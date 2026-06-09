@@ -71,16 +71,17 @@ def normalize_review(data: Any, chapter: dict[str, Any], score_points: list[dict
     }
 
 
-def review_chapter(chapter_id: str, root: Path | None = None) -> Path:
+def review_chapter_markdown(
+    chapter: dict[str, Any],
+    related_score_points: list[dict[str, Any]],
+    global_facts: dict[str, Any],
+    chapter_markdown: str,
+    root: Path | None = None,
+    debug_name: str | None = None,
+) -> dict[str, Any]:
     root = root or project_root()
-    outline = load_outline(root)
-    score_points = load_score_points(root)
-    global_facts = load_global_facts(root)
-    chapter = find_chapter(outline, chapter_id)
-    related_score_points = select_score_points(score_points, chapter.get("score_point_ids", []))
-    chapter_path = root / "workspace" / "chapters" / f"{chapter['id']}.md"
-    chapter_markdown = read_nonempty_text(chapter_path, f"章节文件 {chapter_path}")
     prompt = load_prompt(root, "review_chapter.md")
+    chapter_id = stringify(chapter.get("id"))
 
     raw = chat(
         [
@@ -102,8 +103,21 @@ def review_chapter(chapter_id: str, root: Path | None = None) -> Path:
         ],
         temperature=0.1,
     )
-    data = parse_json_from_model(raw, root / "workspace" / f"debug_review_{chapter['id']}_raw.txt")
-    review = normalize_review(data, chapter, related_score_points)
+    debug_file = debug_name or f"debug_review_{chapter_id}_raw.txt"
+    data = parse_json_from_model(raw, root / "workspace" / debug_file)
+    return normalize_review(data, chapter, related_score_points)
+
+
+def review_chapter(chapter_id: str, root: Path | None = None) -> Path:
+    root = root or project_root()
+    outline = load_outline(root)
+    score_points = load_score_points(root)
+    global_facts = load_global_facts(root)
+    chapter = find_chapter(outline, chapter_id)
+    related_score_points = select_score_points(score_points, chapter.get("score_point_ids", []))
+    chapter_path = root / "workspace" / "chapters" / f"{chapter['id']}.md"
+    chapter_markdown = read_nonempty_text(chapter_path, f"章节文件 {chapter_path}")
+    review = review_chapter_markdown(chapter, related_score_points, global_facts, chapter_markdown, root)
 
     output_path = root / "workspace" / "reviews" / f"{chapter['id']}_review.json"
     write_json(output_path, review)
