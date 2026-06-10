@@ -172,6 +172,23 @@ OPENAI_MAX_RETRIES=3
 | `run --workers 2` | CLI 模式完整流水线（14 步） |
 | `graph-run --workers 2` | LangGraph 主图完整流程 |
 
+## Web 控制台
+
+启动 Web 可视化操作界面：
+
+```bash
+python src/web_app.py
+```
+
+访问 http://127.0.0.1:7860
+
+功能：
+- 上传招标文件、公司资料、Word 模板到 sources/ 对应目录
+- 一键运行完整标书生成流程
+- 分步运行每个阶段，实时查看日志
+- 下载 final.md 和 final.docx
+- 查看全文审核 JSON
+
 ## 自动改稿流程
 
 `review-fix-all` 命令会自动审核所有章节，并对 need_rewrite=true 的章节进行重写，然后再次审核，最多 2 轮。
