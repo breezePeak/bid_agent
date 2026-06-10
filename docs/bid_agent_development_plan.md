@@ -143,6 +143,14 @@ SubAgent 并发章节写作
 - 重写日志保存在 `workspace/rewrites/*_rewrite_log.json`
 - 步骤编号统一为 1/14 ~ 14/14
 
+### Bugfix（2026-06-10）：流程稳定性修复
+
+- 修复 `global_reviewer.py` 的 `read_text` 导入问题
+- `_load_reviews` 改用 `read_json` 直读，reviews 目录不存在时返回空数组
+- `_load_reviews` 改进：JSON 非对象时记录 error，添加 `relative_to(root)` 路径
+- graph-run 接入 `review_fix_chapters_node`，与 CLI `run` 流程一致
+- CLI `run_pipeline` 步骤编号统一为 1/14 ~ 14/14，与 graph-run 对齐
+
 ### 阶段 12：retry/resume — 待开发
 
 - 失败章节重试：`write-chapter --chapter XX`（已有基础支持）
@@ -312,7 +320,7 @@ inputs/template.docx  ← 复制第一个 .docx
 | `global-review` | 全文一致性审核（优先使用章节摘要） |
 | `build-md` | 拼接 Markdown → outputs/final.md |
 | `build-docx` | 生成 Word → outputs/final.docx |
-| `run --workers 2` | CLI 模式完整流水线（13 步） |
+| `run --workers 2` | CLI 模式完整流水线（14 步） |
 | `graph-run --workers 2` | LangGraph 主图完整流程（14 节点） |
 
 ---

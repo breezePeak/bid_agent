@@ -37,15 +37,26 @@ def _load_generated_chapters(root: Path, outline: dict[str, Any]) -> list[dict[s
 
 
 def _load_reviews(root: Path) -> list[dict[str, Any]]:
-    reviews: list[dict[str, Any]] = []
     reviews_dir = root / "workspace" / "reviews"
     if not reviews_dir.exists():
-        return reviews
+        return []
+
+    reviews: list[dict[str, Any]] = []
     for review_path in sorted(reviews_dir.glob("*_review.json")):
         try:
-            reviews.append(read_json(review_path))
+            data = read_json(review_path)
+            if isinstance(data, dict):
+                data["path"] = str(review_path.relative_to(root))
+                reviews.append(data)
+            else:
+                reviews.append(
+                    {
+                        "path": str(review_path.relative_to(root)),
+                        "error": "review json 不是对象",
+                    }
+                )
         except Exception as exc:
-            reviews.append({"path": str(review_path), "error": str(exc)})
+            reviews.append({"path": str(review_path.relative_to(root)), "error": str(exc)})
     return reviews
 
 

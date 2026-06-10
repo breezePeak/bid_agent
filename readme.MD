@@ -169,7 +169,7 @@ OPENAI_MAX_RETRIES=3
 | `global-review` | 全文一致性审核（优先使用章节摘要） |
 | `build-md` | 拼接最终 Markdown → outputs/final.md |
 | `build-docx` | 生成 Word 文件 → outputs/final.docx |
-| `run --workers 2` | CLI 模式完整流水线（13 步） |
+| `run --workers 2` | CLI 模式完整流水线（14 步） |
 | `graph-run --workers 2` | LangGraph 主图完整流程 |
 
 ## 自动改稿流程
