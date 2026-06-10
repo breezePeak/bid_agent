@@ -5,6 +5,10 @@
 ## 快速开始
 
 ```bash
+# 创建 conda 虚拟环境
+conda create -n bid_agent python=3.11 -y
+conda activate bid_agent
+
 # 安装依赖
 pip install -r requirements.txt
 

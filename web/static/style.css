@@ -1,19 +1,30 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; max-width: 1100px; margin: 0 auto; }
+body { font-family: -apple-system, "Microsoft YaHei", sans-serif; background: #0d1117; color: #c9d1d9; padding: 20px; max-width: 1200px; margin: 0 auto; }
 h1 { font-size: 22px; margin-bottom: 12px; color: #f0f6fc; }
 h2 { font-size: 16px; margin: 20px 0 8px; padding-bottom: 4px; border-bottom: 1px solid #30363d; color: #8b949e; }
-
-.status-bar { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 10px 14px; font-size: 13px; display: flex; flex-wrap: wrap; gap: 16px; margin-bottom: 16px; }
-.status-bar .item { display: flex; flex-direction: column; }
-.status-bar .item .label { font-size: 11px; color: #8b949e; }
-.status-bar .item .value { font-size: 13px; }
-.status-bar .ok { color: #56d364; }
-.status-bar .warn { color: #d29922; }
-.status-bar .err { color: #f85149; }
 
 .running-notice { background: #1f6feb22; border: 1px solid #1f6feb; border-radius: 6px; padding: 8px 14px; margin-bottom: 12px; color: #58a6ff; display: flex; align-items: center; gap: 8px; }
 .spinner { width: 14px; height: 14px; border: 2px solid #30363d; border-top: 2px solid #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+.flow-container { display: flex; align-items: flex-start; overflow-x: auto; padding: 16px 0; gap: 0; }
+.flow-step { display: flex; flex-direction: column; align-items: center; min-width: 100px; position: relative; cursor: pointer; transition: transform 0.15s; }
+.flow-step:hover { transform: scale(1.05); }
+.flow-step .node { width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; border: 2px solid #30363d; background: #161b22; color: #8b949e; transition: all 0.3s; position: relative; z-index: 2; }
+.flow-step .label { font-size: 11px; color: #8b949e; margin-top: 6px; text-align: center; max-width: 90px; line-height: 1.3; }
+.flow-step .arrow { position: absolute; right: -20px; top: 22px; width: 20px; height: 2px; background: #30363d; z-index: 1; }
+.flow-step:last-child .arrow { display: none; }
+
+.flow-step.done .node { background: #238636; border-color: #2ea043; color: #fff; }
+.flow-step.done .arrow { background: #2ea043; }
+.flow-step.running .node { background: #1f6feb; border-color: #58a6ff; color: #fff; animation: pulse 1.2s ease-in-out infinite; }
+.flow-step.running .arrow { background: #58a6ff; }
+.flow-step.failed .node { background: #da3633; border-color: #f85149; color: #fff; }
+.flow-step.failed .arrow { background: #f85149; }
+
+@keyframes pulse { 0%, 100% { box-shadow: 0 0 0 0 #1f6feb88; } 50% { box-shadow: 0 0 0 8px #1f6feb00; } }
+
+.flow-actions { display: flex; gap: 8px; margin-bottom: 4px; }
 
 .btn-group { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
 button { padding: 6px 14px; font-size: 13px; border: 1px solid #30363d; border-radius: 5px; background: #21262d; color: #c9d1d9; cursor: pointer; white-space: nowrap; }
@@ -31,4 +42,4 @@ button.secondary { background: #30363d; }
 .upload-box input[type=file] { font-size: 12px; color: #c9d1d9; }
 
 .log-toolbar { display: flex; gap: 8px; margin-bottom: 6px; }
-.log-box { background: #000; color: #00ff00; font-size: 12px; line-height: 1.5; padding: 10px; border-radius: 6px; height: 400px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-family: "Consolas", monospace; }
+.log-box { background: #000; color: #00ff00; font-size: 12px; line-height: 1.5; padding: 10px; border-radius: 6px; height: 350px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; font-family: "Consolas", monospace; }

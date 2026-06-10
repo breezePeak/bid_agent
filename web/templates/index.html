@@ -10,53 +10,40 @@
 
 <h1>标书 Agent 控制台</h1>
 
-<div id="status-bar" class="status-bar">加载中...</div>
-
 <div id="running-notice" class="running-notice" style="display:none">
   <span class="spinner"></span>
   <span id="running-task"></span>
+</div>
+
+<h2>流水线</h2>
+<div class="flow-container" id="flow-container"></div>
+
+<div class="flow-actions">
+  <button onclick="runFullPipeline()" class="primary" id="btn-full-run">一键运行全流程</button>
+  <button onclick="runGraphRun()" class="primary" id="btn-graph-run">LangGraph 全流程</button>
 </div>
 
 <h2>快捷操作</h2>
 <div class="btn-group">
   <button onclick="runCommand('init-demo')">生成演示资料</button>
   <button onclick="runCommand('init')" class="secondary">初始化项目</button>
-  <button onclick="runCommand('run')" class="primary">一键生成标书</button>
-  <button onclick="runCommand('graph-run')" class="primary">LangGraph 运行</button>
   <button onclick="runCommand('validate')">校验项目</button>
-</div>
-
-<h2>分步操作</h2>
-<div class="btn-group">
-  <button onclick="runCommand('prepare-inputs')">导入资料</button>
-  <button onclick="runCommand('split-docs')">切分文档</button>
-  <button onclick="runCommand('parse-score')">解析评分标准</button>
-  <button onclick="runCommand('extract-facts')">提取全局事实</button>
-  <button onclick="runCommand('generate-outline')">生成大纲</button>
-  <button onclick="runCommand('plan-jobs')">生成章节任务</button>
-  <button onclick="runCommand('select-context-all')">选择上下文</button>
-  <button onclick="runCommand('write-all')">生成章节</button>
-  <button onclick="runCommand('review-fix-all')">审核并自动改稿</button>
-  <button onclick="runCommand('summarize-all')">生成章节摘要</button>
-  <button onclick="runCommand('global-review')">全文一致性审核</button>
-  <button onclick="runCommand('build-md')">拼接 Markdown</button>
-  <button onclick="runCommand('build-docx')">生成 Word</button>
 </div>
 
 <h2>文件上传</h2>
 <div class="upload-row">
   <div class="upload-box">
-    <label>招标文件 (tender)</label>
+    <label>招标文件</label>
     <input type="file" id="upload-tender" multiple>
     <button onclick="uploadFiles('tender')">上传</button>
   </div>
   <div class="upload-box">
-    <label>公司资料 (company)</label>
+    <label>公司资料</label>
     <input type="file" id="upload-company" multiple>
     <button onclick="uploadFiles('company')">上传</button>
   </div>
   <div class="upload-box">
-    <label>Word 模板 (template)</label>
+    <label>Word 模板</label>
     <input type="file" id="upload-template" multiple>
     <button onclick="uploadFiles('template')">上传</button>
   </div>
@@ -71,14 +58,14 @@
 
 <h2>日志</h2>
 <div class="log-toolbar">
-  <button onclick="clearLogs()">清空日志</button>
+  <button onclick="clearLogs()">清空</button>
   <button onclick="toggleAutoScroll()">自动滚动: <span id="autoscroll-label">开</span></button>
 </div>
 <pre id="log-box" class="log-box"></pre>
 
 <h2>危险操作</h2>
 <div class="btn-group">
-  <button class="danger" onclick="confirmClean()">清空工作区 (workspace + outputs)</button>
+  <button class="danger" onclick="confirmClean()">清空工作区</button>
 </div>
 
 <script src="/static/app.js"></script>
