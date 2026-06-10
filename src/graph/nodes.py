@@ -10,18 +10,19 @@ from chapter_reviewer import review_chapter
 from context_selector import select_context_for_job
 from docx_builder import build_docx, build_markdown
 from document_splitter import split_docs
-from graph.chapter_subgraph import build_chapter_subgraph
-from graph.state import BidState
 from job_planner import plan_chapter_jobs
+from subagent_runner import run_write_all as concurrent_write_all
 from utils import ensure_dirs, ensure_file, project_root, stringify
 
 
-def _root(state: BidState) -> Path:
+def _root(state) -> Path:
+    from graph.state import BidState
     return Path(state.get("root_dir") or project_root())
 
 
-def init_workspace(state: BidState) -> BidState:
-    root = _root(state)
+def init_workspace(state) -> dict:
+    from graph.state import BidState
+    root = Path(state.get("root_dir") or project_root())
     print("[1/11] 初始化工作区...")
     ensure_dirs(
         root,
@@ -54,42 +55,42 @@ def init_workspace(state: BidState) -> BidState:
     }
 
 
-def split_docs_node(state: BidState) -> BidState:
+def split_docs_node(state) -> dict:
     root = _root(state)
     print("[2/11] 切分文档...")
     tender_chunks_path, company_chunks_path = split_docs(root)
     return {"tender_chunks_path": str(tender_chunks_path), "company_chunks_path": str(company_chunks_path)}
 
 
-def parse_score_node(state: BidState) -> BidState:
+def parse_score_node(state) -> dict:
     root = _root(state)
     print("[3/11] 解析评分标准...")
     score_points_path = score_agent(root)
     return {"score_points_path": str(score_points_path)}
 
 
-def extract_facts_node(state: BidState) -> BidState:
+def extract_facts_node(state) -> dict:
     root = _root(state)
     print("[4/11] 提取全局事实...")
     global_facts_path = fact_agent(root)
     return {"global_facts_path": str(global_facts_path)}
 
 
-def generate_outline_node(state: BidState) -> BidState:
+def generate_outline_node(state) -> dict:
     root = _root(state)
     print("[5/11] 生成大纲...")
     outline_path = outline_agent(root)
     return {"outline_path": str(outline_path)}
 
 
-def plan_chapter_jobs_node(state: BidState) -> BidState:
+def plan_chapter_jobs_node(state) -> dict:
     root = _root(state)
     print("[6/11] 生成章节任务...")
     jobs = plan_chapter_jobs(root)
     return {"chapter_jobs": jobs, "jobs_dir": str(root / "workspace" / "jobs")}
 
 
-def select_contexts_node(state: BidState) -> BidState:
+def select_contexts_node(state) -> dict:
     root = _root(state)
     print("[7/11] 选择章节上下文...")
     errors: list[str] = []
@@ -104,34 +105,20 @@ def select_contexts_node(state: BidState) -> BidState:
     return {"contexts_dir": str(root / "workspace" / "contexts"), "errors": errors}
 
 
-def write_chapters_node(state: BidState) -> BidState:
+def write_chapters_node(state) -> dict:
     root = _root(state)
-    workers = int(state.get("workers") or 1)
+    workers = int(state.get("workers") or 2)
     print(f"[8/11] 章节 SubAgent 写作... workers={workers}")
-    if workers != 1:
-        print("[提示] 当前版本保留 workers 参数；后续可用 LangGraph Send/并行分支并发执行章节任务。")
+    effective_workers = max(1, min(workers, 5))
+    try:
+        result = concurrent_write_all(root, workers=effective_workers)
+    except Exception as exc:
+        errors = [f"并发写入异常: {exc}"]
+        return {"errors": errors}
 
-    chapter_graph = build_chapter_subgraph()
-    completed: list[str] = []
-    failed: list[dict[str, str]] = []
-    errors: list[str] = []
-    for job in state.get("chapter_jobs", []):
-        chapter_id = stringify(job.get("chapter_id"))
-        try:
-            chapter_graph.invoke(
-                {
-                    "root_dir": str(root),
-                    "job": job,
-                    "chapter_id": chapter_id,
-                }
-            )
-            completed.append(chapter_id)
-        except Exception as exc:
-            message = f"章节 {chapter_id} 写作失败: {exc}"
-            print(f"[警告] {message}")
-            failed.append({"chapter_id": chapter_id, "error": str(exc), "stage": "write_chapter"})
-            errors.append(message)
-
+    completed = result.get("completed", [])
+    failed = result.get("failed", [])
+    errors: list[str] = [f"章节 {f['chapter_id']} 写作失败: {f['error']}" for f in failed]
     return {
         "chapters_dir": str(root / "workspace" / "chapters"),
         "completed_chapters": completed,
@@ -140,7 +127,7 @@ def write_chapters_node(state: BidState) -> BidState:
     }
 
 
-def review_chapters_node(state: BidState) -> BidState:
+def review_chapters_node(state) -> dict:
     root = _root(state)
     print("[9/11] 章节审核...")
     failed: list[dict[str, str]] = []
@@ -160,21 +147,21 @@ def review_chapters_node(state: BidState) -> BidState:
     return {"reviews_dir": str(root / "workspace" / "reviews"), "failed_chapters": failed, "errors": errors}
 
 
-def global_review_node(state: BidState) -> BidState:
+def global_review_node(state) -> dict:
     root = _root(state)
     print("[10/11] 全文一致性审核...")
     global_review_path = global_review_agent(root)
     return {"global_review_path": str(global_review_path)}
 
 
-def build_markdown_node(state: BidState) -> BidState:
+def build_markdown_node(state) -> dict:
     root = _root(state)
     print("[11/11] 拼接 Markdown...")
     final_md_path = build_markdown(root)
     return {"final_md_path": str(final_md_path)}
 
 
-def build_docx_node(state: BidState) -> BidState:
+def build_docx_node(state) -> dict:
     root = _root(state)
     print("[11/11] 生成 Word...")
     final_docx_path = build_docx(root)

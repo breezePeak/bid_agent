@@ -9,7 +9,7 @@ from docx_builder import build_docx, build_markdown
 from fact_extractor import extract_facts
 from outline_generator import generate_outline
 from score_parser import parse_score
-from utils import ensure_dirs, ensure_file, project_root
+from utils import ensure_dirs, ensure_file, project_root, read_json
 
 
 DEFAULT_PROMPTS = {
@@ -212,21 +212,77 @@ def init_project(root: Path | None = None) -> None:
     print(f"[完成] 项目已初始化: {root}")
 
 
-def run_pipeline(root: Path | None = None) -> None:
+def _run_split_docs(root: Path) -> None:
+    from document_splitter import split_docs
+
+    print("[执行] 切分文档...")
+    split_docs(root)
+
+
+def _run_plan_jobs(root: Path) -> None:
+    from job_planner import plan_chapter_jobs
+
+    print("[执行] 生成章节任务...")
+    plan_chapter_jobs(root)
+
+
+def _run_select_context_all(root: Path) -> None:
+    from context_selector import select_contexts_for_jobs
+
+    jobs_dir = root / "workspace" / "jobs"
+    if not jobs_dir.exists() or not list(jobs_dir.glob("*.json")):
+        raise FileNotFoundError(
+            f"缺少章节任务目录: {jobs_dir}，请先执行 plan-jobs"
+        )
+    jobs = [read_json(f) for f in sorted(jobs_dir.glob("*.json"))]
+    print("[执行] 选择所有章节上下文...")
+    select_contexts_for_jobs(jobs, root)
+
+
+def _run_select_context(root: Path, chapter_id: str) -> None:
+    from context_selector import select_context_for_job
+
+    job_path = root / "workspace" / "jobs" / f"{chapter_id}.json"
+    if not job_path.exists():
+        raise FileNotFoundError(
+            f"缺少章节任务: {job_path}，请先执行 plan-jobs"
+        )
+    job = read_json(job_path)
+    print(f"[执行] 选择章节 {chapter_id} 上下文...")
+    select_context_for_job(job, root)
+
+
+def _run_write_all(root: Path, workers: int = 1) -> None:
+    if workers > 1:
+        from subagent_runner import run_write_all as concurrent_write_all
+
+        concurrent_write_all(root, workers=workers)
+    else:
+        print("[执行] 串行生成所有章节...")
+        write_all(root)
+
+
+def run_pipeline(root: Path | None = None, workers: int = 1) -> None:
     root = root or project_root()
-    print("[1/7] 解析评分标准...")
+    print("[1/10] 切分文档...")
+    _run_split_docs(root)
+    print("[2/10] 解析评分标准...")
     parse_score(root)
-    print("[2/7] 提取全局事实...")
+    print("[3/10] 提取全局事实...")
     extract_facts(root)
-    print("[3/7] 生成大纲...")
+    print("[4/10] 生成大纲...")
     generate_outline(root)
-    print("[4/7] 生成章节...")
-    write_all(root)
-    print("[5/7] 审核章节...")
+    print("[5/10] 生成章节任务...")
+    _run_plan_jobs(root)
+    print("[6/10] 选择章节上下文...")
+    _run_select_context_all(root)
+    print("[7/10] 生成章节...")
+    _run_write_all(root, workers=workers)
+    print("[8/10] 审核章节...")
     review_all(root)
-    print("[6/7] 拼接 Markdown...")
+    print("[9/10] 拼接 Markdown...")
     build_markdown(root)
-    print("[7/7] 生成 Word...")
+    print("[10/10] 生成 Word...")
     build_docx(root)
 
 
@@ -248,13 +304,23 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="初始化目录、输入文件和默认提示词")
+
+    subparsers.add_parser("split-docs", help="切分招标文件和公司资料为 chunk")
     subparsers.add_parser("parse-score", help="解析评分标准")
     subparsers.add_parser("extract-facts", help="提取全局事实")
     subparsers.add_parser("generate-outline", help="生成标书大纲")
+    subparsers.add_parser("plan-jobs", help="生成章节任务包")
 
-    write_chapter_parser = subparsers.add_parser("write-chapter", help="生成单个章节")
+    select_context_parser = subparsers.add_parser("select-context", help="为单个章节选择上下文")
+    select_context_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
+
+    subparsers.add_parser("select-context-all", help="为所有章节选择上下文")
+
+    write_chapter_parser = subparsers.add_parser("write-chapter", help="生成单个章节（需要先执行 select-context）")
     write_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
-    subparsers.add_parser("write-all", help="串行生成所有章节")
+
+    write_all_parser = subparsers.add_parser("write-all", help="生成所有章节（支持并发）")
+    write_all_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2，最大 5")
 
     review_chapter_parser = subparsers.add_parser("review-chapter", help="审核单个章节")
     review_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
@@ -262,11 +328,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("build-md", help="拼接最终 Markdown")
     subparsers.add_parser("build-docx", help="生成 Word 文件")
-    run_parser = subparsers.add_parser("run", help="按 LangGraph 主图运行完整流程")
-    run_parser.add_argument("--workers", type=int, default=1, help="章节任务 worker 数，当前版本保留参数")
+
+    run_parser = subparsers.add_parser("run", help="按完整流水线运行（CLI 模式）")
+    run_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2，最大 5")
 
     graph_run_parser = subparsers.add_parser("graph-run", help="按 LangGraph 主图运行完整流程")
-    graph_run_parser.add_argument("--workers", type=int, default=1, help="章节任务 worker 数，当前版本保留参数")
+    graph_run_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2")
     return parser
 
 
@@ -276,6 +343,8 @@ def main() -> int:
 
     if args.command == "init":
         init_project(root)
+    elif args.command == "split-docs":
+        _run_split_docs(root)
     elif args.command == "parse-score":
         print("[执行] 解析评分标准...")
         parse_score(root)
@@ -285,12 +354,17 @@ def main() -> int:
     elif args.command == "generate-outline":
         print("[执行] 生成大纲...")
         generate_outline(root)
+    elif args.command == "plan-jobs":
+        _run_plan_jobs(root)
+    elif args.command == "select-context":
+        _run_select_context(root, args.chapter)
+    elif args.command == "select-context-all":
+        _run_select_context_all(root)
     elif args.command == "write-chapter":
         print(f"[执行] 生成章节 {args.chapter}...")
         write_chapter(args.chapter, root)
     elif args.command == "write-all":
-        print("[执行] 生成所有章节...")
-        write_all(root)
+        _run_write_all(root, workers=args.workers)
     elif args.command == "review-chapter":
         print(f"[执行] 审核章节 {args.chapter}...")
         review_chapter(args.chapter, root)
@@ -304,7 +378,7 @@ def main() -> int:
         print("[执行] 生成 Word...")
         build_docx(root)
     elif args.command == "run":
-        run_graph_pipeline(root, workers=args.workers)
+        run_pipeline(root, workers=args.workers)
     elif args.command == "graph-run":
         run_graph_pipeline(root, workers=args.workers)
     else:

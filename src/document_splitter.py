@@ -71,6 +71,29 @@ def _split_long_content(content: str, max_chars: int) -> list[str]:
     return parts
 
 
+def _validate_chunks(chunks: list[dict[str, Any]], source: str) -> None:
+    if not isinstance(chunks, list):
+        raise ValueError(f"{source} chunk 结果必须是数组。")
+    if not chunks:
+        raise ValueError(f"{source} 切分结果为空。")
+    seen_ids: set[str] = set()
+    for i, chunk in enumerate(chunks):
+        if not isinstance(chunk, dict):
+            raise ValueError(f"{source} chunk[{i}] 必须是 JSON 对象。")
+        chunk_id = chunk.get("id")
+        if not chunk_id or not isinstance(chunk_id, str):
+            raise ValueError(f"{source} chunk[{i}] 缺少有效 id 字段。")
+        if chunk_id in seen_ids:
+            raise ValueError(f"{source} chunk id 重复: {chunk_id}")
+        seen_ids.add(chunk_id)
+        content = chunk.get("content")
+        if not content or not isinstance(content, str) or not content.strip():
+            raise ValueError(f"{source} chunk {chunk_id} 内容为空。")
+        title_path = chunk.get("title_path")
+        if not isinstance(title_path, list) or not title_path:
+            raise ValueError(f"{source} chunk {chunk_id} 缺少 title_path。")
+
+
 def split_markdown_document(
     markdown: str,
     source: str,
@@ -108,6 +131,9 @@ def split_docs(root: Path | None = None, max_chars: int = DEFAULT_MAX_CHARS) -> 
 
     tender_chunks = split_markdown_document(tender_md, "tender.md", "TENDER", max_chars=max_chars)
     company_chunks = split_markdown_document(company_md, "company.md", "COMPANY", max_chars=max_chars)
+
+    _validate_chunks(tender_chunks, "招标文件")
+    _validate_chunks(company_chunks, "公司资料")
 
     tender_path = chunks_dir / "tender_chunks.json"
     company_path = chunks_dir / "company_chunks.json"
