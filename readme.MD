@@ -1,95 +1,238 @@
-# 标书写作 Agent MVP
+# 标书写作 Agent
 
-本项目是一个本地 CLI 版标书写作 Agent，使用 LangGraph 编排主流程和章节 SubAgent。第一版只处理 Markdown 输入，输出 Markdown 和 Word。
+本项目是一个本地 CLI 版标书写作 Agent，使用 LangGraph 编排主流程和章节 SubAgent。支持 PDF/DOCX/MD 原始资料导入，自动生成评分标准分离和投标文件内容，并通过多 Agent 并发章节写作最终输出 Markdown 和 Word。
 
-## 初始化
+## 快速开始
+
+```bash
+# 安装依赖
+pip install -r requirements.txt
+
+# 初始化项目
+python src/main.py init
+
+# 配置 API（复制 .env.example 为 .env 并填写）
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=your-api-key
+OPENAI_MODEL=gpt-4.1-mini
+
+# 放入原始资料
+#   招标文件  → sources/tender/
+#   公司资料  → sources/company/
+#   标书模板  → sources/template/
+
+# 导入资料并检查
+python src/main.py prepare-inputs
+python src/main.py validate
+
+# 运行完整流程
+python src/main.py graph-run --workers 2
+```
+
+## 推荐运行流程
 
 ```bash
 python src/main.py init
+# 将招标文件放入 sources/tender/
+# 将公司资料放入 sources/company/
+# 将模板放入 sources/template/
+python src/main.py prepare-inputs
+python src/main.py validate
+python src/main.py graph-run --workers 2
 ```
 
-初始化后填写：
+## 目录结构
 
-- `inputs/tender.md`：招标文件
-- `inputs/score.md`：评分标准
-- `inputs/company.md`：公司资料
+```
+bid_agent/
+  sources/                        ← 用户放入原始资料
+    tender/                       ← 招标文件、答疑、补遗 (.pdf/.docx/.md)
+    company/                      ← 公司资料、案例、产品白皮书 (.pdf/.docx/.md)
+    template/                     ← 标书模板 (.docx)
 
-复制 `.env.example` 为 `.env`，并配置：
+  inputs/                         ← prepare-inputs 自动生成
+    tender.md
+    score.md
+    company.md
+    template.docx
+
+  workspace/
+    imported/                     ← 资料导入中间产物
+      tender_raw.md               ← 招标文件原始合并
+      tender_blocks.json          ← 招标文件切块
+      tender_classified_blocks.json  ← AI 分类后的块
+      tender_other.md             ← 其他内容（非招标正文、非评分标准）
+      tender_classification_report.json ← 分类报告
+    chunks/                       ← 文档切分结果
+      tender_chunks.json
+      company_chunks.json
+    jobs/                         ← 章节任务包 (01.json, 02.json, ...)
+    contexts/                     ← 上下文选择结果 (01_context.json, ...)
+    chapters/                     ← 已生成章节 (01.md, 02.md, ...)
+    reviews/                      ← 章节审核结果 (01_review.json, ...)
+    score_points.json
+    global_facts.json
+    outline.json
+    global_review.json
+
+  outputs/
+    final.md
+    final.docx
+
+  prompts/                        ← 提示词模板
+    parse_score.md
+    extract_facts.md
+    generate_outline.md
+    write_chapter.md
+    review_chapter.md
+    select_context.md
+    global_review.md
+    classify_tender_blocks.md
+
+  src/                            ← 源代码
+    main.py                       ← CLI 入口
+    config.py                     ← API 配置 + 切块/分类全局常量
+    llm_client.py                 ← 统一 LLM 调用
+    utils.py                      ← 文件读写、JSON 解析
+    document_converter.py         ← PDF/DOCX → Markdown 转换
+    input_preparer.py             ← 统筹资料导入流程
+    tender_extractor.py           ← 招标文件导入 + 切块 + AI 分类 + 拼接
+    company_extractor.py          ← 公司资料批量导入
+    document_splitter.py          ← 文档切分为 chunk
+    job_planner.py                ← 章节任务包生成
+    context_selector.py           ← 章节上下文选择
+    subagent_runner.py            ← SubAgent 并发调度
+    project_validator.py          ← 项目闭环检查
+    score_parser.py
+    fact_extractor.py
+    outline_generator.py
+    chapter_writer.py
+    chapter_reviewer.py
+    global_reviewer.py
+    docx_builder.py
+    agents/                       ← Agent 薄封装层
+    graph/                        ← LangGraph 编排层
+      state.py
+      nodes.py
+      routers.py
+      bid_graph.py
+      chapter_subgraph.py
+
+  .env                            ← API 配置
+  requirements.txt
+  readme.MD
+```
+
+## .env 配置
 
 ```env
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=gpt-4.1-mini
+OPENAI_TIMEOUT=120
+OPENAI_MAX_RETRIES=3
 ```
 
-安装 Word 生成依赖：
+## CLI 命令说明
 
-```bash
-pip install -r requirements.txt
-```
-
-## 运行
-
-完整流程：
-
-```bash
-python src/main.py run --workers 3
-```
-
-`run` 等价于：
-
-```bash
-python src/main.py graph-run --workers 3
-```
-
-单步命令：
-
-```bash
-python src/main.py parse-score
-python src/main.py extract-facts
-python src/main.py generate-outline
-python src/main.py write-chapter --chapter 01
-python src/main.py write-all
-python src/main.py review-chapter --chapter 01
-python src/main.py review-all
-python src/main.py build-md
-python src/main.py build-docx
-```
+| 命令 | 说明 |
+|---|---|
+| `init` | 初始化目录、输入文件和默认提示词 |
+| `prepare-inputs` | 导入原始资料：将 sources/ 下的 PDF/DOCX/MD 转为 inputs/ 下标准文件 |
+| `validate` | 项目功能闭环检查：验证文件、环境变量、中间产物完整性（不调用 AI） |
+| `split-docs` | 切分招标文件和公司资料为 chunk |
+| `parse-score` | 解析评分标准 → score_points.json |
+| `extract-facts` | 提取全局事实 → global_facts.json |
+| `generate-outline` | 生成标书大纲 → outline.json |
+| `plan-jobs` | 生成章节任务包 → jobs/*.json |
+| `select-context --chapter 01` | 为单个章节选择上下文 |
+| `select-context-all` | 为所有章节选择上下文 |
+| `write-chapter --chapter 01` | 生成单个章节 |
+| `write-all --workers 2` | 并发生成所有章节（--workers 默认 2，最大 5） |
+| `review-chapter --chapter 01` | 审核单个章节 |
+| `review-all` | 串行审核所有章节 |
+| `build-md` | 拼接最终 Markdown → outputs/final.md |
+| `build-docx` | 生成 Word 文件 → outputs/final.docx |
+| `run --workers 2` | CLI 模式完整流水线（11 步） |
+| `graph-run --workers 2` | LangGraph 主图完整流程 |
 
 ## LangGraph 流程
 
-主图节点：
-
 ```text
 START
-  -> init_workspace
-  -> split_docs
-  -> parse_score
-  -> extract_facts
-  -> generate_outline
-  -> plan_chapter_jobs
-  -> select_contexts
-  -> write_chapters
-  -> review_chapters
-  -> global_review
-  -> build_markdown
-  -> build_docx
-  -> END
+  → init_workspace
+  → prepare_inputs
+  → split_docs
+  → parse_score
+  → extract_facts
+  → generate_outline
+  → plan_chapter_jobs
+  → select_contexts
+  → write_chapters (章节子图：load_job → load_context → write → self_check → save)
+  → review_chapters
+  → global_review
+  → build_markdown
+  → build_docx
+  → END
 ```
-
-章节写作由 `src/graph/chapter_subgraph.py` 中的章节子图执行。章节子图只读取当前章节 job、context 里选中的 chunks、全局事实和绑定评分点，不再读取完整 `tender.md` / `company.md`。
 
 ## 输出
 
-- `workspace/chunks/tender_chunks.json`
-- `workspace/chunks/company_chunks.json`
-- `workspace/score_points.json`
-- `workspace/global_facts.json`
-- `workspace/outline.json`
-- `workspace/jobs/*.json`
-- `workspace/contexts/*_context.json`
-- `workspace/chapters/*.md`
-- `workspace/reviews/*.json`
-- `workspace/global_review.json`
-- `outputs/final.md`
-- `outputs/final.docx`
+```
+workspace/imported/tender_raw.md
+workspace/imported/tender_blocks.json
+workspace/imported/tender_classified_blocks.json
+workspace/imported/tender_other.md
+workspace/imported/tender_classification_report.json
+workspace/chunks/tender_chunks.json
+workspace/chunks/company_chunks.json
+workspace/score_points.json
+workspace/global_facts.json
+workspace/outline.json
+workspace/jobs/*.json
+workspace/contexts/*_context.json
+workspace/chapters/*.md
+workspace/reviews/*.json
+workspace/global_review.json
+outputs/final.md
+outputs/final.docx
+```
+
+## 常见问题
+
+**Q: 评分标准没识别到怎么办？**
+A: 执行 `validate` 会提示 score_blocks=0。检查 `workspace/imported/tender_classification_report.json` 中的 warnings，并可手动编辑 `inputs/score.md`。
+
+**Q: 章节生成失败如何补救？**
+A: 失败章节会在控制台输出 ID，确认原因后可使用 `write-chapter --chapter XX` 单章重跑。
+
+**Q: 目录不存在？**
+A: 先执行 `python src/main.py init` 初始化所有目录。
+
+**Q: .env 未配置？**
+A: 复制 `.env.example` 为 `.env` 并填写 API 信息后重新运行。
+
+## 当前开发状态
+
+| 功能 | 状态 |
+|---|---|
+| 基础 CLI 和文件读写 | 已完成 |
+| LLM 调用与评分解析 | 已完成 |
+| 资料导入 (prepare-inputs) | 已完成 |
+| LangGraph 主流程 | 已完成 |
+| job/context 章节 SubAgent 并发写作 | 已完成 |
+| validate 项目检查 | 已完成 |
+| 招标文件 AI 块分类 | 已完成（待进一步优化） |
+| init-demo | 待开发 |
+| chunk-ranker | 待开发 |
+| chapter-summary + global-review 优化 | 待开发 |
+| retry/resume 断点续跑 | 待开发 |
+
+## 下一步计划
+
+1. **init-demo**：提供一键演示项目初始化，生成示例招标文件和公司资料。
+2. **chunk-ranker**：对 context 选择的 chunk 做相关性排序，替换当前简单取前 8 个的策略。
+3. **AI tender block classifier 优化**：提升分类准确率，减少规则兜底比例。
+4. **chapter-summary**：为每章生成摘要，供后续章节引用，避免重复和冲突。
+5. **global-review 优化**：强化全文一致性审核，增加冲突检测和自动修复建议。
+6. **retry/resume**：支持失败章节重试和已生成章节的断点续跑。
