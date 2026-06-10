@@ -5,7 +5,7 @@ from typing import Any
 
 from file_loader import load_global_facts, load_outline, load_score_points
 from llm_client import chat
-from utils import compact_json, load_prompt, parse_json_from_model, project_root, read_json, write_json
+from utils import compact_json, load_prompt, parse_json_from_model, project_root, read_json, read_text, write_json
 
 
 def _load_chapter_summaries(root: Path) -> list[dict[str, Any]]:
@@ -39,11 +39,11 @@ def _load_generated_chapters(root: Path, outline: dict[str, Any]) -> list[dict[s
 def _load_reviews(root: Path) -> list[dict[str, Any]]:
     reviews: list[dict[str, Any]] = []
     reviews_dir = root / "workspace" / "reviews"
+    if not reviews_dir.exists():
+        return reviews
     for review_path in sorted(reviews_dir.glob("*_review.json")):
         try:
-            import json
-
-            reviews.append(json.loads(read_text(review_path)))
+            reviews.append(read_json(review_path))
         except Exception as exc:
             reviews.append({"path": str(review_path), "error": str(exc)})
     return reviews
