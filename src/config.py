@@ -64,3 +64,63 @@ def get_settings(root: Path | None = None) -> Settings:
         timeout=timeout,
         max_retries=max_retries,
     )
+
+
+# ============================================================
+#  Tender 切块 + AI 分类 全局配置
+# ============================================================
+
+TENDER_EXTENSIONS = {".md", ".docx", ".pdf"}
+
+BLOCK_MAX_CHARS = 3000
+BLOCK_ID_PREFIX = "B"
+
+BATCH_SIZE = 12
+CLASSIFY_TEMPERATURE = 0.1
+LOW_CONFIDENCE_THRESHOLD = 0.6
+
+SCORE_RATIO_WARN = 0.4
+
+SCORE_HINT_KEYWORDS = [
+    "评分", "评分标准", "评分细则", "评分办法", "评分项", "评分点",
+    "分值", "评审", "评审因素", "评审标准", "评审办法", "评标办法",
+    "综合评分", "技术评分", "商务评分", "价格评分", "详细评审",
+    "符合性审查", "资格性审查", "废标", "否决投标",
+]
+
+REQUIREMENT_HINT_KEYWORDS = [
+    "项目背景", "采购需求", "技术要求", "服务要求", "交付要求",
+    "实施要求", "商务响应要求", "技术参数", "功能要求",
+]
+
+CONTRACT_HINT_KEYWORDS = [
+    "合同条款", "付款方式", "履约保证金", "履约要求", "验收标准",
+    "验收要求", "违约责任",
+]
+
+NOTICE_HINT_KEYWORDS = [
+    "招标公告", "投标人须知", "投标流程", "递交截止", "开标时间",
+    "开标地点", "投标文件递交",
+]
+
+FORMAT_HINT_KEYWORDS = [
+    "投标文件格式", "声明函", "承诺函", "报价表", "法定代表人",
+    "授权委托书",
+]
+
+QUALIFICATION_HINT_KEYWORDS = [
+    "供应商资格", "资质要求", "人员要求", "业绩要求", "资格条件",
+    "营业执照", "资质证书",
+]
+
+HINT_CATEGORY_MAP = {
+    "评分相关": SCORE_HINT_KEYWORDS,
+    "需求相关": REQUIREMENT_HINT_KEYWORDS,
+    "合同相关": CONTRACT_HINT_KEYWORDS,
+    "须知相关": NOTICE_HINT_KEYWORDS,
+    "格式相关": FORMAT_HINT_KEYWORDS,
+    "资格相关": QUALIFICATION_HINT_KEYWORDS,
+}
+
+VALID_CATEGORIES = {"score", "requirement", "contract", "notice", "format", "qualification", "appendix", "unknown"}
+VALID_TARGET_FILES = {"score.md", "tender.md", "other.md"}
