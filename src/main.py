@@ -199,6 +199,7 @@ def init_project(root: Path | None = None) -> None:
             "inputs",
             "workspace",
             "workspace/chunks",
+            "workspace/imported",
             "workspace/jobs",
             "workspace/contexts",
             "workspace/chapters",
