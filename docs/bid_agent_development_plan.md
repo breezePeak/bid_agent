@@ -93,17 +93,21 @@ SubAgent 并发章节写作
 - 结果等级：ok / warn / fail
 - fail 返回非 0 退出码
 
-### 阶段 7：init-demo — 待开发
+### 阶段 7：init-demo — 已完成
 
-- 一键演示项目初始化，生成示例招标文件、评分标准、公司资料、模板
+- 新增 `init-demo` 命令，一键生成演示招标文件和公司资料
+- 新增 `src/demo_initializer.py`，实现 `init_demo(root)` 函数
+- 演示文件已存在时跳过，不覆盖
 - 降低新用户首次体验门槛
-- 建议命令：`python src/main.py init --demo`
 
-### 阶段 8：chunk-ranker — 待开发
+### 阶段 8：chunk-ranker — 已完成
 
-- 对 context 选择的 chunk 做相关性排序
-- 替换当前单一取前 8 个策略（从最多 8 个中按相关度择优）
-- 可能方案：bm25 排序或基于 LLM 二次评分
+- 新增 `src/chunk_ranker.py`，实现本地关键词 chunk 相关性排序
+- `rank_chunks_for_job()` 从 job + score_points 提取关键词，对 chunks 加权评分
+- `context_selector.py` 集成 chunk-ranker，LLM 选择前先用 top 30 粗筛
+- 排序结果写入 `workspace/contexts/{chapter_id}_ranked_chunks.json`
+- 支持大型招标文件（300+ 页），避免 prompt 超长
+- ranker 失败时自动回退到全量 chunks
 
 ### 阶段 9：AI tender block classifier 优化 — 待完善
 
@@ -188,6 +192,7 @@ bid_agent/
 
   src/
     main.py
+    demo_initializer.py
     config.py
     llm_client.py
     utils.py
@@ -198,6 +203,7 @@ bid_agent/
     document_splitter.py
     job_planner.py
     context_selector.py
+    chunk_ranker.py
     subagent_runner.py
     project_validator.py
     score_parser.py
@@ -257,6 +263,7 @@ inputs/template.docx  ← 复制第一个 .docx
 | 命令 | 说明 |
 |---|---|
 | `init` | 初始化目录、输入文件和默认提示词 |
+| `init-demo` | 生成最小演示招标文件和公司资料（仅用于开发测试） |
 | `prepare-inputs` | 导入原始资料：PDF/DOCX/MD → inputs/ |
 | `validate` | 项目功能闭环检查（26 项，不调用 AI） |
 | `split-docs` | 切分文档为 chunk |
@@ -264,8 +271,8 @@ inputs/template.docx  ← 复制第一个 .docx
 | `extract-facts` | 提取全局事实 → global_facts.json |
 | `generate-outline` | 生成标书大纲 → outline.json |
 | `plan-jobs` | 生成章节任务包 → jobs/*.json |
-| `select-context --chapter 01` | 为单个章节选择上下文 |
-| `select-context-all` | 为所有章节选择上下文 |
+| `select-context --chapter 01` | 为单个章节选择上下文（含 chunk-ranker 本地粗筛） |
+| `select-context-all` | 为所有章节选择上下文（含 chunk-ranker 本地粗筛） |
 | `write-chapter --chapter 01` | 生成单个章节 |
 | `write-all --workers 2` | 并发生成所有章节 |
 | `review-chapter --chapter 01` | 审核单个章节 |
@@ -307,7 +314,8 @@ START → init_workspace → prepare_inputs → split_docs
 
 ```bash
 python src/main.py init
-# 放入原始文件到 sources/ 各子目录
+python src/main.py init-demo
+# 放入原始文件到 sources/ 各子目录（或使用 init-demo 生成的演示数据）
 python src/main.py prepare-inputs
 python src/main.py validate
 python src/main.py graph-run --workers 2

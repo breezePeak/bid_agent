@@ -319,6 +319,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("init", help="初始化目录、输入文件和默认提示词")
 
+    subparsers.add_parser("init-demo", help="生成最小演示招标文件和公司资料")
+
     subparsers.add_parser("prepare-inputs", help="导入原始资料：将 sources/ 下的 PDF/DOCX/MD 转为 inputs/ 下标准文件")
 
     subparsers.add_parser("split-docs", help="切分招标文件和公司资料为 chunk")
@@ -362,6 +364,10 @@ def main() -> int:
 
     if args.command == "init":
         init_project(root)
+    elif args.command == "init-demo":
+        from demo_initializer import init_demo
+
+        init_demo(root)
     elif args.command == "prepare-inputs":
         _run_prepare_inputs(root)
     elif args.command == "split-docs":

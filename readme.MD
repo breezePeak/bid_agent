@@ -11,6 +11,9 @@ pip install -r requirements.txt
 # 初始化项目
 python src/main.py init
 
+# （可选）生成演示数据，用于快速验证流程
+python src/main.py init-demo
+
 # 配置 API（复制 .env.example 为 .env 并填写）
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=your-api-key
@@ -33,6 +36,7 @@ python src/main.py graph-run --workers 2
 
 ```bash
 python src/main.py init
+python src/main.py init-demo
 # 将招标文件放入 sources/tender/
 # 将公司资料放入 sources/company/
 # 将模板放入 sources/template/
@@ -40,6 +44,8 @@ python src/main.py prepare-inputs
 python src/main.py validate
 python src/main.py graph-run --workers 2
 ```
+
+> **注意：** `init-demo` 仅用于开发测试，生成的演示数据不代表任何真实招标项目或企业，不可用作真实投标资料。
 
 ## 目录结构
 
@@ -91,6 +97,7 @@ bid_agent/
 
   src/                            ← 源代码
     main.py                       ← CLI 入口
+    demo_initializer.py           ← 演示数据初始化
     config.py                     ← API 配置 + 切块/分类全局常量
     llm_client.py                 ← 统一 LLM 调用
     utils.py                      ← 文件读写、JSON 解析
@@ -100,7 +107,8 @@ bid_agent/
     company_extractor.py          ← 公司资料批量导入
     document_splitter.py          ← 文档切分为 chunk
     job_planner.py                ← 章节任务包生成
-    context_selector.py           ← 章节上下文选择
+    context_selector.py           ← 章节上下文选择（含 chunk-ranker 本地粗筛）
+    chunk_ranker.py               ← 本地关键词 chunk 相关性排序
     subagent_runner.py            ← SubAgent 并发调度
     project_validator.py          ← 项目闭环检查
     score_parser.py
@@ -138,6 +146,7 @@ OPENAI_MAX_RETRIES=3
 | 命令 | 说明 |
 |---|---|
 | `init` | 初始化目录、输入文件和默认提示词 |
+| `init-demo` | 生成最小演示招标文件和公司资料（仅用于开发测试） |
 | `prepare-inputs` | 导入原始资料：将 sources/ 下的 PDF/DOCX/MD 转为 inputs/ 下标准文件 |
 | `validate` | 项目功能闭环检查：验证文件、环境变量、中间产物完整性（不调用 AI） |
 | `split-docs` | 切分招标文件和公司资料为 chunk |
@@ -191,12 +200,21 @@ workspace/global_facts.json
 workspace/outline.json
 workspace/jobs/*.json
 workspace/contexts/*_context.json
+workspace/contexts/*_ranked_chunks.json
 workspace/chapters/*.md
 workspace/reviews/*.json
 workspace/global_review.json
 outputs/final.md
 outputs/final.docx
 ```
+
+## Chunk Ranker（本地粗筛）
+
+`select-context` 阶段在调用 LLM 之前，先通过 `chunk_ranker.py` 对全量 chunks 做本地关键词粗筛，只将 top 30 个相关 chunks 交给 LLM 选择。这样可以支持大型招标文件（300+ 页、500+ 页），避免 prompt 超长。
+
+- 排序结果调试文件：`workspace/contexts/*_ranked_chunks.json`
+- 排序基于章节标题、评分点关键词、正文关键词匹配的加权评分
+- 如果 ranker 出错，自动回退到全量 chunks，不影响流程
 
 ## 常见问题
 
@@ -223,16 +241,14 @@ A: 复制 `.env.example` 为 `.env` 并填写 API 信息后重新运行。
 | job/context 章节 SubAgent 并发写作 | 已完成 |
 | validate 项目检查 | 已完成 |
 | 招标文件 AI 块分类 | 已完成（待进一步优化） |
-| init-demo | 待开发 |
-| chunk-ranker | 待开发 |
+| init-demo | 已完成 |
+| chunk-ranker | 已完成 |
 | chapter-summary + global-review 优化 | 待开发 |
 | retry/resume 断点续跑 | 待开发 |
 
 ## 下一步计划
 
-1. **init-demo**：提供一键演示项目初始化，生成示例招标文件和公司资料。
-2. **chunk-ranker**：对 context 选择的 chunk 做相关性排序，替换当前简单取前 8 个的策略。
-3. **AI tender block classifier 优化**：提升分类准确率，减少规则兜底比例。
+1. **AI tender block classifier 优化**：提升分类准确率，减少规则兜底比例。
 4. **chapter-summary**：为每章生成摘要，供后续章节引用，避免重复和冲突。
 5. **global-review 优化**：强化全文一致性审核，增加冲突检测和自动修复建议。
 6. **retry/resume**：支持失败章节重试和已生成章节的断点续跑。

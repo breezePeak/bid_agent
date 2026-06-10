@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from chunk_ranker import rank_chunks_for_job, rank_for_job_separate
 from file_loader import load_global_facts, load_score_points
 from llm_client import chat
 from utils import (
@@ -105,6 +106,25 @@ def select_context_for_job(job: dict[str, Any], root: Path | None = None) -> Pat
     if not isinstance(tender_chunks, list) or not isinstance(company_chunks, list):
         raise ValueError("文档切分结果必须是 JSON 数组。")
 
+    ranked_tender = tender_chunks
+    ranked_company = company_chunks
+    try:
+        ranked_result = rank_for_job_separate(job, related_score_points, tender_chunks, company_chunks)
+        ranked_tender = [c for c in tender_chunks if any(r["id"] == c["id"] for r in ranked_result["tender_top_chunks"])]
+        ranked_company = [c for c in company_chunks if any(r["id"] == c["id"] for r in ranked_result["company_top_chunks"])]
+        if not ranked_tender:
+            ranked_tender = tender_chunks[:30]
+            warnings.append("chunk-ranker 未选出 tender chunks，已回退到前 30 个。")
+        if not ranked_company:
+            ranked_company = company_chunks[:30]
+            warnings.append("chunk-ranker 未选出 company chunks，已回退到前 30 个。")
+        ranked_path = root / "workspace" / "contexts" / f"{chapter_id}_ranked_chunks.json"
+        write_json(ranked_path, ranked_result)
+        print(f"[完成] 章节 {chapter_id} chunk-ranker: tender {len(ranked_result['tender_top_chunks'])} / company {len(ranked_result['company_top_chunks'])}")
+    except Exception as exc:
+        warnings.append(f"chunk-ranker 失败，已回退到全量 chunks: {exc}")
+        print(f"[警告] 章节 {chapter_id} chunk-ranker 失败: {exc}")
+
     try:
         raw = chat(
             [
@@ -120,9 +140,9 @@ def select_context_for_job(job: dict[str, Any], root: Path | None = None) -> Pat
                         "## 全局事实\n\n"
                         f"{compact_json(global_facts)}\n\n"
                         "## 招标文件 chunk 目录\n\n"
-                        f"{compact_json(_chunk_catalog(tender_chunks))}\n\n"
+                        f"{compact_json(_chunk_catalog(ranked_tender))}\n\n"
                         "## 公司资料 chunk 目录\n\n"
-                        f"{compact_json(_chunk_catalog(company_chunks))}"
+                        f"{compact_json(_chunk_catalog(ranked_company))}"
                     ),
                 },
             ],
@@ -131,14 +151,14 @@ def select_context_for_job(job: dict[str, Any], root: Path | None = None) -> Pat
         data = parse_json_from_model(raw, root / "workspace" / f"debug_select_context_{chapter_id}_raw.txt")
     except Exception as exc:
         warnings.append(str(exc))
-        context = _fallback_select(job, tender_chunks, company_chunks, warnings)
+        context = _fallback_select(job, ranked_tender, ranked_company, warnings)
         output_path = root / "workspace" / "contexts" / f"{chapter_id}_context.json"
         write_json(output_path, context)
         print(f"[警告] 章节 {chapter_id} 上下文选择失败，已兜底: {exc}")
         return output_path
 
-    tender_ids = {stringify(chunk.get("id")) for chunk in tender_chunks}
-    company_ids = {stringify(chunk.get("id")) for chunk in company_chunks}
+    tender_ids = {stringify(chunk.get("id")) for chunk in ranked_tender}
+    company_ids = {stringify(chunk.get("id")) for chunk in ranked_company}
     context = {
         "chapter_id": chapter_id,
         "selected_tender_chunks": _normalize_selected(

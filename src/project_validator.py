@@ -203,21 +203,27 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
     else:
         add(_check("workspace/contexts", "warn", "workspace/contexts 下无上下文文件", "请执行 select-context-all"))
 
-    # 24. workspace/chapters 下 md 文件
+    # 24. workspace/contexts 下 ranked_chunks json
+    if contexts_dir.exists() and list(contexts_dir.glob("*_ranked_chunks.json")):
+        add(_check("workspace/contexts ranked", "ok", "contexts 目录下存在 ranked_chunks 文件"))
+    else:
+        add(_check("workspace/contexts ranked", "warn", "workspace/contexts 下无 *_ranked_chunks.json 文件", "请执行 select-context-all 以生成 chunk-ranker 结果"))
+
+    # 25. workspace/chapters 下 md 文件
     chapters_dir = root / "workspace" / "chapters"
     if chapters_dir.exists() and list(chapters_dir.glob("*.md")):
         add(_check("workspace/chapters", "ok", "chapters 目录下存在章节文件"))
     else:
         add(_check("workspace/chapters", "warn", "workspace/chapters 下无 md 文件", "请执行 write-all"))
 
-    # 25. outputs/final.md
+    # 26. outputs/final.md
     final_md = root / "outputs" / "final.md"
     if _file_ok(final_md):
         add(_check("outputs/final.md", "ok", f"final.md 存在 ({final_md.stat().st_size} bytes)"))
     else:
         add(_check("outputs/final.md", "warn", "outputs/final.md 不存在", "请执行 build-md"))
 
-    # 26. outputs/final.docx
+    # 27. outputs/final.docx
     final_docx = root / "outputs" / "final.docx"
     if _file_ok(final_docx):
         add(_check("outputs/final.docx", "ok", f"final.docx 存在 ({final_docx.stat().st_size} bytes)"))
