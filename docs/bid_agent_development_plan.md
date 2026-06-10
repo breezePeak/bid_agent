@@ -120,11 +120,15 @@ SubAgent 并发章节写作
 - 提示词 `prompts/classify_tender_blocks.md` 内置分类规则
 - 分类精度后续可按阶段 9b 继续优化
 
-### 阶段 10：chapter-summary + global-review 优化 — 待开发
+### 阶段 10：chapter-summary + global-review 优化 — 已完成
 
-- 为每章生成结构化的内容摘要
-- 后续章节写作时注入前序章节摘要，避免内容重复和事实冲突
-- `global_reviewer.py` 强化的全文一致性审核
+- 新增 `src/chapter_summarizer.py`，实现 `summarize_chapter()` 和 `summarize_all_chapters()`
+- 新增 `prompts/summarize_chapter.md` 提示词模板
+- 新增 CLI 命令：`summarize-chapter --chapter 01`、`summarize-all`、`global-review`
+- 改造 `global_reviewer.py`：优先使用章节摘要做全文审核，回退到完整章节正文
+- `run_pipeline` 插入 summarize-all + global-review 步骤（11→13 步）
+- LangGraph 主图插入 `summarize_chapters` 节点（review → summarize → global_review）
+- 章节摘要位于 `workspace/summaries/*_summary.json`
 
 ### 阶段 11：retry/resume — 待开发
 

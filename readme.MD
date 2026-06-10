@@ -160,9 +160,12 @@ OPENAI_MAX_RETRIES=3
 | `write-all --workers 2` | 并发生成所有章节（--workers 默认 2，最大 5） |
 | `review-chapter --chapter 01` | 审核单个章节 |
 | `review-all` | 串行审核所有章节 |
+| `summarize-chapter --chapter 01` | 为单个章节生成结构化摘要 |
+| `summarize-all` | 为所有章节生成结构化摘要 |
+| `global-review` | 全文一致性审核（优先使用章节摘要） |
 | `build-md` | 拼接最终 Markdown → outputs/final.md |
 | `build-docx` | 生成 Word 文件 → outputs/final.docx |
-| `run --workers 2` | CLI 模式完整流水线（11 步） |
+| `run --workers 2` | CLI 模式完整流水线（13 步） |
 | `graph-run --workers 2` | LangGraph 主图完整流程 |
 
 ## LangGraph 流程
@@ -179,7 +182,8 @@ START
   → select_contexts
   → write_chapters (章节子图：load_job → load_context → write → self_check → save)
   → review_chapters
-  → global_review
+  → summarize_chapters (为每章生成结构化摘要)
+  → global_review (基于章节摘要做全文审核)
   → build_markdown
   → build_docx
   → END
@@ -203,6 +207,7 @@ workspace/contexts/*_context.json
 workspace/contexts/*_ranked_chunks.json
 workspace/chapters/*.md
 workspace/reviews/*.json
+workspace/summaries/*_summary.json
 workspace/global_review.json
 outputs/final.md
 outputs/final.docx
@@ -243,11 +248,9 @@ A: 复制 `.env.example` 为 `.env` 并填写 API 信息后重新运行。
 | 招标文件 AI 块分类 | 已完成（待进一步优化） |
 | init-demo | 已完成 |
 | chunk-ranker | 已完成 |
-| chapter-summary + global-review 优化 | 待开发 |
+| chapter-summary + global-review 优化 | 已完成 |
 | retry/resume 断点续跑 | 待开发 |
 
 ## 下一步计划
 
-1. **chapter-summary**：为每章生成摘要，供后续章节引用，避免重复和冲突。
-2. **global-review 优化**：强化全文一致性审核，增加冲突检测和自动修复建议。
-3. **retry/resume**：支持失败章节重试和已生成章节的断点续跑。
+1. **retry/resume**：支持失败章节重试和已生成章节的断点续跑。

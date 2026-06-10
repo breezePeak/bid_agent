@@ -5,7 +5,19 @@ from typing import Any
 
 from file_loader import load_global_facts, load_outline, load_score_points
 from llm_client import chat
-from utils import compact_json, load_prompt, parse_json_from_model, project_root, read_text, write_json
+from utils import compact_json, load_prompt, parse_json_from_model, project_root, read_json, write_json
+
+
+def _load_chapter_summaries(root: Path) -> list[dict[str, Any]]:
+    summaries_dir = root / "workspace" / "summaries"
+    summaries: list[dict[str, Any]] = []
+    if summaries_dir.exists():
+        for summary_path in sorted(summaries_dir.glob("*_summary.json")):
+            try:
+                summaries.append(read_json(summary_path))
+            except Exception:
+                pass
+    return summaries
 
 
 def _load_generated_chapters(root: Path, outline: dict[str, Any]) -> list[dict[str, str]]:
@@ -63,9 +75,18 @@ def run_global_review(root: Path | None = None) -> Path:
     global_facts = load_global_facts(root)
     outline = load_outline(root)
     score_points = load_score_points(root)
-    chapters = _load_generated_chapters(root, outline)
     reviews = _load_reviews(root)
     prompt = load_prompt(root, "global_review.md")
+
+    summaries = _load_chapter_summaries(root)
+    if summaries:
+        chapters_section_label = "## 章节摘要\n\n"
+        chapters_data = compact_json(summaries)
+    else:
+        chapters = _load_generated_chapters(root, outline)
+        chapters_section_label = "## 章节正文\n\n"
+        chapters_data = compact_json(chapters)
+        print("[提示] 未找到章节摘要，回退到完整章节正文进行全文审核。")
 
     raw = chat(
         [
@@ -82,8 +103,8 @@ def run_global_review(root: Path | None = None) -> Path:
                     f"{compact_json(score_points)}\n\n"
                     "## 章节审核结果\n\n"
                     f"{compact_json(reviews)}\n\n"
-                    "## 章节正文\n\n"
-                    f"{compact_json(chapters)}"
+                    f"{chapters_section_label}"
+                    f"{chapters_data}"
                 ),
             },
         ],

@@ -4,9 +4,11 @@ import argparse
 from pathlib import Path
 
 from chapter_reviewer import review_all, review_chapter
+from chapter_summarizer import summarize_all_chapters, summarize_chapter
 from chapter_writer import write_all, write_chapter
 from docx_builder import build_docx, build_markdown
 from fact_extractor import extract_facts
+from global_reviewer import run_global_review
 from outline_generator import generate_outline
 from score_parser import parse_score
 from utils import ensure_dirs, ensure_file, project_root, read_json
@@ -159,7 +161,7 @@ DEFAULT_PROMPTS = {
 """,
     "global_review.md": """你是严谨的标书全文一致性审核专家。
 
-任务：根据全局事实、大纲、评分点、章节正文和章节审核结果，输出全文一致性审核 JSON。
+任务：根据全局事实、大纲、评分点、章节摘要（或章节正文）和章节审核结果，输出全文一致性审核 JSON。
 
 输出结构必须为：
 {
@@ -186,6 +188,40 @@ DEFAULT_PROMPTS = {
 8. 是否存在明显编造风险。
 9. 只输出 JSON，不要输出解释，不要使用 Markdown 代码块。
 """,
+    "summarize_chapter.md": """你是标书章节摘要和风险识别助手。
+
+任务：根据输入的章节正文、章节任务、绑定评分点、全局事实和章节审核结果，生成结构化章节摘要 JSON。
+
+输出结构：
+{
+  "chapter_id": "01",
+  "chapter_title": "",
+  "source_chapter_path": "",
+  "covered_score_points": [],
+  "main_claims": [],
+  "key_solutions": [],
+  "project_names": [],
+  "bidder_names": [],
+  "service_periods": [],
+  "warranty_periods": [],
+  "dates": [],
+  "amounts": [],
+  "personnel": [],
+  "qualifications": [],
+  "case_references": [],
+  "risks": [],
+  "possible_conflicts": [],
+  "fabrication_risks": [],
+  "need_manual_review": false
+}
+
+硬性要求：
+1. 只根据输入中的章节正文、任务、评分点、全局事实和审核结果提取，不要补充输入中没有的信息。
+2. 不要编造案例、人员、资质、金额。
+3. 如果发现疑似编造或事实来源不足，写入 fabrication_risks。
+4. 如果发现项目名称、投标人名称、服务周期、质保期和全局事实不一致，写入 possible_conflicts。
+5. 只输出 JSON，不要输出解释，不要使用 Markdown 代码块。
+""",
 }
 
 
@@ -205,6 +241,7 @@ def init_project(root: Path | None = None) -> None:
             "workspace/contexts",
             "workspace/chapters",
             "workspace/reviews",
+            "workspace/summaries",
             "outputs",
             "prompts",
         ],
@@ -276,27 +313,31 @@ def _run_write_all(root: Path, workers: int = 1) -> None:
 
 def run_pipeline(root: Path | None = None, workers: int = 1) -> None:
     root = root or project_root()
-    print("[1/11] 导入原始资料...")
+    print("[1/13] 导入原始资料...")
     _run_prepare_inputs(root)
-    print("[2/11] 切分文档...")
+    print("[2/13] 切分文档...")
     _run_split_docs(root)
-    print("[3/11] 解析评分标准...")
+    print("[3/13] 解析评分标准...")
     parse_score(root)
-    print("[4/11] 提取全局事实...")
+    print("[4/13] 提取全局事实...")
     extract_facts(root)
-    print("[5/11] 生成大纲...")
+    print("[5/13] 生成大纲...")
     generate_outline(root)
-    print("[6/11] 生成章节任务...")
+    print("[6/13] 生成章节任务...")
     _run_plan_jobs(root)
-    print("[7/11] 选择章节上下文...")
+    print("[7/13] 选择章节上下文...")
     _run_select_context_all(root)
-    print("[8/11] 生成章节...")
+    print("[8/13] 生成章节...")
     _run_write_all(root, workers=workers)
-    print("[9/11] 审核章节...")
+    print("[9/13] 审核章节...")
     review_all(root)
-    print("[10/11] 拼接 Markdown...")
+    print("[10/13] 生成章节摘要...")
+    summarize_all_chapters(root)
+    print("[11/13] 全文一致性审核...")
+    run_global_review(root)
+    print("[12/13] 拼接 Markdown...")
     build_markdown(root)
-    print("[11/11] 生成 Word...")
+    print("[13/13] 生成 Word...")
     build_docx(root)
 
 
@@ -343,6 +384,12 @@ def build_parser() -> argparse.ArgumentParser:
     review_chapter_parser = subparsers.add_parser("review-chapter", help="审核单个章节")
     review_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     subparsers.add_parser("review-all", help="串行审核所有章节")
+
+    summarize_chapter_parser = subparsers.add_parser("summarize-chapter", help="为单个章节生成结构化摘要")
+    summarize_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
+
+    subparsers.add_parser("summarize-all", help="为所有章节生成结构化摘要")
+    subparsers.add_parser("global-review", help="全文一致性审核（优先使用章节摘要）")
 
     subparsers.add_parser("build-md", help="拼接最终 Markdown")
     subparsers.add_parser("build-docx", help="生成 Word 文件")
@@ -398,6 +445,15 @@ def main() -> int:
     elif args.command == "review-all":
         print("[执行] 审核所有章节...")
         review_all(root)
+    elif args.command == "summarize-chapter":
+        print(f"[执行] 生成章节 {args.chapter} 摘要...")
+        summarize_chapter(args.chapter, root)
+    elif args.command == "summarize-all":
+        print("[执行] 生成所有章节摘要...")
+        summarize_all_chapters(root)
+    elif args.command == "global-review":
+        print("[执行] 全文一致性审核...")
+        run_global_review(root)
     elif args.command == "build-md":
         print("[执行] 拼接 Markdown...")
         build_markdown(root)

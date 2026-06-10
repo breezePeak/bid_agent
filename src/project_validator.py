@@ -63,6 +63,7 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
         "select_context.md",
         "global_review.md",
         "classify_tender_blocks.md",
+        "summarize_chapter.md",
     ]
 
     # 1. sources/tender
@@ -245,6 +246,20 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
     else:
         add(_check("workspace/chapters", "warn", "workspace/chapters 下无 md 文件", "请执行 write-all"))
 
+    # 25b. workspace/summaries 目录
+    summaries_dir = root / "workspace" / "summaries"
+    if summaries_dir.exists() and list(summaries_dir.glob("*_summary.json")):
+        add(_check("workspace/summaries", "ok", "summaries 目录下存在章节摘要文件"))
+    else:
+        add(_check("workspace/summaries", "warn", "workspace/summaries 下无 *_summary.json 文件", "请执行 summarize-all"))
+
+    # 25c. workspace/global_review.json
+    global_review_path = root / "workspace" / "global_review.json"
+    if _file_ok(global_review_path):
+        add(_check("workspace/global_review.json", "ok", "global_review.json 存在"))
+    else:
+        add(_check("workspace/global_review.json", "warn", "global_review.json 不存在", "请执行 global-review"))
+
     # 26. outputs/final.md
     final_md = root / "outputs" / "final.md"
     if _file_ok(final_md):
@@ -252,7 +267,7 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
     else:
         add(_check("outputs/final.md", "warn", "outputs/final.md 不存在", "请执行 build-md"))
 
-    # 27. outputs/final.docx
+    # 28. outputs/final.docx
     final_docx = root / "outputs" / "final.docx"
     if _file_ok(final_docx):
         add(_check("outputs/final.docx", "ok", f"final.docx 存在 ({final_docx.stat().st_size} bytes)"))

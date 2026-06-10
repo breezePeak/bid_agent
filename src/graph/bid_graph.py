@@ -17,6 +17,7 @@ from graph.nodes import (
     review_chapters_node,
     select_contexts_node,
     split_docs_node,
+    summarize_chapters_node,
     write_chapters_node,
 )
 from graph.state import BidState
@@ -35,6 +36,7 @@ def build_bid_graph():
     graph.add_node("select_contexts", select_contexts_node)
     graph.add_node("write_chapters", write_chapters_node)
     graph.add_node("review_chapters", review_chapters_node)
+    graph.add_node("summarize_chapters", summarize_chapters_node)
     graph.add_node("global_review", global_review_node)
     graph.add_node("build_markdown", build_markdown_node)
     graph.add_node("build_docx", build_docx_node)
@@ -49,7 +51,8 @@ def build_bid_graph():
     graph.add_edge("plan_chapter_jobs", "select_contexts")
     graph.add_edge("select_contexts", "write_chapters")
     graph.add_edge("write_chapters", "review_chapters")
-    graph.add_edge("review_chapters", "global_review")
+    graph.add_edge("review_chapters", "summarize_chapters")
+    graph.add_edge("summarize_chapters", "global_review")
     graph.add_edge("global_review", "build_markdown")
     graph.add_edge("build_markdown", "build_docx")
     graph.add_edge("build_docx", END)
