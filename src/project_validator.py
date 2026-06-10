@@ -62,6 +62,7 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
         "review_chapter.md",
         "select_context.md",
         "global_review.md",
+        "classify_tender_blocks.md",
     ]
 
     # 1. sources/tender
@@ -174,6 +175,34 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
         add(_check("workspace/imported/tender_raw.md", "ok", f"tender_raw.md 存在 ({raw_path.stat().st_size} bytes)"))
     else:
         add(_check("workspace/imported/tender_raw.md", "warn", "tender_raw.md 不存在", "请执行 prepare-inputs"))
+
+    # 19b. workspace/imported/tender_blocks.json
+    blocks_path = root / "workspace" / "imported" / "tender_blocks.json"
+    if _file_ok(blocks_path):
+        add(_check("workspace/imported/tender_blocks.json", "ok", "tender_blocks.json 存在"))
+    else:
+        add(_check("workspace/imported/tender_blocks.json", "warn", "tender_blocks.json 不存在", "请执行 prepare-inputs"))
+
+    # 19c. workspace/imported/tender_classified_blocks.json
+    classified_path = root / "workspace" / "imported" / "tender_classified_blocks.json"
+    if _file_ok(classified_path):
+        add(_check("workspace/imported/tender_classified_blocks.json", "ok", "tender_classified_blocks.json 存在"))
+    else:
+        add(_check("workspace/imported/tender_classified_blocks.json", "warn", "tender_classified_blocks.json 不存在", "请执行 prepare-inputs"))
+
+    # 19d. workspace/imported/tender_classification_report.json
+    report_path = root / "workspace" / "imported" / "tender_classification_report.json"
+    if _file_ok(report_path):
+        add(_check("workspace/imported/tender_classification_report.json", "ok", "tender_classification_report.json 存在"))
+    else:
+        add(_check("workspace/imported/tender_classification_report.json", "warn", "tender_classification_report.json 不存在", "请执行 prepare-inputs"))
+
+    # 19e. workspace/imported/tender_other.md
+    other_path = root / "workspace" / "imported" / "tender_other.md"
+    if _file_ok(other_path):
+        add(_check("workspace/imported/tender_other.md", "ok", f"tender_other.md 存在 ({other_path.stat().st_size} bytes)"))
+    else:
+        add(_check("workspace/imported/tender_other.md", "warn", "tender_other.md 不存在", "请执行 prepare-inputs"))
 
     # 20. workspace/chunks/tender_chunks.json
     tender_chunks = root / "workspace" / "chunks" / "tender_chunks.json"

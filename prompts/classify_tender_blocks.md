@@ -20,8 +20,8 @@
 
 target_file 规则：
 - score.md：category 为 score 的内容；或 qualification 中用于评审/打分/废标的资格性审查内容。
-- tender.md：category 为 requirement、contract、notice、format 的内容；或 qualification 中是普通响应要求的资格内容。
-- other.md：category 为 appendix、unknown 的内容。
+- tender.md：category 为 requirement、contract 的内容；或 qualification 中是普通响应要求的资格内容。
+- other.md：category 为 notice、format、appendix、unknown 的内容。
 
 请对以下内容块逐个进行分类。输出格式为 JSON 数组，每个元素包含 id、category、target_file、confidence、reason 字段。只输出 JSON，不要输出任何解释。
 

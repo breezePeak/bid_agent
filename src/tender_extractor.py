@@ -198,8 +198,8 @@ def _build_classify_prompt(root: Path) -> str:
 
 target_file 规则：
 - **score.md**：category 为 score 的内容；或 qualification 中用于评审/打分/废标的资格性审查内容。
-- **tender.md**：category 为 requirement、contract、notice、format 的内容；或 qualification 中是普通响应要求的资格内容。
-- **other.md**：category 为 appendix、unknown 的内容。
+- **tender.md**：category 为 requirement、contract 的内容；或 qualification 中是普通响应要求的资格内容。
+- **other.md**：category 为 notice、format、appendix、unknown 的内容。
 
 请对以下内容块逐个进行分类。输出格式为 JSON 数组，每个元素包含 id、category、target_file、confidence、reason 字段。只输出 JSON，不要输出任何解释。"""
 
@@ -245,27 +245,27 @@ def _fallback_classify_one(block: dict[str, Any]) -> dict[str, Any]:
     if score_hits > 0:
         category = "score"
         target_file = "score.md"
-        reason = "规则兜底：命中评分关键词"
-    elif qualification_hits > 0:
-        category = "qualification"
-        target_file = "tender.md"
-        reason = "规则兜底：命中资格关键词"
+        reason = "fallback: 命中评分关键词"
     elif requirement_hits > 0:
         category = "requirement"
         target_file = "tender.md"
-        reason = "规则兜底：命中需求关键词"
+        reason = "fallback: 命中需求关键词"
     elif contract_hits > 0:
         category = "contract"
         target_file = "tender.md"
-        reason = "规则兜底：命中合同关键词"
+        reason = "fallback: 命中合同关键词"
+    elif qualification_hits > 0:
+        category = "qualification"
+        target_file = "tender.md"
+        reason = "fallback: 命中资格关键词"
     elif notice_hits > 0:
         category = "notice"
-        target_file = "tender.md"
-        reason = "规则兜底：命中须知关键词"
+        target_file = "other.md"
+        reason = "fallback: 命中须知关键词"
     elif format_hits > 0:
         category = "format"
-        target_file = "tender.md"
-        reason = "规则兜底：命中格式关键词"
+        target_file = "other.md"
+        reason = "fallback: 命中格式关键词"
 
     result = dict(block)
     result["category"] = category
@@ -417,7 +417,7 @@ def _generate_classification_report(
     ]
     fallback_blocks = [
         b["id"] for b in classified
-        if "规则兜底" in str(b.get("reason", ""))
+        if "fallback" in str(b.get("reason", "")).lower()
     ]
 
     raw_chars = len(raw_markdown) if raw_markdown else 0

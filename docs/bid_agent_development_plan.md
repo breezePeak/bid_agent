@@ -109,12 +109,16 @@ SubAgent 并发章节写作
 - 支持大型招标文件（300+ 页），避免 prompt 超长
 - ranker 失败时自动回退到全量 chunks
 
-### 阶段 9：AI tender block classifier 优化 — 待完善
+### 阶段 9：AI tender block classifier — 已完成
 
-- 当前 `tender_extractor.py` 已支持代码切块 + AI 分类 + 拼接流程
-- 待优化：提升分类准确率，减少规则兜底比例
-- 待优化：对 qualification 类型做评审性质 vs 响应要求的精细化判断
-- 待优化：支持多文件 source 追踪
+- `tender_extractor.py` 实现完整的"代码切块 + AI 分类 + 拼接输出"流程
+- `split_tender_into_blocks()` 按标题切块，生成 rule_hints
+- `classify_tender_blocks_with_ai()` 批量 AI 分类（每批 12 个 block）
+- `assemble_inputs_from_classified_blocks()` 拼接 score.md / tender.md / tender_other.md
+- `fallback_classify_blocks()` 规则兜底，失败批次自动降级
+- `_generate_classification_report()` 生成分类报告含 warnings
+- 提示词 `prompts/classify_tender_blocks.md` 内置分类规则
+- 分类精度后续可按阶段 9b 继续优化
 
 ### 阶段 10：chapter-summary + global-review 优化 — 待开发
 

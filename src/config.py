@@ -72,7 +72,7 @@ def get_settings(root: Path | None = None) -> Settings:
 
 TENDER_EXTENSIONS = {".md", ".docx", ".pdf"}
 
-BLOCK_MAX_CHARS = 3000
+BLOCK_MAX_CHARS = 6000
 BLOCK_ID_PREFIX = "B"
 
 BATCH_SIZE = 12
