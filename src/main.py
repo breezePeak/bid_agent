@@ -193,6 +193,9 @@ def init_project(root: Path | None = None) -> None:
     ensure_dirs(
         root,
         [
+            "sources/tender",
+            "sources/company",
+            "sources/template",
             "inputs",
             "workspace",
             "workspace/chunks",
@@ -210,6 +213,13 @@ def init_project(root: Path | None = None) -> None:
     for filename, content in DEFAULT_PROMPTS.items():
         ensure_file(root / "prompts" / filename, content)
     print(f"[完成] 项目已初始化: {root}")
+
+
+def _run_prepare_inputs(root: Path) -> None:
+    from input_preparer import prepare_inputs
+
+    print("[执行] 导入原始资料...")
+    prepare_inputs(root)
 
 
 def _run_split_docs(root: Path) -> None:
@@ -264,25 +274,27 @@ def _run_write_all(root: Path, workers: int = 1) -> None:
 
 def run_pipeline(root: Path | None = None, workers: int = 1) -> None:
     root = root or project_root()
-    print("[1/10] 切分文档...")
+    print("[1/11] 导入原始资料...")
+    _run_prepare_inputs(root)
+    print("[2/11] 切分文档...")
     _run_split_docs(root)
-    print("[2/10] 解析评分标准...")
+    print("[3/11] 解析评分标准...")
     parse_score(root)
-    print("[3/10] 提取全局事实...")
+    print("[4/11] 提取全局事实...")
     extract_facts(root)
-    print("[4/10] 生成大纲...")
+    print("[5/11] 生成大纲...")
     generate_outline(root)
-    print("[5/10] 生成章节任务...")
+    print("[6/11] 生成章节任务...")
     _run_plan_jobs(root)
-    print("[6/10] 选择章节上下文...")
+    print("[7/11] 选择章节上下文...")
     _run_select_context_all(root)
-    print("[7/10] 生成章节...")
+    print("[8/11] 生成章节...")
     _run_write_all(root, workers=workers)
-    print("[8/10] 审核章节...")
+    print("[9/11] 审核章节...")
     review_all(root)
-    print("[9/10] 拼接 Markdown...")
+    print("[10/11] 拼接 Markdown...")
     build_markdown(root)
-    print("[10/10] 生成 Word...")
+    print("[11/11] 生成 Word...")
     build_docx(root)
 
 
@@ -304,6 +316,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     subparsers.add_parser("init", help="初始化目录、输入文件和默认提示词")
+
+    subparsers.add_parser("prepare-inputs", help="导入原始资料：将 sources/ 下的 PDF/DOCX/MD 转为 inputs/ 下标准文件")
 
     subparsers.add_parser("split-docs", help="切分招标文件和公司资料为 chunk")
     subparsers.add_parser("parse-score", help="解析评分标准")
@@ -343,6 +357,8 @@ def main() -> int:
 
     if args.command == "init":
         init_project(root)
+    elif args.command == "prepare-inputs":
+        _run_prepare_inputs(root)
     elif args.command == "split-docs":
         _run_split_docs(root)
     elif args.command == "parse-score":

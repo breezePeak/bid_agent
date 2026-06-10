@@ -13,6 +13,7 @@ from graph.nodes import (
     init_workspace,
     parse_score_node,
     plan_chapter_jobs_node,
+    prepare_inputs_node,
     review_chapters_node,
     select_contexts_node,
     split_docs_node,
@@ -25,6 +26,7 @@ from utils import project_root
 def build_bid_graph():
     graph = StateGraph(BidState)
     graph.add_node("init_workspace", init_workspace)
+    graph.add_node("prepare_inputs", prepare_inputs_node)
     graph.add_node("split_docs", split_docs_node)
     graph.add_node("parse_score", parse_score_node)
     graph.add_node("extract_facts", extract_facts_node)
@@ -38,7 +40,8 @@ def build_bid_graph():
     graph.add_node("build_docx", build_docx_node)
 
     graph.add_edge(START, "init_workspace")
-    graph.add_edge("init_workspace", "split_docs")
+    graph.add_edge("init_workspace", "prepare_inputs")
+    graph.add_edge("prepare_inputs", "split_docs")
     graph.add_edge("split_docs", "parse_score")
     graph.add_edge("parse_score", "extract_facts")
     graph.add_edge("extract_facts", "generate_outline")

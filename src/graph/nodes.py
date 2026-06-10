@@ -10,6 +10,7 @@ from chapter_reviewer import review_chapter
 from context_selector import select_context_for_job
 from docx_builder import build_docx, build_markdown
 from document_splitter import split_docs
+from input_preparer import prepare_inputs
 from job_planner import plan_chapter_jobs
 from subagent_runner import run_write_all as concurrent_write_all
 from utils import ensure_dirs, ensure_file, project_root, stringify
@@ -23,10 +24,13 @@ def _root(state) -> Path:
 def init_workspace(state) -> dict:
     from graph.state import BidState
     root = Path(state.get("root_dir") or project_root())
-    print("[1/11] 初始化工作区...")
+    print("[1/12] 初始化工作区...")
     ensure_dirs(
         root,
         [
+            "sources/tender",
+            "sources/company",
+            "sources/template",
             "inputs",
             "workspace",
             "workspace/chunks",
@@ -55,44 +59,54 @@ def init_workspace(state) -> dict:
     }
 
 
+def prepare_inputs_node(state) -> dict:
+    root = _root(state)
+    print("[2/12] 导入原始资料...")
+    prepare_inputs(root)
+    return {
+        "tender_path": str(root / "inputs" / "tender.md"),
+        "company_path": str(root / "inputs" / "company.md"),
+    }
+
+
 def split_docs_node(state) -> dict:
     root = _root(state)
-    print("[2/11] 切分文档...")
+    print("[3/12] 切分文档...")
     tender_chunks_path, company_chunks_path = split_docs(root)
     return {"tender_chunks_path": str(tender_chunks_path), "company_chunks_path": str(company_chunks_path)}
 
 
 def parse_score_node(state) -> dict:
     root = _root(state)
-    print("[3/11] 解析评分标准...")
+    print("[4/12] 解析评分标准...")
     score_points_path = score_agent(root)
     return {"score_points_path": str(score_points_path)}
 
 
 def extract_facts_node(state) -> dict:
     root = _root(state)
-    print("[4/11] 提取全局事实...")
+    print("[5/12] 提取全局事实...")
     global_facts_path = fact_agent(root)
     return {"global_facts_path": str(global_facts_path)}
 
 
 def generate_outline_node(state) -> dict:
     root = _root(state)
-    print("[5/11] 生成大纲...")
+    print("[6/12] 生成大纲...")
     outline_path = outline_agent(root)
     return {"outline_path": str(outline_path)}
 
 
 def plan_chapter_jobs_node(state) -> dict:
     root = _root(state)
-    print("[6/11] 生成章节任务...")
+    print("[7/12] 生成章节任务...")
     jobs = plan_chapter_jobs(root)
     return {"chapter_jobs": jobs, "jobs_dir": str(root / "workspace" / "jobs")}
 
 
 def select_contexts_node(state) -> dict:
     root = _root(state)
-    print("[7/11] 选择章节上下文...")
+    print("[8/12] 选择章节上下文...")
     errors: list[str] = []
     for job in state.get("chapter_jobs", []):
         try:
@@ -108,7 +122,7 @@ def select_contexts_node(state) -> dict:
 def write_chapters_node(state) -> dict:
     root = _root(state)
     workers = int(state.get("workers") or 2)
-    print(f"[8/11] 章节 SubAgent 写作... workers={workers}")
+    print(f"[9/12] 章节 SubAgent 写作... workers={workers}")
     effective_workers = max(1, min(workers, 5))
     try:
         result = concurrent_write_all(root, workers=effective_workers)
@@ -129,7 +143,7 @@ def write_chapters_node(state) -> dict:
 
 def review_chapters_node(state) -> dict:
     root = _root(state)
-    print("[9/11] 章节审核...")
+    print("[10/12] 章节审核...")
     failed: list[dict[str, str]] = []
     errors: list[str] = []
     completed_set = set(state.get("completed_chapters", []))
@@ -149,20 +163,20 @@ def review_chapters_node(state) -> dict:
 
 def global_review_node(state) -> dict:
     root = _root(state)
-    print("[10/11] 全文一致性审核...")
+    print("[11/12] 全文一致性审核...")
     global_review_path = global_review_agent(root)
     return {"global_review_path": str(global_review_path)}
 
 
 def build_markdown_node(state) -> dict:
     root = _root(state)
-    print("[11/11] 拼接 Markdown...")
+    print("[12/12] 拼接 Markdown...")
     final_md_path = build_markdown(root)
     return {"final_md_path": str(final_md_path)}
 
 
 def build_docx_node(state) -> dict:
     root = _root(state)
-    print("[11/11] 生成 Word...")
+    print("[12/12] 生成 Word...")
     final_docx_path = build_docx(root)
     return {"final_docx_path": str(final_docx_path)}
