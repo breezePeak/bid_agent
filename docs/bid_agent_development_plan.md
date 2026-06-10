@@ -13,7 +13,7 @@
         ↓
 招标文件按标题切块 + AI 分类 → score.md / tender.md / other.md
         ↓
-招标文件切分为 chunk
+招标文件 / 公司资料切分为 chunk
         ↓
 解析评分点
         ↓
@@ -21,13 +21,15 @@
         ↓
 生成标书大纲
         ↓
-章节任务规划 + 上下文选择
+章节任务规划 + 上下文选择（chunk-ranker 本地粗筛）
         ↓
 SubAgent 并发章节写作
         ↓
-逐章审核评分点覆盖情况
+审核 + 自动改稿（review-fix-all，最多 2 轮）
         ↓
-全文一致性审核
+章节摘要生成
+        ↓
+全文一致性审核（优先使用章节摘要）
         ↓
 拼接 Markdown
         ↓
@@ -64,7 +66,7 @@ SubAgent 并发章节写作
 ### 阶段 4：LangGraph 主流程 — 已完成
 
 - `graph/state.py`：BidState + ChapterState TypedDict
-- `graph/nodes.py`：13 个图节点函数
+- `graph/nodes.py`：14 个图节点函数
 - `graph/routers.py`：路由函数
 - `graph/bid_graph.py`：主图构建 + `graph-run` 命令
 - 完整 13 节点线性流程，无分支/条件
@@ -126,11 +128,22 @@ SubAgent 并发章节写作
 - 新增 `prompts/summarize_chapter.md` 提示词模板
 - 新增 CLI 命令：`summarize-chapter --chapter 01`、`summarize-all`、`global-review`
 - 改造 `global_reviewer.py`：优先使用章节摘要做全文审核，回退到完整章节正文
-- `run_pipeline` 插入 summarize-all + global-review 步骤（11→13 步）
+- `run_pipeline` 插入 summarize-all + global-review 步骤
 - LangGraph 主图插入 `summarize_chapters` 节点（review → summarize → global_review）
 - 章节摘要位于 `workspace/summaries/*_summary.json`
 
-### 阶段 11：retry/resume — 待开发
+### 阶段 11：review-fix-all 自动改稿 — 已完成
+
+- 新增 `src/chapter_rewriter.py`，实现 `rewrite_chapter()` / `rewrite_all()` / `review_fix_all()`
+- 新增 `prompts/rewrite_chapter.md` 提示词模板
+- 新增 CLI 命令：`rewrite-chapter`、`rewrite-all`、`review-fix-all`
+- `review_fix_all()` 审核后对 need_rewrite=true 章节自动重写，最多 2 轮
+- `run_pipeline` 集成 review_fix_all（审核 + 改稿一步完成）
+- LangGraph 主图 `review_chapters` -> `review_fix_chapters`，graph-run 也执行自动改稿
+- 重写日志保存在 `workspace/rewrites/*_rewrite_log.json`
+- 步骤编号统一为 1/14 ~ 14/14
+
+### 阶段 12：retry/resume — 待开发
 
 - 失败章节重试：`write-chapter --chapter XX`（已有基础支持）
 - 断点续跑：`graph-run --resume`，跳过已完成章节，只生成失败/缺失章节
@@ -179,6 +192,8 @@ bid_agent/
     contexts/                     ← 01_context.json, 02_context.json, ...
     chapters/                     ← 01.md, 02.md, ...
     reviews/                      ← 01_review.json, ...
+    rewrites/                     ← 01_rewrite_log.json, ...
+    summaries/                    ← 01_summary.json, ...
     score_points.json
     global_facts.json
     outline.json
@@ -197,6 +212,8 @@ bid_agent/
     select_context.md
     global_review.md
     classify_tender_blocks.md
+    summarize_chapter.md
+    rewrite_chapter.md
 
   src/
     main.py
@@ -219,6 +236,8 @@ bid_agent/
     outline_generator.py
     chapter_writer.py
     chapter_reviewer.py
+    chapter_rewriter.py
+    chapter_summarizer.py
     global_reviewer.py
     docx_builder.py
     agents/
@@ -285,10 +304,16 @@ inputs/template.docx  ← 复制第一个 .docx
 | `write-all --workers 2` | 并发生成所有章节 |
 | `review-chapter --chapter 01` | 审核单个章节 |
 | `review-all` | 审核所有章节 |
+| `rewrite-chapter --chapter 01` | 根据审核意见重写单个章节 |
+| `rewrite-all` | 重写所有 need_rewrite=true 的章节 |
+| `review-fix-all` | 审核所有章节并自动改稿（最多 2 轮） |
+| `summarize-chapter --chapter 01` | 为单个章节生成结构化摘要 |
+| `summarize-all` | 为所有章节生成结构化摘要 |
+| `global-review` | 全文一致性审核（优先使用章节摘要） |
 | `build-md` | 拼接 Markdown → outputs/final.md |
 | `build-docx` | 生成 Word → outputs/final.docx |
-| `run --workers 2` | CLI 模式完整流水线（11 步） |
-| `graph-run --workers 2` | LangGraph 主图完整流程 |
+| `run --workers 2` | CLI 模式完整流水线（13 步） |
+| `graph-run --workers 2` | LangGraph 主图完整流程（14 节点） |
 
 ---
 
@@ -298,8 +323,12 @@ inputs/template.docx  ← 复制第一个 .docx
 START → init_workspace → prepare_inputs → split_docs
   → parse_score → extract_facts → generate_outline
   → plan_chapter_jobs → select_contexts → write_chapters
-  → review_chapters → global_review → build_markdown → build_docx → END
+  → review_fix_chapters (审核 + 自动改稿 + 再审)
+  → summarize_chapters → global_review
+  → build_markdown → build_docx → END
 ```
+
+共 14 个节点。`review_fix_chapters` 内置 `review_fix_all` 逻辑：审核 → 对 need_rewrite=true 章节重写 → 再审，最多 2 轮。`global_review` 优先使用 `summarize_chapters` 生成的章节摘要。
 
 ---
 

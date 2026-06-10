@@ -202,7 +202,7 @@ START
   → plan_chapter_jobs
   → select_contexts
   → write_chapters (章节子图：load_job → load_context → write → self_check → save)
-  → review_chapters
+  → review_fix_chapters (审核 + 自动改稿 + 再审，最多 2 轮)
   → summarize_chapters (为每章生成结构化摘要)
   → global_review (基于章节摘要做全文审核)
   → build_markdown
