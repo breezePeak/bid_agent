@@ -10,6 +10,7 @@ from fact_extractor import extract_facts
 from outline_generator import generate_outline
 from score_parser import parse_score
 from utils import ensure_dirs, ensure_file, project_root, read_json
+from project_validator import validate_project
 
 
 DEFAULT_PROMPTS = {
@@ -349,6 +350,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     graph_run_parser = subparsers.add_parser("graph-run", help="按 LangGraph 主图运行完整流程")
     graph_run_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2")
+
+    subparsers.add_parser("validate", help="项目功能闭环检查：验证文件、环境变量、中间产物完整性")
+
     return parser
 
 
@@ -398,6 +402,30 @@ def main() -> int:
         run_pipeline(root, workers=args.workers)
     elif args.command == "graph-run":
         run_graph_pipeline(root, workers=args.workers)
+    elif args.command == "validate":
+        report = validate_project(root)
+        for item in report["results"]:
+            tag = item["level"].upper()
+            if item["level"] == "ok":
+                print(f"[{tag}] {item['message']}")
+            elif item["level"] == "warn":
+                print(f"[{tag}] {item['message']}")
+                if item.get("suggestion"):
+                    print(f"      建议: {item['suggestion']}")
+            elif item["level"] == "fail":
+                print(f"[{tag}] {item['message']}")
+                if item.get("suggestion"):
+                    print(f"      建议: {item['suggestion']}")
+
+        print()
+        print(f"验证结果：")
+        print(f"OK: {report['ok']}")
+        print(f"WARN: {report['warn']}")
+        print(f"FAIL: {report['fail']}")
+
+        if report["fail"] > 0:
+            return 1
+        return 0
     else:
         raise ValueError(f"未知命令: {args.command}")
 
