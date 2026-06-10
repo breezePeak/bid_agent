@@ -116,6 +116,7 @@ bid_agent/
     outline_generator.py
     chapter_writer.py
     chapter_reviewer.py
+    chapter_rewriter.py           ← 章节自动改稿
     global_reviewer.py
     docx_builder.py
     agents/                       ← Agent 薄封装层
@@ -160,6 +161,9 @@ OPENAI_MAX_RETRIES=3
 | `write-all --workers 2` | 并发生成所有章节（--workers 默认 2，最大 5） |
 | `review-chapter --chapter 01` | 审核单个章节 |
 | `review-all` | 串行审核所有章节 |
+| `rewrite-chapter --chapter 01` | 根据审核意见重写单个章节 |
+| `rewrite-all` | 重写所有 need_rewrite=true 的章节 |
+| `review-fix-all` | 审核所有章节并自动改稿（最多 2 轮） |
 | `summarize-chapter --chapter 01` | 为单个章节生成结构化摘要 |
 | `summarize-all` | 为所有章节生成结构化摘要 |
 | `global-review` | 全文一致性审核（优先使用章节摘要） |
@@ -167,6 +171,23 @@ OPENAI_MAX_RETRIES=3
 | `build-docx` | 生成 Word 文件 → outputs/final.docx |
 | `run --workers 2` | CLI 模式完整流水线（13 步） |
 | `graph-run --workers 2` | LangGraph 主图完整流程 |
+
+## 自动改稿流程
+
+`review-fix-all` 命令会自动审核所有章节，并对 need_rewrite=true 的章节进行重写，然后再次审核，最多 2 轮。
+
+```bash
+python src/main.py write-all --workers 2
+python src/main.py review-fix-all
+python src/main.py build-md
+python src/main.py build-docx
+```
+
+说明：
+- `review-fix-all` 会先审核章节，对 need_rewrite=true 的章节自动重写
+- 重写后会重新审核，每章最多重写 2 轮
+- 重写日志保存在 `workspace/rewrites/*_rewrite_log.json`
+- 如果没有需要重写的章节，命令正常结束并打印"无需重写"
 
 ## LangGraph 流程
 
@@ -207,6 +228,7 @@ workspace/contexts/*_context.json
 workspace/contexts/*_ranked_chunks.json
 workspace/chapters/*.md
 workspace/reviews/*.json
+workspace/rewrites/*_rewrite_log.json
 workspace/summaries/*_summary.json
 workspace/global_review.json
 outputs/final.md
@@ -249,6 +271,7 @@ A: 复制 `.env.example` 为 `.env` 并填写 API 信息后重新运行。
 | init-demo | 已完成 |
 | chunk-ranker | 已完成 |
 | chapter-summary + global-review 优化 | 已完成 |
+| review-fix-all 自动改稿 | 已完成 |
 | retry/resume 断点续跑 | 待开发 |
 
 ## 下一步计划

@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from chapter_reviewer import review_all, review_chapter
+from chapter_rewriter import review_fix_all, rewrite_all, rewrite_chapter
 from chapter_summarizer import summarize_all_chapters, summarize_chapter
 from chapter_writer import write_all, write_chapter
 from docx_builder import build_docx, build_markdown
@@ -222,6 +223,20 @@ DEFAULT_PROMPTS = {
 4. 如果发现项目名称、投标人名称、服务周期、质保期和全局事实不一致，写入 possible_conflicts。
 5. 只输出 JSON，不要输出解释，不要使用 Markdown 代码块。
 """,
+    "rewrite_chapter.md": """你是资深标书写作专家，负责根据审核意见修改章节。
+
+任务：根据审核结果中的具体问题，对原章节正文进行针对性修改和补充，输出修改后的完整章节 Markdown。
+
+硬性要求：
+1. 只输出当前章节 Markdown 正文，不要输出其他章节。
+2. 必须保留章节标题，格式为 # 01 章节标题。
+3. 必须针对 review 中的 problems 逐项修复。
+4. 对 coverage_level 为 none 或 low 的评分点，必须重点补充。
+5. 必须结合已提供的招标文件片段和公司资料片段，但不能编造。
+6. 不允许编造未在资料中出现的资质、案例、证书、人员、金额、日期。
+7. 表格使用 Markdown 表格。
+8. 不要输出解释，不要使用 Markdown 代码块包裹全文。
+""",
 }
 
 
@@ -241,6 +256,7 @@ def init_project(root: Path | None = None) -> None:
             "workspace/contexts",
             "workspace/chapters",
             "workspace/reviews",
+            "workspace/rewrites",
             "workspace/summaries",
             "outputs",
             "prompts",
@@ -329,8 +345,8 @@ def run_pipeline(root: Path | None = None, workers: int = 1) -> None:
     _run_select_context_all(root)
     print("[8/13] 生成章节...")
     _run_write_all(root, workers=workers)
-    print("[9/13] 审核章节...")
-    review_all(root)
+    print("[9/13] 审核并自动改稿...")
+    review_fix_all(root)
     print("[10/13] 生成章节摘要...")
     summarize_all_chapters(root)
     print("[11/13] 全文一致性审核...")
@@ -384,6 +400,11 @@ def build_parser() -> argparse.ArgumentParser:
     review_chapter_parser = subparsers.add_parser("review-chapter", help="审核单个章节")
     review_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     subparsers.add_parser("review-all", help="串行审核所有章节")
+
+    rewrite_chapter_parser = subparsers.add_parser("rewrite-chapter", help="根据审核意见重写单个章节")
+    rewrite_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
+    subparsers.add_parser("rewrite-all", help="重写所有 need_rewrite=true 的章节")
+    subparsers.add_parser("review-fix-all", help="审核所有章节并自动改稿（最多 2 轮）")
 
     summarize_chapter_parser = subparsers.add_parser("summarize-chapter", help="为单个章节生成结构化摘要")
     summarize_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
@@ -445,6 +466,15 @@ def main() -> int:
     elif args.command == "review-all":
         print("[执行] 审核所有章节...")
         review_all(root)
+    elif args.command == "rewrite-chapter":
+        print(f"[执行] 根据审核意见重写章节 {args.chapter}...")
+        rewrite_chapter(args.chapter, root)
+    elif args.command == "rewrite-all":
+        print("[执行] 重写所有需改稿章节...")
+        rewrite_all(root)
+    elif args.command == "review-fix-all":
+        print("[执行] 审核并自动改稿...")
+        review_fix_all(root)
     elif args.command == "summarize-chapter":
         print(f"[执行] 生成章节 {args.chapter} 摘要...")
         summarize_chapter(args.chapter, root)

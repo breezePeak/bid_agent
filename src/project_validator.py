@@ -64,6 +64,7 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
         "global_review.md",
         "classify_tender_blocks.md",
         "summarize_chapter.md",
+        "rewrite_chapter.md",
     ]
 
     # 1. sources/tender
@@ -259,6 +260,13 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
         add(_check("workspace/global_review.json", "ok", "global_review.json 存在"))
     else:
         add(_check("workspace/global_review.json", "warn", "global_review.json 不存在", "请执行 global-review"))
+
+    # 25d. workspace/rewrites 目录
+    rewrites_dir = root / "workspace" / "rewrites"
+    if rewrites_dir.exists() and list(rewrites_dir.glob("*_rewrite_log.json")):
+        add(_check("workspace/rewrites", "ok", "rewrites 目录下存在重写日志"))
+    else:
+        add(_check("workspace/rewrites", "warn", "workspace/rewrites 下无 *_rewrite_log.json 文件", "请执行 review-fix-all 以生成改稿日志"))
 
     # 26. outputs/final.md
     final_md = root / "outputs" / "final.md"
