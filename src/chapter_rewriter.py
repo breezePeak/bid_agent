@@ -132,11 +132,8 @@ def rewrite_all(root: Path | None = None) -> list[Path]:
         if not review.get("need_rewrite", False):
             continue
         chapter_id = review.get("chapter_id") or rf.stem.replace("_review", "")
-        try:
-            paths.append(rewrite_chapter(chapter_id, root))
-            rewritten += 1
-        except Exception as exc:
-            print(f"[错误] 章节 {chapter_id} 重写失败: {exc}")
+        paths.append(rewrite_chapter(chapter_id, root))
+        rewritten += 1
 
     if rewritten == 0:
         print("[提示] 没有需要重写的章节。")
@@ -175,19 +172,13 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2) -> None:
         print(f"\n[{round_num + 1}/{max_rounds + 1}] 第 {round_num} 轮改稿：{len(need_rewrite_ids)} 个章节需要重写...")
 
         for chapter_id in need_rewrite_ids:
-            try:
-                rewrite_chapter(chapter_id, root)
-                total_rewritten += 1
-            except Exception as exc:
-                print(f"[错误] 章节 {chapter_id} 重写失败: {exc}")
+            rewrite_chapter(chapter_id, root)
+            total_rewritten += 1
 
         from chapter_reviewer import review_chapter
 
         for chapter_id in need_rewrite_ids:
-            try:
-                review_chapter(chapter_id, root)
-            except Exception as exc:
-                print(f"[错误] 章节 {chapter_id} 审核失败: {exc}")
+            review_chapter(chapter_id, root)
 
     reviews_dir = root / "workspace" / "reviews"
     still_failed = 0

@@ -321,7 +321,11 @@ def _run_write_all(root: Path, workers: int = 1) -> None:
     if workers > 1:
         from subagent_runner import run_write_all as concurrent_write_all
 
-        concurrent_write_all(root, workers=workers)
+        result = concurrent_write_all(root, workers=workers)
+        failed = result.get("failed", [])
+        if failed:
+            messages = [f"章节 {item['chapter_id']} 写作失败: {item['error']}" for item in failed]
+            raise RuntimeError("；".join(messages))
     else:
         print("[执行] 串行生成所有章节...")
         write_all(root)
@@ -363,13 +367,7 @@ def run_graph_pipeline(root: Path | None = None, workers: int = 1) -> None:
     from graph.bid_graph import run_bid_graph
 
     root = root or project_root()
-    final_state = run_bid_graph(root, workers=workers)
-    failed = final_state.get("failed_chapters", [])
-    errors = final_state.get("errors", [])
-    if failed:
-        print(f"[警告] 有 {len(failed)} 个章节执行失败，详情已写入 LangGraph state。")
-    if errors:
-        print(f"[警告] 流程累计 {len(errors)} 条错误/警告。")
+    run_bid_graph(root, workers=workers)
 
 
 def build_parser() -> argparse.ArgumentParser:

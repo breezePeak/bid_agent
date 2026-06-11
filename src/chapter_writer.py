@@ -140,8 +140,5 @@ def write_all(root: Path | None = None) -> list[Path]:
     job_files = sorted(jobs_dir.glob("*.json"))
     for job_file in job_files:
         chapter_id = job_file.stem
-        try:
-            output_paths.append(write_chapter(chapter_id, root))
-        except Exception as exc:
-            print(f"[错误] 章节 {chapter_id} 写入失败: {exc}")
+        output_paths.append(write_chapter(chapter_id, root))
     return output_paths

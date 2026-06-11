@@ -110,16 +110,9 @@ def plan_chapter_jobs_node(state) -> dict:
 def select_contexts_node(state) -> dict:
     root = _root(state)
     print("[8/14] 选择章节上下文...")
-    errors: list[str] = []
     for job in state.get("chapter_jobs", []):
-        try:
-            select_context_for_job(job, root)
-        except Exception as exc:
-            chapter_id = stringify(job.get("chapter_id"))
-            message = f"章节 {chapter_id} 上下文选择失败: {exc}"
-            print(f"[警告] {message}")
-            errors.append(message)
-    return {"contexts_dir": str(root / "workspace" / "contexts"), "errors": errors}
+        select_context_for_job(job, root)
+    return {"contexts_dir": str(root / "workspace" / "contexts")}
 
 
 def write_chapters_node(state) -> dict:
@@ -127,49 +120,37 @@ def write_chapters_node(state) -> dict:
     workers = int(state.get("workers") or 2)
     print(f"[9/14] 章节 SubAgent 写作... workers={workers}")
     effective_workers = max(1, min(workers, 5))
-    try:
-        result = concurrent_write_all(root, workers=effective_workers)
-    except Exception as exc:
-        errors = [f"并发写入异常: {exc}"]
-        return {"errors": errors}
+    result = concurrent_write_all(root, workers=effective_workers)
 
     completed = result.get("completed", [])
     failed = result.get("failed", [])
-    errors: list[str] = [f"章节 {f['chapter_id']} 写作失败: {f['error']}" for f in failed]
+    if failed:
+        messages = [f"章节 {f['chapter_id']} 写作失败: {f['error']}" for f in failed]
+        raise RuntimeError("；".join(messages))
     return {
         "chapters_dir": str(root / "workspace" / "chapters"),
         "completed_chapters": completed,
-        "failed_chapters": failed,
-        "errors": errors,
+        "failed_chapters": [],
     }
 
 
 def review_fix_chapters_node(state) -> dict:
     root = _root(state)
     print("[10/14] 审核并自动改稿...")
-    try:
-        review_fix_all(root)
-    except Exception as exc:
-        print(f"[警告] 自动改稿异常: {exc}")
+    review_fix_all(root)
     return {"reviews_dir": str(root / "workspace" / "reviews"), "rewrites_dir": str(root / "workspace" / "rewrites")}
 
 
 def summarize_chapters_node(state) -> dict:
     root = _root(state)
     print("[11/14] 生成章节摘要...")
-    errors: list[str] = []
     completed_set = set(state.get("completed_chapters", []))
     for job in state.get("chapter_jobs", []):
         chapter_id = stringify(job.get("chapter_id"))
         if chapter_id not in completed_set:
             continue
-        try:
-            summarize_chapter(chapter_id, root)
-        except Exception as exc:
-            message = f"章节 {chapter_id} 摘要生成失败: {exc}"
-            print(f"[警告] {message}")
-            errors.append(message)
-    return {"summaries_dir": str(root / "workspace" / "summaries"), "errors": errors}
+        summarize_chapter(chapter_id, root)
+    return {"summaries_dir": str(root / "workspace" / "summaries")}
 
 
 def global_review_node(state) -> dict:

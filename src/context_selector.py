@@ -150,12 +150,7 @@ def select_context_for_job(job: dict[str, Any], root: Path | None = None) -> Pat
         )
         data = parse_json_from_model(raw, root / "workspace" / f"debug_select_context_{chapter_id}_raw.txt")
     except Exception as exc:
-        warnings.append(str(exc))
-        context = _fallback_select(job, ranked_tender, ranked_company, warnings)
-        output_path = root / "workspace" / "contexts" / f"{chapter_id}_context.json"
-        write_json(output_path, context)
-        print(f"[警告] 章节 {chapter_id} 上下文选择失败，已兜底: {exc}")
-        return output_path
+        raise RuntimeError(f"章节 {chapter_id} 上下文选择失败: {exc}") from exc
 
     tender_ids = {stringify(chunk.get("id")) for chunk in ranked_tender}
     company_ids = {stringify(chunk.get("id")) for chunk in ranked_company}

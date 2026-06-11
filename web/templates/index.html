@@ -8,65 +8,124 @@
 </head>
 <body>
 
-<h1>标书 Agent 控制台</h1>
+<header class="hero">
+  <div>
+    <p class="eyebrow">Bid Agent Console</p>
+    <h1>标书 Agent 控制台</h1>
+    <p class="hero-copy">把“现在做到哪一步了、下一步该点什么、为什么卡住”直接放在首页，免得来回记命令。</p>
+  </div>
+  <div class="hero-side">
+    <div class="hero-stat">
+      <span class="hero-stat-label">当前任务</span>
+      <strong id="hero-task">空闲</strong>
+    </div>
+    <div class="hero-stat">
+      <span class="hero-stat-label">推荐操作</span>
+      <strong id="hero-next">等待状态加载</strong>
+    </div>
+  </div>
+</header>
 
 <div id="running-notice" class="running-notice" style="display:none">
   <span class="spinner"></span>
   <span id="running-task"></span>
 </div>
 
-<h2>流水线</h2>
-<div class="flow-container" id="flow-container"></div>
+<main class="three-col-layout">
+  <aside class="panel column-panel left-panel">
+    <div class="panel-head">
+      <div>
+        <h2>操作区</h2>
+        <p class="panel-subtitle">上传文件，启动流程，必要时手动补跑。</p>
+      </div>
+    </div>
 
-<div class="flow-actions">
-  <button onclick="runFullPipeline()" class="primary" id="btn-full-run">一键运行全流程</button>
-  <button onclick="runGraphRun()" class="primary" id="btn-graph-run">LangGraph 全流程</button>
-</div>
+    <section class="stack-section">
+      <h3>开发文件</h3>
+      <p class="stack-note">开发期间直接用 `sources/` 里的文件，不用每次手动上传。</p>
+      <div class="stack-list">
+        <div id="source-files" class="source-files"></div>
+        <button onclick="runCommand('prepare-inputs')" class="primary">一键同步当前文件</button>
+      </div>
+    </section>
 
-<h2>快捷操作</h2>
-<div class="btn-group">
-  <button onclick="runCommand('init-demo')">生成演示资料</button>
-  <button onclick="runCommand('init')" class="secondary">初始化项目</button>
-  <button onclick="runCommand('validate')">校验项目</button>
-</div>
+    <section class="stack-section">
+      <h3>开始流程</h3>
+      <div class="stack-list">
+        <button onclick="runRecommendedStep()" class="primary" id="btn-run-next">执行下一步</button>
+        <button onclick="runFullPipeline()" class="primary" id="btn-full-run">一键运行全流程</button>
+        <button onclick="runGraphRun()" class="primary" id="btn-graph-run">LangGraph 全流程</button>
+        <button onclick="refreshStatus()" class="secondary">刷新状态</button>
+        <button onclick="runCommand('init-demo')">生成演示资料</button>
+        <button onclick="runCommand('init')" class="secondary">初始化项目</button>
+        <button onclick="runCommand('validate')">校验项目</button>
+      </div>
+    </section>
 
-<h2>文件上传</h2>
-<div class="upload-row">
-  <div class="upload-box">
-    <label>招标文件</label>
-    <input type="file" id="upload-tender" multiple>
-    <button onclick="uploadFiles('tender')">上传</button>
-  </div>
-  <div class="upload-box">
-    <label>公司资料</label>
-    <input type="file" id="upload-company" multiple>
-    <button onclick="uploadFiles('company')">上传</button>
-  </div>
-  <div class="upload-box">
-    <label>Word 模板</label>
-    <input type="file" id="upload-template" multiple>
-    <button onclick="uploadFiles('template')">上传</button>
-  </div>
-</div>
+    <section class="stack-section">
+      <h3>结果下载</h3>
+      <div class="stack-list">
+        <button onclick="downloadFinalMd()">下载 final.md</button>
+        <button onclick="downloadFinalDocx()">下载 final.docx</button>
+        <button onclick="viewGlobalReview()">查看全文审核 JSON</button>
+      </div>
+    </section>
 
-<h2>下载</h2>
-<div class="btn-group">
-  <button onclick="downloadFinalMd()">下载 final.md</button>
-  <button onclick="downloadFinalDocx()">下载 final.docx</button>
-  <button onclick="viewGlobalReview()">查看全文审核 JSON</button>
-</div>
+    <section class="stack-section">
+      <h3>危险操作</h3>
+      <div class="stack-list">
+        <button class="danger" onclick="confirmClean()">清空工作区</button>
+      </div>
+    </section>
 
-<h2>日志</h2>
-<div class="log-toolbar">
-  <button onclick="clearLogs()">清空</button>
-  <button onclick="toggleAutoScroll()">自动滚动: <span id="autoscroll-label">开</span></button>
-</div>
-<pre id="log-box" class="log-box"></pre>
+    <section class="stack-section">
+      <h3>手动上传</h3>
+      <p class="stack-note">只有在你想临时替换 `sources/` 里的文件时才需要。</p>
+      <div class="stack-list">
+        <div class="upload-box">
+          <label>招标文件</label>
+          <input type="file" id="upload-tender" multiple>
+          <button onclick="uploadFiles('tender')">上传</button>
+        </div>
+        <div class="upload-box">
+          <label>公司资料</label>
+          <input type="file" id="upload-company" multiple>
+          <button onclick="uploadFiles('company')">上传</button>
+        </div>
+        <div class="upload-box">
+          <label>Word 模板</label>
+          <input type="file" id="upload-template" multiple>
+          <button onclick="uploadFiles('template')">上传</button>
+        </div>
+      </div>
+    </section>
+  </aside>
 
-<h2>危险操作</h2>
-<div class="btn-group">
-  <button class="danger" onclick="confirmClean()">清空工作区</button>
-</div>
+  <section class="panel panel-highlight middle-panel">
+    <div class="panel-head">
+      <div>
+        <h2>流程总览</h2>
+        <p class="panel-subtitle">按顺序展示每一步的状态、依赖和建议动作。</p>
+      </div>
+    </div>
+    <div id="workflow-summary" class="workflow-summary"></div>
+    <div id="workflow-list" class="workflow-list"></div>
+  </section>
+
+  <aside class="panel column-panel right-panel">
+    <div class="panel-head">
+      <div>
+        <h2>日志</h2>
+        <p class="panel-subtitle">实时看每个命令的输出。</p>
+      </div>
+    </div>
+    <div class="log-toolbar">
+      <button onclick="clearLogs()">清空</button>
+      <button onclick="toggleAutoScroll()">自动滚动: <span id="autoscroll-label">开</span></button>
+    </div>
+    <pre id="log-box" class="log-box"></pre>
+  </aside>
+</main>
 
 <script src="/static/app.js"></script>
 </body>

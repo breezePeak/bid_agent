@@ -342,12 +342,13 @@ def classify_tender_blocks_with_ai(
                         break
 
         except Exception as exc:
-            print(f"  [警告] 批次 {batch_idx + 1} AI 分类失败: {exc}，使用规则兜底。")
+            print(f"  [错误] 批次 {batch_idx + 1} AI 分类失败: {exc}")
             debug_path = debug_dir / f"debug_classify_tender_blocks_batch_{batch_idx + 1:03d}.txt"
             try:
                 debug_path.write_text(str(exc), encoding="utf-8")
             except Exception:
                 pass
+            raise RuntimeError(f"招标文件 AI 分类失败，批次 {batch_idx + 1}/{total_batches}: {exc}") from exc
 
         for block in batch:
             if block["id"] not in classified_ids:
