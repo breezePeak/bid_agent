@@ -1117,9 +1117,16 @@ async function updateProjectProfile(projectType) {
 
 async function showStepDetail(command) {
   if (!stepDetailPanel || stepDetailInFlight) return;
+  if (command === "build-docx") {
+    switchDetailTab("doc");
+    selectedStepCommand = command;
+    renderWorkflow();
+    return;
+  }
   const changed = selectedStepCommand !== command;
   selectedStepCommand = command;
   document.body.classList.add("detail-open");
+  switchDetailTab("step");
   if (changed) {
     document.body.classList.remove("preview-open");
     if (artifactPreviewPanel) {
@@ -1145,6 +1152,7 @@ async function showStepDetail(command) {
 
 function closeStepDetail() {
   selectedStepCommand = "";
+  switchDetailTab("step");
   document.body.classList.remove("detail-open", "preview-open");
   logDockExpanded = false;
   if (logBand) logBand.classList.remove("is-expanded");
