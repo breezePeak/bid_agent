@@ -3,11 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from context_budget import summarize_for_prompt, trim_text
 from file_loader import load_global_facts, load_outline, load_score_points
 from llm_client import chat
+from prompt_registry import load_agent_prompt
+from runtime_context import agent_run
 from utils import (
     compact_json,
-    load_prompt,
     parse_json_from_model,
     project_root,
     read_json,
@@ -18,7 +20,27 @@ from utils import (
 )
 
 
+def _coerce_summary_object(data: Any, chapter_id: str) -> dict[str, Any]:
+    if isinstance(data, dict):
+        for key in ("summary", "chapter_summary", "data"):
+            nested = data.get(key)
+            if isinstance(nested, dict):
+                return nested
+        return data
+
+    if isinstance(data, list):
+        dict_items = [item for item in data if isinstance(item, dict)]
+        if len(dict_items) == 1:
+            return dict_items[0]
+        for item in dict_items:
+            if str(item.get("chapter_id", "")).strip() == chapter_id:
+                return item
+
+    raise ValueError("章节摘要必须是 JSON 对象。")
+
+
 def _normalize_summary(data: Any, chapter_id: str, chapter_title: str, source_path: str) -> dict[str, Any]:
+    data = _coerce_summary_object(data, chapter_id)
     if not isinstance(data, dict):
         raise ValueError("章节摘要必须是 JSON 对象。")
 
@@ -94,34 +116,49 @@ def summarize_chapter(chapter_id: str, root: Path | None = None) -> Path:
         except Exception:
             pass
 
-    prompt = load_prompt(root, "summarize_chapter.md")
+    prompt = load_agent_prompt(root, "chapter_summarizer")
     chapter_title = stringify(job.get("chapter_title") or chapter_id)
     source_path = str(chapter_path.relative_to(root))
 
-    raw = chat(
-        [
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"请为章节 {chapter_id} 生成结构化摘要。\n\n"
-                    "## 章节任务\n\n"
-                    f"{compact_json(job)}\n\n"
-                    "## 绑定评分点\n\n"
-                    f"{compact_json(related_sps)}\n\n"
-                    "## 全局事实\n\n"
-                    f"{compact_json(global_facts)}\n\n"
-                    "## 章节审核结果\n\n"
-                    f"{compact_json(review)}\n\n"
-                    "## 章节正文\n\n"
-                    f"{chapter_md}"
-                ),
-            },
-        ],
+    with agent_run(
+        root,
+        "summarize_chapters",
+        "chapter_summarizer",
+        input_summary={"chapter_id": chapter_id, "chapter_chars": len(chapter_md), "score_point_count": len(related_sps)},
+        chapter_id=chapter_id,
         temperature=0.1,
-    )
-    data = parse_json_from_model(raw, root / "workspace" / f"debug_summarize_{chapter_id}_raw.txt")
-    summary = _normalize_summary(data, chapter_id, chapter_title, source_path)
+    ):
+        raw = chat(
+            [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"请为章节 {chapter_id} 生成结构化摘要。\n\n"
+                        "## 章节任务\n\n"
+                        f"{compact_json(job)}\n\n"
+                        "## 绑定评分点\n\n"
+                        f"{compact_json(related_sps)}\n\n"
+                        "## 全局事实\n\n"
+                        f"{compact_json(global_facts)}\n\n"
+                        "## 章节审核结果\n\n"
+                        f"{compact_json(review)}\n\n"
+                        "## 上下文摘要\n\n"
+                        f"{summarize_for_prompt({'chapter_chars': len(chapter_md)}, 400)}\n\n"
+                        "## 章节正文\n\n"
+                        f"{trim_text(chapter_md, 12000)}"
+                    ),
+                },
+            ],
+            temperature=0.1,
+        )
+    debug_path = root / "workspace" / f"debug_summarize_{chapter_id}_raw.txt"
+    data = parse_json_from_model(raw, debug_path)
+    try:
+        summary = _normalize_summary(data, chapter_id, chapter_title, source_path)
+    except Exception:
+        write_text(debug_path, raw)
+        raise
 
     summaries_dir = root / "workspace" / "summaries"
     summaries_dir.mkdir(parents=True, exist_ok=True)
@@ -131,15 +168,36 @@ def summarize_chapter(chapter_id: str, root: Path | None = None) -> Path:
     return output_path
 
 
+def _existing_summary_path(root: Path, chapter_id: str) -> Path | None:
+    output_path = root / "workspace" / "summaries" / f"{chapter_id}_summary.json"
+    if not output_path.exists():
+        return None
+    try:
+        data = read_json(output_path)
+        _coerce_summary_object(data, chapter_id)
+    except Exception:
+        return None
+    return output_path
+
+
 def summarize_all_chapters(root: Path | None = None) -> list[Path]:
     root = root or project_root()
     outline = load_outline(root)
     paths: list[Path] = []
+    errors: list[str] = []
     for chapter in outline.get("chapters", []):
         chapter_id = str(chapter.get("id"))
         try:
+            existing_path = _existing_summary_path(root, chapter_id)
+            if existing_path:
+                print(f"[跳过] 章节 {chapter_id} 摘要已存在: {existing_path}")
+                paths.append(existing_path)
+                continue
             paths.append(summarize_chapter(chapter_id, root))
         except Exception as exc:
-            print(f"[警告] 章节 {chapter_id} 摘要生成失败: {exc}")
+            errors.append(f"章节 {chapter_id} 摘要生成失败: {exc}")
+            print(f"[错误] {errors[-1]}")
+    if errors:
+        raise RuntimeError("；".join(errors[:5]))
     print(f"[完成] 已生成 {len(paths)} 个章节摘要")
     return paths

@@ -4,7 +4,8 @@ import os
 from pathlib import Path
 from typing import Any
 
-from utils import project_root
+from prompt_registry import required_prompt_files
+from utils import project_root, read_json
 
 
 def _check(
@@ -54,18 +55,7 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
             fail_count += 1
 
     TENDER_EXTS = {".pdf", ".docx", ".md"}
-    PROMPT_FILES = [
-        "parse_score.md",
-        "extract_facts.md",
-        "generate_outline.md",
-        "write_chapter.md",
-        "review_chapter.md",
-        "select_context.md",
-        "global_review.md",
-        "classify_tender_blocks.md",
-        "summarize_chapter.md",
-        "rewrite_chapter.md",
-    ]
+    PROMPT_FILES = required_prompt_files()
 
     # 1. sources/tender
     tender_dir = root / "sources" / "tender"
@@ -254,19 +244,66 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
     else:
         add(_check("workspace/summaries", "warn", "workspace/summaries 下无 *_summary.json 文件", "请执行 summarize-all"))
 
-    # 25c. workspace/global_review.json
+    # 25c. workspace/source_traces 目录
+    source_traces_dir = root / "workspace" / "source_traces"
+    if source_traces_dir.exists() and list(source_traces_dir.glob("*_sources.json")):
+        add(_check("workspace/source_traces", "ok", "source_traces 目录下存在章节来源映射文件"))
+    else:
+        add(_check("workspace/source_traces", "warn", "workspace/source_traces 下无 *_sources.json 文件", "请执行 build-source-trace"))
+
+    # 25d. workspace/source_trace_index.json
+    source_trace_index_path = root / "workspace" / "source_trace_index.json"
+    if _file_ok(source_trace_index_path):
+        add(_check("workspace/source_trace_index.json", "ok", "source_trace_index.json 存在"))
+    else:
+        add(_check("workspace/source_trace_index.json", "warn", "source_trace_index.json 不存在", "请执行 build-source-trace"))
+
+    # 25e. workspace/global_review.json
     global_review_path = root / "workspace" / "global_review.json"
     if _file_ok(global_review_path):
         add(_check("workspace/global_review.json", "ok", "global_review.json 存在"))
     else:
         add(_check("workspace/global_review.json", "warn", "global_review.json 不存在", "请执行 global-review"))
 
-    # 25d. workspace/rewrites 目录
+    # 25f. workspace/rewrites 目录
     rewrites_dir = root / "workspace" / "rewrites"
     if rewrites_dir.exists() and list(rewrites_dir.glob("*_rewrite_log.json")):
         add(_check("workspace/rewrites", "ok", "rewrites 目录下存在重写日志"))
     else:
         add(_check("workspace/rewrites", "warn", "workspace/rewrites 下无 *_rewrite_log.json 文件", "请执行 review-fix-all 以生成改稿日志"))
+
+    # 25g. workspace/template_schema.json
+    template_schema_path = root / "workspace" / "template_schema.json"
+    if _file_ok(template_schema_path):
+        add(_check("workspace/template_schema.json", "ok", "template_schema.json 存在"))
+    else:
+        add(_check("workspace/template_schema.json", "warn", "template_schema.json 不存在", "请执行 prepare-inputs 或 analyze-template"))
+
+    # 25h. workspace/template_evidence_map.json
+    template_evidence_path = root / "workspace" / "template_evidence_map.json"
+    if _file_ok(template_evidence_path):
+        add(_check("workspace/template_evidence_map.json", "ok", "template_evidence_map.json 存在"))
+    else:
+        add(_check("workspace/template_evidence_map.json", "warn", "template_evidence_map.json 不存在", "请执行 build-template-evidence"))
+
+    # 25i. workspace/template_quality_report.json
+    template_quality_path = root / "workspace" / "template_quality_report.json"
+    if _file_ok(template_quality_path):
+        add(_check("workspace/template_quality_report.json", "ok", "template_quality_report.json 存在"))
+        try:
+            quality = read_json(template_quality_path)
+            fail_count = int(quality.get("fail_count", 0) or 0) if isinstance(quality, dict) else 0
+            warn_count = int(quality.get("warn_count", 0) or 0) if isinstance(quality, dict) else 0
+            if fail_count:
+                add(_check("template quality", "fail", f"模板分析质量存在 {fail_count} 项失败", "请查看 workspace/template_quality_report.json 并修复后重新执行 build-template-evidence"))
+            elif warn_count:
+                add(_check("template quality", "warn", f"模板分析质量存在 {warn_count} 项警告", "请查看 workspace/template_quality_report.json，确认弱证据或需人工补证项"))
+            else:
+                add(_check("template quality", "ok", "模板分析质量无警告/失败项"))
+        except Exception as exc:
+            add(_check("template quality", "warn", f"template_quality_report.json 读取失败: {exc}", "请重新执行 build-template-evidence"))
+    else:
+        add(_check("workspace/template_quality_report.json", "warn", "template_quality_report.json 不存在", "请执行 build-template-evidence"))
 
     # 26. outputs/final.md
     final_md = root / "outputs" / "final.md"
@@ -281,6 +318,13 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
         add(_check("outputs/final.docx", "ok", f"final.docx 存在 ({final_docx.stat().st_size} bytes)"))
     else:
         add(_check("outputs/final.docx", "warn", "outputs/final.docx 不存在", "请执行 build-docx"))
+
+    # 29. workspace/template_fill_report.json
+    template_fill_report_path = root / "workspace" / "template_fill_report.json"
+    if _file_ok(template_fill_report_path):
+        add(_check("workspace/template_fill_report.json", "ok", "template_fill_report.json 存在"))
+    else:
+        add(_check("workspace/template_fill_report.json", "warn", "template_fill_report.json 不存在", "请执行 build-docx"))
 
     return {
         "results": results,

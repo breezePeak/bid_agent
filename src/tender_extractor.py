@@ -19,6 +19,8 @@ from config import (
 )
 from document_converter import convert_to_markdown
 from llm_client import chat
+from prompt_registry import load_agent_prompt
+from runtime_context import agent_run
 from utils import (
     ensure_dirs,
     extract_json_text,
@@ -172,9 +174,10 @@ def split_tender_into_blocks(
 # ============================================================
 
 def _build_classify_prompt(root: Path) -> str:
-    prompt_path = root / "prompts" / "classify_tender_blocks.md"
-    if prompt_path.exists():
-        return prompt_path.read_text(encoding="utf-8")
+    try:
+        return load_agent_prompt(root, "tender_block_classifier")
+    except Exception:
+        pass
 
     return """你是投标文件内容分析专家。你的任务是判断招标文件中每个内容块属于什么类别。
 
@@ -228,7 +231,7 @@ def _build_batch_messages(
     ]
 
 
-def _fallback_classify_one(block: dict[str, Any]) -> dict[str, Any]:
+def _fallback_classify_one(block: dict[str, Any], reason_prefix: str = "fallback") -> dict[str, Any]:
     content = block.get("content", "")
 
     score_hits = sum(1 for kw in HINT_CATEGORY_MAP["评分相关"] if kw in content)
@@ -240,43 +243,40 @@ def _fallback_classify_one(block: dict[str, Any]) -> dict[str, Any]:
 
     category = "unknown"
     target_file = "other.md"
-    reason = "规则兜底：未知类别"
+    reason = f"{reason_prefix}: 规则兜底，未命中明确类别"
 
     if score_hits > 0:
         category = "score"
         target_file = "score.md"
-        reason = "fallback: 命中评分关键词"
+        reason = f"{reason_prefix}: 命中评分关键词"
     elif requirement_hits > 0:
         category = "requirement"
         target_file = "tender.md"
-        reason = "fallback: 命中需求关键词"
+        reason = f"{reason_prefix}: 命中需求关键词"
     elif contract_hits > 0:
         category = "contract"
         target_file = "tender.md"
-        reason = "fallback: 命中合同关键词"
+        reason = f"{reason_prefix}: 命中合同关键词"
     elif qualification_hits > 0:
         category = "qualification"
         target_file = "tender.md"
-        reason = "fallback: 命中资格关键词"
+        reason = f"{reason_prefix}: 命中资格关键词"
     elif notice_hits > 0:
         category = "notice"
         target_file = "other.md"
-        reason = "fallback: 命中须知关键词"
+        reason = f"{reason_prefix}: 命中须知关键词"
     elif format_hits > 0:
         category = "format"
         target_file = "other.md"
-        reason = "fallback: 命中格式关键词"
+        reason = f"{reason_prefix}: 命中格式关键词"
 
-    result = dict(block)
-    result["category"] = category
-    result["target_file"] = target_file
-    result["confidence"] = 0.3
-    result["reason"] = reason
-    return result
-
-
-def fallback_classify_blocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [_fallback_classify_one(b) for b in blocks]
+    return {
+        **block,
+        "category": category,
+        "target_file": target_file,
+        "confidence": 0.3,
+        "reason": reason,
+    }
 
 
 def classify_tender_blocks_with_ai(
@@ -299,9 +299,18 @@ def classify_tender_blocks_with_ai(
 
         print(f"  [AI 分类] 批次 {batch_idx + 1}/{total_batches}，块 {start + 1}-{end}/{len(blocks)} ...")
 
+        raw_response = ""
         try:
             messages = _build_batch_messages(batch, system_prompt)
-            raw_response = chat(messages, temperature=CLASSIFY_TEMPERATURE)
+            with agent_run(
+                root,
+                "prepare_inputs",
+                "tender_block_classifier",
+                input_summary={"batch_index": batch_idx + 1, "batch_size": len(batch), "total_blocks": len(blocks)},
+                chapter_id=f"batch_{batch_idx + 1:03d}",
+                temperature=CLASSIFY_TEMPERATURE,
+            ):
+                raw_response = chat(messages, temperature=CLASSIFY_TEMPERATURE)
 
             json_text = extract_json_text(raw_response)
             results = json.loads(json_text)
@@ -342,18 +351,30 @@ def classify_tender_blocks_with_ai(
                         break
 
         except Exception as exc:
-            print(f"  [错误] 批次 {batch_idx + 1} AI 分类失败: {exc}")
+            print(f"  [警告] 批次 {batch_idx + 1} AI 分类失败，改用规则兜底: {exc}")
             debug_path = debug_dir / f"debug_classify_tender_blocks_batch_{batch_idx + 1:03d}.txt"
             try:
-                debug_path.write_text(str(exc), encoding="utf-8")
+                debug_path.write_text(raw_response or str(exc), encoding="utf-8")
             except Exception:
                 pass
-            raise RuntimeError(f"招标文件 AI 分类失败，批次 {batch_idx + 1}/{total_batches}: {exc}") from exc
 
-        for block in batch:
-            if block["id"] not in classified_ids:
-                fallback = _fallback_classify_one(block)
-                classified.append(fallback)
+            for block in batch:
+                if block["id"] in classified_ids:
+                    continue
+                classified.append(_fallback_classify_one(block, reason_prefix=f"fallback batch {batch_idx + 1}"))
+                classified_ids.add(block["id"])
+            continue
+
+        missing_ids = [block["id"] for block in batch if block["id"] not in classified_ids]
+        if missing_ids:
+            print(
+                f"  [警告] 批次 {batch_idx + 1} AI 分类结果缺少 {len(missing_ids)} 个块，"
+                "缺失块改用规则兜底: " + ", ".join(missing_ids[:10])
+            )
+            for block in batch:
+                if block["id"] in classified_ids:
+                    continue
+                classified.append(_fallback_classify_one(block, reason_prefix=f"fallback missing batch {batch_idx + 1}"))
                 classified_ids.add(block["id"])
 
     return classified
@@ -420,7 +441,6 @@ def _generate_classification_report(
         b["id"] for b in classified
         if "fallback" in str(b.get("reason", "")).lower()
     ]
-
     raw_chars = len(raw_markdown) if raw_markdown else 0
     score_chars = sum(b.get("char_count", 0) for b in score_blocks)
 
@@ -434,14 +454,14 @@ def _generate_classification_report(
             f"评分标准抽取比例过高（{score_chars / raw_chars:.1%}），可能误分类，请人工检查。"
         )
 
-    if fallback_blocks:
-        warnings.append(
-            f"{len(fallback_blocks)} 个块使用规则兜底分类，可能不准确: {', '.join(fallback_blocks[:10])}"
-        )
-
     if low_conf:
         warnings.append(
             f"{len(low_conf)} 个块置信度低于 {LOW_CONFIDENCE_THRESHOLD}: {', '.join(low_conf[:10])}"
+        )
+
+    if fallback_blocks:
+        warnings.append(
+            f"{len(fallback_blocks)} 个块使用规则兜底分类，可能不准确: {', '.join(fallback_blocks[:10])}"
         )
 
     return {

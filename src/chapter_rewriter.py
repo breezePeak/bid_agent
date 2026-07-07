@@ -13,17 +13,22 @@ from chapter_reviewer import (
     review_chapter_markdown,
     select_score_points,
 )
+from context_budget import summarize_chunk_payload, summarize_for_prompt, trim_text
 from chapter_writer import _ensure_chapter_heading, _load_selected_chunks
 from llm_client import chat
+from prompt_registry import load_agent_prompt
+from quality_gates import validate_weak_evidence_language
+from runtime_context import agent_run
 from utils import (
     compact_json,
-    load_prompt,
     project_root,
     read_json,
     stringify,
     write_json,
     write_text,
 )
+
+REWRITE_CONTEXT_MAX_CHARS = 17000
 
 
 def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
@@ -60,37 +65,55 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
         "description": stringify(job.get("description")),
         "sections": job.get("sections", []),
     }
-    prompt = load_prompt(root, "rewrite_chapter.md")
+    prompt = load_agent_prompt(root, "chapter_rewriter")
+    tender_context = summarize_chunk_payload(selected_tender, total_max_chars=REWRITE_CONTEXT_MAX_CHARS // 2, per_chunk_chars=1200)
+    company_context = summarize_chunk_payload(selected_company, total_max_chars=REWRITE_CONTEXT_MAX_CHARS // 2, per_chunk_chars=1000)
 
     problems_count = len(review.get("problems", []))
 
-    raw = chat(
-        [
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": (
-                    f"请根据审核意见重写章节 {chapter_id}。\n\n"
-                    "## 当前章节信息\n\n"
-                    f"{compact_json(chapter_info)}\n\n"
-                    "## 绑定评分点\n\n"
-                    f"{compact_json(related_sps)}\n\n"
-                    "## 全局事实\n\n"
-                    f"{compact_json(global_facts)}\n\n"
-                    "## 审核结果\n\n"
-                    f"{compact_json(review)}\n\n"
-                    "## 选中的招标文件片段\n\n"
-                    f"{compact_json(selected_tender)}\n\n"
-                    "## 选中的公司资料片段\n\n"
-                    f"{compact_json(selected_company)}\n\n"
-                    "## 原章节正文\n\n"
-                    f"{old_md}"
-                ),
-            },
-        ],
+    with agent_run(
+        root,
+        "review_fix_chapters",
+        "chapter_rewriter",
+        input_summary={
+            "chapter_id": chapter_id,
+            "problem_count": problems_count,
+            "tender_chunk_count": len(tender_context),
+            "company_chunk_count": len(company_context),
+        },
+        chapter_id=chapter_id,
         temperature=0.35,
-    )
+    ):
+        raw = chat(
+            [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"请根据审核意见重写章节 {chapter_id}。\n\n"
+                        "## 当前章节信息\n\n"
+                        f"{compact_json(chapter_info)}\n\n"
+                        "## 绑定评分点\n\n"
+                        f"{compact_json(related_sps)}\n\n"
+                        "## 全局事实\n\n"
+                        f"{compact_json(global_facts)}\n\n"
+                        "## 审核结果\n\n"
+                        f"{compact_json(review)}\n\n"
+                        "## 上下文摘要\n\n"
+                        f"{summarize_for_prompt({'max_context_chars': REWRITE_CONTEXT_MAX_CHARS, 'old_md_chars': len(old_md)}, 800)}\n\n"
+                        "## 选中的招标文件片段\n\n"
+                        f"{compact_json(tender_context)}\n\n"
+                        "## 选中的公司资料片段\n\n"
+                        f"{compact_json(company_context)}\n\n"
+                        "## 原章节正文\n\n"
+                        f"{trim_text(old_md, REWRITE_CONTEXT_MAX_CHARS // 2)}"
+                    ),
+                },
+            ],
+            temperature=0.35,
+        )
     new_md = _ensure_chapter_heading(raw, chapter_info)
+    validate_weak_evidence_language(job, new_md)
     new_length = len(new_md)
 
     write_text(chapter_path, new_md)

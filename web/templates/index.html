@@ -3,130 +3,259 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>标书 Agent 控制台</title>
-<link rel="stylesheet" href="/static/style.css">
+<title>标书 Agent 流程台</title>
+<link rel="stylesheet" href="/static/style.css?v=20260707-1">
 </head>
 <body>
-
-<header class="hero">
+<header class="topbar">
   <div>
-    <p class="eyebrow">Bid Agent Console</p>
-    <h1>标书 Agent 控制台</h1>
-    <p class="hero-copy">把“现在做到哪一步了、下一步该点什么、为什么卡住”直接放在首页，免得来回记命令。</p>
+    <p class="eyebrow">Bid Agent Workflow</p>
+    <h1>标书生成流程台</h1>
   </div>
-  <div class="hero-side">
-    <div class="hero-stat">
-      <span class="hero-stat-label">当前任务</span>
-      <strong id="hero-task">空闲</strong>
-    </div>
-    <div class="hero-stat">
-      <span class="hero-stat-label">推荐操作</span>
-      <strong id="hero-next">等待状态加载</strong>
+  <div class="topbar-status" aria-live="polite">
+    <span id="run-state-dot" class="state-dot"></span>
+    <div>
+      <span class="meta-label">当前状态</span>
+      <strong id="hero-task">状态加载中</strong>
     </div>
   </div>
 </header>
 
-<div id="running-notice" class="running-notice" style="display:none">
+<section id="workspace-gate" class="workspace-overlay" aria-labelledby="input-title" aria-modal="true" role="dialog">
+  <div class="workspace-modal">
+    <div class="section-head">
+      <div>
+        <h2 id="input-title">选择工作空间</h2>
+        <p>进入后先选择已有工作空间，或新建一个工作空间；选中后下方会显示左侧流程进度和右侧聊天窗口。</p>
+      </div>
+      <div class="run-actions">
+        <button id="btn-create-workspace" class="action-main" onclick="createWorkspaceOnly()" disabled>新建工作空间</button>
+        <button id="btn-start" class="primary action-main" onclick="startAutoRun()" disabled>新建并开始</button>
+        <button id="btn-resume" class="action-main" onclick="resumeAutoRun()">从断点继续</button>
+        <button id="btn-pause" class="action-main" onclick="pauseRun()">暂停当前任务</button>
+      </div>
+    </div>
+
+    <div class="workspace-switcher" aria-label="工作空间选择">
+      <label for="workspace-select">已有工作空间</label>
+      <select id="workspace-select" onchange="selectWorkspace(this.value)">
+        <option value="">加载中</option>
+      </select>
+      <div class="workspace-actions">
+        <button onclick="enterSelectedWorkspace()">进入空间</button>
+        <button onclick="loadRuns(true)">刷新</button>
+      </div>
+      <span id="workspace-meta" class="workspace-meta">暂无工作空间</span>
+    </div>
+
+    <div class="new-run-row">
+      <label for="run-name">新工作空间名称</label>
+      <input id="run-name" type="text" maxlength="48" placeholder="例如：某项目投标文件" oninput="updateStartButtonState()">
+      <label for="project-type-select">项目类型</label>
+      <select id="project-type-select"></select>
+      <span id="run-name-hint">填写名称后才能开始新的工作空间</span>
+    </div>
+  </div>
+</section>
+
+<main class="app-shell">
+  <section id="source-band" class="input-band source-band" aria-labelledby="source-title" hidden>
+    <h3 class="source-title">输入资料</h3>
+
+    <div class="upload-grid">
+      <div class="upload-tile" data-upload-category="tender">
+        <div class="upload-title-row">
+          <h3>招标文件</h3>
+          <span id="tender-count" class="count-pill">0</span>
+        </div>
+        <input type="file" id="upload-tender" multiple>
+        <button onclick="uploadFiles('tender')">上传招标文件</button>
+      </div>
+      <div class="upload-tile" data-upload-category="company">
+        <div class="upload-title-row">
+          <h3>公司资料</h3>
+          <span id="company-count" class="count-pill">0</span>
+        </div>
+        <input type="file" id="upload-company" multiple>
+        <button onclick="uploadFiles('company')">上传公司资料</button>
+      </div>
+      <div class="upload-tile" data-upload-category="template">
+        <div class="upload-title-row">
+          <h3>Word 模板</h3>
+          <span id="template-count" class="count-pill">0</span>
+        </div>
+        <input type="file" id="upload-template" multiple>
+        <button onclick="uploadFiles('template')">上传模板</button>
+      </div>
+    </div>
+
+    <div id="source-files" class="source-files"></div>
+  </section>
+
+  <section id="main-workbench" class="workspace-columns main-workbench" aria-label="流程与聊天" hidden>
+    <div class="workflow-column">
+      <section class="progress-band" aria-labelledby="progress-title">
+        <div class="section-head compact">
+          <div>
+            <h2 id="progress-title">执行进度</h2>
+            <p id="progress-caption">等待流程状态加载。</p>
+          </div>
+          <div class="toolbar">
+            <button onclick="refreshStatus()">刷新</button>
+            <button onclick="runRecommendedStep()">执行下一步</button>
+            <button onclick="runCommand('validate')">校验</button>
+          </div>
+        </div>
+
+        <div class="progress-overview">
+          <div>
+            <span class="meta-label">完成度</span>
+            <strong id="progress-percent">0%</strong>
+          </div>
+          <div class="progress-track" aria-label="流程完成度">
+            <span id="progress-fill"></span>
+          </div>
+          <div>
+            <span class="meta-label">当前阶段</span>
+            <strong id="current-stage">暂无</strong>
+          </div>
+        </div>
+
+        <div id="workflow-list" class="flow-line"></div>
+      </section>
+
+      <section class="insight-band" aria-labelledby="insight-title">
+        <div class="section-head compact">
+          <div>
+            <h2 id="insight-title">运行观测与人工复核</h2>
+            <p>查看 prompt 版本、checksum、budget 命中、阶段指标和可操作的人工复核项。</p>
+          </div>
+        </div>
+        <div class="insight-grid">
+          <article class="insight-card">
+            <h3>Project Profile</h3>
+            <div id="project-profile-panel" class="insight-content"></div>
+          </article>
+          <article class="insight-card">
+            <h3>Latest Agent Runs</h3>
+            <div id="agent-runs-panel" class="insight-content"></div>
+          </article>
+          <article class="insight-card">
+            <div class="panel-head">
+              <h3>人工复核总览</h3>
+              <select id="manual-review-category" onchange="loadManualReviewItems(this.value)">
+                <option value="template_evidence">弱证据 / 模板缺口</option>
+                <option value="score_coverage">未覆盖评分点</option>
+                <option value="chapter_review">章节审核问题</option>
+                <option value="global_review">全文风险</option>
+              </select>
+            </div>
+            <div id="manual-review-panel" class="insight-content"></div>
+            <div id="manual-review-items" class="manual-review-items"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="result-band" aria-labelledby="result-title">
+        <div>
+          <h2 id="result-title">输出结果</h2>
+          <p>流程完成后可下载最终 Markdown 和 Word 文件，也可以查看全文审核 JSON。</p>
+        </div>
+        <div class="result-actions">
+          <button onclick="downloadFinalMd()">下载 final.md</button>
+          <button onclick="downloadFinalDocx()">下载 final.docx</button>
+          <button onclick="viewGlobalReview()">查看全文审核</button>
+          <button class="danger" onclick="confirmClean()">清空工作区</button>
+        </div>
+      </section>
+    </div>
+
+    <aside class="detail-column" id="detail-column">
+      <div class="detail-tabs" role="tablist">
+        <button id="tab-step-detail" class="detail-tab is-active" role="tab" onclick="switchDetailTab('step')">节点详情</button>
+        <button id="tab-doc-editor" class="detail-tab" role="tab" onclick="switchDetailTab('doc')">文档编辑(Word)</button>
+      </div>
+      <section id="step-detail-panel" class="step-detail-panel" aria-live="polite">
+        <div class="detail-empty">点击任一流程节点查看详情。</div>
+      </section>
+      <section id="doc-editor-panel" class="doc-editor-panel" hidden>
+        <div class="doc-editor-toolbar">
+          <span class="meta-label" id="doc-editor-state">等待 final.md 生成</span>
+          <button onclick="reloadDocEditor()" title="重新加载">刷新</button>
+          <button class="primary" onclick="openDocChatEdit()" title="AI 全文改写">AI 全文改写</button>
+          <button onclick="downloadFinalDocx()">下载 Word</button>
+        </div>
+        <div id="doc-editor-page" class="doc-page">
+          <div class="detail-empty small">尚未生成 final.md，请先执行到 build-md / build-docx 阶段。</div>
+        </div>
+        <div id="doc-selection-bar" class="doc-selection-bar" hidden>
+          <div class="selection-bar-head">
+            <span class="meta-label">选区批注</span>
+            <button class="danger" onclick="closeDocSelectionBar()">关闭</button>
+          </div>
+          <div class="selection-bar-quoted" id="doc-selection-quoted"></div>
+          <textarea id="doc-selection-instruction" placeholder="例如：把这段改得更正式；补充评分点响应；删掉空话套话；改成 2 段..."></textarea>
+          <div class="selection-bar-actions">
+            <button class="primary" onclick="submitDocSelectionRewrite()">AI 按批注改写选中内容</button>
+          </div>
+        </div>
+        <div id="doc-pending-bar" class="doc-pending-bar" hidden></div>
+      </section>
+    </aside>
+
+    <aside class="chat-column">
+      <section class="chat-panel" aria-labelledby="chat-title">
+        <div class="section-head compact">
+          <div>
+            <h2 id="chat-title">聊天助手</h2>
+            <p>可以直接问状态、打开节点详情、查看问题，或让它继续执行下一步。</p>
+          </div>
+        </div>
+        <div class="chat-quick-actions">
+          <button onclick="sendQuickChat('当前状态怎么样')">当前状态</button>
+          <button onclick="sendQuickChat('继续执行下一步')">继续执行</button>
+          <button onclick="sendQuickChat('我关心评分覆盖情况')">评分覆盖</button>
+          <button onclick="sendQuickChat('我关心质量风险')">质量风险</button>
+          <button onclick="sendQuickChat('我关心最终输出文件')">最终输出</button>
+          <button onclick="sendQuickChat('我关心资料是否齐全')">资料齐全</button>
+          <button onclick="sendQuickChat('解析评分结果是什么')">解析评分结果</button>
+          <button onclick="sendQuickChat('人工复核还有哪些问题')">人工复核问题</button>
+        </div>
+        <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
+        <div class="chat-input-row">
+          <textarea id="chat-input" placeholder="例如：我关心评分覆盖 / 有哪些质量风险 / 最终 Word 出了吗 / 为什么卡住 / 继续执行下一步"></textarea>
+          <button id="chat-send" class="primary" onclick="submitChat()">发送</button>
+        </div>
+      </section>
+    </aside>
+  </section>
+
+  <section id="log-band" class="log-band" aria-labelledby="log-title">
+    <button id="log-dock-button" class="log-dock-button" onclick="toggleLogDock()">日志</button>
+    <div class="section-head compact">
+      <div>
+        <h2 id="log-title">实时日志</h2>
+        <p>流程运行时会持续输出当前执行情况。</p>
+      </div>
+      <div class="toolbar">
+        <button onclick="clearLogs()">清空日志</button>
+        <button onclick="toggleAutoScroll()">自动滚动：<span id="autoscroll-label">开</span></button>
+      </div>
+    </div>
+    <pre id="log-box" class="log-box"></pre>
+  </section>
+
+</main>
+
+<aside id="artifact-preview-panel" class="artifact-preview-panel" aria-live="polite">
+  <div class="preview-placeholder">点击中间详情里的产物文件进行预览。</div>
+</aside>
+
+<div id="running-notice" class="running-notice" hidden>
   <span class="spinner"></span>
   <span id="running-task"></span>
 </div>
 
-<main class="three-col-layout">
-  <aside class="panel column-panel left-panel">
-    <div class="panel-head">
-      <div>
-        <h2>操作区</h2>
-        <p class="panel-subtitle">上传文件，启动流程，必要时手动补跑。</p>
-      </div>
-    </div>
-
-    <section class="stack-section">
-      <h3>开发文件</h3>
-      <p class="stack-note">开发期间直接用 `sources/` 里的文件，不用每次手动上传。</p>
-      <div class="stack-list">
-        <div id="source-files" class="source-files"></div>
-        <button onclick="runCommand('prepare-inputs')" class="primary">一键同步当前文件</button>
-      </div>
-    </section>
-
-    <section class="stack-section">
-      <h3>开始流程</h3>
-      <div class="stack-list">
-        <button onclick="runRecommendedStep()" class="primary" id="btn-run-next">执行下一步</button>
-        <button onclick="runFullPipeline()" class="primary" id="btn-full-run">一键运行全流程</button>
-        <button onclick="runGraphRun()" class="primary" id="btn-graph-run">LangGraph 全流程</button>
-        <button onclick="refreshStatus()" class="secondary">刷新状态</button>
-        <button onclick="runCommand('init-demo')">生成演示资料</button>
-        <button onclick="runCommand('init')" class="secondary">初始化项目</button>
-        <button onclick="runCommand('validate')">校验项目</button>
-      </div>
-    </section>
-
-    <section class="stack-section">
-      <h3>结果下载</h3>
-      <div class="stack-list">
-        <button onclick="downloadFinalMd()">下载 final.md</button>
-        <button onclick="downloadFinalDocx()">下载 final.docx</button>
-        <button onclick="viewGlobalReview()">查看全文审核 JSON</button>
-      </div>
-    </section>
-
-    <section class="stack-section">
-      <h3>危险操作</h3>
-      <div class="stack-list">
-        <button class="danger" onclick="confirmClean()">清空工作区</button>
-      </div>
-    </section>
-
-    <section class="stack-section">
-      <h3>手动上传</h3>
-      <p class="stack-note">只有在你想临时替换 `sources/` 里的文件时才需要。</p>
-      <div class="stack-list">
-        <div class="upload-box">
-          <label>招标文件</label>
-          <input type="file" id="upload-tender" multiple>
-          <button onclick="uploadFiles('tender')">上传</button>
-        </div>
-        <div class="upload-box">
-          <label>公司资料</label>
-          <input type="file" id="upload-company" multiple>
-          <button onclick="uploadFiles('company')">上传</button>
-        </div>
-        <div class="upload-box">
-          <label>Word 模板</label>
-          <input type="file" id="upload-template" multiple>
-          <button onclick="uploadFiles('template')">上传</button>
-        </div>
-      </div>
-    </section>
-  </aside>
-
-  <section class="panel panel-highlight middle-panel">
-    <div class="panel-head">
-      <div>
-        <h2>流程总览</h2>
-        <p class="panel-subtitle">按顺序展示每一步的状态、依赖和建议动作。</p>
-      </div>
-    </div>
-    <div id="workflow-summary" class="workflow-summary"></div>
-    <div id="workflow-list" class="workflow-list"></div>
-  </section>
-
-  <aside class="panel column-panel right-panel">
-    <div class="panel-head">
-      <div>
-        <h2>日志</h2>
-        <p class="panel-subtitle">实时看每个命令的输出。</p>
-      </div>
-    </div>
-    <div class="log-toolbar">
-      <button onclick="clearLogs()">清空</button>
-      <button onclick="toggleAutoScroll()">自动滚动: <span id="autoscroll-label">开</span></button>
-    </div>
-    <pre id="log-box" class="log-box"></pre>
-  </aside>
-</main>
-
-<script src="/static/app.js"></script>
+<script src="/static/app.js?v=20260707-1"></script>
 </body>
 </html>

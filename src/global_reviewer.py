@@ -3,9 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from context_budget import summarize_for_prompt
 from file_loader import load_global_facts, load_outline, load_score_points
 from llm_client import chat
-from utils import compact_json, load_prompt, parse_json_from_model, project_root, read_json, read_text, write_json
+from manual_review import filter_global_review_with_actions, manual_review_summary
+from prompt_registry import load_agent_prompt
+from runtime_context import agent_run
+from utils import compact_json, parse_json_from_model, project_root, read_json, read_text, write_json
 
 
 def _load_chapter_summaries(root: Path) -> list[dict[str, Any]]:
@@ -60,6 +64,28 @@ def _load_reviews(root: Path) -> list[dict[str, Any]]:
     return reviews
 
 
+def _load_score_coverage_matrix(root: Path) -> dict[str, Any]:
+    matrix_path = root / "workspace" / "score_coverage_matrix.json"
+    if not matrix_path.exists():
+        return {}
+    try:
+        data = read_json(matrix_path)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _load_source_trace_index(root: Path) -> dict[str, Any]:
+    trace_index_path = root / "workspace" / "source_trace_index.json"
+    if not trace_index_path.exists():
+        return {}
+    try:
+        data = read_json(trace_index_path)
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def normalize_global_review(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("全文一致性审核结果必须是 JSON 对象。")
@@ -87,8 +113,9 @@ def run_global_review(root: Path | None = None) -> Path:
     outline = load_outline(root)
     score_points = load_score_points(root)
     reviews = _load_reviews(root)
-    prompt = load_prompt(root, "global_review.md")
-
+    score_coverage_matrix = _load_score_coverage_matrix(root)
+    source_trace_index = _load_source_trace_index(root)
+    review_summary = manual_review_summary(root)
     summaries = _load_chapter_summaries(root)
     if summaries:
         chapters_section_label = "## 章节摘要\n\n"
@@ -99,30 +126,52 @@ def run_global_review(root: Path | None = None) -> Path:
         chapters_data = compact_json(chapters)
         print("[提示] 未找到章节摘要，回退到完整章节正文进行全文审核。")
 
-    raw = chat(
-        [
-            {"role": "system", "content": prompt},
-            {
-                "role": "user",
-                "content": (
-                    "请对当前标书进行全文一致性审核。\n\n"
-                    "## 全局事实\n\n"
-                    f"{compact_json(global_facts)}\n\n"
-                    "## 大纲\n\n"
-                    f"{compact_json(outline)}\n\n"
-                    "## 评分点\n\n"
-                    f"{compact_json(score_points)}\n\n"
-                    "## 章节审核结果\n\n"
-                    f"{compact_json(reviews)}\n\n"
-                    f"{chapters_section_label}"
-                    f"{chapters_data}"
-                ),
-            },
-        ],
+    with agent_run(
+        root,
+        "global_review",
+        "global_reviewer",
+        input_summary={
+            "summary_count": len(summaries),
+            "review_count": len(reviews),
+            "score_point_count": len(score_points),
+            "uses_summaries": bool(summaries),
+        },
         temperature=0.1,
-    )
+    ):
+        prompt = load_agent_prompt(root, "global_reviewer")
+        raw = chat(
+            [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        "请对当前标书进行全文一致性审核。\n\n"
+                        "## 全局事实\n\n"
+                        f"{compact_json(global_facts)}\n\n"
+                        "## 大纲\n\n"
+                        f"{compact_json(outline)}\n\n"
+                        "## 评分点\n\n"
+                        f"{compact_json(score_points)}\n\n"
+                        "## 章节审核结果\n\n"
+                        f"{compact_json(reviews)}\n\n"
+                        "## 评分点覆盖矩阵\n\n"
+                        f"{compact_json(score_coverage_matrix)}\n\n"
+                        "## 来源追溯索引\n\n"
+                        f"{compact_json(source_trace_index)}\n\n"
+                        "## 人工复核工作台摘要\n\n"
+                        f"{compact_json(review_summary)}\n\n"
+                        "## 上下文摘要\n\n"
+                        f"{summarize_for_prompt({'chapter_source': 'summaries' if summaries else 'full_chapters', 'chapter_items': len(summaries) if summaries else len(outline.get('chapters', []))}, 400)}\n\n"
+                        f"{chapters_section_label}"
+                        f"{chapters_data}"
+                    ),
+                },
+            ],
+            temperature=0.1,
+        )
     data = parse_json_from_model(raw, root / "workspace" / "debug_global_review_raw.txt")
     review = normalize_global_review(data)
+    review = filter_global_review_with_actions(root, review)
 
     output_path = root / "workspace" / "global_review.json"
     write_json(output_path, review)

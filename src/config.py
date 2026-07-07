@@ -16,8 +16,12 @@ class Settings:
     base_url: str
     api_key: str
     model: str
-    timeout: int = 120
+    timeout: int = 300
     max_retries: int = 3
+    retry_initial_delay: float = 2.0
+    retry_max_delay: float = 30.0
+    stream: bool = False
+    verify_ssl: bool = True
 
 
 def _parse_env_file(path: Path) -> dict[str, str]:
@@ -39,10 +43,27 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return values
 
 
+def _parse_bool(value: object, default: bool = True) -> bool:
+    if value is None:
+        return default
+    text = str(value).strip().lower()
+    if not text:
+        return default
+    return text not in {"0", "false", "no", "off"}
+
+
 def get_settings(root: Path | None = None) -> Settings:
     root = root or project_root()
-    env_path = root / ".env"
-    file_values = _parse_env_file(env_path)
+    app_root = Path(__file__).resolve().parent.parent
+    app_env_path = app_root / ".env"
+    run_env_path = root / ".env"
+    config_root_text = os.environ.get("BID_AGENT_CONFIG_ROOT", "").strip()
+    config_env_path = Path(config_root_text).resolve() / ".env" if config_root_text else app_env_path
+    file_values = _parse_env_file(app_env_path)
+    if config_env_path != app_env_path:
+        file_values = {**file_values, **_parse_env_file(config_env_path)}
+    if run_env_path not in {app_env_path, config_env_path}:
+        file_values = {**file_values, **_parse_env_file(run_env_path)}
     values = {**file_values, **os.environ}
 
     required_keys = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"]
@@ -50,12 +71,16 @@ def get_settings(root: Path | None = None) -> Settings:
     if missing:
         missing_text = ", ".join(missing)
         raise ConfigError(
-            f"缺少必要配置: {missing_text}。请在 {env_path} 中配置，"
+            f"缺少必要配置: {missing_text}。请在 {config_env_path} 中配置，"
             "可参考 .env.example，且不要把 API Key 写入代码。"
         )
 
-    timeout = int(values.get("OPENAI_TIMEOUT", 120))
-    max_retries = int(values.get("OPENAI_MAX_RETRIES", 3))
+    timeout = int(values.get("OPENAI_TIMEOUT", 300))
+    max_retries = max(1, int(values.get("OPENAI_MAX_RETRIES", 3)))
+    retry_initial_delay = max(0.1, float(values.get("OPENAI_RETRY_INITIAL_DELAY", 2)))
+    retry_max_delay = max(retry_initial_delay, float(values.get("OPENAI_RETRY_MAX_DELAY", 30)))
+    stream = _parse_bool(values.get("OPENAI_STREAM"), default=False)
+    verify_ssl = _parse_bool(values.get("OPENAI_VERIFY_SSL"), default=True)
 
     return Settings(
         base_url=str(values["OPENAI_BASE_URL"]).strip().rstrip("/"),
@@ -63,6 +88,10 @@ def get_settings(root: Path | None = None) -> Settings:
         model=str(values["OPENAI_MODEL"]).strip(),
         timeout=timeout,
         max_retries=max_retries,
+        retry_initial_delay=retry_initial_delay,
+        retry_max_delay=retry_max_delay,
+        stream=stream,
+        verify_ssl=verify_ssl,
     )
 
 

@@ -1,367 +1,208 @@
-# 标书写作 Agent 开发计划
+# 标书写作 Agent 开发演进记录
+
+本文档保留项目从 MVP 到当前版本的演进脉络。它不再承担“当前流程说明”的职责，当前实际逻辑请优先查看 [current_logic_flow.md](/D:/my_project/bid_agent/docs/current_logic_flow.md:1)。
 
 ## 1. 项目目标
 
-> 跑通"招标文件 / 评分标准 / 公司资料 / 标书模板 → 生成章节 → 审核章节 → 拼接 Word"的主流程。
-
-整体流程：
-
-```text
-原始输入资料 (PDF/DOCX/MD)
-        ↓
-资料导入层 → 转换为标准 MD 并落入 inputs/
-        ↓
-招标文件按标题切块 + AI 分类 → score.md / tender.md / other.md
-        ↓
-招标文件 / 公司资料切分为 chunk
-        ↓
-解析评分点
-        ↓
-提取全局事实
-        ↓
-生成标书大纲
-        ↓
-章节任务规划 + 上下文选择（chunk-ranker 本地粗筛）
-        ↓
-SubAgent 并发章节写作
-        ↓
-审核 + 自动改稿（review-fix-all，最多 2 轮）
-        ↓
-章节摘要生成
-        ↓
-全文一致性审核（优先使用章节摘要）
-        ↓
-拼接 Markdown
-        ↓
-生成 Word 文件
-```
-
----
-
-## 2. 开发阶段
-
-### 阶段 1：基础 CLI 和文件读写 — 已完成
-
-- `init` 命令：创建目录结构，初始化输入文件占位和默认提示词
-- 统一的文件读写工具 `utils.py`
-- `.env` 配置读取 `config.py`
-- 基础 CLI 框架 `main.py`（argparse）
-
-### 阶段 2：LLM 调用与评分解析 — 已完成
-
-- `llm_client.py`：统一的 OpenAI-compatible API 调用，支持重试
-- `score_parser.py`：解析 `inputs/score.md` → `workspace/score_points.json`
-- `fact_extractor.py`：从招标文件 + 公司资料提取全局事实 → `workspace/global_facts.json`
-- `outline_generator.py`：根据评分点生成标书大纲 → `workspace/outline.json`
-- 提示词模板 `prompts/*.md`
-
-### 阶段 3：资料导入 (prepare-inputs) — 已完成
-
-- `document_converter.py`：PDF/DOCX/MD → Markdown 转换
-- `tender_extractor.py`：招标文件导入 → 切块 → AI 分类 → 拼接 score.md/tender.md/other.md
-- `company_extractor.py`：公司资料批量合并
-- `input_preparer.py`：统筹 sources/ → inputs/ 完整流程
-- 保留 `workspace/imported/tender_raw.md` 原始合并文件
-
-### 阶段 4：LangGraph 主流程 — 已完成
-
-- `graph/state.py`：BidState + ChapterState TypedDict
-- `graph/nodes.py`：14 个图节点函数
-- `graph/routers.py`：路由函数
-- `graph/bid_graph.py`：主图构建 + `graph-run` 命令
-- 完整 13 节点线性流程，无分支/条件
-
-### 阶段 5：job/context 章节 SubAgent — 已完成
-
-- `document_splitter.py`：按标题切分文档为 chunk（max 3500 chars）
-- `job_planner.py`：从大纲生成章节任务包 → `workspace/jobs/*.json`
-- `context_selector.py`：LLM 为每章选择相关 chunk → `workspace/contexts/*_context.json`
-- `chapter_writer.py` / `chapter_reviewer.py`：章节写作 + 审核
-- `global_reviewer.py`：全文一致性审核
-- `subagent_runner.py`：ThreadPoolExecutor 并发章节写作
-- `graph/chapter_subgraph.py`：章节子图 (load_job → load_context → write → self_check → save)
-- `agents/`：Agent 薄封装层（7 个 agent）
-- `docx_builder.py`：Markdown → Word 转换
-
-### 阶段 6：validate 项目检查 — 已完成
-
-- `project_validator.py`：26 项闭环检查
-  - sources/ 目录及文件
-  - inputs/ 文件存在性及非空
-  - prompts/ 提示词完整性
-  - .env / 环境变量配置
-  - workspace/ 中间产物状态
-  - outputs/ 最终产物状态
-- 结果等级：ok / warn / fail
-- fail 返回非 0 退出码
-
-### 阶段 7：init-demo — 已完成
-
-- 新增 `init-demo` 命令，一键生成演示招标文件和公司资料
-- 新增 `src/demo_initializer.py`，实现 `init_demo(root)` 函数
-- 演示文件已存在时跳过，不覆盖
-- 降低新用户首次体验门槛
-
-### 阶段 8：chunk-ranker — 已完成
-
-- 新增 `src/chunk_ranker.py`，实现本地关键词 chunk 相关性排序
-- `rank_chunks_for_job()` 从 job + score_points 提取关键词，对 chunks 加权评分
-- `context_selector.py` 集成 chunk-ranker，LLM 选择前先用 top 30 粗筛
-- 排序结果写入 `workspace/contexts/{chapter_id}_ranked_chunks.json`
-- 支持大型招标文件（300+ 页），避免 prompt 超长
-- ranker 失败时自动回退到全量 chunks
-
-### 阶段 9：AI tender block classifier — 已完成
-
-- `tender_extractor.py` 实现完整的"代码切块 + AI 分类 + 拼接输出"流程
-- `split_tender_into_blocks()` 按标题切块，生成 rule_hints
-- `classify_tender_blocks_with_ai()` 批量 AI 分类（每批 12 个 block）
-- `assemble_inputs_from_classified_blocks()` 拼接 score.md / tender.md / tender_other.md
-- `fallback_classify_blocks()` 规则兜底，失败批次自动降级
-- `_generate_classification_report()` 生成分类报告含 warnings
-- 提示词 `prompts/classify_tender_blocks.md` 内置分类规则
-- 分类精度后续可按阶段 9b 继续优化
-
-### 阶段 10：chapter-summary + global-review 优化 — 已完成
-
-- 新增 `src/chapter_summarizer.py`，实现 `summarize_chapter()` 和 `summarize_all_chapters()`
-- 新增 `prompts/summarize_chapter.md` 提示词模板
-- 新增 CLI 命令：`summarize-chapter --chapter 01`、`summarize-all`、`global-review`
-- 改造 `global_reviewer.py`：优先使用章节摘要做全文审核，回退到完整章节正文
-- `run_pipeline` 插入 summarize-all + global-review 步骤
-- LangGraph 主图插入 `summarize_chapters` 节点（review → summarize → global_review）
-- 章节摘要位于 `workspace/summaries/*_summary.json`
-
-### 阶段 11：review-fix-all 自动改稿 — 已完成
-
-- 新增 `src/chapter_rewriter.py`，实现 `rewrite_chapter()` / `rewrite_all()` / `review_fix_all()`
-- 新增 `prompts/rewrite_chapter.md` 提示词模板
-- 新增 CLI 命令：`rewrite-chapter`、`rewrite-all`、`review-fix-all`
-- `review_fix_all()` 审核后对 need_rewrite=true 章节自动重写，最多 2 轮
-- `run_pipeline` 集成 review_fix_all（审核 + 改稿一步完成）
-- LangGraph 主图 `review_chapters` -> `review_fix_chapters`，graph-run 也执行自动改稿
-- 重写日志保存在 `workspace/rewrites/*_rewrite_log.json`
-- 步骤编号统一为 1/14 ~ 14/14
-
-### Bugfix（2026-06-10）：流程稳定性修复
-
-- 修复 `global_reviewer.py` 的 `read_text` 导入问题
-- `_load_reviews` 改用 `read_json` 直读，reviews 目录不存在时返回空数组
-- `_load_reviews` 改进：JSON 非对象时记录 error，添加 `relative_to(root)` 路径
-- graph-run 接入 `review_fix_chapters_node`，与 CLI `run` 流程一致
-- CLI `run_pipeline` 步骤编号统一为 1/14 ~ 14/14，与 graph-run 对齐
-
-### 阶段 12：retry/resume — 待开发
-
-- 失败章节重试：`write-chapter --chapter XX`（已有基础支持）
-- 断点续跑：`graph-run --resume`，跳过已完成章节，只生成失败/缺失章节
-- 失败原因持久化记录
-
----
-
-## 3. 技术选型
-
-- **语言**：Python
-- **运行方式**：CLI 命令 `python src/main.py <command>`
-- **大模型接口**：OpenAI-compatible API，统一通过 `llm_client.py` 调用
-- **编排框架**：LangGraph
-- **Word 生成**：python-docx
-- **PDF 解析**：pdfplumber / PyMuPDF
-- **DOCX 解析**：python-docx
-
----
-
-## 4. 目录结构
-
-```text
-bid_agent/
-  sources/                        ← 用户放入原始资料
-    tender/                       ← .pdf / .docx / .md
-    company/                      ← .pdf / .docx / .md
-    template/                     ← .docx
-
-  inputs/                         ← prepare-inputs 自动生成
-    tender.md
-    score.md
-    company.md
-    template.docx
-
-  workspace/
-    imported/
-      tender_raw.md               ← 招标文件原始合并
-      tender_blocks.json          ← 切块结果
-      tender_classified_blocks.json ← AI 分类后分类块
-      tender_other.md             ← 非招标正文、非评分标准内容
-      tender_classification_report.json ← 分类报告
-    chunks/
-      tender_chunks.json
-      company_chunks.json
-    jobs/                         ← 01.json, 02.json, ...
-    contexts/                     ← 01_context.json, 02_context.json, ...
-    chapters/                     ← 01.md, 02.md, ...
-    reviews/                      ← 01_review.json, ...
-    rewrites/                     ← 01_rewrite_log.json, ...
-    summaries/                    ← 01_summary.json, ...
-    score_points.json
-    global_facts.json
-    outline.json
-    global_review.json
-
-  outputs/
-    final.md
-    final.docx
-
-  prompts/
-    parse_score.md
-    extract_facts.md
-    generate_outline.md
-    write_chapter.md
-    review_chapter.md
-    select_context.md
-    global_review.md
-    classify_tender_blocks.md
-    summarize_chapter.md
-    rewrite_chapter.md
-
-  src/
-    main.py
-    demo_initializer.py
-    config.py
-    llm_client.py
-    utils.py
-    document_converter.py
-    input_preparer.py
-    tender_extractor.py
-    company_extractor.py
-    document_splitter.py
-    job_planner.py
-    context_selector.py
-    chunk_ranker.py
-    subagent_runner.py
-    project_validator.py
-    score_parser.py
-    fact_extractor.py
-    outline_generator.py
-    chapter_writer.py
-    chapter_reviewer.py
-    chapter_rewriter.py
-    chapter_summarizer.py
-    global_reviewer.py
-    docx_builder.py
-    agents/
-    graph/
-
-  .env
-  requirements.txt
-  readme.MD
-```
-
----
-
-## 5. 输入文件
-
-### sources/ → inputs/ 资料导入
-
-用户只需将原始资料放入 `sources/` 对应目录：
-
-```text
-sources/tender/     ← 招标文件 (.pdf/.docx/.md)
-sources/company/    ← 公司资料 (.pdf/.docx/.md)
-sources/template/   ← 标书模板 (.docx)
-
-        ↓ python src/main.py prepare-inputs
-
-inputs/tender.md      ← 自动合并 + AI 分类
-inputs/score.md       ← AI 分类的评分标准
-inputs/company.md     ← 自动合并
-inputs/template.docx  ← 复制第一个 .docx
-```
-
-支持的原始文件格式：`.md`（直接读取）、`.docx`（python-docx 提取段落和表格）、`.pdf`（pdfplumber 或 PyMuPDF 提取文本）。
-
-### inputs/tender.md
-
-招标文件正文内容。由 `prepare-inputs` 从 `sources/tender/` 自动生成，经 AI 分类后提取非评分、非附录类内容。
-
-### inputs/score.md
-
-评分标准内容。由 `prepare-inputs` 经 AI 块分类识别，将评分相关块提取到此文件。
-
-### inputs/company.md
-
-公司资料、产品资料、案例资料、人员资料、资质资料合并。由 `prepare-inputs` 自动生成。章节生成时不能编造公司没有提供的内容。
-
----
-
-## 6. CLI 命令
-
-| 命令 | 说明 |
-|---|---|
-| `init` | 初始化目录、输入文件和默认提示词 |
-| `init-demo` | 生成最小演示招标文件和公司资料（仅用于开发测试） |
-| `prepare-inputs` | 导入原始资料：PDF/DOCX/MD → inputs/ |
-| `validate` | 项目功能闭环检查（26 项，不调用 AI） |
-| `split-docs` | 切分文档为 chunk |
-| `parse-score` | 解析评分标准 → score_points.json |
-| `extract-facts` | 提取全局事实 → global_facts.json |
-| `generate-outline` | 生成标书大纲 → outline.json |
-| `plan-jobs` | 生成章节任务包 → jobs/*.json |
-| `select-context --chapter 01` | 为单个章节选择上下文（含 chunk-ranker 本地粗筛） |
-| `select-context-all` | 为所有章节选择上下文（含 chunk-ranker 本地粗筛） |
-| `write-chapter --chapter 01` | 生成单个章节 |
-| `write-all --workers 2` | 并发生成所有章节 |
-| `review-chapter --chapter 01` | 审核单个章节 |
-| `review-all` | 审核所有章节 |
-| `rewrite-chapter --chapter 01` | 根据审核意见重写单个章节 |
-| `rewrite-all` | 重写所有 need_rewrite=true 的章节 |
-| `review-fix-all` | 审核所有章节并自动改稿（最多 2 轮） |
-| `summarize-chapter --chapter 01` | 为单个章节生成结构化摘要 |
-| `summarize-all` | 为所有章节生成结构化摘要 |
-| `global-review` | 全文一致性审核（优先使用章节摘要） |
-| `build-md` | 拼接 Markdown → outputs/final.md |
-| `build-docx` | 生成 Word → outputs/final.docx |
-| `run --workers 2` | CLI 模式完整流水线（14 步） |
-| `graph-run --workers 2` | LangGraph 主图完整流程（14 节点） |
-
----
-
-## 7. LangGraph 主图
-
-```text
-START → init_workspace → prepare_inputs → split_docs
-  → parse_score → extract_facts → generate_outline
-  → plan_chapter_jobs → select_contexts → write_chapters
-  → review_fix_chapters (审核 + 自动改稿 + 再审)
-  → summarize_chapters → global_review
-  → build_markdown → build_docx → END
-```
-
-共 14 个节点。`review_fix_chapters` 内置 `review_fix_all` 逻辑：审核 → 对 need_rewrite=true 章节重写 → 再审，最多 2 轮。`global_review` 优先使用 `summarize_chapters` 生成的章节摘要。
-
----
-
-## 8. 给编码 Agent 的总要求
-
-1. 先跑通主流程，再优化细节。
-2. 不要一开始引入复杂框架。
-3. 所有中间结果都要落盘。
-4. 所有模块都要能单独运行。
-5. 失败时必须输出清晰错误信息。
-6. 代码结构要简单、清晰、可维护。
-7. 不允许硬编码 API Key。
-8. 不允许模型编造公司没有提供的内容。
-9. 每个章节必须绑定评分点。
-10. 修改代码后必须提交并推送。
-
----
-
-## 9. 最小可运行链路
-
-```bash
-python src/main.py init
-python src/main.py init-demo
-# 放入原始文件到 sources/ 各子目录（或使用 init-demo 生成的演示数据）
-python src/main.py prepare-inputs
-python src/main.py validate
-python src/main.py graph-run --workers 2
-```
+目标一直比较稳定：
+
+> 跑通“招标文件 / 评分标准 / 公司资料 / 标书模板 → 生成章节 → 审核章节 → 拼接 Word”的主流程，并持续降低编造风险、人工返工成本和长流程排障成本。
+
+当前目标已经从“能跑通”扩展为：
+- 可观测：每一步可追踪
+- 可恢复：支持安全 resume
+- 可解释：能回看上下文、prompt、事件和质量门禁
+- 可扩展：CLI / Graph / Web 共用一套阶段定义
+
+## 2. 演进概览
+
+### 阶段 1：基础 CLI 和文件读写
+
+已完成：
+- `init` 初始化目录和默认提示词
+- `utils.py` 统一文件读写
+- `config.py` 读取 `.env`
+- `main.py` 建立 CLI 框架
+
+### 阶段 2：LLM 调用与评分解析
+
+已完成：
+- `llm_client.py` 统一 OpenAI-compatible 调用
+- `score_parser.py` 解析评分点
+- `fact_extractor.py` 提取全局事实
+- `outline_generator.py` 生成大纲
+
+### 阶段 3：资料导入
+
+已完成：
+- `document_converter.py`
+- `tender_extractor.py`
+- `company_extractor.py`
+- `input_preparer.py`
+
+核心效果：
+- `sources/` → `inputs/`
+- 招标文件自动分类为 `score.md / tender.md / other.md`
+
+### 阶段 4：LangGraph 主流程
+
+已完成：
+- `graph/state.py`
+- `graph/nodes.py`
+- `graph/bid_graph.py`
+- `graph-run`
+
+### 阶段 5：job/context 章节 SubAgent
+
+已完成：
+- `document_splitter.py`
+- `job_planner.py`
+- `context_selector.py`
+- `chapter_writer.py`
+- `chapter_reviewer.py`
+- `subagent_runner.py`
+- `graph/chapter_subgraph.py`
+
+### 阶段 6：validate 项目检查
+
+已完成：
+- 文件、环境变量、中间产物、输出结果静态检查
+
+### 阶段 7：init-demo
+
+已完成：
+- 生成最小演示数据，降低首次体验门槛
+
+### 阶段 8：chunk-ranker
+
+已完成：
+- `select-context` 前做本地粗筛
+- 降低大项目 prompt 长度
+
+### 阶段 9：AI tender block classifier
+
+已完成：
+- 招标文件切块 + AI 分类 + 规则兜底
+
+### 阶段 10：chapter-summary + global-review
+
+已完成：
+- 章节摘要
+- 全文审核优先使用摘要
+
+### 阶段 11：review-fix-all 自动改稿
+
+已完成：
+- 审核 → 自动改稿 → 再审核
+
+### 阶段 12：retry / resume
+
+已完成：
+- `graph-run --resume`
+- 失败章节重试
+- `run_state.json` / `run_state_history.jsonl`
+
+### 阶段 13：评分点覆盖矩阵
+
+已完成：
+- `workspace/score_coverage_matrix.json`
+
+### 阶段 14：来源可追溯引用
+
+已完成：
+- `workspace/source_trace_index.json`
+- `workspace/source_traces/*`
+
+### 阶段 15：DOCX 模板保真
+
+已完成（基础版）：
+- 尽量继承模板样式、封面、表格、页眉页脚
+
+## 3. 本轮升级：借鉴 `claude-code` 的结构能力
+
+这一轮不是新增业务功能，而是升级基础架构。
+
+### 3.1 统一阶段注册表
+
+新增：
+- `src/pipeline_registry.py`
+
+落地效果：
+- `main.py`、`graph/bid_graph.py`、`web_app.py` 共用同一份 `StageSpec`
+- 阶段定义不再三处硬编码
+
+### 3.2 运行时状态事件化
+
+升级：
+- `src/graph/state_recorder.py`
+
+新增产物：
+- `workspace/run_events.jsonl`
+- `workspace/run_metrics.json`
+
+落地效果：
+- 每阶段有 `start/success/reuse/skip/fail`
+- 可以记录阶段 attempts、duration、llm_calls、token 估算
+
+### 3.3 Prompt / Agent 治理
+
+升级：
+- `src/prompt_registry.py`
+- `src/runtime_context.py`
+
+落地效果：
+- 每个 agent 有 `AgentSpec`
+- prompt 带 `version`、`checksum`
+- 每次 agent 调用都会生成追踪 artifact
+
+### 3.4 上下文预算控制
+
+新增：
+- `src/context_budget.py`
+
+落地效果：
+- `select-contexts`、`write-chapters`、`review/summarize/global-review` 都会压缩上下文
+- 避免大项目下 prompt 无限膨胀
+
+### 3.5 质量门禁
+
+新增：
+- `src/quality_gates.py`
+
+落地效果：
+- 大纲必须覆盖所有评分点
+- 弱证据不能写成既成事实
+- 模板填充异常会阻止 `build-docx` 通过
+- `need_manual_review=true` 时整体流程状态为 `warn`
+
+## 4. 当前状态总结
+
+当前项目已经从“能跑通的多步骤生成器”升级为：
+
+1. 有统一阶段模型的流程系统
+2. 有事件流和指标的可观测系统
+3. 有 prompt/version/checksum 的 agent 追踪系统
+4. 有上下文预算和质量门禁的受控生成系统
+
+## 5. 下一阶段落地结果
+
+这一轮已经把上一版“下一步建议”中的 4 个方向落成第一版：
+
+1. 更细的结构契约测试
+   已补 `context_selector / chapter_writer / web status / project profile / manual review`
+
+2. Web 可视化补强
+   已展示项目类型、prompt version/checksum、最新 agent runs、阶段指标和 budget 命中
+
+3. 项目类型化 prompt 策略
+   已增加 `general / government_procurement / software_project / ops_service / system_integration`
+
+4. 人工复核工作台
+   已增加独立覆盖层、摘要聚合、分类查看与状态写入，以及局部重跑建议
+
+后续更值得继续推进的是：
+
+1. 把人工复核项和章节/产物预览做更强联动
+2. 为 5 个核心 agent 补齐真实 variant prompt 文件
+3. 为 replay 建立显式“从某阶段重跑受影响章节”的 UI 命令
+4. 扩展 Web 视图测试到前端渲染层

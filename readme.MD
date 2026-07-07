@@ -1,216 +1,44 @@
 # 标书写作 Agent
 
-本项目是一个本地 CLI 版标书写作 Agent，使用 LangGraph 编排主流程和章节 SubAgent。支持 PDF/DOCX/MD 原始资料导入，自动生成评分标准分离和投标文件内容，并通过多 Agent 并发章节写作最终输出 Markdown 和 Word。
+本项目是一个面向标书生成场景的本地 Agent。它基于 LangGraph 编排完整流水线，支持招标文件/公司资料/Word 模板导入，自动完成评分点解析、事实提取、大纲生成、章节写作、审核改稿、来源追溯、评分覆盖分析、全文审核和 Word 输出。
+
+当前版本已经从“脚本串流程”升级为“可观测流程系统”：
+- `CLI`、`LangGraph`、`Web` 共用同一份阶段注册表
+- 每个阶段会写运行状态、事件流和阶段指标
+- 每次 agent 调用会固化 prompt 版本、checksum、模型和输入摘要
+- 支持按项目类型解析 prompt profile
+- 支持人工复核覆盖层和局部重跑建议
+- 上下文选择和章节写作带预算约束
+- 大纲覆盖、弱证据表述、模板填充和最终审核都有质量门禁
 
 ## 快速开始
 
 ```bash
-# 创建 conda 虚拟环境
 conda create -n bid_agent python=3.11 -y
 conda activate bid_agent
-
-# 安装依赖
 pip install -r requirements.txt
 
-# 初始化项目
 python src/main.py init
-
-# （可选）生成演示数据，用于快速验证流程
 python src/main.py init-demo
 
-# 配置 API（复制 .env.example 为 .env 并填写）
+# 配置 .env
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=gpt-4.1-mini
 
-# 放入原始资料
-#   招标文件  → sources/tender/
-#   公司资料  → sources/company/
-#   标书模板  → sources/template/
-
-# 导入资料并检查
-python src/main.py prepare-inputs
-python src/main.py validate
-
-# 运行完整流程
-python src/main.py graph-run --workers 2
-```
-
-## 推荐运行流程
-
-```bash
-python src/main.py init
-python src/main.py init-demo
-# 将招标文件放入 sources/tender/
-# 将公司资料放入 sources/company/
-# 将模板放入 sources/template/
 python src/main.py prepare-inputs
 python src/main.py validate
 python src/main.py graph-run --workers 2
 ```
 
-> **注意：** `init-demo` 仅用于开发测试，生成的演示数据不代表任何真实招标项目或企业，不可用作真实投标资料。
+如果你使用真实项目资料：
+- 招标文件放入 `sources/tender/`
+- 公司资料放入 `sources/company/`
+- Word 模板放入 `sources/template/`
 
-## 目录结构
+## 当前流程
 
-```
-bid_agent/
-  sources/                        ← 用户放入原始资料
-    tender/                       ← 招标文件、答疑、补遗 (.pdf/.docx/.md)
-    company/                      ← 公司资料、案例、产品白皮书 (.pdf/.docx/.md)
-    template/                     ← 标书模板 (.docx)
-
-  inputs/                         ← prepare-inputs 自动生成
-    tender.md
-    score.md
-    company.md
-    template.docx
-
-  workspace/
-    imported/                     ← 资料导入中间产物
-      tender_raw.md               ← 招标文件原始合并
-      tender_blocks.json          ← 招标文件切块
-      tender_classified_blocks.json  ← AI 分类后的块
-      tender_other.md             ← 其他内容（非招标正文、非评分标准）
-      tender_classification_report.json ← 分类报告
-    chunks/                       ← 文档切分结果
-      tender_chunks.json
-      company_chunks.json
-    jobs/                         ← 章节任务包 (01.json, 02.json, ...)
-    contexts/                     ← 上下文选择结果 (01_context.json, ...)
-    chapters/                     ← 已生成章节 (01.md, 02.md, ...)
-    reviews/                      ← 章节审核结果 (01_review.json, ...)
-    score_points.json
-    global_facts.json
-    outline.json
-    global_review.json
-
-  outputs/
-    final.md
-    final.docx
-
-  prompts/                        ← 提示词模板
-    parse_score.md
-    extract_facts.md
-    generate_outline.md
-    write_chapter.md
-    review_chapter.md
-    select_context.md
-    global_review.md
-    classify_tender_blocks.md
-
-  src/                            ← 源代码
-    main.py                       ← CLI 入口
-    demo_initializer.py           ← 演示数据初始化
-    config.py                     ← API 配置 + 切块/分类全局常量
-    llm_client.py                 ← 统一 LLM 调用
-    utils.py                      ← 文件读写、JSON 解析
-    document_converter.py         ← PDF/DOCX → Markdown 转换
-    input_preparer.py             ← 统筹资料导入流程
-    tender_extractor.py           ← 招标文件导入 + 切块 + AI 分类 + 拼接
-    company_extractor.py          ← 公司资料批量导入
-    document_splitter.py          ← 文档切分为 chunk
-    job_planner.py                ← 章节任务包生成
-    context_selector.py           ← 章节上下文选择（含 chunk-ranker 本地粗筛）
-    chunk_ranker.py               ← 本地关键词 chunk 相关性排序
-    subagent_runner.py            ← SubAgent 并发调度
-    project_validator.py          ← 项目闭环检查
-    score_parser.py
-    fact_extractor.py
-    outline_generator.py
-    chapter_writer.py
-    chapter_reviewer.py
-    chapter_rewriter.py           ← 章节自动改稿
-    global_reviewer.py
-    docx_builder.py
-    agents/                       ← Agent 薄封装层
-    graph/                        ← LangGraph 编排层
-      state.py
-      nodes.py
-      routers.py
-      bid_graph.py
-      chapter_subgraph.py
-
-  .env                            ← API 配置
-  requirements.txt
-  readme.MD
-```
-
-## .env 配置
-
-```env
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=your-api-key
-OPENAI_MODEL=gpt-4.1-mini
-OPENAI_TIMEOUT=120
-OPENAI_MAX_RETRIES=3
-```
-
-## CLI 命令说明
-
-| 命令 | 说明 |
-|---|---|
-| `init` | 初始化目录、输入文件和默认提示词 |
-| `init-demo` | 生成最小演示招标文件和公司资料（仅用于开发测试） |
-| `prepare-inputs` | 导入原始资料：将 sources/ 下的 PDF/DOCX/MD 转为 inputs/ 下标准文件 |
-| `validate` | 项目功能闭环检查：验证文件、环境变量、中间产物完整性（不调用 AI） |
-| `split-docs` | 切分招标文件和公司资料为 chunk |
-| `parse-score` | 解析评分标准 → score_points.json |
-| `extract-facts` | 提取全局事实 → global_facts.json |
-| `generate-outline` | 生成标书大纲 → outline.json |
-| `plan-jobs` | 生成章节任务包 → jobs/*.json |
-| `select-context --chapter 01` | 为单个章节选择上下文 |
-| `select-context-all` | 为所有章节选择上下文 |
-| `write-chapter --chapter 01` | 生成单个章节 |
-| `write-all --workers 2` | 并发生成所有章节（--workers 默认 2，最大 5） |
-| `review-chapter --chapter 01` | 审核单个章节 |
-| `review-all` | 串行审核所有章节 |
-| `rewrite-chapter --chapter 01` | 根据审核意见重写单个章节 |
-| `rewrite-all` | 重写所有 need_rewrite=true 的章节 |
-| `review-fix-all` | 审核所有章节并自动改稿（最多 2 轮） |
-| `summarize-chapter --chapter 01` | 为单个章节生成结构化摘要 |
-| `summarize-all` | 为所有章节生成结构化摘要 |
-| `global-review` | 全文一致性审核（优先使用章节摘要） |
-| `build-md` | 拼接最终 Markdown → outputs/final.md |
-| `build-docx` | 生成 Word 文件 → outputs/final.docx |
-| `run --workers 2` | CLI 模式完整流水线（14 步） |
-| `graph-run --workers 2` | LangGraph 主图完整流程 |
-
-## Web 控制台
-
-启动 Web 可视化操作界面：
-
-```bash
-python src/web_app.py
-```
-
-访问 http://127.0.0.1:7860
-
-功能：
-- 上传招标文件、公司资料、Word 模板到 sources/ 对应目录
-- 一键运行完整标书生成流程
-- 分步运行每个阶段，实时查看日志
-- 下载 final.md 和 final.docx
-- 查看全文审核 JSON
-
-## 自动改稿流程
-
-`review-fix-all` 命令会自动审核所有章节，并对 need_rewrite=true 的章节进行重写，然后再次审核，最多 2 轮。
-
-```bash
-python src/main.py write-all --workers 2
-python src/main.py review-fix-all
-python src/main.py build-md
-python src/main.py build-docx
-```
-
-说明：
-- `review-fix-all` 会先审核章节，对 need_rewrite=true 的章节自动重写
-- 重写后会重新审核，每章最多重写 2 轮
-- 重写日志保存在 `workspace/rewrites/*_rewrite_log.json`
-- 如果没有需要重写的章节，命令正常结束并打印"无需重写"
-
-## LangGraph 流程
+主流程现在与代码保持一致，按下面 18 个阶段运行：
 
 ```text
 START
@@ -219,82 +47,170 @@ START
   → split_docs
   → parse_score
   → extract_facts
+  → build_template_evidence
   → generate_outline
   → plan_chapter_jobs
   → select_contexts
-  → write_chapters (章节子图：load_job → load_context → write → self_check → save)
-  → review_fix_chapters (审核 + 自动改稿 + 再审，最多 2 轮)
-  → summarize_chapters (为每章生成结构化摘要)
-  → global_review (基于章节摘要做全文审核)
+  → write_chapters
+  → review_fix_chapters
+  → build_source_trace_index
+  → build_score_coverage_matrix
+  → summarize_chapters
+  → global_review
   → build_markdown
   → build_docx
+  → check_format
   → END
 ```
 
-## 输出
+对应关系：
+- 阶段注册表：`src/pipeline_registry.py`
+- Graph 编排：`src/graph/bid_graph.py`
+- 节点执行：`src/graph/nodes.py`
+- Web 流程台：`src/web_app.py`
 
+更详细的逻辑说明见 [docs/current_logic_flow.md](/D:/my_project/bid_agent/docs/current_logic_flow.md:1)。
+
+## 关键目录
+
+```text
+sources/                 用户原始资料
+inputs/                  标准化输入
+workspace/imported/      招标文件切块与分类中间产物
+workspace/chunks/        文档 chunk
+workspace/jobs/          章节任务包
+workspace/contexts/      章节上下文与 ranker 结果
+workspace/chapters/      章节 Markdown
+workspace/reviews/       章节审核结果
+workspace/rewrites/      自动改稿日志
+workspace/summaries/     章节摘要
+workspace/agent_runs/    每次 agent 调用的追踪记录
+workspace/project_profile.json 当前项目类型
+workspace/manual_review/ 人工复核覆盖层与重跑建议
+workspace/run_state.json 当前运行状态
+workspace/run_state_history.jsonl 运行历史
+workspace/run_events.jsonl        事件流
+workspace/run_metrics.json        阶段指标
+outputs/                 final.md / final.docx
+tests/                   回归测试
 ```
-workspace/imported/tender_raw.md
-workspace/imported/tender_blocks.json
-workspace/imported/tender_classified_blocks.json
-workspace/imported/tender_other.md
-workspace/imported/tender_classification_report.json
-workspace/chunks/tender_chunks.json
-workspace/chunks/company_chunks.json
-workspace/score_points.json
-workspace/global_facts.json
-workspace/outline.json
-workspace/jobs/*.json
-workspace/contexts/*_context.json
-workspace/contexts/*_ranked_chunks.json
-workspace/chapters/*.md
-workspace/reviews/*.json
-workspace/rewrites/*_rewrite_log.json
-workspace/summaries/*_summary.json
-workspace/global_review.json
-outputs/final.md
-outputs/final.docx
-```
 
-## Chunk Ranker（本地粗筛）
+## 可观测性与追踪
 
-`select-context` 阶段在调用 LLM 之前，先通过 `chunk_ranker.py` 对全量 chunks 做本地关键词粗筛，只将 top 30 个相关 chunks 交给 LLM 选择。这样可以支持大型招标文件（300+ 页、500+ 页），避免 prompt 超长。
+新增的运行时产物：
 
-- 排序结果调试文件：`workspace/contexts/*_ranked_chunks.json`
-- 排序基于章节标题、评分点关键词、正文关键词匹配的加权评分
-- 如果 ranker 出错，自动回退到全量 chunks，不影响流程
+- `workspace/run_state.json`
+  当前阶段、状态、摘要、阶段指标
+- `workspace/run_state_history.jsonl`
+  每次状态快照历史
+- `workspace/run_events.jsonl`
+  阶段级事件流，包含 `start/success/reuse/skip/fail/agent_artifact`
+- `workspace/run_metrics.json`
+  阶段 attempts、duration、llm_calls、token 估算
+- `workspace/agent_runs/*.json`
+  每次 agent 调用的 prompt 文件、版本、checksum、模型、temperature、输入摘要
 
-## 常见问题
+这使得下面几类问题更容易排查：
+- 为什么这次大纲结构变了
+- 为什么某章上下文被截断
+- 为什么 resume 跳过了某一步
+- 为什么最终结果被标记为 `warn`
 
-**Q: 评分标准没识别到怎么办？**
-A: 执行 `validate` 会提示 score_blocks=0。检查 `workspace/imported/tender_classification_report.json` 中的 warnings，并可手动编辑 `inputs/score.md`。
+## 上下文预算与质量门禁
 
-**Q: 章节生成失败如何补救？**
-A: 失败章节会在控制台输出 ID，确认原因后可使用 `write-chapter --chapter XX` 单章重跑。
+当前默认规则：
 
-**Q: 目录不存在？**
-A: 先执行 `python src/main.py init` 初始化所有目录。
+- `select-contexts`
+  先走 `chunk_ranker` 本地粗筛，再按预算压缩候选目录
+- `write-chapters`
+  只向模型发送 compact chunk payload，不直接塞全量片段
+- `review-chapter` / `summarize-chapter` / `global-review`
+  默认使用裁剪后的正文或摘要，降低长上下文失控风险
 
-**Q: .env 未配置？**
-A: 复制 `.env.example` 为 `.env` 并填写 API 信息后重新运行。
+质量门禁：
+- `generate-outline`
+  所有评分点必须至少被一个章节绑定
+- `write/rewrite chapter`
+  弱证据模板任务不能写成“已具备/已提供/已完成”
+- `build-docx`
+  模板填充报告若存在未处理结构或残留占位，会触发门禁
+- `global-review`
+  若 `need_manual_review=true`，整体运行状态会落为 `warn`
 
-## 当前开发状态
+## CLI 命令
 
-| 功能 | 状态 |
+| 命令 | 说明 |
 |---|---|
-| 基础 CLI 和文件读写 | 已完成 |
-| LLM 调用与评分解析 | 已完成 |
-| 资料导入 (prepare-inputs) | 已完成 |
-| LangGraph 主流程 | 已完成 |
-| job/context 章节 SubAgent 并发写作 | 已完成 |
-| validate 项目检查 | 已完成 |
-| 招标文件 AI 块分类 | 已完成（待进一步优化） |
-| init-demo | 已完成 |
-| chunk-ranker | 已完成 |
-| chapter-summary + global-review 优化 | 已完成 |
-| review-fix-all 自动改稿 | 已完成 |
-| retry/resume 断点续跑 | 待开发 |
+| `init` | 初始化目录和默认提示词 |
+| `init-demo` | 生成演示数据 |
+| `prepare-inputs` | 导入原始资料并生成标准输入 |
+| `analyze-template` | 仅解析模板 schema |
+| `split-docs` | 切分招标文件和公司资料 |
+| `parse-score` | 解析评分要求和评分点 |
+| `extract-facts` | 提取招标需求、公司事实和全局事实 |
+| `build-template-evidence` | 生成模板依据映射和质量报告 |
+| `generate-outline` | 生成标书大纲 |
+| `plan-jobs` | 生成章节任务包 |
+| `select-context --chapter 01` | 为单章选择上下文 |
+| `select-context-all` | 为所有章节选择上下文 |
+| `write-chapter --chapter 01` | 生成单个章节 |
+| `write-all --workers 2 --max-retries 1` | 并发生成所有章节 |
+| `review-chapter --chapter 01` | 审核单个章节 |
+| `review-all` | 审核所有章节 |
+| `rewrite-chapter --chapter 01` | 根据审核意见重写单章 |
+| `rewrite-all` | 重写所有需改稿章节 |
+| `review-fix-all` | 审核并自动改稿 |
+| `build-source-trace` | 生成来源追溯索引 |
+| `build-score-coverage` | 生成评分覆盖矩阵 |
+| `summarize-chapter --chapter 01` | 生成单章摘要 |
+| `summarize-all` | 生成所有章节摘要 |
+| `global-review` | 全文一致性审核 |
+| `build-md` | 拼接最终 Markdown |
+| `build-docx` | 生成最终 Word |
+| `check-format` | 执行格式检查与门禁 |
+| `run --workers 2` | CLI 串行完整流水线 |
+| `graph-run --workers 2 --resume --max-retries 1` | LangGraph 完整流水线，支持断点续跑 |
+| `validate` | 静态检查项目状态，不调用模型 |
 
-## 下一步计划
+## Web 控制台
 
-1. **retry/resume**：支持失败章节重试和已生成章节的断点续跑。
+启动：
+
+```bash
+python src/web_app.py
+```
+
+访问 [http://127.0.0.1:7860](http://127.0.0.1:7860)
+
+当前 Web 控制台支持：
+- 上传资料并创建独立运行工作空间
+- 按统一阶段注册表展示流程
+- 基于 `run_events.jsonl` 推送实时事件
+- 查看阶段详情、前置条件、输出产物和运行历史
+- 查看项目类型、prompt version/checksum、agent run 和 budget 命中
+- 查看并操作人工复核项
+- 下载 `final.md`、`final.docx`
+- 查看全文审核 JSON
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v
+python -m compileall src tests
+```
+
+当前测试覆盖重点：
+- 阶段注册表与 Web 映射一致性
+- resume 必须同时满足“产物存在 + 事件完整”
+- agent prompt 元数据追踪
+- 大纲评分点覆盖门禁
+- context selector / chapter writer / web status 结构契约
+- 项目类型 prompt 解析
+- 人工复核覆盖层
+
+## 文档
+
+- [docs/current_logic_flow.md](/D:/my_project/bid_agent/docs/current_logic_flow.md:1)
+  当前实际运行逻辑、关键输入输出、事件流和质量门禁
+- [docs/bid_agent_development_plan.md](/D:/my_project/bid_agent/docs/bid_agent_development_plan.md:1)
+  开发演进记录和阶段性设计说明
