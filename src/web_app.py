@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -26,14 +27,26 @@ from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
 WEB_DIR = ROOT / "web"
+VUE_DIST_DIR = ROOT / "frontend" / "dist"
 RUNS_DIR = ROOT / "runs"
 ACTIVE_RUN_FILE = RUNS_DIR / ".active_run"
 
 sys.path.insert(0, str(ROOT / "src"))
 
+from chat_store import clear_messages, load_messages, save_message
+from session_orchestrator import plan as orchestrator_plan, resolve_execution as orchestrator_resolve
 from graph.state_recorder import load_run_events, load_stage_metrics, save_run_state
 from manual_review import apply_manual_review_update, manual_review_items, manual_review_summary
-from pipeline_registry import auto_run_commands, stage_command_map, workflow_stage_specs
+from pipeline_registry import (
+    auto_run_commands,
+    artifact_exists,
+    stage_command_map,
+    stage_outputs_ready,
+    stage_spec_by_command,
+    workflow_stage_specs,
+)
+from pipeline_supervisor import PipelineSupervisor
+from stage_validation import COLLECTION_STAGE_IDS, stage_collection_status
 from project_profile_registry import load_project_profile, project_profile_choices, save_project_profile
 from prompt_registry import AGENT_SPECS
 
@@ -47,6 +60,7 @@ CURRENT_PROCESS: subprocess.Popen | None = None
 CURRENT_RUN_ID = ""
 CURRENT_RUN_ROOT: Path | None = None
 PAUSE_REQUESTED = False
+SUPERVISOR = PipelineSupervisor()
 ACTIVE_RUN_ID = ""
 ACTIVE_RUN_ROOT: Path | None = None
 _PENDING_LINE_EDITS: dict[Path, dict[str, Any]] = {}
@@ -207,7 +221,7 @@ def _normalize_run_name(name: str) -> str:
     return cleaned[:48]
 
 
-def _create_run_workspace(name: str, project_type: str | None = None) -> tuple[str, Path]:
+def _create_run_workspace(name: str, project_type: str | None = None, expected_pages: int = 0) -> tuple[str, Path]:
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     safe_name = _normalize_run_name(name)
     if not safe_name:
@@ -239,9 +253,8 @@ def _create_run_workspace(name: str, project_type: str | None = None) -> tuple[s
     ]:
         (run_root / relative_dir).mkdir(parents=True, exist_ok=True)
 
-    _copy_tree_contents(ROOT / "sources", run_root / "sources")
     _copy_tree_contents(ROOT / "prompts", run_root / "prompts")
-    save_project_profile(run_root, project_type)
+    save_project_profile(run_root, project_type, expected_pages=expected_pages)
     return run_id, run_root
 
 
@@ -252,9 +265,15 @@ def _create_run_workspace(name: str, project_type: str | None = None) -> tuple[s
 if (WEB_DIR / "static").exists():
     app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
+USE_VUE = VUE_DIST_DIR.exists()
+if USE_VUE:
+    app.mount("/assets", StaticFiles(directory=str(VUE_DIST_DIR / "assets")), name="vue_assets")
+
 
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request) -> str:
+    if USE_VUE:
+        return (VUE_DIST_DIR / "index.html").read_text(encoding="utf-8")
     index_path = WEB_DIR / "templates" / "index.html"
     if not index_path.exists():
         return "<h1>缺少 web/templates/index.html</h1>"
@@ -316,6 +335,11 @@ def _read_json_file(path: Path) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+
+def _write_json_file(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _safe_relative(root: Path, path: Path) -> str:
@@ -784,6 +808,34 @@ def _command_for_stage(stage: str) -> str:
     return STAGE_TO_COMMAND.get(stage, stage)
 
 
+def _recovery_has_live_progress(
+    command: str,
+    recovery: dict[str, Any],
+    events: list[dict[str, Any]],
+) -> bool:
+    recovered_after = _parse_timestamp(recovery.get("updated_at"))
+    if recovered_after is None:
+        return False
+    stage_id = next(
+        (str(step.get("id", "")) for step in WORKFLOW_STEPS if step.get("command") == command),
+        command.replace("-", "_"),
+    )
+    for event in reversed(events):
+        event_time = _parse_timestamp(event.get("ts"))
+        if event_time is None:
+            continue
+        if event_time <= recovered_after:
+            break
+        if str(event.get("stage", "")) != stage_id:
+            continue
+        if str(event.get("event_type", "")) == "success":
+            return True
+        metrics = event.get("metrics", {}) if isinstance(event.get("metrics"), dict) else {}
+        if str(event.get("event_type", "")) == "agent_artifact" and int(metrics.get("llm_calls", 0) or 0) > 0:
+            return True
+    return False
+
+
 def _current_command_from_status(status: dict[str, Any]) -> str:
     if not status.get("running"):
         return ""
@@ -895,11 +947,21 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
 
     requirement_paths = [_artifact_path(req) for req in step.get("requires", [])]
     produce_paths = [_artifact_path(prod) for prod in step.get("produces", [])]
-    requirements = [bool(key_map.get(req, False)) for req in requirement_paths]
-    ready = all(requirements)
-    done = all(key_map.get(prod, False) for prod in produce_paths)
 
-    missing_requires = [req for req in requirement_paths if not key_map.get(req, False)]
+    def _artifact_ok(artifact: Any) -> bool:
+        if _artifact_kind(artifact) == "virtual":
+            return True
+        return bool(key_map.get(_artifact_path(artifact), False))
+
+    requirements = [_artifact_ok(req) for req in step.get("requires", [])]
+    ready = all(requirements)
+    done = stage_outputs_ready(root, str(step.get("id", "")))
+    step_index = next((idx for idx, item in enumerate(WORKFLOW_STEPS) if item.get("id") == step.get("id")), -1)
+    if step_index > 0 and step.get("kind") != "utility":
+        previous = WORKFLOW_STEPS[step_index - 1]
+        ready = stage_outputs_ready(root, str(previous.get("id", "")))
+
+    missing_requires = [req for req in requirement_paths if not _artifact_ok(req)]
     source_stale = status["sync"]["source_stale"]
     run_state = status.get("run_state", {}) if isinstance(status.get("run_state"), dict) else {}
     failed_command = _command_for_stage(str(run_state.get("stage", "")))
@@ -918,8 +980,13 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         message = "请先重新执行导入资料"
     elif status.get("running") and step["command"] == active_command:
         done = False
-        state = "ready"
-        message = f"已运行 {duration_label}" if duration_label else "运行中"
+        recovery_status = str(run_state.get("status", ""))
+        if recovery_status in {"recovering", "retrying"}:
+            state = recovery_status
+            message = str(run_state.get("message", "")).strip() or ("正在尝试自主修复" if recovery_status == "recovering" else "正在自动重试")
+        else:
+            state = "running"
+            message = f"已运行 {duration_label}" if duration_label else "运行中"
     elif done:
         state = "done"
         message = f"用时 {duration_label}" if duration_label else "用时 --"
@@ -930,12 +997,13 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         state = "blocked"
         message = "等待前置步骤"
 
-    if not done and run_state.get("status") in {"error", "paused"} and step["command"] == failed_command:
+    if not done and run_state.get("status") in {"error", "paused", "recovery_failed"} and step["command"] == failed_command:
         done = False
         state = "ready" if ready else "blocked"
         detail = str(run_state.get("message", "")).strip()
         message = f"上次执行失败，流程已暂停{f'：{detail}' if detail else ''}"
 
+    collection = stage_collection_status(root, str(step.get("id"))) if step.get("id") in COLLECTION_STAGE_IDS else None
     return {
         **step,
         "ready": ready,
@@ -943,6 +1011,7 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         "state": state,
         "message": message,
         "missing_requires": missing_requires,
+        "collection": collection,
     }
 
 
@@ -957,6 +1026,37 @@ def _chat_step_payload(status: dict[str, Any], command: str) -> dict[str, Any] |
 
 def _chat_has_any(text: str, normalized: str, keywords: tuple[str, ...]) -> bool:
     return any(keyword in text or keyword.lower() in normalized for keyword in keywords)
+
+
+def _diagnose_error_payload(status: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+    run_state = status.get("run_state", {}) if isinstance(status.get("run_state"), dict) else {}
+    error = status.get("failed_stage_error", {}) if isinstance(status.get("failed_stage_error"), dict) else {}
+    recovery = status.get("recovery", {}) if isinstance(status.get("recovery"), dict) else {}
+    command = str(error.get("command") or _command_for_stage(str(run_state.get("stage", ""))))
+    lines = [str(line) for line in error.get("lines", [])[-8:]] if isinstance(error.get("lines"), list) else []
+    tail = "\n".join(lines).strip()
+    status_text = str(run_state.get("status", "未知"))
+    if status_text in {"recovering", "retrying"}:
+        reply = (
+            f"流程没有直接停下，我正在尝试自主修复“{_step_label(command)}”。"
+            f"原因：{recovery.get('reason', '正在分析失败原因')}；"
+            f"动作：{recovery.get('action', '自动重试')}；"
+            f"次数：{recovery.get('attempt', 0)}/{recovery.get('max_attempts', AUTO_RECOVERY_MAX_ATTEMPTS)}。"
+        )
+        return reply, [{"type": "chat_prompt", "label": "查看诊断"}]
+    if tail:
+        reply = f"“{_step_label(command)}”上次失败。最后日志显示：\n{tail}"
+    else:
+        reply = f"“{_step_label(command)}”上次失败，但没有捕获到详细错误日志。"
+    actions: list[dict[str, str]] = []
+    if command:
+        actions.extend(
+            [
+                {"type": "retry_stage", "command": command, "label": "手动重试"},
+                {"type": "skip_stage", "command": command, "label": "跳过此阶段"},
+            ]
+        )
+    return reply, actions
 
 
 def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[str, Any]:
@@ -1009,7 +1109,7 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
         matrix_done = bool(workspace.get("score_coverage_matrix"))
         pending = manual_summary.get("score_coverage_pending", 0)
         reply = (
-            f"你关心的是评分覆盖。评分点解析：{'已完成' if score_done else '未完成'}；"
+            f"你关心的是解析评分和评分覆盖。评分点解析：{'已完成' if score_done else '未完成'}；"
             f"评分覆盖矩阵：{'已生成' if matrix_done else '未生成'}；"
             f"未覆盖评分点待处理 {pending} 项。"
         )
@@ -1068,6 +1168,10 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
             ],
         }
 
+    if _chat_has_any(text, normalized, ("诊断", "失败", "错误", "修复", "error", "failed")) and status.get("failed_stage_error"):
+        reply, actions = _diagnose_error_payload(status)
+        return {"reply": reply, "actions": actions}
+
     if _chat_has_any(text, normalized, ("状态", "进度", "卡", "为什么", "失败", "暂停", "blocked", "error")):
         run_state = status.get("run_state", {})
         active = status.get("active_run", {})
@@ -1075,6 +1179,12 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
             f"当前工作空间是 `{active.get('relative_root', active.get('id', ''))}`。"
             f" 运行状态：{run_state.get('status', '未知')}。"
         )
+        if run_state.get("status") in {"recovering", "retrying"} and status.get("recovery"):
+            recovery = status.get("recovery", {})
+            reply += (
+                f" 正在尝试自主修复：{recovery.get('reason', '')}；"
+                f"{recovery.get('action', '')}（{recovery.get('attempt', 0)}/{recovery.get('max_attempts', AUTO_RECOVERY_MAX_ATTEMPTS)}）。"
+            )
         if isinstance(next_step, dict):
             reply += f" 下一步是“{next_step.get('label', '')}”。"
         if isinstance(blocked_step, dict):
@@ -1118,14 +1228,35 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
 def api_status() -> dict[str, Any]:
     root = _active_root()
     run_state = _read_run_state(root)
+    run_events = load_run_events(root)
     project_profile = load_project_profile(root)
     review_summary = manual_review_summary(root)
-    selected_running = RUNNING and _same_path(CURRENT_RUN_ROOT, root)
+    pipeline_control = SUPERVISOR.load(root)
+    pipeline_running = SUPERVISOR.is_running(root) or str(pipeline_control.get("status", "")) in {
+        "running",
+        "recovering",
+        "retrying",
+        "pausing",
+    }
+    selected_running = (RUNNING and _same_path(CURRENT_RUN_ROOT, root)) or pipeline_running
+    effective_task = CURRENT_TASK if RUNNING and _same_path(CURRENT_RUN_ROOT, root) else str(pipeline_control.get("current_stage", ""))
     run_state_stage = str(run_state.get("stage", ""))
     run_state_command = _command_for_stage(run_state_stage)
     run_state_status = str(run_state.get("status", ""))
     run_state_message = str(run_state.get("message", ""))
-    stale_run_error = run_state_status in {"error", "paused"} and _step_outputs_present(root, run_state_command)
+    recovery_file = root / "workspace" / "recovery_state.json"
+    recovery_payload = _read_json_file(recovery_file) if recovery_file.exists() else {}
+    if not isinstance(recovery_payload, dict):
+        recovery_payload = {}
+    recovery_resolved = (
+        selected_running
+        and run_state_status in {"recovering", "retrying"}
+        and _recovery_has_live_progress(run_state_command, recovery_payload, run_events)
+    )
+    if recovery_resolved:
+        run_state_status = "running"
+        run_state_message = "LLM 已恢复，正在继续执行当前阶段"
+    stale_run_error = run_state_status in {"error", "paused", "recovery_failed"} and _step_outputs_present(root, run_state_command)
     if stale_run_error:
         run_state_status = "progress"
         run_state_message = ""
@@ -1205,13 +1336,15 @@ def api_status() -> dict[str, Any]:
             "imported_latest": imported_latest,
         },
         "running": selected_running,
-        "current_task": CURRENT_TASK if selected_running else "",
-        "global_running": RUNNING,
+        "current_task": effective_task if selected_running else "",
+        "global_running": RUNNING or SUPERVISOR.is_running(),
+        "pipeline": pipeline_control,
+        "recovery_resolved": recovery_resolved,
         "running_run": {
             "id": CURRENT_RUN_ID,
             "root": str(CURRENT_RUN_ROOT) if CURRENT_RUN_ROOT else "",
             "relative_root": str(CURRENT_RUN_ROOT.relative_to(ROOT)) if CURRENT_RUN_ROOT and CURRENT_RUN_ROOT.is_relative_to(ROOT) else (str(CURRENT_RUN_ROOT) if CURRENT_RUN_ROOT else ""),
-            "command": CURRENT_TASK,
+            "command": effective_task,
         },
         "active_run": _active_run_payload(),
         "run_state": {
@@ -1223,15 +1356,25 @@ def api_status() -> dict[str, Any]:
         },
         "project_profile": project_profile,
         "project_profile_choices": project_profile_choices(),
+        "llm_config": _active_llm_summary(),
         "manual_review_summary": review_summary,
         "latest_agent_runs": _latest_agent_runs(root),
         "run_metrics": load_stage_metrics(root),
-        "run_events_tail": load_run_events(root)[-20:],
+        "run_events_tail": run_events[-20:],
     }
+    # 失败/恢复阶段错误日志，供编排器诊断和前端恢复
+    error_file = root / "workspace" / "run_error.json"
+    if error_file.exists() and run_state_status in {"error", "paused", "progress", "recovering", "retrying", "recovery_failed"}:
+        try:
+            status["failed_stage_error"] = json.loads(error_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    if recovery_payload and run_state_status in {"recovering", "retrying", "recovery_failed"}:
+        status["recovery"] = recovery_payload
     status["timings"] = _workflow_timings(
         root,
         running=selected_running,
-        current_task=CURRENT_TASK if selected_running else "",
+        current_task=effective_task if selected_running else "",
         run_state=status["run_state"],
     )
 
@@ -1302,6 +1445,219 @@ async def api_chat(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, **payload})
 
 
+def _trigger_command_inline(command: str) -> dict[str, Any]:
+    global RUNNING
+    if not command:
+        return {"ok": False, "message": "没有可执行的命令。"}
+    if RUNNING or SUPERVISOR.is_running():
+        return {"ok": False, "message": "当前已有任务正在运行，请等待完成。"}
+    if command not in COMMANDS:
+        return {"ok": False, "message": f"未知命令: {command}"}
+    if command in auto_run_commands():
+        started = SUPERVISOR.start(ACTIVE_RUN_ID, _active_root(), _run_sync, start_command=command)
+        return {
+            "ok": started,
+            "message": f"已从 {command} 启动后端自动流水线" if started else "当前已有流水线正在运行",
+        }
+    if ACTIVE_RUN_ROOT is None:
+        return {"ok": False, "message": "请先创建本次运行工作空间。"}
+    run_id = ACTIVE_RUN_ID
+    run_root = _active_root()
+    threading.Thread(target=_run_sync, args=(command, run_id, run_root), daemon=True).start()
+    return {"ok": True, "message": f"命令已启动: {command}"}
+
+
+def _load_review_context(root: Path, limit: int = 50) -> list[dict[str, Any]]:
+    """加载各章 review 摘要，供编排器综合改稿目标。"""
+    reviews_dir = root / "workspace" / "reviews"
+    if not reviews_dir.exists():
+        return []
+    items: list[dict[str, Any]] = []
+    for review_path in sorted(reviews_dir.glob("*_review.json"))[:limit]:
+        try:
+            data = read_json(review_path)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        problems = data.get("problems", []) if isinstance(data.get("problems"), list) else []
+        top = [
+            {"type": str(p.get("type", "")), "description": str(p.get("description", ""))[:120]}
+            for p in problems[:3]
+            if isinstance(p, dict)
+        ]
+        items.append(
+            {
+                "chapter_id": str(data.get("chapter_id") or review_path.stem.replace("_review", "")),
+                "need_rewrite": bool(data.get("need_rewrite", False)),
+                "problem_count": len(problems),
+                "top_problems": top,
+            }
+        )
+    return items
+
+
+def _trigger_rewrite_targets_inline(targets: list[dict[str, Any]]) -> dict[str, Any]:
+    global RUNNING
+    if not targets:
+        return {"ok": False, "message": "没有定向改稿目标。"}
+    if RUNNING:
+        return {"ok": False, "message": "当前已有任务正在运行，请等待完成。"}
+    if ACTIVE_RUN_ROOT is None:
+        return {"ok": False, "message": "请先创建本次运行工作空间。"}
+    chapter_ids = [str(t.get("chapter_id")) for t in targets if t.get("chapter_id")]
+    if not chapter_ids:
+        return {"ok": False, "message": "改稿目标缺少 chapter_id。"}
+    run_root = _active_root()
+
+    def _run_rewrite_sync(chapters: list[str], root: Path) -> None:
+        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
+        RUNNING = True
+        CURRENT_TASK = "dispatch-rewrite"
+        CURRENT_RUN_ID = ACTIVE_RUN_ID
+        CURRENT_RUN_ROOT = root
+        PAUSE_REQUESTED = False
+        save_run_state(
+            root,
+            {"root_dir": str(root), "current_command": "dispatch-rewrite"},
+            stage="review-fix-all",
+            status="running",
+            message=f"定向改稿: {chapters}",
+        )
+        try:
+            _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
+            from subagent_runner import run_rewrite_all
+
+            result = run_rewrite_all(root, workers=2, chapter_ids=chapters)
+            failed = result.get("failed", [])
+            state_status = "ok" if not failed else "error"
+            state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
+        except Exception as exc:
+            state_status = "error"
+            state_message = f"定向改稿失败: {exc}"
+            _append_log(f"[错误] 定向改稿异常: {exc}")
+        save_run_state(
+            root,
+            {"root_dir": str(root), "current_command": "dispatch-rewrite"},
+            stage="review-fix-all",
+            status=state_status,
+            message=state_message,
+        )
+        RUNNING = False
+        CURRENT_TASK = ""
+        CURRENT_RUN_ROOT = None
+
+    threading.Thread(target=_run_rewrite_sync, args=(chapter_ids, run_root), daemon=True).start()
+    return {"ok": True, "message": f"定向改稿已启动: {chapter_ids}"}
+
+
+@app.post("/api/chat/orchestrate")
+async def api_chat_orchestrate(request: Request) -> JSONResponse:
+    root = _active_root()
+    run_id = ACTIVE_RUN_ID or root.name
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    message = str(body.get("message", "")).strip()
+    if not message:
+        return JSONResponse(
+            {"ok": True, "reply": "可以直接告诉我你想做什么，比如：当前状态、继续执行下一步、查看评分覆盖、一键生成。", "actions": []}
+        )
+
+    history = load_messages(root, run_id, limit=20)
+    status = api_status()
+    review_context = _load_review_context(root)
+    plan_result = orchestrator_plan(message, history, status, review_context=review_context)
+    resolved = orchestrator_resolve(plan_result, status)
+
+    trigger_command = str(resolved.get("trigger_command", "")).strip()
+    trigger_auto_run = bool(resolved.get("trigger_auto_run", False))
+    trigger_rewrite_targets = resolved.get("trigger_rewrite_targets", []) if isinstance(resolved.get("trigger_rewrite_targets"), list) else []
+    actions = resolved.get("actions", []) if isinstance(resolved.get("actions"), list) else []
+
+    if trigger_command:
+        trigger_result = _trigger_command_inline(trigger_command)
+        if trigger_result.get("ok"):
+            label = WORKFLOW_COMMAND_LABELS.get(trigger_command, trigger_command)
+            resolved["reply"] = f"{resolved.get('reply', '')}".strip()
+            if trigger_command == "write-all":
+                resolved["reply"] += "\n已派发多个章节写作子 Agent 并发写作。"
+            elif trigger_command == "review-fix-all":
+                resolved["reply"] += "\n已派发审核子 Agent 并发审核，需要时由写作子 Agent 改稿。"
+            elif trigger_command == "global-review":
+                resolved["reply"] += "\n已触发全文审核子 Agent（单实例，自带上下文装配）。"
+            else:
+                resolved["reply"] += f"\n已为你启动「{label}」。"
+        else:
+            resolved["reply"] = f"{resolved.get('reply', '')}".strip()
+            resolved["reply"] += f"\n（启动失败：{trigger_result.get('message', '')}）"
+            actions = [a for a in actions if a.get("command") != trigger_command]
+
+    if trigger_rewrite_targets:
+        rewrite_result = _trigger_rewrite_targets_inline(trigger_rewrite_targets)
+        resolved["reply"] = f"{resolved.get('reply', '')}".strip()
+        if rewrite_result.get("ok"):
+            ids = ", ".join(str(t.get("chapter_id", "")) for t in trigger_rewrite_targets if t.get("chapter_id"))
+            resolved["reply"] += f"\n已派发写作子 Agent 定向改稿：{ids}。"
+        else:
+            resolved["reply"] += f"\n（定向改稿失败：{rewrite_result.get('message', '')}）"
+
+    if trigger_auto_run:
+        actions = [a for a in actions if a.get("type") != "auto_run"]
+        actions = [{"type": "auto_run", "label": "一键跑完剩余"}, *actions]
+
+    payload = {
+        "ok": True,
+        "reply": resolved.get("reply", ""),
+        "actions": actions,
+        "action": resolved.get("action", "chat"),
+        "intent": resolved.get("intent", ""),
+        "auto_execute": bool(resolved.get("auto_execute", False)),
+        "triggered_command": trigger_command,
+        "triggered_auto_run": trigger_auto_run,
+        "triggered_rewrite": bool(trigger_rewrite_targets),
+    }
+    if plan_result.get("error"):
+        payload["orchestrator_note"] = plan_result.get("error")
+    return JSONResponse(payload)
+
+
+@app.get("/api/chat/messages")
+def api_chat_messages_get() -> JSONResponse:
+    root = _active_root()
+    run_id = ACTIVE_RUN_ID or root.name
+    messages = load_messages(root, run_id)
+    return JSONResponse({"ok": True, "run_id": run_id, "messages": messages})
+
+
+@app.post("/api/chat/messages")
+async def api_chat_messages_post(request: Request) -> JSONResponse:
+    root = _active_root()
+    run_id = ACTIVE_RUN_ID or root.name
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    role = str(body.get("role", "system")).strip()
+    content = str(body.get("content", ""))
+    thinking = str(body.get("thinking", ""))
+    actions = body.get("actions") if isinstance(body.get("actions"), list) else []
+    kind = str(body.get("kind", "message")).strip()
+    if role not in {"user", "assistant", "system"}:
+        role = "system"
+    saved = save_message(root, run_id, role, content, thinking, actions, kind)
+    return JSONResponse({"ok": True, "message": saved})
+
+
+@app.delete("/api/chat/messages")
+def api_chat_messages_delete() -> JSONResponse:
+    root = _active_root()
+    run_id = ACTIVE_RUN_ID or root.name
+    removed = clear_messages(root, run_id)
+    return JSONResponse({"ok": True, "removed": removed})
+
+
 @app.get("/api/manual-review/summary")
 def api_manual_review_summary() -> JSONResponse:
     root = _active_root()
@@ -1362,6 +1718,308 @@ async def api_set_project_profile(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
     path = save_project_profile(root, str(body.get("project_type", "")).strip())
     return JSONResponse({"ok": True, "profile": load_project_profile(root), "path": _safe_relative(root, path)})
+
+
+# ---------------------------------------------------------------
+#  LLM settings (multi-model presets + .env sync)
+# ---------------------------------------------------------------
+
+LLM_ENV_KEYS: list[tuple[str, str]] = [
+    ("OPENAI_BASE_URL", "base_url"),
+    ("OPENAI_API_KEY", "api_key"),
+    ("OPENAI_MODEL", "model"),
+    ("OPENAI_TIMEOUT", "timeout"),
+    ("OPENAI_MAX_RETRIES", "max_retries"),
+    ("OPENAI_RETRY_INITIAL_DELAY", "retry_initial_delay"),
+    ("OPENAI_RETRY_MAX_DELAY", "retry_max_delay"),
+    ("OPENAI_STREAM", "stream"),
+    ("OPENAI_VERIFY_SSL", "verify_ssl"),
+]
+_LLM_ALIAS_TO_KEY = {alias: key for key, alias in LLM_ENV_KEYS}
+LLM_MODELS_FILE = ROOT / "models.json"
+
+
+def _llm_env_path() -> Path:
+    return ROOT / ".env"
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        if value is None or value == "":
+            return default
+        return int(value)
+    except Exception:
+        return default
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _parse_bool_str(value: Any, default: bool) -> bool:
+    if value is None or value == "":
+        return default
+    return str(value).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _read_llm_env_values() -> dict[str, str]:
+    from config import _parse_env_file
+
+    values = _parse_env_file(_llm_env_path())
+    return {alias: values.get(key, "") for key, alias in LLM_ENV_KEYS}
+
+
+def _write_llm_env(settings: dict[str, Any]) -> None:
+    env_path = _llm_env_path()
+    existing_lines: list[str] = []
+    if env_path.exists():
+        existing_lines = env_path.read_text(encoding="utf-8").splitlines()
+    known_keys = {key for key, _ in LLM_ENV_KEYS}
+    updated_keys: set[str] = set()
+    new_lines: list[str] = []
+    for raw_line in existing_lines:
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            new_lines.append(raw_line)
+            continue
+        key = stripped.split("=", 1)[0].strip()
+        if key in known_keys:
+            alias = _LLM_ALIAS_TO_KEY.get(key, key)
+            if alias in settings and settings[alias] is not None:
+                new_lines.append(f"{key}={settings[alias]}")
+                updated_keys.add(key)
+                continue
+        new_lines.append(raw_line)
+    for alias, value in settings.items():
+        key = _LLM_ALIAS_TO_KEY.get(alias)
+        if key and key not in updated_keys and value is not None:
+            new_lines.append(f"{key}={value}")
+            updated_keys.add(key)
+    temp_path = env_path.with_name(env_path.name + ".tmp")
+    temp_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    temp_path.replace(env_path)
+    # Web 进程自身也可能直接调用 LLM；同步进程环境可让它无需重启立即使用新配置。
+    for alias, value in settings.items():
+        key = _LLM_ALIAS_TO_KEY.get(alias)
+        if key and value is not None:
+            os.environ[key] = str(value)
+
+
+def _llm_config_revision() -> str:
+    env_path = _llm_env_path()
+    if not env_path.exists():
+        return ""
+    stat = env_path.stat()
+    return f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+
+
+def _normalize_model(raw: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(raw.get("id", "")).strip(),
+        "name": str(raw.get("name", "")).strip(),
+        "base_url": str(raw.get("base_url", "")).strip(),
+        "api_key": str(raw.get("api_key", "")).strip(),
+        "model": str(raw.get("model", "")).strip(),
+        "timeout": _to_int(raw.get("timeout"), 300),
+        "max_retries": _to_int(raw.get("max_retries"), 3),
+        "retry_initial_delay": _to_float(raw.get("retry_initial_delay"), 2),
+        "retry_max_delay": _to_float(raw.get("retry_max_delay"), 30),
+        "stream": _parse_bool_str(raw.get("stream"), False),
+        "verify_ssl": _parse_bool_str(raw.get("verify_ssl"), True),
+    }
+
+
+def _sync_model_to_env(model: dict[str, Any]) -> None:
+    _write_llm_env(
+        {
+            "base_url": model.get("base_url", ""),
+            "api_key": model.get("api_key", ""),
+            "model": model.get("model", ""),
+            "timeout": model.get("timeout", 300),
+            "max_retries": model.get("max_retries", 3),
+            "retry_initial_delay": model.get("retry_initial_delay", 2),
+            "retry_max_delay": model.get("retry_max_delay", 30),
+            "stream": "true" if model.get("stream") else "false",
+            "verify_ssl": "true" if model.get("verify_ssl") else "false",
+        }
+    )
+
+
+def _read_models_store() -> dict[str, Any]:
+    if LLM_MODELS_FILE.exists():
+        try:
+            data = json.loads(LLM_MODELS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict) and isinstance(data.get("models"), list):
+                return data
+        except Exception:
+            pass
+    env_values = _read_llm_env_values()
+    default_model = _normalize_model(
+        {
+            "id": "default",
+            "name": "默认模型",
+            "base_url": env_values.get("base_url", ""),
+            "api_key": env_values.get("api_key", ""),
+            "model": env_values.get("model", ""),
+            "timeout": env_values.get("timeout", 300),
+            "max_retries": env_values.get("max_retries", 3),
+            "retry_initial_delay": env_values.get("retry_initial_delay", 2),
+            "retry_max_delay": env_values.get("retry_max_delay", 30),
+            "stream": env_values.get("stream", "false"),
+            "verify_ssl": env_values.get("verify_ssl", "true"),
+        }
+    )
+    store: dict[str, Any] = {
+        "models": [default_model],
+        "active_id": default_model["id"] if default_model["base_url"] else "",
+    }
+    _write_models_store(store)
+    return store
+
+
+def _active_llm_summary() -> dict[str, Any]:
+    store = _read_models_store()
+    active_id = str(store.get("active_id", ""))
+    models = store.get("models", []) if isinstance(store.get("models"), list) else []
+    active = next((item for item in models if isinstance(item, dict) and str(item.get("id", "")) == active_id), {})
+    return {
+        "active_id": active_id,
+        "name": str(active.get("name", "")),
+        "model": str(active.get("model", "")),
+        "config_revision": _llm_config_revision(),
+    }
+
+
+def _write_models_store(store: dict[str, Any]) -> None:
+    LLM_MODELS_FILE.write_text(
+        json.dumps(store, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+@app.get("/api/llm-settings")
+def api_get_llm_settings() -> JSONResponse:
+    store = _read_models_store()
+    return JSONResponse(
+        {
+            "ok": True,
+            "models": store.get("models", []),
+            "active_id": store.get("active_id", ""),
+            "config_revision": _llm_config_revision(),
+        }
+    )
+
+
+@app.post("/api/llm-settings")
+async def api_set_llm_settings(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON 对象。"}, status_code=400)
+    raw_model = body.get("model")
+    if not isinstance(raw_model, dict):
+        return JSONResponse({"ok": False, "message": "缺少 model 字段。"}, status_code=400)
+    model = _normalize_model(raw_model)
+    if not model["name"]:
+        return JSONResponse({"ok": False, "message": "模型别名（name）不能为空。"}, status_code=400)
+    if not model["base_url"] or not model["api_key"] or not model["model"]:
+        return JSONResponse({"ok": False, "message": "Base URL、API Key、模型均为必填项。"}, status_code=400)
+
+    store = _read_models_store()
+    models: list[dict[str, Any]] = list(store.get("models", []))
+    model_id = model["id"]
+    if model_id:
+        index = next((i for i, m in enumerate(models) if str(m.get("id", "")) == model_id), -1)
+        if index < 0:
+            return JSONResponse({"ok": False, "message": "未找到要更新的模型。"}, status_code=404)
+        models[index] = {**models[index], **model}
+    else:
+        model_id = uuid.uuid4().hex[:12]
+        model["id"] = model_id
+        models.append(model)
+
+    store["models"] = models
+    set_active = bool(body.get("set_active"))
+    active_id = str(store.get("active_id", ""))
+    applied_live = set_active or not active_id or active_id == model_id
+    if set_active or not active_id:
+        store["active_id"] = model_id
+    if applied_live:
+        _sync_model_to_env(next(m for m in models if m["id"] == model_id))
+
+    _write_models_store(store)
+    return JSONResponse(
+        {
+            "ok": True,
+            "models": models,
+            "active_id": store.get("active_id", ""),
+            "saved_id": model_id,
+            "applied_live": applied_live,
+            "config_revision": _llm_config_revision(),
+        }
+    )
+
+
+@app.post("/api/llm-settings/activate")
+async def api_activate_llm_model(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    model_id = str(body.get("id", "")).strip()
+    store = _read_models_store()
+    models: list[dict[str, Any]] = list(store.get("models", []))
+    target = next((m for m in models if m["id"] == model_id), None)
+    if target is None:
+        return JSONResponse({"ok": False, "message": "未找到该模型。"}, status_code=404)
+    store["active_id"] = model_id
+    _write_models_store(store)
+    _sync_model_to_env(target)
+    return JSONResponse(
+        {
+            "ok": True,
+            "models": models,
+            "active_id": model_id,
+            "applied_live": True,
+            "config_revision": _llm_config_revision(),
+        }
+    )
+
+
+@app.post("/api/llm-settings/delete")
+async def api_delete_llm_model(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    model_id = str(body.get("id", "")).strip()
+    store = _read_models_store()
+    models: list[dict[str, Any]] = list(store.get("models", []))
+    new_models = [m for m in models if m["id"] != model_id]
+    if len(new_models) == len(models):
+        return JSONResponse({"ok": False, "message": "未找到该模型。"}, status_code=404)
+    store["models"] = new_models
+    if store.get("active_id") == model_id:
+        store["active_id"] = new_models[0]["id"] if new_models else ""
+        if new_models:
+            _sync_model_to_env(new_models[0])
+    _write_models_store(store)
+    return JSONResponse(
+        {
+            "ok": True,
+            "models": new_models,
+            "active_id": store.get("active_id", ""),
+            "applied_live": bool(store.get("active_id")),
+            "config_revision": _llm_config_revision(),
+        }
+    )
 
 
 @app.get("/api/file-preview")
@@ -1503,6 +2161,294 @@ COMMANDS: dict[str, list[str]] = {
     "graph-run": ["--workers", "2"],
 }
 
+AUTO_RECOVERY_MAX_ATTEMPTS = 2
+
+_NON_RECOVERABLE_ERROR_PATTERNS = (
+    "api key",
+    "401",
+    "403",
+    "unauthorized",
+    "未授权",
+    "无效或未授权",
+    "permission denied",
+    "access denied",
+    "用户暂停",
+    "已暂停",
+)
+
+_TRANSIENT_ERROR_PATTERNS = (
+    "timeout",
+    "timed out",
+    "remote end closed",
+    "remotedisconnected",
+    "temporarily unavailable",
+    "rate limit",
+    "llm 请求失败",
+    "流式响应为空",
+    "connection reset",
+    "无进展超时",
+)
+
+_PARSE_ERROR_PATTERNS = (
+    "jsondecodeerror",
+    "expecting value",
+    "解析失败",
+    "未返回合法 json",
+    "invalid json",
+)
+
+
+def _run_process_once(command: str, run_root: Path) -> int:
+    global CURRENT_PROCESS
+    args = ["src/main.py", command, *COMMANDS.get(command, [])]
+    env = os.environ.copy()
+    env["PYTHONUTF8"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUNBUFFERED"] = "1"
+    env["BID_AGENT_ROOT"] = str(run_root)
+    env["BID_AGENT_CONFIG_ROOT"] = str(ROOT)
+    process = subprocess.Popen(
+        [sys.executable, *args],
+        cwd=str(ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=False,
+        bufsize=0,
+    )
+    CURRENT_PROCESS = process
+    assert process.stdout is not None
+    output_queue: queue.Queue[bytes | None] = queue.Queue()
+
+    def _read_output() -> None:
+        assert process.stdout is not None
+        while True:
+            raw_line = process.stdout.readline()
+            if not raw_line:
+                break
+            output_queue.put(raw_line)
+        output_queue.put(None)
+
+    threading.Thread(target=_read_output, daemon=True, name=f"output-{process.pid}").start()
+    try:
+        stall_timeout = max(60, int(os.environ.get("BID_AGENT_STAGE_STALL_TIMEOUT", "900")))
+    except ValueError:
+        stall_timeout = 900
+    last_progress = time.monotonic()
+    last_heartbeat = 0.0
+    output_closed = False
+    timed_out = False
+    while True:
+        try:
+            raw_line = output_queue.get(timeout=1)
+            if raw_line is None:
+                output_closed = True
+            else:
+                line = _decode_log_bytes(raw_line).rstrip("\n").rstrip("\r")
+                if line:
+                    _append_log(line)
+                    last_progress = time.monotonic()
+        except queue.Empty:
+            pass
+
+        now = time.monotonic()
+        if now - last_heartbeat >= 5:
+            SUPERVISOR.heartbeat(
+                run_root,
+                command=command,
+                worker_pid=process.pid,
+                progress_at=datetime.fromtimestamp(time.time() - (now - last_progress)).isoformat(timespec="seconds"),
+            )
+            last_heartbeat = now
+        if process.poll() is None and now - last_progress > stall_timeout:
+            _append_log(f"[错误] {command} 连续 {stall_timeout} 秒无进展超时，正在终止并自动恢复。")
+            _terminate_process_tree(process)
+            timed_out = True
+            break
+        if process.poll() is not None and output_closed:
+            break
+    try:
+        process.wait(timeout=10 if timed_out else None)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        finally:
+            process.wait(timeout=5)
+    CURRENT_PROCESS = None
+    return 124 if timed_out else int(process.returncode or 0)
+
+
+def _terminate_process_tree(process: subprocess.Popen | None) -> None:
+    if not process or process.poll() is not None:
+        return
+    _terminate_pid_tree(process.pid)
+
+
+def _terminate_pid_tree(pid: int) -> None:
+    if pid <= 0:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        else:
+            os.kill(pid, 15)
+    except Exception:
+        pass
+
+
+def _error_text(lines: list[str]) -> str:
+    return "\n".join(str(line) for line in lines).lower()
+
+
+def _is_non_recoverable_error(lines: list[str]) -> bool:
+    text = _error_text(lines)
+    return any(pattern in text for pattern in _NON_RECOVERABLE_ERROR_PATTERNS)
+
+
+def _is_transient_error(lines: list[str]) -> bool:
+    text = _error_text(lines)
+    return any(pattern in text for pattern in _TRANSIENT_ERROR_PATTERNS)
+
+
+def _is_parse_error(lines: list[str]) -> bool:
+    text = _error_text(lines)
+    return any(pattern in text for pattern in _PARSE_ERROR_PATTERNS)
+
+
+def _stage_index(command: str) -> int:
+    commands = [str(step["command"]) for step in WORKFLOW_STEPS]
+    try:
+        return commands.index(command)
+    except ValueError:
+        return -1
+
+
+def _missing_required_artifacts(command: str, run_root: Path) -> list[str]:
+    try:
+        spec = stage_spec_by_command(command)
+    except KeyError:
+        return []
+    missing: list[str] = []
+    for artifact in spec.requires:
+        if not artifact_exists(run_root, artifact):
+            missing.append(artifact.path)
+    return missing
+
+
+def _producer_command_for_artifact(artifact_path: str, before_command: str) -> str:
+    before_idx = _stage_index(before_command)
+    if before_idx < 0:
+        return ""
+    for step in reversed(WORKFLOW_STEPS[:before_idx]):
+        for produced in step.get("produces", []):
+            produced_path = _artifact_path(produced)
+            if produced_path == artifact_path:
+                return str(step.get("command", ""))
+            if "*" in produced_path and Path(produced_path).parent == Path(artifact_path).parent:
+                return str(step.get("command", ""))
+    return ""
+
+
+def _dependency_recovery_commands(command: str, run_root: Path) -> list[str]:
+    commands: list[str] = []
+    try:
+        spec = stage_spec_by_command(command)
+    except KeyError:
+        spec = None
+    if spec is not None:
+        for required in spec.requires:
+            producer = _producer_command_for_artifact(required.path, command)
+            producer_step = _step_by_command(producer) if producer else None
+            producer_spec = stage_spec_by_command(producer) if producer else None
+            if (
+                required.kind == "glob"
+                and producer_step
+                and producer_spec is not None
+                and producer_spec.validator == "collection"
+                and not stage_outputs_ready(run_root, str(producer_step.get("id", "")))
+            ):
+                commands.append(producer)
+    for missing in _missing_required_artifacts(command, run_root):
+        producer = _producer_command_for_artifact(missing, command)
+        if producer and producer not in commands:
+            commands.append(producer)
+    return commands
+
+
+def _save_recovery_state(run_root: Path, payload: dict[str, Any]) -> None:
+    _write_json_file(run_root / "workspace" / "recovery_state.json", payload)
+
+
+def _attempt_auto_recovery(command: str, run_root: Path, error_lines: list[str]) -> int | None:
+    if PAUSE_REQUESTED or _is_non_recoverable_error(error_lines):
+        return None
+
+    dependency_commands = _dependency_recovery_commands(command, run_root)
+    recoverable = bool(dependency_commands) or _is_transient_error(error_lines) or _is_parse_error(error_lines)
+    if not recoverable:
+        return None
+
+    for attempt in range(1, AUTO_RECOVERY_MAX_ATTEMPTS + 1):
+        reason = "缺少前置产物" if dependency_commands else ("LLM/网络临时异常" if _is_transient_error(error_lines) else "模型输出解析异常")
+        action = "回退补跑前置阶段后重试" if dependency_commands else "等待后自动重试当前阶段"
+        payload = {
+            "command": command,
+            "attempt": attempt,
+            "max_attempts": AUTO_RECOVERY_MAX_ATTEMPTS,
+            "reason": reason,
+            "action": action,
+            "dependency_commands": dependency_commands,
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        _save_recovery_state(run_root, payload)
+        save_run_state(
+            run_root,
+            {"root_dir": str(run_root), "current_command": command, "recovery": payload},
+            stage=command,
+            status="recovering",
+            message=f"正在尝试自主修复：{reason}；{action}（{attempt}/{AUTO_RECOVERY_MAX_ATTEMPTS}）",
+        )
+        _append_log(f"[自动恢复] {command}: {reason}；{action}（{attempt}/{AUTO_RECOVERY_MAX_ATTEMPTS}）")
+
+        for dependency in dependency_commands:
+            if PAUSE_REQUESTED:
+                return None
+            _append_log(f"[自动恢复] 补跑前置阶段: {dependency}")
+            dep_exit = _run_process_once(dependency, run_root)
+            if dep_exit != 0:
+                _append_log(f"[自动恢复] 前置阶段 {dependency} 补跑失败，停止自动恢复。")
+                return None
+
+        if not dependency_commands:
+            time.sleep(min(3 * attempt, 6))
+
+        save_run_state(
+            run_root,
+            {"root_dir": str(run_root), "current_command": command, "recovery": payload},
+            stage=command,
+            status="retrying",
+            message=f"自动修复后重试 {command}（{attempt}/{AUTO_RECOVERY_MAX_ATTEMPTS}）",
+        )
+        _append_log(f"[自动恢复] 重试阶段: {command}")
+        retry_log_start = len(LOG_LINES)
+        retry_exit = _run_process_once(command, run_root)
+        if retry_exit == 0:
+            _append_log(f"[自动恢复] {command} 已恢复成功。")
+            return 0
+        retry_error_lines = LOG_LINES[retry_log_start:][-40:]
+        error_lines = retry_error_lines or error_lines
+        dependency_commands = _dependency_recovery_commands(command, run_root)
+        if PAUSE_REQUESTED or _is_non_recoverable_error(error_lines):
+            return None
+
+    _append_log(f"[自动恢复] {command} 已达到最大重试次数，停止自动恢复。")
+    return None
+
 
 def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     global RUNNING, CURRENT_TASK, CURRENT_PROCESS, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
@@ -1513,6 +2459,7 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     CURRENT_RUN_ROOT = run_root
     PAUSE_REQUESTED = False
 
+    log_start = len(LOG_LINES)
     args = ["src/main.py", command, *COMMANDS.get(command, [])]
     _append_log(f"--- [{time.strftime('%H:%M:%S')}] 开始: python {' '.join(args)} ---")
     _append_log(f"[运行目录] {run_root}")
@@ -1527,31 +2474,7 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
         )
 
     try:
-        env = os.environ.copy()
-        env["PYTHONUTF8"] = "1"
-        env["PYTHONIOENCODING"] = "utf-8"
-        env["BID_AGENT_ROOT"] = str(run_root)
-        env["BID_AGENT_CONFIG_ROOT"] = str(ROOT)
-        process = subprocess.Popen(
-            [sys.executable, *args],
-            cwd=str(ROOT),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=False,
-            bufsize=1,
-        )
-        CURRENT_PROCESS = process
-        assert process.stdout is not None
-        while True:
-            raw_line = process.stdout.readline()
-            if not raw_line:
-                break
-            line = _decode_log_bytes(raw_line).rstrip("\n").rstrip("\r")
-            if line:
-                _append_log(line)
-        process.wait()
-        exit_code = process.returncode
+        exit_code = _run_process_once(command, run_root)
     except Exception as exc:
         _append_log(f"[错误] 命令执行异常: {exc}")
         exit_code = 1
@@ -1568,6 +2491,22 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
             if state_status == "paused"
             else (f"{command} 执行完成" if exit_code == 0 else f"{command} 执行失败，exit_code={exit_code}")
         )
+        # 失败时保存最后 40 行日志，供编排器/前端诊断和恢复
+        if state_status == "error":
+            error_lines = LOG_LINES[log_start:][-40:]
+            error_path = run_root / "workspace" / "run_error.json"
+            try:
+                _write_json_file(error_path, {"command": command, "exit_code": exit_code, "lines": error_lines})
+            except Exception:
+                pass
+            recovered_exit = _attempt_auto_recovery(command, run_root, error_lines)
+            if recovered_exit == 0:
+                exit_code = 0
+                state_status = "ok"
+                state_message = f"{command} 自动恢复后执行完成"
+            elif recovered_exit is None and not was_paused:
+                state_status = "recovery_failed"
+                state_message = f"{command} 自动恢复未成功，exit_code={exit_code}"
         save_run_state(
             run_root,
             {"root_dir": str(run_root), "current_command": command},
@@ -1608,7 +2547,7 @@ def _step_outputs_present(root: Path, command: str) -> bool:
     step = _step_by_command(command)
     if not step:
         return False
-    return all(_artifact_present(root, artifact) for artifact in step.get("produces", []))
+    return stage_outputs_ready(root, str(step.get("id", "")))
 
 
 def _latest_tree_mtime(root: Path) -> float:
@@ -1628,11 +2567,7 @@ def _latest_tree_mtime(root: Path) -> float:
 
 def _run_progress_summary(run_root: Path) -> dict[str, Any]:
     core_steps = [step for step in WORKFLOW_STEPS if step.get("kind") != "utility"]
-    done_count = sum(
-        1
-        for step in core_steps
-        if all(_artifact_present(run_root, artifact) for artifact in step.get("produces", []))
-    )
+    done_count = sum(1 for step in core_steps if stage_outputs_ready(run_root, str(step.get("id", ""))))
     run_state = _read_run_state(run_root)
     failed_command = _command_for_stage(str(run_state.get("stage", "")))
     failed_step = next((step for step in core_steps if step["command"] == failed_command), None)
@@ -1687,6 +2622,7 @@ async def api_start_run(request: Request) -> JSONResponse:
 
     run_name = str(body.get("name", "")).strip()
     project_type = str(body.get("project_type", "")).strip()
+    expected_pages = int(body.get("expected_pages", 0) or 0)
     if not run_name:
         return JSONResponse(
             {"ok": False, "message": "请先设置工作空间名称。"},
@@ -1694,7 +2630,7 @@ async def api_start_run(request: Request) -> JSONResponse:
         )
 
     try:
-        run_id, run_root = _create_run_workspace(run_name, project_type)
+        run_id, run_root = _create_run_workspace(run_name, project_type, expected_pages=expected_pages)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": f"创建运行工作空间失败: {exc}"}, status_code=500)
 
@@ -1713,6 +2649,7 @@ def api_runs() -> JSONResponse:
         run_dirs = [path for path in RUNS_DIR.iterdir() if path.is_dir()]
         for run_root in sorted(run_dirs, key=_latest_tree_mtime, reverse=True):
             progress = _run_progress_summary(run_root)
+            profile = load_project_profile(run_root)
             runs.append(
                 {
                     "id": run_root.name,
@@ -1720,6 +2657,9 @@ def api_runs() -> JSONResponse:
                     "relative_root": str(run_root.relative_to(ROOT)) if run_root.is_relative_to(ROOT) else str(run_root),
                     "active": run_root == ACTIVE_RUN_ROOT,
                     "progress": progress,
+                    "project_type": profile.get("project_type", ""),
+                    "project_label": profile.get("label", ""),
+                    "expected_pages": profile.get("expected_pages", 0),
                 }
             )
     return JSONResponse({"ok": True, "active_run_id": ACTIVE_RUN_ID, "runs": runs})
@@ -1753,7 +2693,7 @@ async def api_select_run(request: Request) -> JSONResponse:
 @app.post("/api/run-command")
 async def api_run_command(request: Request) -> JSONResponse:
     global RUNNING
-    if RUNNING:
+    if RUNNING or SUPERVISOR.is_running():
         return JSONResponse(
             {"ok": False, "message": "当前已有任务正在运行，请等待完成。"},
             status_code=409,
@@ -1777,7 +2717,8 @@ async def api_run_command(request: Request) -> JSONResponse:
             {"ok": False, "message": "请先点击“开始生成”，创建本次运行工作空间后再执行流程命令。"},
             status_code=409,
         )
-    if command not in {"validate", "init-demo"} and str(body.get("run_id", "")).strip() != ACTIVE_RUN_ID:
+    sent_run_id = str(body.get("run_id", "")).strip()
+    if sent_run_id and sent_run_id != ACTIVE_RUN_ID:
         return JSONResponse(
             {"ok": False, "message": "运行工作空间已变化，请刷新页面后重新开始。"},
             status_code=409,
@@ -1789,28 +2730,43 @@ async def api_run_command(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "message": f"命令已启动: {command}"})
 
 
+@app.post("/api/start-pipeline")
+async def api_start_pipeline(request: Request) -> JSONResponse:
+    if RUNNING or SUPERVISOR.is_running():
+        return JSONResponse({"ok": False, "message": "当前已有任务或流水线正在运行。"}, status_code=409)
+    if ACTIVE_RUN_ROOT is None:
+        return JSONResponse({"ok": False, "message": "请先创建并选择工作空间。"}, status_code=409)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    sent_run_id = str(body.get("run_id", "")).strip()
+    if sent_run_id and sent_run_id != ACTIVE_RUN_ID:
+        return JSONResponse({"ok": False, "message": "工作空间已变化，请刷新后重试。"}, status_code=409)
+    start_command = str(body.get("start_command", "")).strip()
+    if start_command and start_command not in auto_run_commands():
+        return JSONResponse({"ok": False, "message": f"无效起始阶段: {start_command}"}, status_code=400)
+    started = SUPERVISOR.start(ACTIVE_RUN_ID, _active_root(), _run_sync, start_command=start_command)
+    if not started:
+        return JSONResponse({"ok": False, "message": "流水线未启动，已有调度线程正在运行。"}, status_code=409)
+    return JSONResponse({"ok": True, "message": "后端自动流水线已启动。"})
+
+
 @app.post("/api/pause-run")
 def api_pause_run() -> JSONResponse:
     global PAUSE_REQUESTED
-    if not RUNNING:
+    if not RUNNING and not SUPERVISOR.is_running():
         return JSONResponse({"ok": True, "message": "当前没有正在运行的任务。"})
 
     PAUSE_REQUESTED = True
+    SUPERVISOR.pause()
     process = CURRENT_PROCESS
     _append_log(f"[暂停] 正在停止当前任务: {CURRENT_TASK}")
-    if process and process.poll() is None:
-        try:
-            if os.name == "nt":
-                subprocess.run(
-                    ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    check=False,
-                )
-            else:
-                process.terminate()
-        except Exception as exc:
-            return JSONResponse({"ok": False, "message": f"暂停失败: {exc}"}, status_code=500)
+    if process:
+        _terminate_process_tree(process)
+    else:
+        control = SUPERVISOR.load(_active_root())
+        _terminate_pid_tree(int(control.get("worker_pid", 0) or 0))
     return JSONResponse({"ok": True, "message": "已发送暂停指令。"})
 
 
@@ -1857,7 +2813,11 @@ async def api_upload(category: str = "tender", files: list[UploadFile] = File(..
     if category not in VALID_CATEGORIES:
         return JSONResponse({"ok": False, "message": f"无效 category: {category}"}, status_code=400)
 
-    dest_dir = ROOT / "sources" / category
+    active_root = _active_root()
+    if active_root == ROOT:
+        return JSONResponse({"ok": False, "message": "请先选择或创建工作空间。"}, status_code=400)
+
+    dest_dir = active_root / "sources" / category
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     saved: list[str] = []
@@ -1865,11 +2825,6 @@ async def api_upload(category: str = "tender", files: list[UploadFile] = File(..
         content = await f.read()
         dest = dest_dir / f.filename
         dest.write_bytes(content)
-        active_root = _active_root()
-        if active_root != ROOT and not RUNNING:
-            active_dest = active_root / "sources" / category / f.filename
-            active_dest.parent.mkdir(parents=True, exist_ok=True)
-            active_dest.write_bytes(content)
         saved.append(f.filename)
         _append_log(f"[上传] {category} → {f.filename}")
 
@@ -2095,6 +3050,7 @@ def api_final_md_pending() -> JSONResponse:
 # ---------------------------------------------------------------
 
 _PENDING_DOC_EDIT: dict[Path, dict[str, Any]] = {}
+_LAST_BACKUP: dict[Path, Path] = {}
 
 
 def triggerDocRefresh() -> None:
@@ -2288,6 +3244,7 @@ def _replace_final_md_block(root: Path, block_id: str, new_text: str, instructio
     new_text_full = "\n".join(merged) + ("\n" if original.endswith("\n") else "")
 
     backup_path = _backup_final_md(root, original, f"block_{block_id}")
+    _LAST_BACKUP[root.resolve()] = backup_path
     path.write_text(new_text_full, encoding="utf-8")
 
     review = {
@@ -2315,6 +3272,7 @@ def _overwrite_final_md(root: Path, new_md: str, instruction: str, source: str) 
         raise FileNotFoundError("final.md 不存在，请先执行 build-md。")
     original = path.read_text(encoding="utf-8", errors="ignore")
     backup_path = _backup_final_md(root, original, "chat_edit")
+    _LAST_BACKUP[root.resolve()] = backup_path
     new_clean = new_md.strip("\n") + "\n"
     path.write_text(new_clean, encoding="utf-8")
     review = {
@@ -2586,6 +3544,152 @@ def api_final_doc_pending() -> JSONResponse:
     return JSONResponse({"ok": True, "pending": pending})
 
 
+@app.post("/api/final-doc/undo-rewrite")
+def api_final_doc_undo_rewrite() -> JSONResponse:
+    root = _active_root()
+    key = root.resolve()
+    backup_path = _LAST_BACKUP.pop(key, None)
+    if not backup_path or not backup_path.exists():
+        return JSONResponse({"ok": False, "message": "没有可撤销的改写。"}, status_code=404)
+    final_md = _final_md_path(root)
+    original = backup_path.read_text(encoding="utf-8")
+    final_md.write_text(original, encoding="utf-8")
+    _append_log("[WYSIWYG] 已撤销上次改写，恢复到上一版本。")
+    triggerDocRefresh()
+    return JSONResponse({"ok": True, "message": "已撤销。"})
+
+
+def _sse_event(event: str, data: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+def _sse_error(message: str):
+    def _gen():
+        yield _sse_event("error", {"message": message})
+    return _gen()
+
+
+@app.post("/api/final-doc/rewrite-block/stream")
+async def api_final_doc_rewrite_block_stream(request: Request) -> StreamingResponse:
+    root = _active_root()
+    path = _final_md_path(root)
+    if not path.exists():
+        return StreamingResponse(
+            _sse_error("final.md 不存在，请先执行 build-md。"),
+            media_type="text/event-stream",
+        )
+    if RUNNING:
+        return StreamingResponse(
+            _sse_error("当前已有任务正在运行。"),
+            media_type="text/event-stream",
+        )
+    try:
+        body = await request.json()
+    except Exception:
+        return StreamingResponse(
+            _sse_error("请求体必须是 JSON。"),
+            media_type="text/event-stream",
+        )
+
+    line_number = int(body.get("line_number", 0))
+    instruction = str(body.get("instruction", "")).strip()
+    if line_number <= 0 or not instruction:
+        return StreamingResponse(
+            _sse_error("请提供 line_number 和修改意见。"),
+            media_type="text/event-stream",
+        )
+
+    original = path.read_text(encoding="utf-8", errors="ignore")
+    blocks = _parse_final_md_blocks(original)
+    target = next((b for b in blocks if b.get("start_line") == line_number), None)
+    if target is None:
+        return StreamingResponse(
+            _sse_error(f"未找到第 {line_number} 行对应的内容块。"),
+            media_type="text/event-stream",
+        )
+
+    full_text = target.get("text") or target.get("raw", "")
+    is_table = target.get("type") == "table"
+    context_start = max(0, blocks.index(target) - 1)
+    context_end = min(len(blocks), blocks.index(target) + 2)
+    context_blocks = blocks[context_start:context_end]
+
+    if is_table:
+        header = target.get("header", []) or []
+        rows = target.get("rows", []) or []
+        table_str = "| " + " | ".join(header) + " |"
+        for row in rows:
+            table_str += "\n| " + " | ".join(row) + " |"
+        context_str = "\n\n".join(b.get("raw", "") for b in context_blocks if b != target)
+        sys_msg = "你是标书表格改写子 agent。只改写表格中用户要求的单元格内容，严格保留表格结构（行列数不变）。输出完整表格 Markdown，不要解释或代码块。"
+        usr_msg = f"上下文：\n{context_str}\n\n当前表格（第 {line_number} 行）：\n{table_str}\n\n修改意见：{instruction}"
+    else:
+        sys_msg = "你是标书 Word 精确改写子 agent。输出该块的完整改写结果（保持 Markdown 格式），保留原有结构，直接输出最终文本，不要解释或代码块。"
+        usr_msg = "\n".join(b.get("raw", "") for b in context_blocks) + f"\n\n需要改写的块（第 {line_number} 行）：\n{full_text}\n\n修改意见：{instruction}"
+
+    async def stream():
+        from llm_client import chat_stream_chunks
+        import threading
+
+        try:
+            yield _sse_event("start", {"line_number": line_number})
+            all_chunks = []
+            loop = asyncio.get_event_loop()
+            q: asyncio.Queue = asyncio.Queue()
+            done_flag = object()
+
+            def _run_llm():
+                try:
+                    for chunk_type, chunk_text in chat_stream_chunks(
+                        [{"role": "system", "content": sys_msg}, {"role": "user", "content": usr_msg}],
+                        temperature=0.3,
+                    ):
+                        loop.call_soon_threadsafe(q.put_nowait, (chunk_type, chunk_text))
+                except Exception as exc:
+                    loop.call_soon_threadsafe(q.put_nowait, ("error", str(exc)))
+                finally:
+                    loop.call_soon_threadsafe(q.put_nowait, done_flag)
+
+            thread = threading.Thread(target=_run_llm, daemon=True)
+            thread.start()
+            while True:
+                item = await q.get()
+                if item is done_flag:
+                    break
+                chunk_type, chunk_text = item
+                if chunk_type == "error":
+                    yield _sse_event("error", {"message": chunk_text})
+                    return
+                if chunk_type == "reasoning":
+                    print(f"[SSE] reasoning: {chunk_text[:60]!r}", flush=True)
+                    yield _sse_event("reasoning", {"text": chunk_text})
+                else:
+                    all_chunks.append(chunk_text)
+                    print(f"[SSE] content: {chunk_text[:60]!r}", flush=True)
+                    yield _sse_event("chunk", {"text": chunk_text})
+
+            generated = "".join(all_chunks).strip().strip("`").strip()
+            if generated:
+                _PENDING_DOC_EDIT[root.resolve()] = {
+                    "kind": "selection_rewrite",
+                    "block_id": target["block_id"],
+                    "instruction": instruction,
+                    "line_number": line_number,
+                    "selected_text": full_text,
+                    "old_text": full_text,
+                    "new_text": generated,
+                    "source": "ai_chat_rewrite",
+                    "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                _append_log(f"[WYSIWYG] 第 {line_number} 行流式改写完成。")
+                triggerDocRefresh()
+            yield _sse_event("done", {"block_id": target["block_id"], "line_number": line_number, "new_text": generated})
+        except Exception as exc:
+            yield _sse_event("error", {"message": str(exc)})
+
+    return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.get("/api/download/final-md", response_model=None)
 def download_final_md() -> FileResponse | JSONResponse:
     path = _active_root() / "outputs" / "final.md"
@@ -2629,6 +3733,35 @@ def api_global_review() -> JSONResponse:
 #  Clean workspace
 # ---------------------------------------------------------------
 
+@app.post("/api/delete-run")
+async def api_delete_run(request: Request) -> JSONResponse:
+    global ACTIVE_RUN_ID, ACTIVE_RUN_ROOT
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+
+    run_id = str(body.get("run_id", "")).strip()
+    if not run_id or Path(run_id).name != run_id:
+        return JSONResponse({"ok": False, "message": "无效工作空间。"}, status_code=400)
+
+    run_root = (RUNS_DIR / run_id).resolve()
+    runs_root = RUNS_DIR.resolve()
+    if not run_root.is_relative_to(runs_root) or not run_root.exists() or not run_root.is_dir():
+        return JSONResponse({"ok": False, "message": f"工作空间不存在: {run_id}"}, status_code=404)
+
+    shutil.rmtree(str(run_root))
+
+    if run_id == ACTIVE_RUN_ID:
+        ACTIVE_RUN_ID = ""
+        ACTIVE_RUN_ROOT = None
+        if ACTIVE_RUN_FILE.exists():
+            ACTIVE_RUN_FILE.write_text("", encoding="utf-8")
+
+    _append_log(f"[工作空间] 已删除: {run_id}")
+    return JSONResponse({"ok": True, "message": f"工作空间 {run_id} 已删除。"})
+
+
 @app.post("/api/clean-workspace")
 def api_clean_workspace() -> JSONResponse:
     global LOG_LINES
@@ -2649,6 +3782,24 @@ def api_clean_workspace() -> JSONResponse:
 # ---------------------------------------------------------------
 #  Startup
 # ---------------------------------------------------------------
+
+
+@app.on_event("startup")
+def reconcile_interrupted_pipeline() -> None:
+    _load_active_run_from_disk()
+    if ACTIVE_RUN_ROOT is None:
+        return
+    if SUPERVISOR.reconcile(ACTIVE_RUN_ID, ACTIVE_RUN_ROOT, _run_sync):
+        _append_log(f"[自动恢复] 已接管工作空间流水线: {ACTIVE_RUN_ID}")
+
+
+@app.get("/{full_path:path}")
+async def spa_fallback(full_path: str) -> HTMLResponse:
+    if USE_VUE and not full_path.startswith("api/") and full_path != "static":
+        html = (VUE_DIST_DIR / "index.html").read_text(encoding="utf-8")
+        return HTMLResponse(html)
+    return HTMLResponse("<h1>Not Found</h1>", status_code=404)
+
 
 if __name__ == "__main__":
     import uvicorn

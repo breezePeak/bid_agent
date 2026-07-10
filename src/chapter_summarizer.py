@@ -182,12 +182,24 @@ def _existing_summary_path(root: Path, chapter_id: str) -> Path | None:
 
 def summarize_all_chapters(root: Path | None = None) -> list[Path]:
     root = root or project_root()
+    from stage_validation import chapter_ids as valid_chapter_ids, missing_ids_for_stage
+
     outline = load_outline(root)
+    pending_ids = set(missing_ids_for_stage(root, "summarize_chapters"))
+    available_ids = valid_chapter_ids(root)
     paths: list[Path] = []
     errors: list[str] = []
     for chapter in outline.get("chapters", []):
         chapter_id = str(chapter.get("id"))
+        if chapter_id not in available_ids:
+            errors.append(f"章节 {chapter_id} 正文不存在，无法生成摘要")
+            continue
         try:
+            if chapter_id not in pending_ids:
+                existing_path = _existing_summary_path(root, chapter_id)
+                if existing_path:
+                    paths.append(existing_path)
+                continue
             existing_path = _existing_summary_path(root, chapter_id)
             if existing_path:
                 print(f"[跳过] 章节 {chapter_id} 摘要已存在: {existing_path}")

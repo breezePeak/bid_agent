@@ -26,6 +26,7 @@ from pipeline_registry import stage_spec_by_id
 from quality_gates import final_review_status, validate_template_fill_report
 from score_coverage_matrix import build_score_coverage_matrix
 from source_trace import build_source_trace_index
+from stage_validation import chapter_ids, context_ids, review_ids, summary_ids
 from subagent_runner import run_write_all as concurrent_write_all
 from template_evidence import build_template_evidence
 from utils import ensure_dirs, ensure_file, project_root, read_json, stringify
@@ -389,7 +390,7 @@ def select_contexts_node(state) -> dict:
     _start_stage(state, "select_contexts", "选择章节上下文")
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
-    existing_context_ids = _existing_chapter_ids(root, "contexts/*_context.json", "_context")
+    existing_context_ids = sorted(context_ids(root))
     if _is_resume(state):
         pending_ids = _missing_ids(expected_chapter_ids, existing_context_ids)
         if not pending_ids:
@@ -443,7 +444,7 @@ def write_chapters_node(state) -> dict:
     effective_workers = max(1, min(workers, 5))
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
-    existing_chapter_ids = _existing_chapter_ids(root, "chapters/*.md")
+    existing_chapter_ids = sorted(chapter_ids(root))
     pending_ids = _missing_ids(expected_chapter_ids, existing_chapter_ids)
     if _is_resume(state) and not pending_ids:
         update = {
@@ -509,7 +510,7 @@ def review_fix_chapters_node(state) -> dict:
     _start_stage(state, "review_fix_chapters", "审核并自动改稿")
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
-    existing_review_ids = _existing_chapter_ids(root, "reviews/*_review.json", "_review")
+    existing_review_ids = sorted(review_ids(root))
     if _is_resume(state):
         pending_ids = _missing_ids(expected_chapter_ids, existing_review_ids)
         if not pending_ids:
@@ -521,7 +522,7 @@ def review_fix_chapters_node(state) -> dict:
             _persist_state(state, update, stage="review_fix_chapters", status="ok", message="resume: 复用审核结果")
             return update
     try:
-        review_fix_all(root)
+        review_fix_all(root, workers=max(1, int(state.get("workers", 1))))
         update = {
             "chapter_jobs": jobs,
             "reviews_dir": str(root / "workspace" / "reviews"),
@@ -588,9 +589,9 @@ def summarize_chapters_node(state) -> dict:
     print("[14/18] 生成章节摘要...")
     _start_stage(state, "summarize_chapters", "生成章节摘要")
     jobs = _state_jobs(state, root)
-    completed_ids = _existing_chapter_ids(root, "chapters/*.md")
+    completed_ids = sorted(chapter_ids(root))
     expected_summary_ids = completed_ids if completed_ids else _chapter_ids_from_jobs(jobs)
-    existing_summary_ids = _existing_chapter_ids(root, "summaries/*_summary.json", "_summary")
+    existing_summary_ids = sorted(summary_ids(root))
     pending_ids = _missing_ids(expected_summary_ids, existing_summary_ids)
     if _is_resume(state) and not pending_ids:
         update = {
@@ -712,4 +713,3 @@ def check_format_node(state) -> dict:
     except Exception as exc:
         _persist_error_state(state, "check_format", exc)
         raise
-

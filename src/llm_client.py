@@ -48,13 +48,14 @@ def _extract_content(response_data: dict[str, Any]) -> str:
     return str(content)
 
 
-def _extract_stream_delta(event_data: dict[str, Any]) -> str:
+def _extract_stream_delta(event_data: dict[str, Any]) -> tuple[str, str]:
     choices = event_data.get("choices") or []
     if not choices:
-        return ""
+        return "", ""
     choice = choices[0] or {}
     delta = choice.get("delta") or {}
     content = delta.get("content")
+    reasoning = delta.get("reasoning_content") or ""
     if content is None:
         message = choice.get("message") or {}
         content = message.get("content")
@@ -65,8 +66,8 @@ def _extract_stream_delta(event_data: dict[str, Any]) -> str:
                 parts.append(str(item.get("text") or item.get("content") or ""))
             else:
                 parts.append(str(item))
-        return "".join(parts)
-    return "" if content is None else str(content)
+        return str(reasoning) if reasoning else "", "".join(parts)
+    return str(reasoning) if reasoning else "", "" if content is None else str(content)
 
 
 def _read_streaming_response(response: Any) -> str:
@@ -84,7 +85,9 @@ def _read_streaming_response(response: Any) -> str:
             event_data = json.loads(data)
         except json.JSONDecodeError:
             continue
-        parts.append(_extract_stream_delta(event_data))
+        _, content = _extract_stream_delta(event_data)
+        if content:
+            parts.append(content)
     return "".join(parts)
 
 
@@ -126,33 +129,32 @@ def _retry_delay(attempt: int, initial_delay: float, max_delay: float) -> float:
 
 
 def chat(messages: list[dict], temperature: float = 0.2) -> str:
-    settings = get_settings(project_root())
-    endpoint = _chat_endpoint(settings.base_url)
-    ssl_context = _create_ssl_context(settings.verify_ssl)
-    payload = {
-        "model": settings.model,
-        "messages": messages,
-        "temperature": temperature,
-    }
-    if settings.stream:
-        payload["stream"] = True
-    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-    headers = {
-        "Authorization": f"Bearer {settings.api_key}",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Connection": "close",
-        # OpenCode's edge can flag Python's default urllib fingerprint on Windows.
-        # A standard browser-like UA avoids Cloudflare 1010 false positives.
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/137.0.0.0 Safari/537.36"
-        ),
-    }
-
+    initial_settings = get_settings(project_root())
     last_error: Exception | None = None
-    for attempt in range(1, settings.max_retries + 1):
+    for attempt in range(1, initial_settings.max_retries + 1):
+        # 每次重试都重新读取中央配置；运行中切换模型/API Key 后无需重启工作空间任务。
+        settings = get_settings(project_root())
+        endpoint = _chat_endpoint(settings.base_url)
+        ssl_context = _create_ssl_context(settings.verify_ssl)
+        payload = {
+            "model": settings.model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if settings.stream:
+            payload["stream"] = True
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers = {
+            "Authorization": f"Bearer {settings.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Connection": "close",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/137.0.0.0 Safari/537.36"
+            ),
+        }
         request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
@@ -193,13 +195,57 @@ def chat(messages: list[dict], temperature: float = 0.2) -> str:
             if hint:
                 print(f"[LLM] 提示: {hint}", file=sys.stderr)
 
-        if attempt < settings.max_retries:
+        if attempt < initial_settings.max_retries:
             delay = _retry_delay(attempt, settings.retry_initial_delay, settings.retry_max_delay)
             print(f"[LLM] {delay:.1f} 秒后重试...", file=sys.stderr)
             time.sleep(delay)
 
     raise RuntimeError(
-        f"LLM 请求失败，已重试 {settings.max_retries} 次。"
+        f"LLM 请求失败，已重试 {initial_settings.max_retries} 次。"
         "请检查 OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY 是否匹配，"
         "或临时增大 OPENAI_MAX_RETRIES 后重试。"
     ) from last_error
+
+
+def chat_stream_chunks(messages: list[dict], temperature: float = 0.2):
+    settings = get_settings(project_root())
+    endpoint = _chat_endpoint(settings.base_url)
+    ssl_context = _create_ssl_context(settings.verify_ssl)
+    payload = {
+        "model": settings.model,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {settings.api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Connection": "close",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/137.0.0.0 Safari/537.36"
+        ),
+    }
+    request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line or line.startswith(":"):
+                continue
+            if not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if data == "[DONE]":
+                break
+            try:
+                event_data = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            reasoning, content = _extract_stream_delta(event_data)
+            if reasoning:
+                yield ("reasoning", reasoning)
+            if content:
+                yield ("content", content)

@@ -1,0 +1,381 @@
+<template>
+  <div v-if="visible" class="dialog-overlay" @click.self="$emit('close')">
+    <div class="dialog settings-dialog">
+      <div class="dialog-header">
+        <h2>大模型设置</h2>
+        <button class="btn btn-icon" @click="$emit('close')">&times;</button>
+      </div>
+      <div class="settings-dialog-body">
+        <div class="settings-layout">
+          <div class="settings-list">
+            <button class="btn btn-sm btn-block settings-add-btn" @click="startNewModel">
+              + 添加模型
+            </button>
+            <div
+              v-for="m in models"
+              :key="m.id"
+              class="settings-list-item"
+              :class="{
+                active: m.id === activeId,
+                editing: m.id === editingId,
+              }"
+              @click="selectModel(m.id)"
+            >
+              <div class="settings-list-item-main">
+                <div class="settings-list-item-name">
+                  {{ m.name || '未命名' }}
+                  <span v-if="m.id === activeId" class="settings-active-badge">使用中</span>
+                </div>
+                <div class="settings-list-item-meta">{{ m.model || '—' }}</div>
+              </div>
+              <button
+                class="settings-list-item-delete"
+                title="删除"
+                @click.stop="handleDelete(m.id)"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="3 6 5 6 21 6"/>
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                </svg>
+              </button>
+            </div>
+            <div v-if="models.length === 0" class="settings-list-empty">暂无模型，点击上方添加</div>
+          </div>
+
+          <form class="settings-form" @submit.prevent="handleSave">
+            <div class="settings-form-title">
+              {{ isNew ? '新增模型' : '编辑模型' }}
+              <span v-if="!isNew && form.id === activeId" class="settings-active-badge">使用中</span>
+            </div>
+            <div class="form-group">
+              <label for="llm-name">模型别名 <span class="required">*</span></label>
+              <input
+                id="llm-name"
+                v-model="form.name"
+                type="text"
+                maxlength="48"
+                placeholder="例如：默认模型 / GLM / GPT"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="llm-base-url">Base URL <span class="required">*</span></label>
+              <input
+                id="llm-base-url"
+                v-model="form.base_url"
+                type="text"
+                placeholder="https://api.openai.com/v1"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="llm-api-key">API Key <span class="required">*</span></label>
+              <div class="input-with-action">
+                <input
+                  id="llm-api-key"
+                  v-model="form.api_key"
+                  :type="showApiKey ? 'text' : 'password'"
+                  placeholder="sk-..."
+                  required
+                />
+                <button type="button" class="btn btn-sm" @click="showApiKey = !showApiKey">
+                  {{ showApiKey ? '隐藏' : '显示' }}
+                </button>
+              </div>
+            </div>
+            <div class="form-group">
+              <label for="llm-model">模型 ID <span class="required">*</span></label>
+              <input
+                id="llm-model"
+                v-model="form.model"
+                type="text"
+                placeholder="gpt-4.1-mini"
+                required
+              />
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="llm-timeout">超时（秒）</label>
+                <input id="llm-timeout" v-model.number="form.timeout" type="number" min="1" placeholder="300" />
+              </div>
+              <div class="form-group">
+                <label for="llm-retries">最大重试次数</label>
+                <input id="llm-retries" v-model.number="form.max_retries" type="number" min="1" placeholder="3" />
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label for="llm-retry-initial">重试初始延迟（秒）</label>
+                <input id="llm-retry-initial" v-model.number="form.retry_initial_delay" type="number" min="0" step="0.1" placeholder="2" />
+              </div>
+              <div class="form-group">
+                <label for="llm-retry-max">重试最大延迟（秒）</label>
+                <input id="llm-retry-max" v-model.number="form.retry_max_delay" type="number" min="0" step="0.1" placeholder="30" />
+              </div>
+            </div>
+            <div class="form-group form-check-group">
+              <label class="form-check">
+                <input v-model="form.stream" type="checkbox" />
+                <span>流式输出（stream）</span>
+              </label>
+              <label class="form-check">
+                <input v-model="form.verify_ssl" type="checkbox" />
+                <span>校验 TLS 证书（verify_ssl）</span>
+              </label>
+            </div>
+            <p class="settings-hint">
+              修改「使用中」模型后会实时生效；所有工作空间后续发起的大模型请求都会使用新配置。
+            </p>
+            <p v-if="error" class="form-error">{{ error }}</p>
+            <p v-if="success" class="form-success">{{ success }}</p>
+            <div class="settings-form-footer">
+              <button type="button" class="btn" @click="$emit('close')">关闭</button>
+              <div class="settings-form-footer-right">
+                <button
+                  v-if="!isNew && form.id !== activeId"
+                  type="button"
+                  class="btn"
+                  :disabled="!form.id"
+                  @click="handleActivate"
+                >
+                  设为使用中
+                </button>
+                <button type="submit" class="btn btn-primary" :disabled="submitting">
+                  {{ submitting ? '保存中...' : (isNew ? '添加' : '保存') }}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+</template>
+
+<script setup>
+import { ref, reactive, watch } from 'vue'
+import {
+  fetchLlmSettings,
+  saveLlmModel,
+  activateLlmModel,
+  deleteLlmModel,
+} from '../api'
+
+const props = defineProps({
+  visible: { type: Boolean, default: false },
+})
+
+const emit = defineEmits(['close', 'saved'])
+
+const models = ref([])
+const activeId = ref('')
+const editingId = ref('')
+const isNew = ref(false)
+const showApiKey = ref(false)
+const submitting = ref(false)
+const error = ref('')
+const success = ref('')
+
+const form = reactive({
+  id: '',
+  name: '',
+  base_url: '',
+  api_key: '',
+  model: '',
+  timeout: 300,
+  max_retries: 3,
+  retry_initial_delay: 2,
+  retry_max_delay: 30,
+  stream: false,
+  verify_ssl: true,
+})
+
+function emptyForm() {
+  form.id = ''
+  form.name = ''
+  form.base_url = ''
+  form.api_key = ''
+  form.model = ''
+  form.timeout = 300
+  form.max_retries = 3
+  form.retry_initial_delay = 2
+  form.retry_max_delay = 30
+  form.stream = false
+  form.verify_ssl = true
+}
+
+function fillForm(m) {
+  form.id = m.id || ''
+  form.name = m.name || ''
+  form.base_url = m.base_url || ''
+  form.api_key = m.api_key || ''
+  form.model = m.model || ''
+  form.timeout = Number(m.timeout ?? 300)
+  form.max_retries = Number(m.max_retries ?? 3)
+  form.retry_initial_delay = Number(m.retry_initial_delay ?? 2)
+  form.retry_max_delay = Number(m.retry_max_delay ?? 30)
+  form.stream = _parseBool(m.stream, false)
+  form.verify_ssl = _parseBool(m.verify_ssl, true)
+}
+
+function _parseBool(value, fallback) {
+  if (value === '' || value === null || value === undefined) return fallback
+  if (typeof value === 'boolean') return value
+  const text = String(value).toLowerCase()
+  return text && !['0', 'false', 'no', 'off'].includes(text)
+}
+
+async function loadModels(keepEditing = false) {
+  error.value = ''
+  try {
+    const { data } = await fetchLlmSettings()
+    if (data.ok) {
+      models.value = data.models || []
+      activeId.value = data.active_id || ''
+      if (!keepEditing) {
+        if (models.value.length) {
+          const target = models.value.find((m) => m.id === activeId.value) || models.value[0]
+          selectModel(target.id)
+        } else {
+          startNewModel()
+        }
+      }
+    }
+  } catch (e) {
+    error.value = '加载配置失败，请检查后端服务'
+  }
+}
+
+function selectModel(id) {
+  const m = models.value.find((item) => item.id === id)
+  if (!m) return
+  editingId.value = id
+  isNew.value = false
+  fillForm(m)
+  error.value = ''
+  success.value = ''
+}
+
+function startNewModel() {
+  editingId.value = ''
+  isNew.value = true
+  emptyForm()
+  error.value = ''
+  success.value = ''
+}
+
+async function handleSave() {
+  error.value = ''
+  success.value = ''
+  if (!form.name.trim()) {
+    error.value = '请填写模型别名'
+    return
+  }
+  if (!form.base_url.trim() || !form.api_key.trim() || !form.model.trim()) {
+    error.value = 'Base URL、API Key、模型 ID 均为必填项'
+    return
+  }
+  submitting.value = true
+  try {
+    const payload = {
+      id: isNew.value ? '' : form.id,
+      name: form.name.trim(),
+      base_url: form.base_url.trim(),
+      api_key: form.api_key.trim(),
+      model: form.model.trim(),
+      timeout: form.timeout,
+      max_retries: form.max_retries,
+      retry_initial_delay: form.retry_initial_delay,
+      retry_max_delay: form.retry_max_delay,
+      stream: form.stream,
+      verify_ssl: form.verify_ssl,
+    }
+    const setActivate = isNew.value && models.value.length === 0
+    const { data } = await saveLlmModel(payload, setActivate)
+    if (data.ok) {
+      models.value = data.models || []
+      activeId.value = data.active_id || ''
+      const savedId = data.saved_id || (isNew.value ? '' : form.id)
+      if (savedId) {
+        editingId.value = savedId
+        isNew.value = false
+        const saved = models.value.find((m) => m.id === savedId)
+        if (saved) fillForm(saved)
+      }
+      success.value = data.applied_live
+        ? (setActivate ? '已添加并设为使用中，所有工作空间实时生效' : '保存成功，所有工作空间后续请求实时生效')
+        : '保存成功；该配置尚未设为使用中'
+      emit('saved', { models: models.value, activeId: activeId.value })
+    } else {
+      error.value = data.message || '保存失败'
+    }
+  } catch (e) {
+    error.value = e.response?.data?.message || '保存失败，请检查后端服务'
+  } finally {
+    submitting.value = false
+  }
+}
+
+async function handleActivate() {
+  error.value = ''
+  success.value = ''
+  if (!form.id) {
+    error.value = '请先保存模型'
+    return
+  }
+  try {
+    const { data } = await activateLlmModel(form.id)
+    if (data.ok) {
+      models.value = data.models || []
+      activeId.value = data.active_id || ''
+      success.value = '已设为使用中，所有工作空间后续请求实时生效'
+      emit('saved', { models: models.value, activeId: activeId.value })
+    } else {
+      error.value = data.message || '设置失败'
+    }
+  } catch (e) {
+    error.value = e.response?.data?.message || '设置失败，请检查后端服务'
+  }
+}
+
+async function handleDelete(id) {
+  error.value = ''
+  success.value = ''
+  const target = models.value.find((m) => m.id === id)
+  if (!target) return
+  if (!confirm(`确定要删除「${target.name || '该模型'}」吗？`)) return
+  try {
+    const { data } = await deleteLlmModel(id)
+    if (data.ok) {
+      models.value = data.models || []
+      activeId.value = data.active_id || ''
+      if (editingId.value === id) {
+        if (models.value.length) {
+          selectModel(models.value[0].id)
+        } else {
+          startNewModel()
+        }
+      }
+      success.value = '已删除'
+      emit('saved', { models: models.value, activeId: activeId.value })
+    } else {
+      error.value = data.message || '删除失败'
+    }
+  } catch (e) {
+    error.value = e.response?.data?.message || '删除失败，请检查后端服务'
+  }
+}
+
+watch(
+  () => props.visible,
+  (visible) => {
+    if (visible) {
+      loadModels()
+    } else {
+      error.value = ''
+      success.value = ''
+    }
+  },
+  { immediate: true }
+)
+</script>

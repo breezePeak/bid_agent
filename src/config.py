@@ -59,12 +59,19 @@ def get_settings(root: Path | None = None) -> Settings:
     run_env_path = root / ".env"
     config_root_text = os.environ.get("BID_AGENT_CONFIG_ROOT", "").strip()
     config_env_path = Path(config_root_text).resolve() / ".env" if config_root_text else app_env_path
-    file_values = _parse_env_file(app_env_path)
-    if config_env_path != app_env_path:
-        file_values = {**file_values, **_parse_env_file(config_env_path)}
-    if run_env_path not in {app_env_path, config_env_path}:
-        file_values = {**file_values, **_parse_env_file(run_env_path)}
-    values = {**file_values, **os.environ}
+    app_values = _parse_env_file(app_env_path)
+    run_values = _parse_env_file(run_env_path) if run_env_path not in {app_env_path, config_env_path} else {}
+    config_values = _parse_env_file(config_env_path) if config_env_path != app_env_path else app_values
+
+    if config_root_text:
+        # Web 管理的子进程会继承服务启动时的环境变量。中央配置文件必须最后覆盖这些
+        # 旧环境值，且本函数每次请求都会重新读取文件，从而让所有工作空间热切换模型。
+        file_values = {**app_values, **run_values, **config_values}
+        values = {**os.environ, **file_values}
+    else:
+        # 独立 CLI 仍保留显式环境变量覆盖 .env 的传统行为。
+        file_values = {**app_values, **run_values}
+        values = {**file_values, **os.environ}
 
     required_keys = ["OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENAI_MODEL"]
     missing = [key for key in required_keys if not str(values.get(key, "")).strip()]

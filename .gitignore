@@ -1,4 +1,5 @@
 .env
+models.json
 __pycache__/
 *.pyc
 .pytest_cache/
@@ -6,3 +7,5 @@ workspace/
 outputs/
 sources/
 inputs/
+frontend/node_modules/
+frontend/dist/

@@ -197,14 +197,18 @@ def _normalize_template_profile(document, profile: dict[str, Any] | None = None)
     return normalized
 
 
-def _add_paragraph_with_style(document, text: str, style_name: str | None = None) -> None:
+def _add_paragraph_with_style(document, text: str, style_name: str | None = None, indent: bool = False) -> None:
     if style_name:
         try:
-            document.add_paragraph(text, style=style_name)
-            return
+            p = document.add_paragraph(text, style=style_name)
         except Exception:
-            pass
-    document.add_paragraph(text)
+            p = document.add_paragraph(text)
+    else:
+        p = document.add_paragraph(text)
+    if indent:
+        from docx.shared import Cm
+
+        p.paragraph_format.first_line_indent = Cm(0.74)
 
 
 def _add_heading_with_style(document, text: str, level: int, profile: dict[str, Any]) -> None:
@@ -639,7 +643,7 @@ def _add_markdown_to_document(document, markdown: str, profile: dict[str, Any] |
                 break
             paragraph_lines.append(next_line)
             i += 1
-        _add_paragraph_with_style(document, " ".join(paragraph_lines), style_name=profile.get("paragraph_style"))
+        _add_paragraph_with_style(document, " ".join(paragraph_lines), style_name=profile.get("paragraph_style"), indent=True)
 
 
 def build_docx(root: Path | None = None) -> Path:
@@ -649,6 +653,7 @@ def build_docx(root: Path | None = None) -> Path:
 
     try:
         from docx import Document
+        from docx.shared import Cm
     except ImportError as exc:
         raise ImportError("缺少依赖 python-docx，请先执行: pip install -r requirements.txt") from exc
 

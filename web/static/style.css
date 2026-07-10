@@ -739,8 +739,8 @@ body.detail-open.preview-open .artifact-preview-panel {
 .chat-thread {
   display: grid;
   gap: 12px;
-  min-height: 420px;
-  max-height: calc(100vh - 250px);
+  min-height: 480px;
+  max-height: calc(100vh - 200px);
   overflow: auto;
   padding: 8px 4px 8px 0;
 }

@@ -362,14 +362,23 @@ def _run_plan_jobs(root: Path) -> None:
 
 def _run_select_context_all(root: Path) -> None:
     from context_selector import select_contexts_for_jobs
+    from stage_validation import missing_ids_for_stage
 
     jobs_dir = root / "workspace" / "jobs"
     if not jobs_dir.exists() or not list(jobs_dir.glob("*.json")):
         raise FileNotFoundError(
             f"缺少章节任务目录: {jobs_dir}，请先执行 plan-jobs"
         )
-    jobs = [read_json(f) for f in sorted(jobs_dir.glob("*.json"))]
-    print("[执行] 选择所有章节上下文...")
+    missing_ids = set(missing_ids_for_stage(root, "select_contexts"))
+    jobs = [
+        read_json(f)
+        for f in sorted(jobs_dir.glob("*.json"))
+        if f.stem in missing_ids
+    ]
+    if not jobs:
+        print("[跳过] 所有章节上下文均已存在且有效。")
+        return
+    print(f"[执行] 补齐 {len(jobs)} 个缺失章节上下文...")
     select_contexts_for_jobs(jobs, root)
 
 
@@ -387,20 +396,32 @@ def _run_select_context(root: Path, chapter_id: str) -> None:
 
 
 def _run_write_all(root: Path, workers: int = 1, max_retries: int = 0) -> None:
-    if workers > 1:
-        from subagent_runner import run_write_all as concurrent_write_all
+    from stage_validation import context_ids, missing_ids_for_stage
+    from subagent_runner import run_write_all as concurrent_write_all
 
-        result = concurrent_write_all(root, workers=workers, max_retries=max_retries)
-        failed = result.get("failed", [])
-        if failed:
-            messages = [
-                f"章节 {item['chapter_id']} 写作失败(已重试 {item.get('attempts', 1)} 次): {item['error']}"
-                for item in failed
-            ]
-            raise RuntimeError("；".join(messages))
-    else:
-        print("[执行] 串行生成所有章节...")
-        write_all(root)
+    pending_ids = missing_ids_for_stage(root, "write_chapters")
+    missing_contexts = sorted(set(pending_ids) - context_ids(root))
+    if missing_contexts:
+        raise FileNotFoundError(
+            f"仍有 {len(missing_contexts)} 个章节缺少上下文，请先执行 select-context-all: {missing_contexts[:10]}"
+        )
+    if not pending_ids:
+        print("[跳过] 所有章节正文均已存在且有效。")
+        return
+    print(f"[执行] 补写 {len(pending_ids)} 个缺失章节...")
+    result = concurrent_write_all(
+        root,
+        workers=workers,
+        chapter_ids=pending_ids,
+        max_retries=max_retries,
+    )
+    failed = result.get("failed", [])
+    if failed:
+        messages = [
+            f"章节 {item['chapter_id']} 写作失败(已重试 {item.get('attempts', 1)} 次): {item['error']}"
+            for item in failed
+        ]
+        raise RuntimeError("；".join(messages))
 
 
 def run_pipeline(root: Path | None = None, workers: int = 1, max_retries: int = 0) -> None:
@@ -418,7 +439,7 @@ def run_pipeline(root: Path | None = None, workers: int = 1, max_retries: int = 
         "plan_chapter_jobs": lambda: _run_plan_jobs(root),
         "select_contexts": lambda: _run_select_context_all(root),
         "write_chapters": lambda: _run_write_all(root, workers=workers, max_retries=max_retries),
-        "review_fix_chapters": lambda: review_fix_all(root),
+        "review_fix_chapters": lambda: review_fix_all(root, workers=workers),
         "build_source_trace_index": lambda: build_source_trace_index(root),
         "build_score_coverage_matrix": lambda: build_score_coverage_matrix(root),
         "summarize_chapters": lambda: summarize_all_chapters(root),
@@ -488,12 +509,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     review_chapter_parser = subparsers.add_parser("review-chapter", help="审核单个章节")
     review_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
-    subparsers.add_parser("review-all", help="串行审核所有章节")
+    review_all_parser = subparsers.add_parser("review-all", help="并发审核所有章节")
+    review_all_parser.add_argument("--workers", type=int, default=2, help="章节审核 worker 数，默认 2，最大 5")
 
     rewrite_chapter_parser = subparsers.add_parser("rewrite-chapter", help="根据审核意见重写单个章节")
     rewrite_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     subparsers.add_parser("rewrite-all", help="重写所有 need_rewrite=true 的章节")
-    subparsers.add_parser("review-fix-all", help="审核所有章节并自动改稿（最多 2 轮）")
+    review_fix_all_parser = subparsers.add_parser("review-fix-all", help="审核所有章节并自动改稿（最多 2 轮，并发）")
+    review_fix_all_parser.add_argument("--workers", type=int, default=2, help="审核/改稿 worker 数，默认 2，最大 5")
 
     summarize_chapter_parser = subparsers.add_parser("summarize-chapter", help="为单个章节生成结构化摘要")
     summarize_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
@@ -570,8 +593,10 @@ def main() -> int:
         print(f"[执行] 审核章节 {args.chapter}...")
         review_chapter(args.chapter, root)
     elif args.command == "review-all":
-        print("[执行] 审核所有章节...")
-        review_all(root)
+        print("[执行] 审核所有章节（并发子 agent）...")
+        from subagent_runner import run_review_all
+
+        run_review_all(root, workers=args.workers)
     elif args.command == "rewrite-chapter":
         print(f"[执行] 根据审核意见重写章节 {args.chapter}...")
         rewrite_chapter(args.chapter, root)
@@ -579,8 +604,8 @@ def main() -> int:
         print("[执行] 重写所有需改稿章节...")
         rewrite_all(root)
     elif args.command == "review-fix-all":
-        print("[执行] 审核并自动改稿...")
-        review_fix_all(root)
+        print("[执行] 审核并自动改稿（并发子 agent）...")
+        review_fix_all(root, workers=args.workers)
     elif args.command == "summarize-chapter":
         print(f"[执行] 生成章节 {args.chapter} 摘要...")
         summarize_chapter(args.chapter, root)

@@ -165,15 +165,23 @@ def rewrite_all(root: Path | None = None) -> list[Path]:
     return paths
 
 
-def review_fix_all(root: Path | None = None, max_rounds: int = 2) -> None:
+def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int = 2) -> None:
     root = root or project_root()
+    from subagent_runner import run_review_all, run_rewrite_all
+    from stage_validation import chapter_ids as valid_chapter_ids, review_ids as valid_review_ids
+
     outlines = load_outline(root)
     chapter_count = len(outlines.get("chapters", []))
 
-    print(f"[1/{max_rounds + 1}] 初次审核所有章节...")
-    from chapter_reviewer import review_all
-
-    review_all(root)
+    pending_review_ids = sorted(valid_chapter_ids(root) - valid_review_ids(root))
+    if pending_review_ids:
+        print(f"[1/{max_rounds + 1}] 补审 {len(pending_review_ids)} 个缺失章节（并发子 agent）...")
+        review_result = run_review_all(root, workers=workers, chapter_ids=pending_review_ids)
+        if review_result.get("failed"):
+            details = [f"{item['chapter_id']}: {item['error']}" for item in review_result["failed"][:10]]
+            raise RuntimeError("章节审核失败：" + "；".join(details))
+    else:
+        print("[跳过] 所有现有章节均已有有效审核结果。")
 
     total_rewritten = 0
     for round_num in range(1, max_rounds + 1):
@@ -192,16 +200,18 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2) -> None:
             print(f"[完成] 第 {round_num} 轮无章节需要重写。")
             break
 
-        print(f"\n[{round_num + 1}/{max_rounds + 1}] 第 {round_num} 轮改稿：{len(need_rewrite_ids)} 个章节需要重写...")
+        print(f"\n[{round_num + 1}/{max_rounds + 1}] 第 {round_num} 轮改稿：{len(need_rewrite_ids)} 个章节并发改稿...")
+        rewrite_result = run_rewrite_all(root, workers=workers, chapter_ids=need_rewrite_ids)
+        if rewrite_result.get("failed"):
+            details = [f"{item['chapter_id']}: {item['error']}" for item in rewrite_result["failed"][:10]]
+            raise RuntimeError("章节改稿失败：" + "；".join(details))
+        total_rewritten += len(rewrite_result.get("completed", []))
 
-        for chapter_id in need_rewrite_ids:
-            rewrite_chapter(chapter_id, root)
-            total_rewritten += 1
-
-        from chapter_reviewer import review_chapter
-
-        for chapter_id in need_rewrite_ids:
-            review_chapter(chapter_id, root)
+        print(f"[{round_num + 1}/{max_rounds + 1}] 改稿后并发复审...")
+        rereview_result = run_review_all(root, workers=workers, chapter_ids=need_rewrite_ids)
+        if rereview_result.get("failed"):
+            details = [f"{item['chapter_id']}: {item['error']}" for item in rereview_result["failed"][:10]]
+            raise RuntimeError("章节复审失败：" + "；".join(details))
 
     reviews_dir = root / "workspace" / "reviews"
     still_failed = 0

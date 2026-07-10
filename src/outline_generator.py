@@ -13,6 +13,7 @@ from file_loader import (
     read_required_input,
 )
 from llm_client import chat
+from project_profile_registry import load_project_profile
 from prompt_registry import load_agent_prompt
 from quality_gates import validate_outline_score_coverage
 from runtime_context import agent_run
@@ -351,6 +352,18 @@ def generate_outline(root: Path | None = None) -> Path:
     template_outline = load_template_outline(root)
     template_evidence = load_template_evidence_map(root)
     prompt = load_agent_prompt(root, "outline_generator")
+    profile = load_project_profile(root)
+    expected_pages = int(profile.get("expected_pages", 0) or 0)
+    page_target_section = ""
+    if expected_pages > 0:
+        page_target_section = (
+            "## 篇幅目标\n\n"
+            f"本次投标文件目标总篇幅约 {expected_pages} 页（A4）。\n"
+            "硬性要求补充：请据此规划章节数量与各章篇幅深度——"
+            "页数较多时增加章节数或加深各章子节粒度，页数较少时精简合并；"
+            "并在每个章节的 description 中给出该章目标页数占比或目标页数区间，"
+            "供后续章节写作控制篇幅。\n\n"
+        )
     has_template_guidance = bool(template_outline.get("headings")) or bool(template_evidence.get("items"))
     if template_outline.get("headings"):
         write_json(root / "workspace" / "template_outline.json", template_outline)
@@ -380,6 +393,7 @@ def generate_outline(root: Path | None = None) -> Path:
             "template_heading_count": len(template_outline.get("headings", [])),
             "template_item_count": len(template_evidence.get("items", [])) if isinstance(template_evidence.get("items"), list) else 0,
             "tender_chars": len(tender_markdown),
+            "expected_pages": expected_pages,
         },
         temperature=0.2,
     ):
@@ -390,6 +404,7 @@ def generate_outline(root: Path | None = None) -> Path:
                     "role": "user",
                     "content": (
                         "请根据招标文件、评分点和全局事实生成标书大纲。\n\n"
+                        f"{page_target_section}"
                         f"{template_section}"
                         "## 招标文件\n\n"
                         f"{tender_markdown}\n\n"

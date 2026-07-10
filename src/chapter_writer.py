@@ -7,6 +7,7 @@ from context_budget import summarize_chunk_payload, summarize_for_prompt
 from file_loader import load_global_facts, load_score_points, load_tender_requirements
 from llm_client import chat
 from manual_review import manual_review_context_for_chapter
+from project_profile_registry import load_project_profile
 from prompt_registry import load_agent_prompt
 from quality_gates import validate_weak_evidence_language
 from runtime_context import agent_run
@@ -126,6 +127,16 @@ def write_chapter_from_job_context(
         total_max_chars=WRITER_CONTEXT_MAX_CHARS // 2,
         per_chunk_chars=1000,
     )
+    profile = load_project_profile(root)
+    expected_pages = int(profile.get("expected_pages", 0) or 0)
+    length_guidance = ""
+    if expected_pages > 0:
+        length_guidance = (
+            f"篇幅控制：本次投标文件目标总篇幅约 {expected_pages} 页（A4），"
+            "请按本章节任务包 description 中给出的目标页数占比/区间控制本章篇幅，"
+            "目标页数较多时加深细节、扩充论据与方案，较少时精简避免注水；"
+            "不要为凑篇幅编造招标文件和公司资料之外的事实。"
+        )
 
     with agent_run(
         root,
@@ -137,6 +148,7 @@ def write_chapter_from_job_context(
             "tender_chunk_count": len(tender_context),
             "company_chunk_count": len(company_context),
             "manual_review_instructions": len(manual_review.get("operator_instructions", [])),
+            "expected_pages": expected_pages,
         },
         chapter_id=chapter["id"],
         temperature=0.2,
@@ -173,6 +185,7 @@ def write_chapter_from_job_context(
                         "章节标题必须使用当前章节任务包中的 heading_level 对应的 Markdown 标题层级；"
                         "模板任务中的 fill_slot 和 writing_task 必须优先响应；"
                         "如果模板任务状态为 weak/missing 或证据不足，不要硬写成既成事实。"
+                        f"{length_guidance}"
                     ),
                 },
             ],
