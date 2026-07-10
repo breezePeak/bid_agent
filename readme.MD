@@ -10,6 +10,8 @@
 - 支持人工复核覆盖层和局部重跑建议
 - 上下文选择和章节写作带预算约束
 - 大纲覆盖、弱证据表述、模板填充和最终审核都有质量门禁
+- Web 端改为后端监督器驱动的自动流水线，页面刷新或服务重启后可继续接管
+- 大模型配置支持热切换，后续请求自动使用新的模型和 API Key
 
 ## 快速开始
 
@@ -91,6 +93,9 @@ workspace/run_state.json 当前运行状态
 workspace/run_state_history.jsonl 运行历史
 workspace/run_events.jsonl        事件流
 workspace/run_metrics.json        阶段指标
+workspace/pipeline_control.json   后端流水线监督状态
+workspace/recovery_state.json     自动恢复状态
+workspace/run_error.json          最近一次失败阶段诊断
 outputs/                 final.md / final.docx
 tests/                   回归测试
 ```
@@ -189,11 +194,15 @@ python src/web_app.py
 - 记录流水线心跳并在阶段长期无进展时终止、重试；服务重启后自动接管或断点恢复
 - `run_state.json` 只保存紧凑指标；状态历史和事件日志超过 5MB 后自动轮转，保留 3 份归档
 - 修改或切换“使用中”的大模型后，Web 进程和所有工作空间会在下一次 LLM 请求时动态读取新模型/API Key，无需重启任务
+- 当前阶段如果经历过 `429/超时/网络抖动`，前端会在检测到新成功事件后自动清除“仍在重试”的陈旧提示
 - 按统一阶段注册表展示流程
 - 基于 `run_events.jsonl` 推送实时事件
 - 查看阶段详情、前置条件、输出产物和运行历史
 - 查看项目类型、prompt version/checksum、agent run 和 budget 命中
 - 查看并操作人工复核项
+- 流式查看阶段日志、失败诊断和恢复进度
+- 在线编辑 `final.md`，支持块级改写、撤销上次改写和文档预览
+- 删除历史工作空间
 - 下载 `final.md`、`final.docx`
 - 查看全文审核 JSON
 
@@ -209,6 +218,9 @@ python -m compileall src tests
 当前测试覆盖重点：
 - 阶段注册表与 Web 映射一致性
 - resume 必须同时满足“产物存在 + 事件完整”
+- 工作空间级自动流水线、暂停/恢复与服务重启接管
+- 成功进度到达后会清理前端陈旧恢复提示
+- LLM 配置热切换后，多工作空间后续请求会使用新配置
 - agent prompt 元数据追踪
 - 大纲评分点覆盖门禁
 - context selector / chapter writer / web status 结构契约

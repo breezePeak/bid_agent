@@ -35,6 +35,8 @@
   管理人工复核覆盖层、摘要聚合和局部重跑建议
 - `src/graph/state_recorder.py`
   记录运行状态、事件流、阶段指标和 agent artifact
+- `src/pipeline_supervisor.py`
+  负责后端自动流水线调度、暂停、重试、重启接管和持久化控制状态
 
 ## 2. 实际主流程
 
@@ -352,6 +354,40 @@ agent：
 - `output_tokens_est`
 - `agent_runs`
 
+### 4.5 `workspace/pipeline_control.json`
+
+保存后端监督器的控制面状态，典型字段包括：
+- `status`
+- `current_stage`
+- `worker_pid`
+- `started_at`
+- `updated_at`
+- `error`
+
+这个文件让 Web 流程从“页面内存状态”变成“工作空间持久状态”，因此：
+- 刷新页面不会丢失自动推进状态
+- Web 服务重启后可重新接管仍在运行或待恢复的工作空间
+
+### 4.6 `workspace/recovery_state.json`
+
+当阶段失败后进入自动恢复，会写入：
+- `reason`
+- `action`
+- `attempt`
+- `max_attempts`
+- `updated_at`
+
+前端用它展示“正在自主修复 / 自动重试”的状态。
+
+### 4.7 `workspace/run_error.json`
+
+最近一次失败阶段的诊断缓存，主要包含：
+- `command`
+- `exit_code`
+- `lines`
+
+前端和聊天面板可以直接基于它给出失败摘要、重试和跳过动作。
+
 ## 5. Agent 追踪
 
 每次 agent 调用结束后，会生成：
@@ -383,7 +419,7 @@ agent：
 
 ## 6. Resume 逻辑
 
-当前 resume 不再只看“文件是否存在”，而是同时要求：
+当前 resume / 阶段完成判断 不再只看“文件是否存在”，而是同时要求：
 
 1. 阶段输出产物有效
 2. `run_events.jsonl` 中该阶段最后事件为 `success/reuse/skip`
@@ -391,8 +427,29 @@ agent：
 因此：
 - 只有产物存在但没有成功事件，不会被安全复用
 - 事件存在但产物被删了，也不会被复用
+- 对 `select_contexts / write_chapters / review_fix_chapters / summarize_chapters` 这类集合阶段，会按章节 ID 集合精确校验是否补齐，不再因为“目录里已有部分文件”误判为完成
 
-## 7. Web 控制台当前逻辑
+## 7. 自动流水线与恢复
+
+当前 Web 不再依赖前端逐步触发每个命令，而是由后端监督器统一推进自动阶段：
+
+- 前端调用 `/api/start-pipeline`
+- `PipelineSupervisor` 持久化当前工作空间的调度状态
+- 每个自动阶段最终仍复用同一套 `_run_sync` 执行逻辑
+
+恢复策略分为三层：
+
+1. 阶段失败自动恢复
+   目前会针对 `429 / 超时 / 网络异常 / LLM 暂时不可用` 等问题记录恢复状态并自动重试。
+2. 阶段卡死看门狗
+   如果一个阶段长时间没有日志心跳，会终止子进程并进入恢复流程。
+3. 服务重启接管
+   FastAPI 启动时会读取 `pipeline_control.json` 和当前活动工作空间，尝试重新接管未完成的流水线。
+
+另外，前端已经做了一个纠偏：
+- 如果恢复提示仍显示“重试中”，但新的 `agent_artifact` 或 `success` 事件已经出现，状态接口会把这一阶段归一为正常运行，前端同步清掉陈旧提示，避免页面一直挂在“2/2 重试中”。
+
+## 8. Web 控制台当前逻辑
 
 Web 控制台不是独立实现的另一套流程，而是读取统一元数据：
 
@@ -406,15 +463,32 @@ Web 控制台不是独立实现的另一套流程，而是读取统一元数据�
 
 当前支持：
 - 独立 run workspace
+- Vue 单页控制台与 FastAPI API/静态资源一体部署
 - 节点详情查看
 - 产物预览
 - 运行记录查看
 - 实时日志 + 实时事件推送
+- 自动流水线启动、暂停、重试、跳过失败阶段
+- 恢复中状态、失败诊断和阶段日志折叠展示
 - 项目类型选择与当前 profile 展示
 - 最新 agent run、prompt version/checksum、budget 命中查看
 - 人工复核总览和分类项操作
+- 工作空间列表、删除工作空间
+- `final.md` 在线改写、块级流式改写、撤销上次改写、文档预览
 
-## 8. 项目类型化 Prompt
+## 9. LLM 配置热更新
+
+当前 Web 管理模式下，LLM 配置的读取规则与独立 CLI 不同：
+
+- 独立 CLI：环境变量仍然覆盖 `.env`
+- Web 管理工作空间：中央配置文件会覆盖 Web 进程启动时继承的旧环境变量
+
+这样做的目的，是保证你在设置页里修改“当前使用中的模型 / API Key / Base URL”后：
+- Web 进程内的后续请求立即生效
+- 已存在的多个工作空间在下一次 LLM 请求时自动读取新配置
+- 不需要人工重启工作空间，也不会继续拿着旧子进程环境跑下去
+
+## 10. 项目类型化 Prompt
 
 当前项目类型默认来自 `workspace/project_profile.json`，由 CLI/Web 手动选择，默认值为 `general`。
 
@@ -436,7 +510,7 @@ Web 控制台不是独立实现的另一套流程，而是读取统一元数据�
 - 若存在 `write_chapter.software_project.md` 这类 variant 文件，则直接使用
 - 若不存在 variant 文件，则在默认 prompt 后拼接 profile guidance
 
-## 9. 人工复核覆盖层
+## 11. 人工复核覆盖层
 
 人工复核不直接改写原始运行产物，而是单独写入：
 
@@ -457,7 +531,7 @@ Web 控制台不是独立实现的另一套流程，而是读取统一元数据�
 - `global_review`
   可消费 accepted/resolved 风险，避免重复告警
 
-## 10. 测试与回归点
+## 12. 测试与回归点
 
 当前测试覆盖了最容易回归的结构层能力：
 
@@ -475,6 +549,14 @@ Web 控制台不是独立实现的另一套流程，而是读取统一元数据�
   确保章节标题、agent run artifact 和弱证据门禁稳定
 - `tests/test_web_status_contract.py`
   确保 Web 状态接口和节点详情结构稳定
+- `tests/test_pipeline_supervisor.py`
+  确保后端自动流水线调度、暂停与恢复接管逻辑稳定
+- `tests/test_incremental_pipeline.py`
+  确保集合阶段按缺失章节增量补齐，而不是整阶段误判完成
+- `tests/test_auto_recovery.py`
+  确保自动恢复、恢复失败和前端恢复态契约稳定
+- `tests/test_live_llm_config.py`
+  确保多工作空间会在后续请求中热切换到新模型/API Key
 - `tests/test_project_profile_prompt_resolution.py`
   确保项目类型 prompt 解析正确
 - `tests/test_manual_review.py`
