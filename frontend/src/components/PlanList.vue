@@ -39,7 +39,9 @@
         v-for="(step, idx) in steps"
         :key="step.command"
         class="plan-row"
-        :class="{ done: step.status === 'done', running: step.status === 'running', recovering: step.status === 'recovering' || step.status === 'retrying', error: step.status === 'error' }"
+        :class="{ done: step.status === 'done', running: step.status === 'running', recovering: step.status === 'recovering' || step.status === 'retrying', error: step.status === 'error', clickable: true }"
+        @click="$emit('preview', step.command)"
+        :title="'查看「' + step.label + '」成果'"
       >
         <span class="plan-row-check">
           <span v-if="step.status === 'done'">&#x2713;</span>

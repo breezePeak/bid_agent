@@ -118,6 +118,7 @@
         :compliance="complianceSummary"
         @pause="pauseAutoRun"
         @preview-compliance="emit('preview', 'compliance-check')"
+        @preview="emit('preview', $event)"
       />
     </div>
 
@@ -254,7 +255,7 @@ const quickBtns = computed(() => {
     const btns = [
       { label: '下载 Word', action: 'download-docx' },
       { label: '预览 Word', action: 'doc-editor' },
-      { label: '查看全文审核', action: 'chat' },
+      { label: '查看全文审核', type: 'show_step', command: 'global-review' },
     ]
     if (complianceSummary.value) {
       btns.splice(2, 0, { label: complianceSummary.value.blocking ? '合规阻断详情' : '查看专项合规', type: 'show_step', command: 'compliance-check' })

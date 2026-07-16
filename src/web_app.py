@@ -895,6 +895,7 @@ def _step_history(root: Path, command: str) -> list[dict[str, Any]]:
 
 
 def _step_extra_details(root: Path, command: str) -> dict[str, Any]:
+    workspace = root / "workspace"
     if command == "parse-score":
         return {
             "score_point_rows": _score_point_rows(root),
@@ -902,6 +903,87 @@ def _step_extra_details(root: Path, command: str) -> dict[str, Any]:
         }
     if command == "review-fix-all":
         return {"review_rows": _review_detail_rows(root)}
+    if command == "global-review":
+        data = _read_json_file(workspace / "global_review.json")
+        return {"global_review": data if isinstance(data, dict) else {}}
+    if command == "compliance-check":
+        data = _read_json_file(workspace / "compliance_report.json")
+        if not isinstance(data, dict):
+            return {"compliance_report": {}}
+        items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+        return {
+            "compliance_report": {
+                "blocking": data.get("blocking"),
+                "need_manual_review": data.get("need_manual_review"),
+                "max_severity": data.get("max_severity"),
+                "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
+                "failed_items": [
+                    i for i in items if i.get("status") in {"fail", "warn"}
+                ][:80],
+            }
+        }
+    if command == "build-score-coverage":
+        data = _read_json_file(workspace / "score_coverage_matrix.json")
+        if not isinstance(data, dict):
+            return {"score_coverage": {}}
+        matrix = data.get("matrix") if isinstance(data.get("matrix"), list) else []
+        return {
+            "score_coverage": {
+                "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
+                "uncovered_score_points": data.get("uncovered_score_points") or [],
+                "weak_score_points": data.get("weak_score_points") or [],
+                "fully_covered_score_points": data.get("fully_covered_score_points") or [],
+                "matrix_preview": matrix[:40],
+            }
+        }
+    if command == "estimate-score":
+        data = _read_json_file(workspace / "final_score_estimate.json")
+        return {"score_estimate": data if isinstance(data, dict) else {}}
+    if command == "generate-outline":
+        data = _read_json_file(workspace / "outline.json")
+        chapters = data.get("chapters") if isinstance(data, dict) and isinstance(data.get("chapters"), list) else []
+        return {
+            "outline_chapters": [
+                {
+                    "id": c.get("id"),
+                    "title": c.get("title"),
+                    "score_point_ids": c.get("score_point_ids") if isinstance(c.get("score_point_ids"), list) else [],
+                    "description": str(c.get("description") or "")[:200],
+                }
+                for c in chapters[:60]
+                if isinstance(c, dict)
+            ]
+        }
+    if command == "extract-facts":
+        data = _read_json_file(workspace / "global_facts.json")
+        return {"global_facts": data if isinstance(data, dict) else {}}
+    if command == "write-all":
+        chapters_dir = workspace / "chapters"
+        files = sorted(chapters_dir.glob("*.md")) if chapters_dir.exists() else []
+        return {
+            "chapter_files": [
+                {"chapter_id": f.stem, "path": f"workspace/chapters/{f.name}", "size": f.stat().st_size}
+                for f in files[:80]
+            ]
+        }
+    if command == "summarize-all":
+        summaries_dir = workspace / "summaries"
+        files = sorted(summaries_dir.glob("*.json")) if summaries_dir.exists() else []
+        rows = []
+        for f in files[:40]:
+            data = _read_json_file(f)
+            if isinstance(data, dict):
+                rows.append({
+                    "chapter_id": data.get("chapter_id") or f.stem.replace("_summary", ""),
+                    "title": data.get("title") or data.get("chapter_title") or "",
+                    "summary": str(data.get("summary") or data.get("brief") or "")[:240],
+                })
+            else:
+                rows.append({"chapter_id": f.stem, "title": "", "summary": ""})
+        return {"chapter_summaries": rows}
+    if command == "check-format":
+        data = _read_json_file(workspace / "format_check_report.json")
+        return {"format_check": data if isinstance(data, dict) else {}}
     return {}
 
 

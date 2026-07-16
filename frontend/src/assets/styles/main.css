@@ -2723,3 +2723,17 @@ body {
   background: #0f172a; color: #e2e8f0; border-radius: 10px; padding: 12px;
   font-size: 11px; overflow: auto; max-height: 420px;
 }
+
+.sdv-flags { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+.sdv-flag { font-size: 12px; padding: 4px 10px; border-radius: 999px; background: #ecfdf5; color: #166534; }
+.sdv-flag.bad { background: #fef2f2; color: #b91c1c; }
+.sdv-block { margin-top: 12px; }
+.sdv-block b { display: block; margin-bottom: 6px; font-size: 13px; }
+.sdv-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+.sdv-tag { font-size: 11px; padding: 2px 8px; border-radius: 999px; background: #e2e8f0; color: #334155; font-family: ui-monospace, monospace; }
+.sdv-tag.bad { background: #fee2e2; color: #b91c1c; }
+.sdv-tag.warn { background: #fef3c7; color: #92400e; }
+.sdv-line { font-size: 13px; color: #334155; line-height: 1.5; margin-bottom: 4px; }
+.sdv-item.soft { background: #fff; cursor: default; }
+.plan-row.clickable { cursor: pointer; }
+.plan-row.clickable:hover { background: #f1f5f9; }
