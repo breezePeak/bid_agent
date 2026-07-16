@@ -618,7 +618,16 @@ body {
   width: var(--files-panel-width); 
   min-width: var(--files-panel-width); 
   border-left: 1px solid var(--color-border); 
-  overflow: hidden; 
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+.wl-files .file-explorer {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
 }
 
 /* ===== Chat Panel ===== */
@@ -2237,7 +2246,13 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  height: 100%;
   overflow: hidden;
+}
+.wl-files .file-explorer {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: auto;
 }
 .agent-goal-panel {
   flex: 0 0 auto;

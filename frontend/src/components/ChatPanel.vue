@@ -49,10 +49,10 @@
             <div v-if="msg.actions && msg.actions.length" class="chat-msg-actions">
               <button v-for="act in msg.actions" :key="act.label" class="btn btn-sm" @click="handleAction(act)">{{ act.label }}</button>
             </div>
-            <div v-if="msg.goal && (msg.goal.status || msg.goal_id)" class="chat-goal-badge">
+            <div v-if="(msg.goal && (msg.goal.status || msg.goal.all_criteria_ok !== undefined)) || msg.goal_id" class="chat-goal-badge">
               <span class="chat-goal-label">目标</span>
               <span class="chat-goal-status" :class="'goal-' + (msg.goal.status || 'pending')">{{ msg.goal.status || 'pending' }}</span>
-              <span v-if="msg.goal_id" class="chat-goal-id">#{{ msg.goal_id }}</span>
+              <span v-if="msg.goal_id || (msg.goal && msg.goal.goal_id)" class="chat-goal-id">#{{ msg.goal_id || msg.goal.goal_id }}</span>
               <span v-if="msg.goal.all_criteria_ok === true" class="chat-goal-ok">criteria OK</span>
               <span v-else-if="msg.goal.all_criteria_ok === false" class="chat-goal-bad">criteria pending</span>
             </div>
