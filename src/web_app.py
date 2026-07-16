@@ -26,6 +26,8 @@ from fastapi.responses import (
 from fastapi.staticfiles import StaticFiles
 
 ROOT = Path(__file__).resolve().parent.parent
+# Web 进程与流水线子进程统一：配置以项目根 .env / models.json 为准
+os.environ.setdefault("BID_AGENT_CONFIG_ROOT", str(ROOT))
 WEB_DIR = ROOT / "web"
 VUE_DIST_DIR = ROOT / "frontend" / "dist"
 RUNS_DIR = ROOT / "runs"
@@ -4031,6 +4033,20 @@ def api_clean_workspace() -> JSONResponse:
 
 @app.on_event("startup")
 def reconcile_interrupted_pipeline() -> None:
+    # 启动时把“使用中”的大模型刷进进程环境，避免仅写了 models.json/.env 但进程仍用旧环境变量
+    try:
+        store = _read_models_store()
+        active_id = str(store.get("active_id") or "")
+        models = store.get("models") if isinstance(store.get("models"), list) else []
+        active = next((m for m in models if isinstance(m, dict) and str(m.get("id")) == active_id), None)
+        if active:
+            _sync_model_to_env(active)
+            _append_log(f"[系统] 已加载使用中大模型: {active.get('name') or active.get('model') or active_id}")
+        else:
+            _append_log("[系统] 未配置使用中大模型，请在设置页添加并设为使用中")
+    except Exception as exc:
+        _append_log(f"[警告] 加载大模型配置失败: {exc}")
+
     _load_active_run_from_disk()
     if ACTIVE_RUN_ROOT is None:
         return
@@ -4064,21 +4080,16 @@ if __name__ == "__main__":
     candidates = [preferred, 7861, 7862, 7863, 7870, 8000]
     port = next((p for p in candidates if _port_free(host, p)), None)
     if port is None:
-        print(
-            f"[错误] 常用端口均被占用（{candidates}）。
-"
-            f"请先结束占用进程，例如 PowerShell:
-"
-            f"  Get-NetTCPConnection -LocalPort 7860 | Select OwningProcess
-"
-            f"  Stop-Process -Id <PID> -Force"
-        )
+        print("[ERROR] ports busy:", candidates)
+        print("Kill process on 7860, e.g.:")
+        print("  Get-NetTCPConnection -LocalPort 7860 | Select OwningProcess")
+        print("  Stop-Process -Id <PID> -Force")
         raise SystemExit(1)
 
     if port != preferred:
-        print(f"[警告] 端口 {preferred} 已被占用，改用 http://{host}:{port}")
+        print(f"[WARN] port {preferred} busy, using http://{host}:{port}")
     else:
-        print(f"[启动] 标书 Agent Web 控制台: http://{host}:{port}")
+        print(f"[START] bid agent web: http://{host}:{port}")
 
-    _append_log(f"[系统] 标书 Agent Web 控制台启动中 port={port}")
+    _append_log(f"[system] web console starting port={port}")
     uvicorn.run(app, host=host, port=port, log_level="info")

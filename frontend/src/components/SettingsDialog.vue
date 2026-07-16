@@ -143,6 +143,9 @@
                 <button type="submit" class="btn btn-primary" :disabled="submitting">
                   {{ submitting ? '保存中...' : (isNew ? '添加' : '保存') }}
                 </button>
+                <button type="button" class="btn btn-primary" :disabled="submitting" @click="handleSave(true)">
+                  保存并使用
+                </button>
               </div>
             </div>
           </form>
@@ -264,7 +267,7 @@ function startNewModel() {
   success.value = ''
 }
 
-async function handleSave() {
+async function handleSave(forceActive = false) {
   error.value = ''
   success.value = ''
   if (!form.name.trim()) {
@@ -290,7 +293,8 @@ async function handleSave() {
       stream: form.stream,
       verify_ssl: form.verify_ssl,
     }
-    const setActivate = isNew.value && models.value.length === 0
+    const isEditingActive = !isNew.value && form.id && form.id === activeId.value
+    const setActivate = forceActive === true || (isNew.value && models.value.length === 0) || isEditingActive
     const { data } = await saveLlmModel(payload, setActivate)
     if (data.ok) {
       models.value = data.models || []
