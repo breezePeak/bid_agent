@@ -200,9 +200,22 @@
 4. 人工复核工作台
    已增加独立覆盖层、摘要聚合、分类查看与状态写入，以及局部重跑建议
 
+### 5.1 专项合规检查（第一版 → 交付门禁增强）
+
+已新增独立阶段 `compliance_check`（命令 `compliance-check`）：
+- 规则优先，不改写正文
+- 覆盖 9 类：资格 / 废标 / ★▲ / 签章 / 保证金 / 有效期 / 完整性 / 一致性 / 报价商务
+- 签章/资格/废标禁止关键词假 pass，默认人工复核
+- `pre_build` 可继续出稿；`check_format` 终稿复检 `phase=final`，`blocking` 硬阻断交付
+- 产物：`workspace/compliance_report.json`
+- 已接入 registry / CLI / Graph / Web status / PlanList 合规摘要 / validate
+- claim 防编造：写稿硬门禁 + 审核合并 findings
+- 合规 fail 回灌：manual_review + 章节 priority_fixes，驱动自动改稿
+
 后续更值得继续推进的是：
 
 1. 把人工复核项和章节/产物预览做更强联动
 2. 为 5 个核心 agent 补齐真实 variant prompt 文件
 3. 为 replay 建立显式“从某阶段重跑受影响章节”的 UI 命令
 4. 扩展 Web 视图测试到前端渲染层
+5. ~~报价确定性计算 / 偏离表逐行 / 评分点硬指标 / claim-source_trace 对齐~~（已落地）

@@ -137,4 +137,5 @@ python src/main.py graph-run --workers 2
 ## 进一步说明
 
 - 逻辑与流程说明：[docs/current_logic_flow.md](/D:/my_project/bid_agent/docs/current_logic_flow.md:1)
-- 开发演进记录：[docs/bid_agent_development_plan.md](/D:/my_project/bid_agent/docs/bid_agent_development_plan.md:1)
+- 开发演进记录：[docs/bid_agent_development_plan.md
+- Agent 化改造计划：[docs/agentization_development_plan.md](docs/agentization_development_plan.md)](/D:/my_project/bid_agent/docs/bid_agent_development_plan.md:1)

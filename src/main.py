@@ -10,6 +10,7 @@ from chapter_summarizer import summarize_all_chapters, summarize_chapter
 from chapter_writer import write_all, write_chapter
 from docx_builder import build_docx, build_markdown
 from fact_extractor import extract_facts
+from compliance_checker import run_compliance_check
 from global_reviewer import run_global_review
 from format_checker import check_output_format
 from outline_generator import generate_outline
@@ -17,6 +18,7 @@ from pipeline_registry import workflow_stage_specs
 from project_profile_registry import project_profile_choices, save_project_profile
 from prompt_registry import required_prompt_files
 from score_coverage_matrix import build_score_coverage_matrix
+from score_estimator import estimate_final_score
 from source_trace import build_source_trace_index
 from score_parser import parse_score
 from template_analyzer import analyze_template
@@ -178,18 +180,36 @@ DEFAULT_PROMPTS = {
   "problems": [
     {
       "type": "content_too_generic",
+      "severity": "major",
       "description": "部分内容偏通用",
       "suggestion": "增加招标文件中的具体业务场景"
     }
   ],
-  "need_rewrite": false
+  "priority_fixes": [
+    {
+      "id": "fix_01",
+      "severity": "major",
+      "source": "problem",
+      "score_point_id": "",
+      "problem_type": "content_too_generic",
+      "target": "部分内容偏通用",
+      "action": "增加招标文件中的具体业务场景",
+      "acceptance": "关键段落出现可核验的招标业务场景描述"
+    }
+  ],
+  "need_rewrite": false,
+  "need_evidence": false
 }
 
 硬性要求：
 1. 只审核当前章节绑定评分点。
 2. coverage_level 只能使用 high、medium、low、none。
-3. 第一版只审核，不自动重写。
-4. 只输出 JSON，不要输出解释，不要使用 Markdown 代码块。
+3. problems.severity 与 priority_fixes.severity 只能使用 blocker、major、minor。
+4. need_rewrite 仅在存在 blocker/major 时为 true。
+5. priority_fixes 只列本轮最优先的 1-5 项。
+6. 缺材料时 need_evidence=true，纯缺证问题 type 用 missing_evidence。
+7. 第一版只审核，不自动重写。
+8. 只输出 JSON，不要输出解释，不要使用 Markdown 代码块。
 """,
     "select_context.md": """你是标书章节资料选择助手。
 
@@ -291,12 +311,13 @@ DEFAULT_PROMPTS = {
 硬性要求：
 1. 只输出当前章节 Markdown 正文，不要输出其他章节。
 2. 必须保留章节标题，格式为 # 01 章节标题。
-3. 必须针对 review 中的 problems 逐项修复。
-4. 对 coverage_level 为 none 或 low 的评分点，必须重点补充。
-5. 必须结合已提供的招标文件片段和公司资料片段，但不能编造。
-6. 不允许编造未在资料中出现的资质、案例、证书、人员、金额、日期。
-7. 表格使用 Markdown 表格。
-8. 不要输出解释，不要使用 Markdown 代码块包裹全文。
+3. 优先处理 priority_fixes 中的 blocker/major，逐项落实 action 与 acceptance。
+4. 必须针对 review 中的 problems 修复 blocker/major 项。
+5. 对 coverage_level 为 none 或 low 的评分点，必须重点补充。
+6. 必须结合已提供的招标文件片段和公司资料片段，但不能编造。
+7. 不允许编造未在资料中出现的资质、案例、证书、人员、金额、日期。
+8. 表格使用 Markdown 表格。
+9. 不要输出解释，不要使用 Markdown 代码块包裹全文。
 """,
 }
 
@@ -442,8 +463,10 @@ def run_pipeline(root: Path | None = None, workers: int = 1, max_retries: int = 
         "review_fix_chapters": lambda: review_fix_all(root, workers=workers),
         "build_source_trace_index": lambda: build_source_trace_index(root),
         "build_score_coverage_matrix": lambda: build_score_coverage_matrix(root),
+        "estimate_final_score": lambda: estimate_final_score(root),
         "summarize_chapters": lambda: summarize_all_chapters(root),
         "global_review": lambda: run_global_review(root),
+        "compliance_check": lambda: run_compliance_check(root),
         "build_markdown": lambda: build_markdown(root),
         "build_docx": lambda: build_docx(root),
         "check_format": lambda: check_output_format(root),
@@ -524,7 +547,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("summarize-all", help="为所有章节生成结构化摘要")
     subparsers.add_parser("build-source-trace", help="生成章节来源追溯索引")
     subparsers.add_parser("build-score-coverage", help="生成评分点覆盖矩阵")
+    subparsers.add_parser("estimate-score", help="根据覆盖矩阵估算终稿得分")
     subparsers.add_parser("global-review", help="全文一致性审核（优先使用章节摘要）")
+    subparsers.add_parser("compliance-check", help="专项合规检查（资格/废标/强制参数/签章/保证金/有效期/完整性/一致性/报价/偏离）")
+    subparsers.add_parser("check-price-tables", help="报价表确定性验算（数量×单价）")
+    subparsers.add_parser("check-deviation-tables", help="偏离表逐行检查")
+    subparsers.add_parser("validate-claims", help="claim 防编造与 source_trace 对齐")
 
     subparsers.add_parser("build-md", help="拼接最终 Markdown")
     subparsers.add_parser("build-docx", help="生成 Word 文件")
@@ -542,6 +570,13 @@ def build_parser() -> argparse.ArgumentParser:
     graph_run_parser.add_argument("--project-type", default="", help=project_type_help)
 
     subparsers.add_parser("validate", help="项目功能闭环检查：验证文件、环境变量、中间产物完整性")
+
+    tool_parser = subparsers.add_parser("tool", help="调用 Agent Tool 层（PR-1: run_stage / 阶段 command）")
+    tool_parser.add_argument("--name", required=False, default="", help="tool 名，如 run_stage / parse-score")
+    tool_parser.add_argument("--args", default="{}", help="JSON 参数对象")
+    tool_parser.add_argument("--dry-run", action="store_true", help="只预览不执行")
+    tool_parser.add_argument("--list", action="store_true", dest="list_tools", help="列出可用 tools 后退出")
+
 
     return parser
 
@@ -618,9 +653,39 @@ def main() -> int:
     elif args.command == "build-score-coverage":
         print("[执行] 生成评分点覆盖矩阵...")
         build_score_coverage_matrix(root)
+    elif args.command == "estimate-score":
+        print("[执行] 终稿估分...")
+        estimate_final_score(root)
     elif args.command == "global-review":
         print("[执行] 全文一致性审核...")
         run_global_review(root)
+    elif args.command == "compliance-check":
+        print("[执行] 专项合规检查...")
+        run_compliance_check(root)
+    elif args.command == "check-price-tables":
+        print("[执行] 报价表确定性验算...")
+        from price_table_parser import parse_price_tables
+
+        report = parse_price_tables(root)
+        print(
+            f"[结果] tables={report.get('table_count')} issues={report.get('issue_count')} "
+            f"ok={report.get('ok')} -> workspace/price_table_report.json"
+        )
+    elif args.command == "check-deviation-tables":
+        print("[执行] 偏离表逐行检查...")
+        from deviation_table_checker import check_deviation_tables
+
+        report = check_deviation_tables(root)
+        print(
+            f"[结果] tables={report.get('table_count')} fail_rows={report.get('fail_row_count')} "
+            f"ok={report.get('ok')} -> workspace/deviation_table_report.json"
+        )
+    elif args.command == "validate-claims":
+        print("[执行] claim 防编造与对齐...")
+        from claim_validator import validate_all_chapter_claims
+
+        path = validate_all_chapter_claims(root)
+        print(f"[结果] {path}")
     elif args.command == "build-md":
         print("[执行] 拼接 Markdown...")
         build_markdown(root)
@@ -638,6 +703,35 @@ def main() -> int:
         if args.project_type:
             save_project_profile(root, args.project_type)
         run_graph_pipeline(root, workers=args.workers, resume=args.resume, max_retries=args.max_retries)
+    elif args.command == "tool":
+        import json
+        from agent.tool_registry import tool_manifest
+        from agent.tool_runtime import invoke as tool_invoke
+
+        if getattr(args, "list_tools", False):
+            for item in tool_manifest():
+                print(f"{item['name']}\t{item['label']}\t{item['id']}")
+            return 0
+        if not args.name:
+            print("[失败] 请提供 --name，或使用 --list 查看 tools")
+            return 1
+        try:
+            payload = json.loads(args.args or "{}")
+        except json.JSONDecodeError as exc:
+            print(f"[失败] --args 不是合法 JSON: {exc}")
+            return 1
+        if not isinstance(payload, dict):
+            print("[失败] --args 必须是 JSON 对象")
+            return 1
+        result = tool_invoke(
+            args.name,
+            payload,
+            root=root,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            actor="cli",
+        )
+        print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
+        return 0 if result.ok else 1
     elif args.command == "validate":
         report = validate_project(root)
         for item in report["results"]:

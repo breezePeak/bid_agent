@@ -25,6 +25,20 @@
       <div class="plan-summary-recovery" v-if="recovery">
         正在尝试修复：{{ recovery.reason || '分析失败原因' }} · {{ recovery.action || '自动重试' }}（{{ recovery.attempt || 0 }}/{{ recovery.max_attempts || 2 }}）
       </div>
+      <div
+        v-if="compliance && compliance.exists"
+        class="plan-summary-compliance"
+        :class="{ blocking: compliance.blocking, warn: !compliance.blocking && compliance.need_manual_review }"
+        @click="$emit('preview-compliance')"
+      >
+        <span class="plan-summary-kicker">{{ compliance.blocking ? '合规阻断' : (compliance.need_manual_review ? '合规待核' : '合规') }}</span>
+        <strong>
+          fail {{ (compliance.counts && compliance.counts.fail) || 0 }}
+          · warn {{ (compliance.counts && compliance.counts.warn) || 0 }}
+          · {{ compliance.max_severity || 'info' }}
+        </strong>
+        <small>{{ complianceTopHint }}</small>
+      </div>
     </div>
     <div class="plan-list-body" v-show="!planCollapsed" ref="bodyRef">
       <div
@@ -64,9 +78,21 @@ const props = defineProps({
   running: { type: Boolean, default: false },
   executing: { type: Boolean, default: false },
   recovery: { type: Object, default: null },
+  compliance: { type: Object, default: null },
 })
 
-defineEmits(['pause'])
+defineEmits(['pause', 'preview-compliance'])
+
+const complianceTopHint = computed(() => {
+  const items = props.compliance?.failed_items
+  if (Array.isArray(items) && items.length) {
+    const first = items[0]
+    return `${first.check_id || ''}${first.check_name ? ' ' + first.check_name : ''}`.trim() || '点击查看详情'
+  }
+  if (props.compliance?.blocking) return '存在 fatal/critical 失败，交付已阻断'
+  if (props.compliance?.need_manual_review) return '需人工复核签章/资格/废标条款等'
+  return '专项合规检查已完成'
+})
 
 const planCollapsed = ref(true)
 const bodyRef = ref(null)

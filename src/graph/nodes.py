@@ -12,6 +12,7 @@ from chapter_summarizer import summarize_chapter
 from context_selector import select_context_for_job
 from docx_builder import build_docx, build_markdown
 from document_splitter import split_docs
+from compliance_checker import run_compliance_check
 from format_checker import check_output_format
 from graph.state_recorder import (
     record_stage_finish,
@@ -22,9 +23,15 @@ from graph.state_recorder import (
 )
 from input_preparer import prepare_inputs
 from job_planner import plan_chapter_jobs
-from pipeline_registry import stage_spec_by_id
-from quality_gates import final_review_status, validate_template_fill_report
+from pipeline_registry import stage_spec_by_id, workflow_stage_specs
+from quality_gates import (
+    compliance_review_status,
+    final_review_status,
+    validate_compliance_blocking,
+    validate_template_fill_report,
+)
 from score_coverage_matrix import build_score_coverage_matrix
+from score_estimator import estimate_final_score
 from source_trace import build_source_trace_index
 from stage_validation import chapter_ids, context_ids, review_ids, summary_ids
 from subagent_runner import run_write_all as concurrent_write_all
@@ -34,6 +41,16 @@ from utils import ensure_dirs, ensure_file, project_root, read_json, stringify
 
 def _root(state) -> Path:
     return Path(state.get("root_dir") or project_root())
+
+
+def _stage_progress(stage_id: str) -> str:
+    """从 registry 生成 [i/n] 进度前缀，避免手写分母分叉。"""
+    specs = workflow_stage_specs()
+    total = len(specs)
+    for index, spec in enumerate(specs, start=1):
+        if spec.id == stage_id:
+            return f"[{index}/{total}] {spec.label}"
+    return stage_id
 
 
 def _is_resume(state: dict[str, Any]) -> bool:
@@ -182,7 +199,7 @@ def _start_stage(state: dict, stage: str, message: str) -> None:
 
 def init_workspace(state) -> dict:
     root = Path(state.get("root_dir") or project_root())
-    print("[1/18] 初始化工作区...")
+    print(_stage_progress("init_workspace") + "...")
     _start_stage(state, "init_workspace", "初始化工作区")
     try:
         ensure_dirs(
@@ -233,7 +250,7 @@ def init_workspace(state) -> dict:
 
 def prepare_inputs_node(state) -> dict:
     root = _root(state)
-    print("[2/18] 导入原始资料...")
+    print(_stage_progress("prepare_inputs") + "...")
     _start_stage(state, "prepare_inputs", "导入原始资料")
     try:
         if _is_resume(state) and stage_resume_ready(root, "prepare_inputs"):
@@ -263,7 +280,7 @@ def prepare_inputs_node(state) -> dict:
 
 def split_docs_node(state) -> dict:
     root = _root(state)
-    print("[3/18] 切分文档...")
+    print(_stage_progress("split_docs") + "...")
     _start_stage(state, "split_docs", "切分文档")
     try:
         tender_chunks = root / "workspace" / "chunks" / "tender_chunks.json"
@@ -283,7 +300,7 @@ def split_docs_node(state) -> dict:
 
 def parse_score_node(state) -> dict:
     root = _root(state)
-    print("[4/18] 解析评分标准...")
+    print(_stage_progress("parse_score") + "...")
     _start_stage(state, "parse_score", "解析评分标准")
     try:
         score_points_path = root / "workspace" / "score_points.json"
@@ -302,7 +319,7 @@ def parse_score_node(state) -> dict:
 
 def extract_facts_node(state) -> dict:
     root = _root(state)
-    print("[5/18] 提取全局事实...")
+    print(_stage_progress("extract_facts") + "...")
     _start_stage(state, "extract_facts", "提取全局事实")
     try:
         global_facts_path = root / "workspace" / "global_facts.json"
@@ -321,7 +338,7 @@ def extract_facts_node(state) -> dict:
 
 def build_template_evidence_node(state) -> dict:
     root = _root(state)
-    print("[6/18] 生成模板依据映射...")
+    print(_stage_progress("build_template_evidence") + "...")
     _start_stage(state, "build_template_evidence", "生成模板依据映射")
     try:
         evidence_path = root / "workspace" / "template_evidence_map.json"
@@ -347,7 +364,7 @@ def build_template_evidence_node(state) -> dict:
 
 def generate_outline_node(state) -> dict:
     root = _root(state)
-    print("[7/18] 生成大纲...")
+    print(_stage_progress("generate_outline") + "...")
     _start_stage(state, "generate_outline", "生成大纲")
     try:
         outline_path = root / "workspace" / "outline.json"
@@ -366,7 +383,7 @@ def generate_outline_node(state) -> dict:
 
 def plan_chapter_jobs_node(state) -> dict:
     root = _root(state)
-    print("[8/18] 生成章节任务...")
+    print(_stage_progress("plan_chapter_jobs") + "...")
     _start_stage(state, "plan_chapter_jobs", "生成章节任务")
     try:
         if _is_resume(state) and stage_resume_ready(root, "plan_chapter_jobs"):
@@ -386,7 +403,7 @@ def plan_chapter_jobs_node(state) -> dict:
 
 def select_contexts_node(state) -> dict:
     root = _root(state)
-    print("[9/18] 选择章节上下文...")
+    print(_stage_progress("select_contexts") + "...")
     _start_stage(state, "select_contexts", "选择章节上下文")
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
@@ -439,7 +456,7 @@ def write_chapters_node(state) -> dict:
     root = _root(state)
     workers = int(state.get("workers") or 2)
     max_retries = max(0, int(state.get("max_retries") or 0))
-    print(f"[10/18] 章节 SubAgent 写作... workers={workers}")
+    print(f"{_stage_progress('write_chapters')}... workers={workers}")
     _start_stage(state, "write_chapters", "章节写作")
     effective_workers = max(1, min(workers, 5))
     jobs = _state_jobs(state, root)
@@ -506,7 +523,7 @@ def write_chapters_node(state) -> dict:
 
 def review_fix_chapters_node(state) -> dict:
     root = _root(state)
-    print("[11/18] 审核并自动改稿...")
+    print(_stage_progress("review_fix_chapters") + "...")
     _start_stage(state, "review_fix_chapters", "审核并自动改稿")
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
@@ -548,7 +565,7 @@ def review_fix_chapters_node(state) -> dict:
 
 def build_score_coverage_matrix_node(state) -> dict:
     root = _root(state)
-    print("[13/18] 生成评分点覆盖矩阵...")
+    print(_stage_progress("build_score_coverage_matrix") + "...")
     _start_stage(state, "build_score_coverage_matrix", "生成评分点覆盖矩阵")
     try:
         matrix_path = root / "workspace" / "score_coverage_matrix.json"
@@ -565,9 +582,28 @@ def build_score_coverage_matrix_node(state) -> dict:
         raise
 
 
+def estimate_final_score_node(state) -> dict:
+    root = _root(state)
+    print(_stage_progress("estimate_final_score") + "...")
+    _start_stage(state, "estimate_final_score", "终稿估分")
+    try:
+        estimate_path = root / "workspace" / "final_score_estimate.json"
+        if _is_resume(state) and stage_resume_ready(root, "estimate_final_score"):
+            update = {"final_score_estimate_path": str(estimate_path)}
+            _persist_state(state, update, stage="estimate_final_score", status="ok", message="resume: 复用终稿估分")
+            return update
+        estimate_path = estimate_final_score(root)
+        update = {"final_score_estimate_path": str(estimate_path)}
+        _persist_state(state, update, stage="estimate_final_score")
+        return update
+    except Exception as exc:
+        _persist_error_state(state, "estimate_final_score", exc)
+        raise
+
+
 def build_source_trace_index_node(state) -> dict:
     root = _root(state)
-    print("[12/18] 生成来源追溯索引...")
+    print(_stage_progress("build_source_trace_index") + "...")
     _start_stage(state, "build_source_trace_index", "生成来源追溯索引")
     try:
         trace_index_path = root / "workspace" / "source_trace_index.json"
@@ -586,7 +622,7 @@ def build_source_trace_index_node(state) -> dict:
 
 def summarize_chapters_node(state) -> dict:
     root = _root(state)
-    print("[14/18] 生成章节摘要...")
+    print(_stage_progress("summarize_chapters") + "...")
     _start_stage(state, "summarize_chapters", "生成章节摘要")
     jobs = _state_jobs(state, root)
     completed_ids = sorted(chapter_ids(root))
@@ -631,7 +667,7 @@ def summarize_chapters_node(state) -> dict:
 
 def global_review_node(state) -> dict:
     root = _root(state)
-    print("[15/18] 全文一致性审核...")
+    print(_stage_progress("global_review") + "...")
     _start_stage(state, "global_review", "全文一致性审核")
     try:
         global_review_path = root / "workspace" / "global_review.json"
@@ -650,9 +686,40 @@ def global_review_node(state) -> dict:
         raise
 
 
+def compliance_check_node(state) -> dict:
+    root = _root(state)
+    print(_stage_progress("compliance_check") + "...")
+    _start_stage(state, "compliance_check", "专项合规检查")
+    try:
+        report_path = root / "workspace" / "compliance_report.json"
+        # resume 也要重新校验 blocking，避免半成品/旧报告被静默跳过
+        if _is_resume(state) and stage_resume_ready(root, "compliance_check") and report_path.exists():
+            report_data = read_json(report_path)
+            status = compliance_review_status(report_data if isinstance(report_data, dict) else {})
+            if status != "error":
+                update = {"compliance_report_path": str(report_path)}
+                _persist_state(state, update, stage="compliance_check", status=status, message="resume: 复用合规检查报告")
+                return update
+        report_path = run_compliance_check(root, raise_on_blocking=False, phase="pre_build")
+        report_data = read_json(report_path)
+        status = compliance_review_status(report_data if isinstance(report_data, dict) else {})
+        message = ""
+        if status == "error":
+            message = "blocking compliance findings"
+        elif status == "warn":
+            message = "need_manual_review"
+        update = {"compliance_report_path": str(report_path)}
+        _persist_state(state, update, stage="compliance_check", status=status, message=message)
+        # pre_build 阶段：blocking 标记 error 但仍允许继续出稿，由 check_format 终稿硬门禁拦截
+        return update
+    except Exception as exc:
+        _persist_error_state(state, "compliance_check", exc)
+        raise
+
+
 def build_markdown_node(state) -> dict:
     root = _root(state)
-    print("[16/18] 拼接 Markdown...")
+    print(_stage_progress("build_markdown") + "...")
     _start_stage(state, "build_markdown", "拼接 Markdown")
     try:
         final_md_path = root / "outputs" / "final.md"
@@ -671,7 +738,7 @@ def build_markdown_node(state) -> dict:
 
 def build_docx_node(state) -> dict:
     root = _root(state)
-    print("[17/18] 生成 Word...")
+    print(_stage_progress("build_docx") + "...")
     _start_stage(state, "build_docx", "生成 Word")
     try:
         final_docx_path = root / "outputs" / "final.docx"
@@ -698,15 +765,13 @@ def build_docx_node(state) -> dict:
 
 def check_format_node(state) -> dict:
     root = _root(state)
-    print("[18/18] 检查输出格式...")
+    print(_stage_progress("check_format") + "...")
     _start_stage(state, "check_format", "检查输出格式")
     try:
         report_path = root / "workspace" / "format_check_report.json"
-        if _is_resume(state) and stage_resume_ready(root, "check_format"):
-            update = {"format_check_report_path": str(report_path)}
-            _persist_state(state, update, stage="check_format", status="ok", message="resume: 复用格式检查报告")
-            return update
+        # 终稿合规门禁必须可重跑：不因旧 format 报告而跳过
         report_path = check_output_format(root)
+        validate_compliance_blocking(root, required=True)
         update = {"format_check_report_path": str(report_path)}
         _persist_state(state, update, stage="check_format")
         return update

@@ -73,7 +73,9 @@
         :running="running"
         :executing="autoExecuting"
         :recovery="recoveryState"
+        :compliance="complianceSummary"
         @pause="pauseAutoRun"
+        @preview-compliance="emit('preview', 'compliance-check')"
       />
     </div>
 
@@ -132,21 +134,44 @@ function formatLog(content) {
 
 const emit = defineEmits(['preview', 'open-doc-editor', 'rewrite-done'])
 
-const AUTO_RUN_COMMANDS = [
-  'init', 'prepare-inputs', 'split-docs', 'parse-score', 'extract-facts',
-  'build-template-evidence', 'generate-outline', 'plan-jobs',
-  'select-context-all', 'write-all', 'review-fix-all',
-  'build-source-trace', 'build-score-coverage', 'summarize-all',
-  'global-review', 'build-md', 'build-docx', 'check-format',
-]
+function coreWorkflowSteps(workflow = []) {
+  return (Array.isArray(workflow) ? workflow : []).filter(step => step && step.kind !== 'utility' && step.command)
+}
 
-const PLAN_LABELS = {
-  init: '初始化', 'prepare-inputs': '导入资料', 'split-docs': '切分文档',
-  'parse-score': '解析评分', 'extract-facts': '提取事实', 'build-template-evidence': '模板依据',
-  'generate-outline': '生成大纲', 'plan-jobs': '生成任务', 'select-context-all': '选择上下文',
-  'write-all': '生成章节', 'review-fix-all': '审核改稿', 'build-source-trace': '来源追溯',
-  'build-score-coverage': '评分覆盖', 'summarize-all': '生成摘要', 'global-review': '全文审核',
-  'build-md': '拼接MD', 'build-docx': '生成Word', 'check-format': '检查格式',
+function stepLabel(command) {
+  const hit = planSteps.value.find(s => s.command === command)
+  return hit?.label || command
+}
+
+function workflowCommands() {
+  return planSteps.value.map(s => s.command)
+}
+
+function syncPlanStepsFromWorkflow(workflow, timings = {}) {
+  const core = coreWorkflowSteps(workflow)
+  if (!core.length) return
+  const prevByCommand = Object.fromEntries(planSteps.value.map(s => [s.command, s]))
+  planSteps.value = core.map(step => {
+    const command = step.command
+    const prev = prevByCommand[command] || {}
+    let status = prev.status || 'pending'
+    if (step.done) status = 'done'
+    else if (step.state === 'running') status = 'running'
+    else if (step.state === 'recovering' || step.state === 'retrying') status = step.state
+    else if (step.state === 'error') status = 'error'
+    else if (!prev.status) status = 'pending'
+    const timing = timings[command]
+    const durationLabel = (timing && typeof timing === 'object' && timing.duration_label)
+      ? timing.duration_label
+      : (prev.durationLabel || '')
+    return {
+      command,
+      label: step.label || prev.label || command,
+      status,
+      message: step.message || prev.message || '',
+      durationLabel,
+    }
+  })
 }
 
 const messages = ref([])
@@ -156,7 +181,7 @@ const chatFileInput = ref(null)
 const msgContainer = ref(null)
 
 const files = reactive({ tender: [], company: [], template: [] })
-const planSteps = ref(AUTO_RUN_COMMANDS.map(cmd => ({ command: cmd, label: PLAN_LABELS[cmd] || cmd, status: 'pending', message: '', durationLabel: '' })))
+const planSteps = ref([])
 
 const prevStatusMap = reactive({})
 let messagesLoaded = false
@@ -178,13 +203,20 @@ const uploadedAll = computed(() => files.tender.length > 0 && files.company.leng
 const planDone = computed(() => planSteps.value.length > 0 && planSteps.value.every(s => s.status === 'done'))
 const docxReady = ref(false)
 const recoveryState = ref(null)
+const complianceSummary = ref(null)
 const quickBtns = computed(() => {
   if (!uploadedAll.value) return []
-  if (planDone.value || docxReady.value) return [
-    { label: '下载 Word', action: 'download-docx' },
-    { label: '预览 Word', action: 'doc-editor' },
-    { label: '查看全文审核', action: 'chat' },
-  ]
+  if (planDone.value || docxReady.value) {
+    const btns = [
+      { label: '下载 Word', action: 'download-docx' },
+      { label: '预览 Word', action: 'doc-editor' },
+      { label: '查看全文审核', action: 'chat' },
+    ]
+    if (complianceSummary.value) {
+      btns.splice(2, 0, { label: complianceSummary.value.blocking ? '合规阻断详情' : '查看专项合规', type: 'show_step', command: 'compliance-check' })
+    }
+    return btns
+  }
   const stepStatus = (cmd) => planSteps.value.find(s => s.command === cmd)?.status
   const failedStep = planSteps.value.find(s => s.status === 'error')
   if (failedStep) return [
@@ -193,15 +225,17 @@ const quickBtns = computed(() => {
     { label: `跳过 "${failedStep.label}"`, type: 'skip_stage', command: failedStep.command },
     { label: '诊断错误', action: 'chat' },
   ]
-  const chaptersDone = stepStatus('write-all') === 'done'
-  const reviewDone = stepStatus('review-fix-all') === 'done'
   const btns = [{ label: '当前状态', action: 'chat' }]
-  if (chaptersDone && !reviewDone) {
-    btns.push({ label: '派发审核改稿', type: 'dispatch_review' })
-  }
-  if (reviewDone) {
-    btns.push({ label: '定向改稿', type: 'dispatch_rewrite' })
-    btns.push({ label: '全文审核', type: 'global_review' })
+  const nextPending = planSteps.value.find(s => s.status !== 'done')
+  if (nextPending) {
+    if (nextPending.command === 'review-fix-all') {
+      btns.push({ label: '派发审核改稿', type: 'dispatch_review' })
+    } else if (nextPending.command === 'global-review') {
+      btns.push({ label: '定向改稿', type: 'dispatch_rewrite' })
+      btns.push({ label: '全文审核', type: 'global_review' })
+    } else {
+      btns.push({ label: `执行 ${nextPending.label}`, type: 'run_command', command: nextPending.command })
+    }
   }
   btns.push({ label: '评分覆盖', action: 'chat' })
   return btns
@@ -255,28 +289,16 @@ function updateFromStatus(data) {
   if (!data || !data.workflow) return
   const wf = data.workflow || []
   const timings = (data.timings && typeof data.timings === 'object') ? data.timings : {}
+  const before = Object.fromEntries(planSteps.value.map(s => [s.command, s.status]))
+  syncPlanStepsFromWorkflow(wf, timings)
   planSteps.value.forEach(s => {
-    const ws = wf.find(w => w.command === s.command || w.id?.replace(/_/g, '-') === s.command)
-      if (ws) {
-        let newStatus = 'pending'
-        if (ws.done) newStatus = 'done'
-        else if (ws.state === 'running') newStatus = 'running'
-        else if (ws.state === 'recovering' || ws.state === 'retrying') newStatus = ws.state
-        else if (ws.state === 'error') newStatus = 'error'
-      if (ws.message) s.message = ws.message
-      const timing = timings[s.command]
-      if (timing && typeof timing === 'object' && timing.duration_label) {
-        s.durationLabel = timing.duration_label
-      }
-      const prev = prevStatusMap[s.command]
-      if (prev === 'running' && newStatus === 'done' && messagesLoaded) {
-        if (activeStageLog.value && activeStageLog.value.stageLabel === s.label) collapseActiveStageLog()
-        const dur = s.durationLabel || ''
-        addMessage('system', `✓ ${s.label} 完成${dur ? '（用时 ' + dur + '）' : ''}`, [], { kind: 'stage_duration' })
-      }
-      prevStatusMap[s.command] = newStatus
-      s.status = newStatus
+    const prev = before[s.command] || prevStatusMap[s.command]
+    if (prev === 'running' && s.status === 'done' && messagesLoaded) {
+      if (activeStageLog.value && activeStageLog.value.stageLabel === s.label) collapseActiveStageLog()
+      const dur = s.durationLabel || ''
+      addMessage('system', `✓ ${s.label} 完成${dur ? '（用时 ' + dur + '）' : ''}`, [], { kind: 'stage_duration' })
     }
+    prevStatusMap[s.command] = s.status
   })
   running.value = data.running || false
   if (data.sources) {
@@ -288,6 +310,9 @@ function updateFromStatus(data) {
   const outputs = data.outputs || {}
   docxReady.value = !!(outputs.final_docx || outputs.final_md)
   recoveryState.value = data.recovery || null
+  complianceSummary.value = (data.compliance_summary && typeof data.compliance_summary === 'object')
+    ? data.compliance_summary
+    : null
   if (data.recovery_resolved) {
     const note = '✓ LLM 已恢复，当前阶段正在正常继续执行。'
     const recoveryMessage = [...messages.value].reverse().find(m =>
@@ -325,7 +350,7 @@ async function startAutoRun(fromCommand = null) {
   if (autoExecuting.value) return
   autoExecuting.value = true
   autoStarted.value = true
-  addMessage('system', fromCommand ? `从 ${PLAN_LABELS[fromCommand] || fromCommand} 继续后端流水线...` : '启动后端自动流水线...')
+  addMessage('system', fromCommand ? `从 ${stepLabel(fromCommand)} 继续后端流水线...` : '启动后端自动流水线...')
   connectSSE()
   if (statusTimer) clearInterval(statusTimer)
   statusTimer = setInterval(loadStatus, 2000)
@@ -350,10 +375,11 @@ function pauseAutoRun() {
   fetch('/api/pause-run', { method: 'POST' }); addMessage('system', '流程已暂停')
 }
 function skipFailedStage(failedCmd) {
-  const idx = AUTO_RUN_COMMANDS.indexOf(failedCmd)
+  const commands = workflowCommands()
+  const idx = commands.indexOf(failedCmd)
   if (idx < 0) return
-  addMessage('system', `已跳过 "${PLAN_LABELS[failedCmd] || failedCmd}"，继续下一步...`)
-  const nextCommand = AUTO_RUN_COMMANDS[idx + 1]
+  addMessage('system', `已跳过 "${stepLabel(failedCmd)}"，继续下一步...`)
+  const nextCommand = commands[idx + 1]
   if (nextCommand) startAutoRun(nextCommand)
 }
 async function runCommand(cmd) {
@@ -490,7 +516,7 @@ async function doChat(text) {
     addMessage('assistant', reply, actions)
     if (body.triggered_auto_run) {
       nextTick(() => { if (!autoExecuting.value) startAutoRun() })
-    } else if (body.triggered_command && AUTO_RUN_COMMANDS.includes(body.triggered_command)) {
+    } else if (body.triggered_command && workflowCommands().includes(body.triggered_command)) {
       // 编排器触发的命令属于流水线一环 → 接管为自动推进链，完成后自动跑下一个
       nextTick(() => { if (!autoExecuting.value) startAutoRun(body.triggered_command) })
     } else if (body.triggered_command || body.triggered_rewrite) {
@@ -587,14 +613,14 @@ async function doRewriteBlock(lineNumber, instruction) {
   sending.value = false
 }
 function triggerAndAutoAdvance(cmd, label) {
-  addMessage('system', `${label || ''}：${PLAN_LABELS[cmd] || cmd}`)
+  addMessage('system', `${label || ''}：${stepLabel(cmd)}`)
   runCommand(cmd)
   if (!autoExecuting.value) startAutoRun(cmd)
 }
 function handleAction(act) {
   if (act.type === 'chat_prompt') send(act.label)
   else if (act.type === 'run_command') triggerAndAutoAdvance(act.command, '执行')
-  else if (act.type === 'retry_stage') { addMessage('system', `重试: ${PLAN_LABELS[act.command] || act.command}`); triggerAndAutoAdvance(act.command, '重试') }
+  else if (act.type === 'retry_stage') { addMessage('system', `重试: ${stepLabel(act.command)}`); triggerAndAutoAdvance(act.command, '重试') }
   else if (act.type === 'skip_stage') { skipFailedStage(act.command) }
   else if (act.type === 'dispatch_chapters') triggerAndAutoAdvance('write-all', '派发章节写作子 Agent')
   else if (act.type === 'dispatch_review') triggerAndAutoAdvance('review-fix-all', '派发审核改稿子 Agent')

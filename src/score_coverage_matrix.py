@@ -157,6 +157,31 @@ def build_score_coverage_matrix(root: Path | None = None) -> Path:
         "matrix": matrix_rows,
     }
 
+    # 硬指标：关键词命中/要求词重叠，可下调 LLM 乐观覆盖
+    try:
+        from score_hard_metrics import enrich_matrix_with_hard_metrics
+
+        matrix = enrich_matrix_with_hard_metrics(root, matrix)
+        # 用硬指标修正 uncovered/weak 列表（更严）
+        hard_uncovered = matrix.get("hard_uncovered_score_points") or []
+        hard_weak = matrix.get("hard_weak_score_points") or []
+        if hard_uncovered:
+            matrix["uncovered_score_points"] = sorted(set(matrix.get("uncovered_score_points") or []) | set(hard_uncovered))
+        if hard_weak:
+            matrix["weak_score_points"] = sorted(set(matrix.get("weak_score_points") or []) | set(hard_weak))
+        # fully_covered 去掉硬指标 none/low 冲突项
+        conflict = set(hard_uncovered) | set(hard_weak)
+        matrix["fully_covered_score_points"] = [
+            spid for spid in (matrix.get("fully_covered_score_points") or []) if spid not in conflict
+        ]
+        summary = matrix.get("summary") if isinstance(matrix.get("summary"), dict) else {}
+        summary["fully_covered_score_point_count"] = len(matrix.get("fully_covered_score_points") or [])
+        summary["weak_score_point_count"] = len(matrix.get("weak_score_points") or [])
+        summary["uncovered_score_point_count"] = len(matrix.get("uncovered_score_points") or [])
+        matrix["summary"] = summary
+    except Exception as exc:
+        matrix["hard_metrics_error"] = str(exc)
+
     output_path = root / "workspace" / "score_coverage_matrix.json"
     write_json(output_path, matrix)
     print(f"[完成] 已生成评分点覆盖矩阵: {output_path}")

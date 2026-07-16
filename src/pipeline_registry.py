@@ -233,6 +233,18 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         runner="score_coverage_matrix.build_score_coverage_matrix",
     ),
     StageSpec(
+        id="estimate_final_score",
+        label="终稿估分",
+        command="estimate-score",
+        kind="core",
+        requires=(_artifact("workspace/score_coverage_matrix.json"),),
+        produces=(
+            _artifact("workspace/final_score_estimate.json"),
+            _artifact("outputs/score_estimate.md"),
+        ),
+        runner="score_estimator.estimate_final_score",
+    ),
+    StageSpec(
         id="summarize_chapters",
         label="生成摘要",
         command="summarize-all",
@@ -261,6 +273,26 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         runner="global_reviewer.run_global_review",
         max_context_chars=20000,
         prompt_agents=("global_reviewer",),
+    ),
+    StageSpec(
+        id="compliance_check",
+        label="专项合规检查",
+        command="compliance-check",
+        kind="core",
+        requires=(
+            _artifact("workspace/global_facts.json"),
+            _artifact("workspace/tender_requirements.json"),
+            _artifact("workspace/outline.json"),
+            _artifact("workspace/chapters/*.md", kind="glob", required_nonempty=False),
+            _artifact("workspace/global_review.json", required_nonempty=False),
+            _artifact("outputs/final.md", required_nonempty=False),
+        ),
+        produces=(_artifact("workspace/compliance_report.json"),),
+        runner="compliance_checker.run_compliance_check",
+        notes=(
+            "规则优先的专项合规检查：资格/废标/强制参数/签章/保证金/有效期/完整性/一致性",
+            "fatal/critical 失败标记 blocking，不改变写稿流程，仅作为独立门禁阶段",
+        ),
     ),
     StageSpec(
         id="build_markdown",

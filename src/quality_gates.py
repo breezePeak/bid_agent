@@ -67,3 +67,54 @@ def final_review_status(global_review: dict[str, Any]) -> str:
     if not isinstance(global_review, dict):
         return "ok"
     return "warn" if bool(global_review.get("need_manual_review")) else "ok"
+
+
+def compliance_review_status(compliance_report: dict[str, Any]) -> str:
+    if not isinstance(compliance_report, dict):
+        return "ok"
+    summary = compliance_report.get("summary") if isinstance(compliance_report.get("summary"), dict) else {}
+    blocking = bool(compliance_report.get("blocking") or summary.get("blocking"))
+    if blocking:
+        return "error"
+    need_manual = bool(compliance_report.get("need_manual_review") or summary.get("need_manual_review"))
+    return "warn" if need_manual else "ok"
+
+
+def validate_compliance_blocking(root: Path, *, required: bool = True) -> None:
+    """交付级门禁：fatal/critical 失败阻止流程成功完成。"""
+    report_path = root / "workspace" / "compliance_report.json"
+    if not report_path.exists():
+        if required:
+            raise ValueError(f"合规检查报告不存在，无法通过交付门禁: {report_path}")
+        return
+    report = read_json(report_path)
+    if not isinstance(report, dict):
+        raise ValueError("compliance_report.json 必须是 JSON 对象")
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    blocking = bool(report.get("blocking") or summary.get("blocking"))
+    if blocking:
+        raise RuntimeError(f"专项合规检查阻断交付，请修复后重跑 compliance-check: {report_path}")
+
+
+def validate_chapter_claims_gate(
+    root: Path,
+    chapter_id: str,
+    chapter_markdown: str,
+    *,
+    raise_on_blocker: bool = True,
+) -> dict[str, Any]:
+    """章节 claim 防编造门禁：金额/资质/业绩既成事实必须能在公司资料中找到支撑。"""
+    from claim_validator import validate_chapter_claims
+
+    result = validate_chapter_claims(root, chapter_id, chapter_markdown)
+    blockers = [
+        item
+        for item in (result.get("findings") or [])
+        if isinstance(item, dict) and stringify(item.get("severity")) == "blocker"
+    ]
+    if raise_on_blocker and blockers:
+        samples = [stringify(item.get("value") or item.get("description"))[:60] for item in blockers[:3]]
+        raise ValueError(
+            f"章节 {chapter_id} claim 防编造门禁失败（{len(blockers)} 项 blocker）: {samples}"
+        )
+    return result

@@ -9,8 +9,10 @@ from chapter_reviewer import (
     load_global_facts,
     load_outline,
     load_score_points,
+    mark_review_stuck,
     read_nonempty_text,
-    review_chapter_markdown,
+    rewrite_fix_signatures,
+    should_auto_rewrite,
     select_score_points,
 )
 from context_budget import summarize_chunk_payload, summarize_for_prompt, trim_text
@@ -29,6 +31,74 @@ from utils import (
 )
 
 REWRITE_CONTEXT_MAX_CHARS = 17000
+STUCK_UNCHANGED_ROUNDS = 2
+
+
+def _collect_auto_rewrite_ids(root: Path) -> tuple[list[str], list[str], list[str]]:
+    reviews_dir = root / "workspace" / "reviews"
+    need_rewrite_ids: list[str] = []
+    need_evidence_ids: list[str] = []
+    stuck_ids: list[str] = []
+    if not reviews_dir.exists():
+        return need_rewrite_ids, need_evidence_ids, stuck_ids
+
+    for rf in sorted(reviews_dir.glob("*_review.json")):
+        try:
+            review = read_json(rf)
+        except Exception:
+            continue
+        if not isinstance(review, dict):
+            continue
+        chapter_id = stringify(review.get("chapter_id")) or rf.stem.replace("_review", "")
+        status = stringify(review.get("rewrite_status"))
+        if status == "stuck" or bool(review.get("stuck")):
+            stuck_ids.append(chapter_id)
+            continue
+        if status == "need_evidence" or (
+            bool(review.get("need_evidence")) and not bool(review.get("has_writing_fixes", True))
+        ):
+            need_evidence_ids.append(chapter_id)
+            continue
+        if should_auto_rewrite(review):
+            need_rewrite_ids.append(chapter_id)
+    return need_rewrite_ids, need_evidence_ids, stuck_ids
+
+
+def _apply_stuck_detection(
+    root: Path,
+    chapter_ids: list[str],
+    previous_signatures: dict[str, list[str]],
+    unchanged_rounds: dict[str, int],
+) -> list[str]:
+    stuck_now: list[str] = []
+    for chapter_id in chapter_ids:
+        review_path = root / "workspace" / "reviews" / f"{chapter_id}_review.json"
+        if not review_path.exists():
+            continue
+        try:
+            review = read_json(review_path)
+        except Exception:
+            continue
+        if not isinstance(review, dict):
+            continue
+        current_sigs = rewrite_fix_signatures(review)
+        previous_sigs = previous_signatures.get(chapter_id, [])
+        if current_sigs and previous_sigs and set(current_sigs) == set(previous_sigs):
+            unchanged_rounds[chapter_id] = unchanged_rounds.get(chapter_id, 0) + 1
+        else:
+            unchanged_rounds[chapter_id] = 0
+        previous_signatures[chapter_id] = current_sigs
+
+        if unchanged_rounds.get(chapter_id, 0) >= STUCK_UNCHANGED_ROUNDS and should_auto_rewrite(review):
+            stuck_review = mark_review_stuck(
+                review,
+                stuck_signatures=current_sigs,
+                rounds_unchanged=unchanged_rounds[chapter_id],
+            )
+            write_json(review_path, stuck_review)
+            stuck_now.append(chapter_id)
+            print(f"[卡住] 章节 {chapter_id} 连续 {unchanged_rounds[chapter_id]} 轮 blocker/major 未收敛，停止自动改稿")
+    return stuck_now
 
 
 def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
@@ -51,6 +121,10 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
     old_md = read_nonempty_text(chapter_path, f"章节文件 {chapter_path}")
     old_length = len(old_md)
     review = read_json(review_path)
+    if not should_auto_rewrite(review):
+        status = stringify(review.get("rewrite_status")) or "skip"
+        raise RuntimeError(f"章节 {chapter_id} 当前状态为 {status}，跳过自动改稿（缺证据/卡住/无需重写）")
+
     job = read_json(job_path)
     context = read_json(context_path)
     score_points = load_score_points(root)
@@ -70,6 +144,45 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
     company_context = summarize_chunk_payload(selected_company, total_max_chars=REWRITE_CONTEXT_MAX_CHARS // 2, per_chunk_chars=1000)
 
     problems_count = len(review.get("problems", []))
+    priority_fixes = review.get("priority_fixes") if isinstance(review.get("priority_fixes"), list) else []
+    # 合并合规回灌线索（若审核结果尚未注入）
+    try:
+        from compliance_feedback import compliance_hints_for_chapter
+
+        existing_ids = {
+            stringify(item.get("id")) for item in priority_fixes if isinstance(item, dict)
+        }
+        for fix in compliance_hints_for_chapter(root, chapter_id):
+            if not isinstance(fix, dict):
+                continue
+            fix_id = stringify(fix.get("id"))
+            if fix_id and fix_id not in existing_ids:
+                priority_fixes.append(fix)
+                existing_ids.add(fix_id)
+    except Exception:
+        pass
+    rewrite_fixes = [
+        item
+        for item in priority_fixes
+        if isinstance(item, dict) and stringify(item.get("severity")) in {"blocker", "major"}
+    ]
+    if not rewrite_fixes and priority_fixes:
+        rewrite_fixes = [item for item in priority_fixes if isinstance(item, dict)][:5]
+    if not rewrite_fixes:
+        for item in review.get("problems") or []:
+            if not isinstance(item, dict):
+                continue
+            rewrite_fixes.append(
+                {
+                    "id": f"legacy_{len(rewrite_fixes) + 1:02d}",
+                    "severity": stringify(item.get("severity")) or "major",
+                    "source": "problem",
+                    "target": stringify(item.get("description")) or stringify(item.get("type")),
+                    "action": stringify(item.get("suggestion")) or "按审核意见修订",
+                    "acceptance": "对应问题在复审中不再出现。",
+                    "problem_type": stringify(item.get("type")),
+                }
+            )
 
     with agent_run(
         root,
@@ -78,6 +191,8 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
         input_summary={
             "chapter_id": chapter_id,
             "problem_count": problems_count,
+            "priority_fix_count": len(rewrite_fixes),
+            "max_severity": stringify(review.get("max_severity")),
             "tender_chunk_count": len(tender_context),
             "company_chunk_count": len(company_context),
         },
@@ -97,10 +212,12 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
                         f"{compact_json(related_sps)}\n\n"
                         "## 全局事实\n\n"
                         f"{compact_json(global_facts)}\n\n"
-                        "## 审核结果\n\n"
+                        "## 本轮优先修复项（必须逐项处理）\n\n"
+                        f"{compact_json(rewrite_fixes)}\n\n"
+                        "## 完整审核结果\n\n"
                         f"{compact_json(review)}\n\n"
                         "## 上下文摘要\n\n"
-                        f"{summarize_for_prompt({'max_context_chars': REWRITE_CONTEXT_MAX_CHARS, 'old_md_chars': len(old_md)}, 800)}\n\n"
+                        f"{summarize_for_prompt({'max_context_chars': REWRITE_CONTEXT_MAX_CHARS, 'old_md_chars': len(old_md), 'priority_fix_count': len(rewrite_fixes)}, 800)}\n\n"
                         "## 选中的招标文件片段\n\n"
                         f"{compact_json(tender_context)}\n\n"
                         "## 选中的公司资料片段\n\n"
@@ -117,7 +234,7 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
     new_length = len(new_md)
 
     write_text(chapter_path, new_md)
-    print(f"[完成] 已重写章节 {chapter_id}（{old_length} → {new_length} 字符）")
+    print(f"[完成] 已重写章节 {chapter_id}（{old_length} → {new_length} 字符，优先修复 {len(rewrite_fixes)} 项）")
 
     rewrites_dir = root / "workspace" / "rewrites"
     rewrites_dir.mkdir(parents=True, exist_ok=True)
@@ -126,7 +243,12 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
         "old_length": old_length,
         "new_length": new_length,
         "review_need_rewrite": review.get("need_rewrite", False),
+        "review_max_severity": stringify(review.get("max_severity")),
         "fixed_problem_count": problems_count,
+        "priority_fix_count": len(rewrite_fixes),
+        "priority_fix_ids": [stringify(item.get("id")) for item in rewrite_fixes if isinstance(item, dict)],
+        "priority_fixes": rewrite_fixes,
+        "priority_fix_signatures": rewrite_fix_signatures({"priority_fixes": rewrite_fixes}),
         "rewrite_time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "review_file": str(review_path.relative_to(root)),
         "chapter_file": str(chapter_path.relative_to(root)),
@@ -140,21 +262,18 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
 
 def rewrite_all(root: Path | None = None) -> list[Path]:
     root = root or project_root()
-    reviews_dir = root / "workspace" / "reviews"
     paths: list[Path] = []
     rewrites_dir = root / "workspace" / "rewrites"
     rewrites_dir.mkdir(parents=True, exist_ok=True)
 
-    review_files = sorted(reviews_dir.glob("*_review.json"))
+    need_rewrite_ids, need_evidence_ids, stuck_ids = _collect_auto_rewrite_ids(root)
+    if need_evidence_ids:
+        print(f"[跳过改稿] 缺证据章节: {need_evidence_ids}")
+    if stuck_ids:
+        print(f"[跳过改稿] 已卡住章节: {stuck_ids}")
+
     rewritten = 0
-    for rf in review_files:
-        try:
-            review = read_json(rf)
-        except Exception:
-            continue
-        if not review.get("need_rewrite", False):
-            continue
-        chapter_id = review.get("chapter_id") or rf.stem.replace("_review", "")
+    for chapter_id in need_rewrite_ids:
         paths.append(rewrite_chapter(chapter_id, root))
         rewritten += 1
 
@@ -184,21 +303,33 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int =
         print("[跳过] 所有现有章节均已有有效审核结果。")
 
     total_rewritten = 0
+    previous_signatures: dict[str, list[str]] = {}
+    unchanged_rounds: dict[str, int] = {}
+    total_stuck: set[str] = set()
+    total_need_evidence: set[str] = set()
+
     for round_num in range(1, max_rounds + 1):
-        reviews_dir = root / "workspace" / "reviews"
-        review_files = sorted(reviews_dir.glob("*_review.json"))
-        need_rewrite_ids: list[str] = []
-        for rf in review_files:
-            try:
-                review = read_json(rf)
-                if review.get("need_rewrite", False):
-                    need_rewrite_ids.append(review.get("chapter_id") or rf.stem.replace("_review", ""))
-            except Exception:
-                continue
+        need_rewrite_ids, need_evidence_ids, stuck_ids = _collect_auto_rewrite_ids(root)
+        total_need_evidence.update(need_evidence_ids)
+        total_stuck.update(stuck_ids)
+
+        if need_evidence_ids:
+            print(f"[分流] 第 {round_num} 轮缺证据章节（不自动改稿）: {need_evidence_ids}")
+        if stuck_ids:
+            print(f"[分流] 第 {round_num} 轮已卡住章节（不自动改稿）: {stuck_ids}")
 
         if not need_rewrite_ids:
-            print(f"[完成] 第 {round_num} 轮无章节需要重写。")
+            print(f"[完成] 第 {round_num} 轮无章节需要自动重写。")
             break
+
+        # 记录改稿前签名，供复审后判断是否收敛
+        for chapter_id in need_rewrite_ids:
+            review_path = root / "workspace" / "reviews" / f"{chapter_id}_review.json"
+            try:
+                review = read_json(review_path)
+                previous_signatures[chapter_id] = rewrite_fix_signatures(review)
+            except Exception:
+                previous_signatures[chapter_id] = []
 
         print(f"\n[{round_num + 1}/{max_rounds + 1}] 第 {round_num} 轮改稿：{len(need_rewrite_ids)} 个章节并发改稿...")
         rewrite_result = run_rewrite_all(root, workers=workers, chapter_ids=need_rewrite_ids)
@@ -207,24 +338,45 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int =
             raise RuntimeError("章节改稿失败：" + "；".join(details))
         total_rewritten += len(rewrite_result.get("completed", []))
 
-        print(f"[{round_num + 1}/{max_rounds + 1}] 改稿后并发复审...")
+        print(f"[{round_num + 1}/{max_rounds + 1}] 改稿后定向复审（带上轮 priority_fixes）...")
         rereview_result = run_review_all(root, workers=workers, chapter_ids=need_rewrite_ids)
         if rereview_result.get("failed"):
             details = [f"{item['chapter_id']}: {item['error']}" for item in rereview_result["failed"][:10]]
             raise RuntimeError("章节复审失败：" + "；".join(details))
 
+        stuck_now = _apply_stuck_detection(root, need_rewrite_ids, previous_signatures, unchanged_rounds)
+        total_stuck.update(stuck_now)
+
     reviews_dir = root / "workspace" / "reviews"
     still_failed = 0
-    for rf in sorted(reviews_dir.glob("*_review.json")):
+    need_evidence_final: list[str] = []
+    stuck_final: list[str] = []
+    for rf in sorted(reviews_dir.glob("*_review.json")) if reviews_dir.exists() else []:
         try:
             review = read_json(rf)
-            if review.get("need_rewrite", False):
-                still_failed += 1
         except Exception:
             continue
+        if not isinstance(review, dict):
+            continue
+        chapter_id = stringify(review.get("chapter_id")) or rf.stem.replace("_review", "")
+        status = stringify(review.get("rewrite_status"))
+        if status == "stuck" or bool(review.get("stuck")):
+            stuck_final.append(chapter_id)
+            still_failed += 1
+        elif status == "need_evidence" or (
+            bool(review.get("need_evidence")) and not bool(review.get("has_writing_fixes", True))
+        ):
+            need_evidence_final.append(chapter_id)
+            still_failed += 1
+        elif review.get("need_rewrite", False):
+            still_failed += 1
 
     print()
     print(f"--- review-fix-all 完成 ---")
     print(f"总章节数: {chapter_count}")
     print(f"已重写数: {total_rewritten}")
     print(f"仍未通过数: {still_failed}")
+    if need_evidence_final:
+        print(f"缺证据章节: {need_evidence_final}")
+    if stuck_final:
+        print(f"卡住章节: {stuck_final}")

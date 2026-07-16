@@ -57,73 +57,35 @@ const AUTO_LAST_COMMAND_KEY = "bidAgentAutoRunLastCommand";
 const AUTO_LAST_STARTED_AT_KEY = "bidAgentAutoRunLastStartedAt";
 const CHAT_HISTORY_KEY = "bidAgentChatHistory";
 
-const COMMAND_LABELS = {
-  init: "初始化项目",
+// 流程定义以后端 /api/status.workflow 为准，前端不再硬编码阶段列表。
+const EXTRA_COMMAND_LABELS = {
   "init-demo": "生成演示资料",
-  "prepare-inputs": "导入资料",
   "analyze-template": "解析模板结构",
-  "split-docs": "切分文档",
-  "parse-score": "解析评分",
-  "extract-facts": "提取事实",
-  "build-template-evidence": "生成模板依据",
-  "generate-outline": "生成大纲",
-  "plan-jobs": "生成任务",
-  "select-context-all": "选择上下文",
-  "write-all": "生成章节",
-  "review-fix-all": "审核改稿",
-  "build-source-trace": "生成来源追溯",
-  "build-score-coverage": "生成评分覆盖矩阵",
-  "summarize-all": "生成摘要",
-  "global-review": "全文审核",
-  "build-md": "拼接 MD",
-  "build-docx": "生成 Word",
-  "check-format": "检查格式",
   validate: "校验项目",
   run: "自动执行全流程",
   "graph-run": "自动执行全流程",
 };
 
-const STAGE_TO_COMMAND = {
-  init_workspace: "init",
-  prepare_inputs: "prepare-inputs",
-  split_docs: "split-docs",
-  parse_score: "parse-score",
-  extract_facts: "extract-facts",
-  build_template_evidence: "build-template-evidence",
-  generate_outline: "generate-outline",
-  plan_chapter_jobs: "plan-jobs",
-  select_contexts: "select-context-all",
-  write_chapters: "write-all",
-  review_fix_chapters: "review-fix-all",
-  build_source_trace_index: "build-source-trace",
-  build_score_coverage_matrix: "build-score-coverage",
-  summarize_chapters: "summarize-all",
-  global_review: "global-review",
-  build_markdown: "build-md",
-  build_docx: "build-docx",
-  check_format: "check-format",
-};
+function coreWorkflow(workflow) {
+  return (Array.isArray(workflow) ? workflow : []).filter((step) => step && step.kind !== "utility" && step.command);
+}
 
-const AUTO_RUN_COMMANDS = [
-  "init",
-  "prepare-inputs",
-  "split-docs",
-  "parse-score",
-  "extract-facts",
-  "build-template-evidence",
-  "generate-outline",
-  "plan-jobs",
-  "select-context-all",
-  "write-all",
-  "review-fix-all",
-  "build-source-trace",
-  "build-score-coverage",
-  "summarize-all",
-  "global-review",
-  "build-md",
-  "build-docx",
-  "check-format",
-];
+function autoRunCommands() {
+  return coreWorkflow(currentStatus?.workflow || []).map((step) => step.command);
+}
+
+function commandLabel(command) {
+  const step = (currentStatus?.workflow || []).find((item) => item.command === command);
+  if (step?.label) return step.label;
+  return EXTRA_COMMAND_LABELS[command] || command;
+}
+
+function stageToCommand(stage) {
+  if (!stage) return "";
+  const hit = (currentStatus?.workflow || []).find((step) => step.id === stage || step.command === stage);
+  if (hit?.command) return hit.command;
+  return String(stage).replaceAll("_", "-");
+}
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -1268,7 +1230,7 @@ function getActiveCommand() {
     return currentStatus.current_task;
   }
   if (currentStatus.running && (currentStatus.current_task === "graph-run" || currentStatus.current_task === "run")) {
-    return STAGE_TO_COMMAND[stage] || "";
+    return stageToCommand(stage);
   }
   return "";
 }
@@ -1328,7 +1290,7 @@ function getWorkflowStep(command) {
 
 function isCommandComplete(command) {
   const stage = currentStatus?.run_state?.stage || "";
-  const runStateCommand = STAGE_TO_COMMAND[stage] || stage;
+  const runStateCommand = stageToCommand(stage) || stage;
   if (["error", "paused"].includes(currentStatus?.run_state?.status) && runStateCommand === command) return false;
   if (command === "init") return true;
   const step = getWorkflowStep(command);
@@ -1414,7 +1376,7 @@ function updateProgressSummary(workflow) {
     progressCaption.textContent = "尚未开始本次生成，点击顶部“开始生成”后会从第一步自动执行。";
     currentStage.textContent = "待开始";
   } else if (currentStatus?.running) {
-    progressCaption.textContent = `正在执行：${activeStep?.label || COMMAND_LABELS[currentStatus.current_task] || currentStatus.current_task}`;
+    progressCaption.textContent = `正在执行：${activeStep?.label || commandLabel(currentStatus.current_task)}`;
   } else if (failed) {
     progressCaption.textContent = `流程已暂停：${currentStatus.run_state?.message || "上一步执行失败"}`;
   } else if (stale) {
@@ -1489,7 +1451,7 @@ function updateChrome() {
   updateWorkspaceShell();
 
   heroTask.textContent = running
-    ? `运行中：${activeStep?.label || COMMAND_LABELS[currentStatus.current_task] || currentStatus.current_task}`
+    ? `运行中：${activeStep?.label || commandLabel(currentStatus.current_task)}`
     : globalRunning
       ? `后台运行中：${currentStatus.running_run?.relative_root || currentStatus.running_run?.id || ""}`
     : failed
@@ -1589,7 +1551,7 @@ async function runCommand(command) {
       return;
     }
     if (command !== "validate") markCurrentRunStarted();
-    appendLog("--- 触发: " + (COMMAND_LABELS[command] || command) + " ---");
+    appendLog("--- 触发: " + commandLabel(command) + " ---");
     connectLogStream();
     setTimeout(loadStatus, 500);
   } catch (error) {
@@ -1676,7 +1638,7 @@ async function resumeAutoRun() {
     alert("当前没有可继续执行的步骤。");
     return;
   }
-  const index = AUTO_RUN_COMMANDS.indexOf(currentStatus.next_step.command);
+  const index = autoRunCommands().indexOf(currentStatus.next_step.command);
   if (index < 0) {
     alert("当前下一步不在自动流程中。");
     return;
@@ -1785,18 +1747,18 @@ async function runNextAutoCommand() {
     const startedAt = autoLastStartedAt;
     if (Date.now() - startedAt < 2000) return;
     if (!isCommandComplete(lastCommand)) {
-      appendLog(`[自动流程] ${COMMAND_LABELS[lastCommand] || lastCommand} 未完成，流程已暂停。`);
+      appendLog(`[自动流程] ${commandLabel(lastCommand)} 未完成，流程已暂停。`);
       stopAutoRun();
       loadStatus();
       return;
     }
-    const completedIndex = AUTO_RUN_COMMANDS.indexOf(lastCommand);
+    const completedIndex = autoRunCommands().indexOf(lastCommand);
     autoRunIndex = Math.max(completedIndex + 1, getAutoIndex());
     autoLastCommand = "";
   }
 
   const index = getAutoIndex();
-  const command = AUTO_RUN_COMMANDS[index];
+  const command = autoRunCommands()[index];
   if (!command) {
     appendLog("--- 自动流程已完成 ---");
     stopAutoRun();

@@ -80,15 +80,15 @@ AGENT_SPECS: dict[str, AgentSpec] = {
     "chapter_reviewer": AgentSpec(
         name="chapter_reviewer",
         prompt_file="review_chapter.md",
-        version="1.0.0",
+        version="1.1.0",
         input_contract={"documents": ["workspace/chapters/*.md", "workspace/jobs/*.json", "workspace/global_facts.json"], "mode": "chapter_review"},
-        output_contract={"type": "json_object", "required_keys": ["score_coverage", "problems", "need_rewrite"]},
+        output_contract={"type": "json_object", "required_keys": ["score_coverage", "problems", "priority_fixes", "need_rewrite"]},
         context_budget={"max_context_chars": 14000},
     ),
     "chapter_rewriter": AgentSpec(
         name="chapter_rewriter",
         prompt_file="rewrite_chapter.md",
-        version="1.0.0",
+        version="1.1.0",
         input_contract={"documents": ["workspace/chapters/*.md", "workspace/reviews/*_review.json", "workspace/contexts/*_context.json"], "mode": "chapter_rewrite"},
         output_contract={"type": "markdown", "required_features": ["chapter_heading"]},
         context_budget={"max_context_chars": 17000, "max_chunks": 16},

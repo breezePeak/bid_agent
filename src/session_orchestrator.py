@@ -43,6 +43,7 @@ _ORCHESTRATOR_SYSTEM_PROMPT = """你是标书 Agent 的主 Agent（全局会话�
 - global_review: 触发全文审核子 agent（单实例，自带上下文）。对应 global-review。
 - auto_run: 从当前进度自动连续执行剩余所有阶段。
 - chat: 通用回答/引导。
+说明：专项合规检查命令为 compliance-check，通过 run_command 触发，位于 global-review 之后、build-md 之前。
 
 ## 6. 输出规则
 1. 只输出一个 JSON 对象，不要任何额外文字、不要 markdown 代码块。
@@ -50,7 +51,7 @@ _ORCHESTRATOR_SYSTEM_PROMPT = """你是标书 Agent 的主 Agent（全局会话�
 3. actions 元素：{"type":"run_command","command":"<cmd>","label":"<lbl>"}；{"type":"dispatch_chapters","label":"派发章节写作"}；{"type":"dispatch_review","label":"派发审核改稿"}；{"type":"dispatch_rewrite","label":"定向改稿"}；{"type":"global_review","label":"全文审核"}；{"type":"auto_run","label":"一键跑完剩余"}；{"type":"show_step","command":"<cmd>","label":"<lbl>"}。
 4. 用户说"继续/下一步/开始/执行/跑/重试/派发"→action=run_command, command=next_step.command, auto_execute=true。
 5. 用户说"全部跑完/一键生成"→action=auto_run, auto_execute=true。
-6. 用户说"审核/检查质量"但没有明确要求执行时，先 action=query, query_type=quality_risk；只有明确说"执行审核/开始审核/派发审核"才 action=dispatch_review 或 global_review。
+6. 用户说"审核/检查质量"但没有明确要求执行时，先 action=query, query_type=quality_risk；只有明确说"执行审核/开始审核/派发审核"才 action=dispatch_review 或 global_review；用户说"合规检查/废标检查/专项合规"→action=run_command, command=compliance-check。
 7. 用户说"改某章/定向改稿"→action=dispatch_rewrite，给 rewrite_targets。
 8. query 和 chat 永远 auto_execute=false。
 9. 普通问答规则：
@@ -220,6 +221,25 @@ def plan(
     llm_chat=None,
     review_context: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    # PR-3: optional Supervisor short-loop (flag default off)
+    try:
+        from agent.flags import agent_supervisor_enabled
+        from agent.supervisor import plan_with_supervisor
+
+        if agent_supervisor_enabled():
+            supervised = plan_with_supervisor(
+                message,
+                history,
+                status,
+                llm_chat=llm_chat,
+                review_context=review_context,
+            )
+            if supervised:
+                return supervised
+    except Exception:
+        # fall through to legacy orchestrator
+        pass
+
     snapshot = _compact_status_snapshot(status)
     system_prompt = (
         _ORCHESTRATOR_SYSTEM_PROMPT
@@ -285,16 +305,19 @@ def build_query_reply(query_type: str, status: dict[str, Any]) -> tuple[str, lis
         return reply, actions
 
     if query_type == "quality_risk":
+        compliance_done = any(w.get("command") == "compliance-check" and w.get("done") for w in snapshot.get("workflow", []))
         reply = (
             f"质量风险概览：人工复核待处理 {manual.get('total_pending', 0)} 项，"
             f"章节问题 {manual.get('chapter_review_pending', 0)}，"
             f"全文风险 {manual.get('global_review_pending', 0)}，"
-            f"弱证据/模板缺口 {manual.get('template_evidence_pending', 0)}。"
+            f"弱证据/模板缺口 {manual.get('template_evidence_pending', 0)}；"
+            f"专项合规检查：{'已完成' if compliance_done else '未完成'}。"
         )
         return reply, [
             {"type": "show_manual_review", "category": "global_review", "label": "看全文风险"},
             {"type": "show_manual_review", "category": "chapter_review", "label": "看章节问题"},
             {"type": "show_step", "command": "global-review", "label": "查看全文审核"},
+            {"type": "show_step", "command": "compliance-check", "label": "查看专项合规"},
         ]
 
     if query_type == "inputs":

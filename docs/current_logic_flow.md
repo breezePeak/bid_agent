@@ -57,8 +57,10 @@ START
   → review_fix_chapters
   → build_source_trace_index
   → build_score_coverage_matrix
+  → estimate_final_score
   → summarize_chapters
   → global_review
+  → compliance_check
   → build_markdown
   → build_docx
   → check_format
@@ -66,9 +68,11 @@ START
 ```
 
 说明：
-- `run` 和 `graph-run` 的阶段顺序一致
+- `run` 和 `graph-run` 的阶段顺序一致，均以 `pipeline_registry.STAGE_SPECS` 为准
+- Graph 进度文案由 registry 动态生成 `[i/n]`，不再手写分母
 - `graph-run --resume` 会按事件流和产物校验决定是否复用
 - Web 流程台展示的节点顺序与这里一致
+- 报价/偏离表同时解析 Markdown 与 `outputs/final.docx`
 
 ## 3. 分阶段说明
 
@@ -218,10 +222,14 @@ agent：
 
 职责：
 - 审核章节是否覆盖评分点
-- 对 `need_rewrite=true` 的章节执行自动改稿，最多 2 轮
+- 按 severity 分级问题（blocker / major / minor），并生成 `priority_fixes`
+- 仅当存在可自动改稿的 blocker/major（`rewrite_status=need_rewrite`）时自动改稿，最多 2 轮
+- `need_evidence` / 纯缺材料问题：分流人工补资料，不进入自动改稿
+- 改稿优先消费 `priority_fixes`；复审带上轮 fixes 做定向验收
+- 同一批 blocker/major 连续 2 轮未收敛：标记 `stuck` 并停止自动改稿
 
 关键输出：
-- `workspace/reviews/*_review.json`
+- `workspace/reviews/*_review.json`（含 `priority_fixes` / `max_severity` / `need_evidence` / `rewrite_status`）
 - `workspace/rewrites/*_rewrite_log.json`
 
 agent：
@@ -241,9 +249,26 @@ agent：
 
 职责：
 - 汇总评分点 -> 章节任务 -> 审核覆盖结果
+- 叠加硬指标：关键词命中率、要求词重叠、`level_hint`
+- 硬指标可下调 LLM 过于乐观的覆盖结论
 
 关键输出：
-- `workspace/score_coverage_matrix.json`
+- `workspace/score_coverage_matrix.json`（含 `hard_metrics` / `hard_uncovered_score_points`）
+
+### 3.13b `estimate_final_score`
+
+职责：
+- 按「评分点满分 × 覆盖档位系数」估算终稿得分
+- 覆盖档位融合 LLM 与硬指标（取更严）
+- 输出保守/基准/乐观区间、失分项与等级
+
+关键输出：
+- `workspace/final_score_estimate.json`
+- `outputs/score_estimate.md`
+
+说明：
+- 为系统参考分，不是评标委员会正式打分
+- 无分值评分点不计入总分
 
 ### 3.14 `summarize_chapters`
 
@@ -272,7 +297,42 @@ agent：
 agent：
 - `global_reviewer`
 
-### 3.16 `build_markdown`
+### 3.16 `compliance_check`
+
+职责：
+- 规则优先的专项合规检查（9 类）
+  - 资格条件（默认 warn/人工，禁止关键词假 pass）
+  - 废标条款（默认 warn/人工，禁止空 pass）
+  - ★▲强制参数
+  - 签字盖章（文本无法验真，禁止 pass）
+  - 保证金
+  - 投标有效期
+  - 文档完整性
+  - 全文数据一致性
+  - 报价/商务最小检查（限价、零报价、报价表存在性）
+- 统一输出检查项结构（check_id / severity / requirement_source / bid_evidence）
+- 不改写正文，只发现废标/扣分/缺失风险
+
+关键输出：
+- `workspace/compliance_report.json`
+
+关键状态：
+- `blocking=true`（存在 fatal/critical 失败）时阶段状态为 `error`
+- `need_manual_review=true` 时阶段状态为 `warn`
+- `pre_build` 阶段不硬停后续出稿，便于先生成终稿
+- `check_format` 阶段会基于 `final.md` 做 `final` 复检；`blocking` 时阻断交付成功
+
+说明：
+- 本阶段为确定性规则检查，不依赖 LLM
+- 与 `global_review`（LLM 全文一致性）互补，不替换
+- 完成后自动：
+  - 生成 `workspace/claim_validation_report.json`（金额/资质/业绩 claim 防编造 + chunk 对齐）
+  - 回灌 `workspace/compliance_rewrite_hints.json` 与 `manual_review/compliance_actions.json`
+  - 将可改稿合规项注入对应章节 `reviews/*_review.json` 的 `priority_fixes`
+  - 报价表确定性验算：`workspace/price_table_report.json`（数量×单价）
+  - 偏离表逐行：`workspace/deviation_table_report.json`
+
+### 3.17 `build_markdown`
 
 职责：
 - 按大纲顺序拼接章节为 `final.md`
@@ -280,7 +340,7 @@ agent：
 关键输出：
 - `outputs/final.md`
 
-### 3.17 `build_docx`
+### 3.18 `build_docx`
 
 职责：
 - 尽量继承模板样式、封面、表格和页眉页脚
@@ -293,16 +353,19 @@ agent：
 质量门禁：
 - 若模板填充报告显示未处理结构或残留占位，阶段失败
 
-### 3.18 `check_format`
+### 3.19 `check_format`
 
 职责：
 - 对 Markdown、DOCX、模板 contract、填充报告做最终检查
+- 触发专项合规终稿复检（`phase=final`，优先 `outputs/final.md`）
+- `compliance blocking` 记入格式门禁 fail，并阻止流程成功完成
 
 关键输出：
 - `workspace/format_check_report.json`
+- 更新 `workspace/compliance_report.json`（终稿复检结果）
 
 说明：
-- 如果存在 `fail` 项，会抛异常并阻止流程被视为成功
+- 如果存在 `fail` 项（含合规阻断），会抛异常并阻止流程被视为成功
 
 ## 4. 运行时状态与事件流
 

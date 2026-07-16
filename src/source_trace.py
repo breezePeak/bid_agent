@@ -86,6 +86,20 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
     ]
 
     chapter_text = read_text(chapter_path)
+    # 为对齐补全 chunk 全文（不仅 preview）
+    selected_tender_full = []
+    for item in selected_tender:
+        full = dict(item)
+        chunk = tender_index.get(stringify(item.get("id")), {})
+        full["content"] = stringify(chunk.get("content"))
+        selected_tender_full.append(full)
+    selected_company_full = []
+    for item in selected_company:
+        full = dict(item)
+        chunk = company_index.get(stringify(item.get("id")), {})
+        full["content"] = stringify(chunk.get("content"))
+        selected_company_full.append(full)
+
     trace = {
         "chapter_id": chapter_id,
         "chapter_title": stringify(job.get("chapter_title")),
@@ -93,13 +107,49 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
         "chapter_preview": " ".join(line.strip() for line in chapter_text.splitlines() if line.strip())[:400],
         "score_point_ids": job.get("score_point_ids", []) if isinstance(job.get("score_point_ids"), list) else [],
         "related_score_points": related_score_points,
-        "selected_tender_chunk_count": len(selected_tender),
-        "selected_company_chunk_count": len(selected_company),
-        "selected_tender_chunks": selected_tender,
-        "selected_company_chunks": selected_company,
+        "selected_tender_chunk_count": len(selected_tender_full),
+        "selected_company_chunk_count": len(selected_company_full),
+        "selected_tender_chunks": selected_tender_full,
+        "selected_company_chunks": selected_company_full,
         "context_path": str((root / "workspace" / "contexts" / f"{chapter_id}_context.json").relative_to(root)),
         "job_path": str((root / "workspace" / "jobs" / f"{chapter_id}.json").relative_to(root)),
     }
+
+    # claim ↔ source_trace 逐句对齐（使用本轮已解析的 chunk 全文，避免读写环）
+    try:
+        from claim_validator import build_evidence_corpus, validate_claims_against_evidence
+
+        chunk_payload = []
+        for item in selected_company_full:
+            chunk_payload.append(
+                {
+                    "chunk_id": stringify(item.get("id")),
+                    "source": "company",
+                    "content": stringify(item.get("content")),
+                    "selected_reason": stringify(item.get("selected_reason")),
+                }
+            )
+        for item in selected_tender_full:
+            chunk_payload.append(
+                {
+                    "chunk_id": stringify(item.get("id")),
+                    "source": "tender",
+                    "content": stringify(item.get("content")),
+                    "selected_reason": stringify(item.get("selected_reason")),
+                }
+            )
+        evidence = build_evidence_corpus(root)
+        claim_result = validate_claims_against_evidence(chapter_text, evidence, chunks=chunk_payload)
+        trace["claim_alignments"] = claim_result.get("claim_alignments") or []
+        trace["claim_alignment_summary"] = {
+            "claim_count": claim_result.get("claim_count", 0),
+            "aligned_count": claim_result.get("aligned_count", 0),
+            "finding_count": claim_result.get("finding_count", 0),
+            "blocker_count": claim_result.get("blocker_count", 0),
+            "grounded_count": claim_result.get("grounded_count", 0),
+        }
+    except Exception as exc:
+        trace["claim_alignment_error"] = str(exc)
 
     output_dir = root / "workspace" / "source_traces"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -126,12 +176,21 @@ def build_source_trace_index(root: Path | None = None) -> Path:
         except Exception as exc:
             missing_chapters.append(f"{chapter_id}: {exc}")
 
+    aligned_total = 0
+    claim_total = 0
+    for trace in traces:
+        summary = trace.get("claim_alignment_summary") if isinstance(trace.get("claim_alignment_summary"), dict) else {}
+        aligned_total += int(summary.get("aligned_count") or 0)
+        claim_total += int(summary.get("claim_count") or 0)
+
     index = {
         "summary": {
             "chapter_count": len(traces),
             "missing_chapter_count": len(missing_chapters),
             "tender_chunk_reference_count": sum(int(trace.get("selected_tender_chunk_count", 0)) for trace in traces),
             "company_chunk_reference_count": sum(int(trace.get("selected_company_chunk_count", 0)) for trace in traces),
+            "claim_count": claim_total,
+            "claim_aligned_count": aligned_total,
         },
         "missing_chapters": missing_chapters,
         "chapters": traces,

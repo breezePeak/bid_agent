@@ -541,6 +541,62 @@ def _check_docx(root: Path, results: list[dict[str, str]]) -> None:
     _check_docx_template_contract(root, document, results)
 
 
+def _check_price_and_deviation_tables(root: Path, results: list[dict[str, str]]) -> None:
+    try:
+        from price_table_parser import parse_price_tables
+
+        price_report = parse_price_tables(root)
+        if price_report.get("table_count", 0) == 0:
+            results.append(_item("price tables", "ok", "未检出可验算报价表（跳过）"))
+        elif price_report.get("ok"):
+            results.append(
+                _item(
+                    "price tables",
+                    "ok",
+                    f"报价表确定性验算通过：{price_report.get('table_count')} 张表",
+                )
+            )
+        else:
+            messages = [str(i.get("message") or "") for i in (price_report.get("issues") or [])[:5]]
+            results.append(
+                _item(
+                    "price tables",
+                    "fail",
+                    "报价表数量×单价验算失败: " + "；".join(messages),
+                    "请修正分项报价表后重跑 build-md / check-format",
+                )
+            )
+    except Exception as exc:
+        results.append(_item("price tables", "warn", f"报价表验算异常: {exc}"))
+
+    try:
+        from deviation_table_checker import check_deviation_tables
+
+        dev_report = check_deviation_tables(root)
+        if dev_report.get("table_count", 0) == 0:
+            results.append(_item("deviation tables", "ok", "未检出偏离/响应表（跳过）"))
+        elif dev_report.get("ok"):
+            results.append(
+                _item(
+                    "deviation tables",
+                    "ok",
+                    f"偏离表逐行检查通过：{dev_report.get('table_count')} 张表",
+                )
+            )
+        else:
+            fail_n = int(dev_report.get("fail_row_count") or 0)
+            results.append(
+                _item(
+                    "deviation tables",
+                    "fail",
+                    f"偏离表存在 {fail_n} 行问题（空列/负偏离/表述冲突）",
+                    "请查看 workspace/deviation_table_report.json",
+                )
+            )
+    except Exception as exc:
+        results.append(_item("deviation tables", "warn", f"偏离表检查异常: {exc}"))
+
+
 def check_output_format(root: Path | None = None) -> Path:
     root = root or project_root()
     results: list[dict[str, str]] = []
@@ -549,6 +605,43 @@ def check_output_format(root: Path | None = None) -> Path:
     _check_markdown(root, results)
     _check_docx(root, results)
     _check_template_fill_report(root, results)
+    _check_price_and_deviation_tables(root, results)
+
+    # 终稿合规硬门禁：基于 final.md 复检，blocking 记入格式门禁结果并抛错
+    compliance_blocking = False
+    try:
+        from compliance_checker import enforce_final_compliance_gate, normalize_compliance_report
+
+        compliance_path = enforce_final_compliance_gate(root)
+        compliance = normalize_compliance_report(read_json(compliance_path))
+        summary = compliance.get("summary") if isinstance(compliance.get("summary"), dict) else {}
+        counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+        compliance_blocking = bool(compliance.get("blocking"))
+        if compliance_blocking:
+            results.append(
+                _item(
+                    "compliance_blocking",
+                    "fail",
+                    f"专项合规阻断交付：fatal/critical fail={counts.get('fail', 0)}",
+                    "查看 workspace/compliance_report.json 并修复后重跑",
+                )
+            )
+        elif compliance.get("need_manual_review"):
+            results.append(
+                _item(
+                    "compliance_manual_review",
+                    "warn",
+                    f"专项合规需人工复核：warn={counts.get('warn', 0)} need_manual={counts.get('need_manual_review', 0)}",
+                    "查看 workspace/compliance_report.json",
+                )
+            )
+        else:
+            results.append(_item("compliance_gate", "ok", "专项合规终稿复检通过"))
+    except RuntimeError as exc:
+        compliance_blocking = True
+        results.append(_item("compliance_blocking", "fail", str(exc), "查看 workspace/compliance_report.json"))
+    except Exception as exc:
+        results.append(_item("compliance_gate", "warn", f"终稿合规复检异常: {exc}", "请手动执行 compliance-check"))
 
     fail_count = sum(1 for item in results if item["level"] == "fail")
     warn_count = sum(1 for item in results if item["level"] == "warn")
@@ -559,6 +652,7 @@ def check_output_format(root: Path | None = None) -> Path:
         "warn_count": warn_count,
         "fail_count": fail_count,
         "results": results,
+        "compliance_blocking": compliance_blocking,
     }
 
     output_path = root / "workspace" / "format_check_report.json"

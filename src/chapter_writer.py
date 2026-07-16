@@ -9,7 +9,7 @@ from llm_client import chat
 from manual_review import manual_review_context_for_chapter
 from project_profile_registry import load_project_profile
 from prompt_registry import load_agent_prompt
-from quality_gates import validate_weak_evidence_language
+from quality_gates import validate_chapter_claims_gate, validate_weak_evidence_language
 from runtime_context import agent_run
 from utils import (
     compact_json,
@@ -193,6 +193,8 @@ def write_chapter_from_job_context(
         )
     content = _ensure_chapter_heading(raw, chapter)
     validate_weak_evidence_language(job, content)
+    # claim 防编造：无证据的金额/资质/业绩既成事实直接失败，迫使改写或补材料
+    validate_chapter_claims_gate(root, chapter["id"], content, raise_on_blocker=True)
     return content
 
 

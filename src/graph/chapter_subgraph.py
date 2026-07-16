@@ -76,11 +76,28 @@ def self_check_chapter(state: ChapterState) -> ChapterState:
                 "problems": [
                     {
                         "type": "self_check_failed",
+                        "severity": "blocker",
                         "description": str(exc),
                         "suggestion": "请人工检查本章节内容。",
                     }
                 ],
+                "priority_fixes": [
+                    {
+                        "id": "self_check_failed",
+                        "severity": "blocker",
+                        "source": "problem",
+                        "score_point_id": "",
+                        "problem_type": "self_check_failed",
+                        "target": str(exc),
+                        "action": "请人工检查本章节内容。",
+                        "acceptance": "自检通过且无阻断错误。",
+                    }
+                ],
+                "max_severity": "blocker",
                 "need_rewrite": True,
+                "need_evidence": False,
+                "has_writing_fixes": True,
+                "rewrite_status": "need_rewrite",
             },
             "error": str(exc),
         }

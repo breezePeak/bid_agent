@@ -536,7 +536,11 @@ def _summarize_review_step(root: Path) -> dict[str, Any]:
     review_files = sorted(reviews_dir.glob("*_review.json")) if reviews_dir.exists() else []
     rewrite_files = sorted(rewrites_dir.glob("*_rewrite_log.json")) if rewrites_dir.exists() else []
     need_rewrite: list[str] = []
+    need_evidence: list[str] = []
+    stuck: list[str] = []
     problem_count = 0
+    priority_fix_count = 0
+    severity = {"blocker": 0, "major": 0, "minor": 0}
     coverage = {"high": 0, "medium": 0, "low": 0, "none": 0}
     problem_samples: list[str] = []
     for path in review_files:
@@ -544,12 +548,26 @@ def _summarize_review_step(root: Path) -> dict[str, Any]:
         if not isinstance(data, dict):
             continue
         chapter_id = str(data.get("chapter_id") or path.name.replace("_review.json", ""))
-        if data.get("need_rewrite"):
+        status = str(data.get("rewrite_status") or "")
+        if status == "stuck" or data.get("stuck"):
+            stuck.append(chapter_id)
+        elif status == "need_evidence" or (
+            data.get("need_evidence") and not data.get("has_writing_fixes", True)
+        ):
+            need_evidence.append(chapter_id)
+        elif data.get("need_rewrite"):
             need_rewrite.append(chapter_id)
+        if data.get("need_evidence") and chapter_id not in need_evidence:
+            need_evidence.append(chapter_id)
         problems = data.get("problems") if isinstance(data.get("problems"), list) else []
         problem_count += len(problems)
+        fixes = data.get("priority_fixes") if isinstance(data.get("priority_fixes"), list) else []
+        priority_fix_count += len(fixes)
         for problem in problems[:2]:
             if isinstance(problem, dict):
+                sev = str(problem.get("severity") or "").lower()
+                if sev in severity:
+                    severity[sev] += 1
                 problem_samples.append(f"{chapter_id}: {problem.get('description') or problem.get('type') or '需修订'}")
         for item in data.get("score_coverage") or []:
             if isinstance(item, dict):
@@ -560,12 +578,20 @@ def _summarize_review_step(root: Path) -> dict[str, Any]:
         "审核文件": len(review_files),
         "打回重写日志": len(rewrite_files),
         "当前仍需重写": len(need_rewrite),
+        "需补证据": len(need_evidence),
+        "卡住": len(stuck),
         "问题数": problem_count,
+        "优先修复项": priority_fix_count,
+        "阻断": severity["blocker"],
+        "重要": severity["major"],
+        "次要": severity["minor"],
         "高覆盖": coverage["high"],
         "中覆盖": coverage["medium"],
         "低覆盖": coverage["low"],
         "未覆盖": coverage["none"],
         "仍需重写章节": need_rewrite[:12],
+        "需补证据章节": need_evidence[:12],
+        "卡住章节": stuck[:12],
         "问题示例": problem_samples[:8],
     }
 
@@ -597,14 +623,25 @@ def _review_detail_rows(root: Path) -> list[dict[str, Any]]:
             if level in {"low", "none"} or not item.get("covered", True):
                 score_id = str(item.get("score_point_id") or "")
                 weak_coverage.append(f"{score_id}({level or '未覆盖'})")
+        priority_fixes = [
+            str(item.get("target") or item.get("action") or item.get("id") or "")
+            for item in (data.get("priority_fixes") or [])
+            if isinstance(item, dict)
+        ]
         rows.append(
             {
                 "chapter_id": chapter_id,
                 "chapter_title": str(data.get("chapter_title") or ""),
                 "need_rewrite": bool(data.get("need_rewrite")),
+                "need_evidence": bool(data.get("need_evidence")),
+                "stuck": bool(data.get("stuck")) or str(data.get("rewrite_status") or "") == "stuck",
+                "rewrite_status": str(data.get("rewrite_status") or ""),
+                "max_severity": str(data.get("max_severity") or ""),
                 "rewritten": chapter_id in rewrite_ids,
                 "problem_count": len(problems),
+                "priority_fix_count": len(priority_fixes),
                 "problems": problems[:3],
+                "priority_fixes": priority_fixes[:3],
                 "weak_coverage": weak_coverage[:6],
                 "review_path": str(path.relative_to(root)).replace("\\", "/"),
                 "rewrite_path": f"workspace/rewrites/{chapter_id}_rewrite_log.json" if chapter_id in rewrite_ids else "",
@@ -733,10 +770,44 @@ def _step_detail_summary(root: Path, command: str) -> dict[str, Any]:
         return _summarize_review_step(root)
     if command == "build-source-trace":
         index = _read_json_file(workspace / "source_trace_index.json")
-        return {"来源索引项": _json_count(index), "章节来源文件": _count_glob(workspace / "source_traces", "*_sources.json")}
+        summary = index.get("summary") if isinstance(index, dict) and isinstance(index.get("summary"), dict) else {}
+        return {
+            "来源索引项": _json_count(index),
+            "章节来源文件": _count_glob(workspace / "source_traces", "*_sources.json"),
+            "claim数": summary.get("claim_count", 0),
+            "claim已对齐": summary.get("claim_aligned_count", 0),
+        }
     if command == "build-score-coverage":
         matrix = _read_json_file(workspace / "score_coverage_matrix.json")
-        return matrix.get("summary", {}) if isinstance(matrix, dict) else {}
+        if not isinstance(matrix, dict):
+            return {}
+        summary = matrix.get("summary", {}) if isinstance(matrix.get("summary"), dict) else {}
+        return {
+            **summary,
+            "硬指标未覆盖": len(matrix.get("hard_uncovered_score_points") or []),
+            "硬指标偏弱": len(matrix.get("hard_weak_score_points") or []),
+            "硬指标较强": len(matrix.get("hard_strong_score_points") or []),
+        }
+    if command == "estimate-score":
+        estimate = _read_json_file(workspace / "final_score_estimate.json")
+        if not isinstance(estimate, dict):
+            return {}
+        summary = estimate.get("summary") if isinstance(estimate.get("summary"), dict) else {}
+        return {
+            "满分合计": summary.get("full_score_total"),
+            "预估得分": summary.get("estimated_score_total"),
+            "预估得分率": summary.get("estimated_percent"),
+            "等级": summary.get("grade"),
+            "保守分": summary.get("conservative_score_total"),
+            "乐观分": summary.get("optimistic_score_total"),
+            "预计失分": summary.get("lost_points"),
+            "无分值项": summary.get("unscored_point_count"),
+            "主要失分": [
+                f"{item.get('score_point_id')}:{item.get('lost_points')}"
+                for item in (estimate.get("top_score_losses") or [])[:5]
+                if isinstance(item, dict)
+            ],
+        }
     if command == "summarize-all":
         return {"章节摘要": _count_glob(workspace / "summaries", "*_summary.json")}
     if command == "global-review":
@@ -749,6 +820,37 @@ def _step_detail_summary(root: Path, command: str) -> dict[str, Any]:
                 "编造风险": len(review.get("fabrication_risks") or []),
                 "建议": review.get("suggestions", [])[:6] if isinstance(review.get("suggestions"), list) else [],
                 "风险示例": review.get("fabrication_risks", [])[:6] if isinstance(review.get("fabrication_risks"), list) else [],
+            }
+        return {}
+    if command == "compliance-check":
+        report = _read_json_file(workspace / "compliance_report.json")
+        if isinstance(report, dict):
+            summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+            counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+            items = report.get("items") if isinstance(report.get("items"), list) else []
+            failed = [
+                f"{item.get('check_id')}:{item.get('check_name')}"
+                for item in items
+                if isinstance(item, dict) and item.get("status") in {"fail", "warn"}
+            ][:8]
+            price_report = _read_json_file(workspace / "price_table_report.json")
+            dev_report = _read_json_file(workspace / "deviation_table_report.json")
+            claim_report = _read_json_file(workspace / "claim_validation_report.json")
+            return {
+                "检查通过": bool(report.get("ok")),
+                "阻断": bool(report.get("blocking") or summary.get("blocking")),
+                "需人工复核": bool(report.get("need_manual_review") or summary.get("need_manual_review")),
+                "最高风险": report.get("max_severity") or summary.get("max_severity"),
+                "通过项": counts.get("pass", 0),
+                "警告项": counts.get("warn", 0),
+                "失败项": counts.get("fail", 0),
+                "跳过项": counts.get("skip", 0),
+                "报价表问题": (price_report or {}).get("issue_count", 0) if isinstance(price_report, dict) else 0,
+                "偏离表问题行": (dev_report or {}).get("fail_row_count", 0) if isinstance(dev_report, dict) else 0,
+                "claim阻断": ((claim_report or {}).get("summary") or {}).get("blocker_count", 0)
+                if isinstance(claim_report, dict)
+                else 0,
+                "结果": failed,
             }
         return {}
     if command == "build-md":
@@ -933,10 +1035,13 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         "workspace/rewrites/*_rewrite_log.json": status["workspace"]["rewrites_count"] > 0,
         "workspace/source_trace_index.json": status["workspace"]["source_trace_index"],
         "workspace/score_coverage_matrix.json": status["workspace"]["score_coverage_matrix"],
+        "workspace/final_score_estimate.json": status["workspace"]["final_score_estimate"],
         "workspace/summaries/*_summary.json": status["workspace"]["summaries_count"] > 0,
         "workspace/global_review.json": status["workspace"]["global_review"],
+        "workspace/compliance_report.json": status["workspace"]["compliance_report"],
         "outputs/final.md": status["outputs"]["final_md"],
         "outputs/final.docx": status["outputs"]["final_docx"],
+        "outputs/score_estimate.md": status["outputs"]["score_estimate_md"],
         "workspace/format_check_report.json": status["workspace"]["format_check_report"],
         "workspace/template_schema.json": status["workspace"]["template_schema"],
         "workspace/template_fill_report.json": status["workspace"]["template_fill_report"],
@@ -1122,12 +1227,14 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
             actions.append({"type": "run_command", "command": str(next_step.get("command", "")), "label": "执行下一步"})
         return {"reply": reply, "actions": actions}
 
-    if _chat_has_any(text, normalized, ("风险", "质量", "问题", "审核", "复核", "risk", "review")):
+    if _chat_has_any(text, normalized, ("风险", "质量", "问题", "审核", "复核", "合规", "废标", "risk", "review", "compliance")):
+        compliance_done = bool(workspace.get("compliance_report"))
         reply = (
             f"你关心的是质量风险。当前人工复核待处理总数 {manual_summary.get('total_pending', 0)} 项，"
             f"章节问题 {manual_summary.get('chapter_review_pending', 0)}，"
             f"全文风险 {manual_summary.get('global_review_pending', 0)}，"
-            f"弱证据/模板缺口 {manual_summary.get('template_evidence_pending', 0)}。"
+            f"弱证据/模板缺口 {manual_summary.get('template_evidence_pending', 0)}；"
+            f"专项合规检查：{'已完成' if compliance_done else '未完成'}。"
         )
         return {
             "reply": reply,
@@ -1135,6 +1242,7 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
                 {"type": "show_manual_review", "category": "global_review", "label": "看全文风险"},
                 {"type": "show_manual_review", "category": "chapter_review", "label": "看章节问题"},
                 {"type": "show_step", "command": "global-review", "label": "查看全文审核"},
+                {"type": "show_step", "command": "compliance-check", "label": "查看专项合规"},
             ],
         }
 
@@ -1319,16 +1427,19 @@ def api_status() -> dict[str, Any]:
             "reviews_count": _count_glob(root / "workspace" / "reviews", "*_review.json"),
             "source_trace_index": _exists(root / "workspace" / "source_trace_index.json"),
             "score_coverage_matrix": _exists(root / "workspace" / "score_coverage_matrix.json"),
+            "final_score_estimate": _exists(root / "workspace" / "final_score_estimate.json"),
             "format_check_report": _exists(root / "workspace" / "format_check_report.json"),
             "template_schema": _exists(root / "workspace" / "template_schema.json"),
             "template_fill_report": _exists(root / "workspace" / "template_fill_report.json"),
             "summaries_count": _count_glob(root / "workspace" / "summaries", "*_summary.json"),
             "global_review": _exists(root / "workspace" / "global_review.json"),
+            "compliance_report": _exists(root / "workspace" / "compliance_report.json"),
             "rewrites_count": _count_glob(root / "workspace" / "rewrites", "*_rewrite_log.json"),
         },
         "outputs": {
             "final_md": _exists(root / "outputs" / "final.md"),
             "final_docx": _exists(root / "outputs" / "final.docx"),
+            "score_estimate_md": _exists(root / "outputs" / "score_estimate.md"),
         },
         "sync": {
             "source_stale": source_stale,
@@ -1388,11 +1499,44 @@ def api_status() -> dict[str, Any]:
         next_step = next((step for step in workflow if not step["done"] and step["ready"]), None)
     blocked_step = next((step for step in core_workflow if not step["done"] and not step["ready"]), None)
 
+    compliance_summary: dict[str, Any] = {}
+    compliance_path = root / "workspace" / "compliance_report.json"
+    if compliance_path.exists():
+        try:
+            compliance = json.loads(compliance_path.read_text(encoding="utf-8"))
+            if isinstance(compliance, dict):
+                summary = compliance.get("summary") if isinstance(compliance.get("summary"), dict) else {}
+                counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+                failed_items = [
+                    {
+                        "check_id": item.get("check_id"),
+                        "check_name": item.get("check_name"),
+                        "status": item.get("status"),
+                        "severity": item.get("severity"),
+                        "suggestion": item.get("suggestion"),
+                    }
+                    for item in (compliance.get("items") or [])
+                    if isinstance(item, dict) and item.get("status") in {"fail", "warn"}
+                ][:12]
+                compliance_summary = {
+                    "exists": True,
+                    "ok": bool(compliance.get("ok")),
+                    "blocking": bool(compliance.get("blocking") or summary.get("blocking")),
+                    "need_manual_review": bool(compliance.get("need_manual_review") or summary.get("need_manual_review")),
+                    "max_severity": compliance.get("max_severity") or summary.get("max_severity"),
+                    "phase": compliance.get("phase") or "",
+                    "counts": counts,
+                    "failed_items": failed_items,
+                }
+        except Exception:
+            compliance_summary = {"exists": True, "ok": False, "blocking": False, "error": "read_failed"}
+
     return {
         **status,
         "workflow": workflow,
         "next_step": next_step,
         "blocked_step": blocked_step,
+        "compliance_summary": compliance_summary,
     }
 
 
@@ -1490,6 +1634,9 @@ def _load_review_context(root: Path, limit: int = 50) -> list[dict[str, Any]]:
             {
                 "chapter_id": str(data.get("chapter_id") or review_path.stem.replace("_review", "")),
                 "need_rewrite": bool(data.get("need_rewrite", False)),
+                "need_evidence": bool(data.get("need_evidence", False)),
+                "stuck": bool(data.get("stuck")) or str(data.get("rewrite_status") or "") == "stuck",
+                "rewrite_status": str(data.get("rewrite_status") or ""),
                 "problem_count": len(problems),
                 "top_problems": top,
             }
@@ -1620,6 +1767,12 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
     }
     if plan_result.get("error"):
         payload["orchestrator_note"] = plan_result.get("error")
+    # PR-3: optional supervisor decision steps (only when flag enabled path used)
+    if plan_result.get("supervisor") or plan_result.get("supervisor_steps"):
+        payload["supervisor"] = True
+        payload["supervisor_steps"] = plan_result.get("supervisor_steps") or []
+        if plan_result.get("goal_id"):
+            payload["goal_id"] = plan_result.get("goal_id")
     return JSONResponse(payload)
 
 
@@ -2151,8 +2304,13 @@ COMMANDS: dict[str, list[str]] = {
     "review-fix-all": [],
     "build-source-trace": [],
     "build-score-coverage": [],
+    "estimate-score": [],
     "summarize-all": [],
     "global-review": [],
+    "compliance-check": [],
+    "check-price-tables": [],
+    "check-deviation-tables": [],
+    "validate-claims": [],
     "build-md": [],
     "build-docx": [],
     "check-format": [],
@@ -2556,6 +2714,7 @@ def _latest_tree_mtime(root: Path) -> float:
         "workspace/run_state.json",
         "workspace/run_state_history.jsonl",
         "workspace/format_check_report.json",
+        "workspace/compliance_report.json",
         "outputs/final.md",
         "outputs/final.docx",
     ]:
@@ -3720,6 +3879,21 @@ def api_global_review() -> JSONResponse:
     if not path.exists():
         return JSONResponse(
             {"ok": False, "message": "global_review.json 不存在，请先执行 global-review"},
+            status_code=404,
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return JSONResponse({"ok": True, "data": data})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"读取失败: {exc}"}, status_code=500)
+
+
+@app.get("/api/file/compliance-report")
+def api_compliance_report() -> JSONResponse:
+    path = _active_root() / "workspace" / "compliance_report.json"
+    if not path.exists():
+        return JSONResponse(
+            {"ok": False, "message": "compliance_report.json 不存在，请先执行 compliance-check"},
             status_code=404,
         )
     try:

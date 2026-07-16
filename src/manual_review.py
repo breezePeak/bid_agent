@@ -331,8 +331,11 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
                         "chapter_id": chapter_id,
                         "chapter_title": stringify(review.get("chapter_title")),
                         "problem_type": stringify(problem.get("type")),
+                        "severity": stringify(problem.get("severity")),
                         "description": stringify(problem.get("description")),
                         "suggestion": stringify(problem.get("suggestion")),
+                        "need_rewrite": bool(review.get("need_rewrite")),
+                        "max_severity": stringify(review.get("max_severity")),
                         "override": overrides.get(item_id, {}),
                     }
                 )
@@ -367,6 +370,17 @@ def manual_review_summary(root: Path | None = None) -> dict[str, Any]:
     score_items = manual_review_items(root, "score_coverage")
     chapter_items = manual_review_items(root, "chapter_review")
     global_items = manual_review_items(root, "global_review")
+    compliance_actions = _read_json_or_default(manual_review_dir(root) / "compliance_actions.json", {"items": {}})
+    compliance_items = compliance_actions.get("items") if isinstance(compliance_actions.get("items"), dict) else {}
+    compliance_pending = len(
+        [
+            item
+            for item in compliance_items.values()
+            if isinstance(item, dict) and stringify(item.get("status")) in {"", "pending", "open"}
+        ]
+    )
+    rewrite_hints = _read_json_or_default(root / "workspace" / "compliance_rewrite_hints.json", {})
+    rewrite_summary = rewrite_hints.get("summary") if isinstance(rewrite_hints.get("summary"), dict) else {}
     replay_requests = _load_list_overrides(root, "replay_requests")
     project_profile = load_project_profile(root)
     summary = {
@@ -375,7 +389,14 @@ def manual_review_summary(root: Path | None = None) -> dict[str, Any]:
         "score_coverage_pending": len(score_items),
         "chapter_review_pending": len(chapter_items),
         "global_review_pending": len(global_items),
-        "total_pending": len(template_items) + len(score_items) + len(chapter_items) + len(global_items),
+        "compliance_pending": compliance_pending,
+        "compliance_rewrite_chapters": int(rewrite_summary.get("chapter_count") or 0),
+        "compliance_injected_fixes": int(rewrite_summary.get("fix_count") or 0),
+        "total_pending": len(template_items)
+        + len(score_items)
+        + len(chapter_items)
+        + len(global_items)
+        + compliance_pending,
         "latest_replay_requests": replay_requests[-8:],
     }
     write_json(_manual_path(root, "summary"), summary)

@@ -23,6 +23,7 @@ class BidState(TypedDict, total=False):
 
     score_points_path: str
     score_coverage_matrix_path: str
+    final_score_estimate_path: str
     source_trace_index_path: str
     global_facts_path: str
     outline_path: str
@@ -38,6 +39,7 @@ class BidState(TypedDict, total=False):
     final_docx_path: str
     format_check_report_path: str
     global_review_path: str
+    compliance_report_path: str
 
     chapter_jobs: list[dict[str, Any]]
 

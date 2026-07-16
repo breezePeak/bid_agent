@@ -265,6 +265,39 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
     else:
         add(_check("workspace/global_review.json", "warn", "global_review.json 不存在", "请执行 global-review"))
 
+    # 25e2. workspace/compliance_report.json
+    compliance_report_path = root / "workspace" / "compliance_report.json"
+    if _file_ok(compliance_report_path):
+        add(_check("workspace/compliance_report.json", "ok", "compliance_report.json 存在"))
+        try:
+            compliance = read_json(compliance_report_path)
+            if isinstance(compliance, dict):
+                summary = compliance.get("summary") if isinstance(compliance.get("summary"), dict) else {}
+                if compliance.get("blocking") or summary.get("blocking"):
+                    add(
+                        _check(
+                            "compliance blocking",
+                            "fail",
+                            "专项合规检查存在 fatal/critical 阻断项",
+                            "请查看 workspace/compliance_report.json 并修复后重新执行 compliance-check",
+                        )
+                    )
+                elif compliance.get("need_manual_review") or summary.get("need_manual_review"):
+                    add(
+                        _check(
+                            "compliance review",
+                            "warn",
+                            "专项合规检查需要人工复核",
+                            "请查看 workspace/compliance_report.json",
+                        )
+                    )
+                else:
+                    add(_check("compliance review", "ok", "专项合规检查无阻断/人工复核项"))
+        except Exception as exc:
+            add(_check("compliance review", "warn", f"compliance_report.json 读取失败: {exc}", "请重新执行 compliance-check"))
+    else:
+        add(_check("workspace/compliance_report.json", "warn", "compliance_report.json 不存在", "请执行 compliance-check"))
+
     # 25f. workspace/rewrites 目录
     rewrites_dir = root / "workspace" / "rewrites"
     if rewrites_dir.exists() and list(rewrites_dir.glob("*_rewrite_log.json")):
