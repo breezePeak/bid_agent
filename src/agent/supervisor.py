@@ -70,6 +70,25 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
             "done": True,
             "need_confirm": False,
         }
+    if any(k in message for k in ("合规", "废标", "blocking", "专项合规", "合规检查失败")):
+        if any(k in message for k in ("改", "修", "补", "处理", "修复", "改稿")):
+            return {
+                "thought_summary": "用户要求按合规失败项改稿，给出 fix_compliance 计划",
+                "tool": "fix_compliance",
+                "args": {"confirm_execute": False, "sync": True},
+                "reply": "我将根据合规报告生成定向改稿计划（确认后执行）。",
+                "done": True,
+                "need_confirm": True,
+            }
+        return {
+            "thought_summary": "用户询问合规问题，执行只读分析",
+            "tool": "analyze_compliance",
+            "args": {"sync": True},
+            "reply": "我先分析当前合规报告与可改写项。",
+            "done": True,
+            "need_confirm": False,
+        }
+
     if any(k in message for k in ("覆盖率", "评分点未覆盖", "未覆盖评分", "补齐评分", "覆盖缺口", "评分覆盖")):
         if any(k in message for k in ("改", "修", "补", "处理", "修复")):
             return {

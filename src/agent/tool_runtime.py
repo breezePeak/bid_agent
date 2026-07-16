@@ -1072,6 +1072,205 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
 
 
 
+
+
+def _analyze_compliance(root: Path, args: dict[str, Any]) -> ToolResult:
+    started = _now()
+    sync = bool(args.get("sync", True))
+    report_path = root / "workspace" / "compliance_report.json"
+    if not report_path.exists():
+        return _fail(
+            "analyze_compliance",
+            args,
+            started,
+            code="missing_requires",
+            message="缺少 workspace/compliance_report.json，请先 compliance-check",
+            suggested_tools=["run_stage"],
+        )
+    try:
+        import json
+
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return _fail("analyze_compliance", args, started, code="runner_failed", message=str(exc))
+
+    if sync:
+        try:
+            from compliance_feedback import sync_compliance_findings
+
+            sync_compliance_findings(root)
+        except Exception as exc:
+            # non-fatal
+            sync_error = str(exc)
+        else:
+            sync_error = ""
+    else:
+        sync_error = ""
+
+    from compliance_feedback import MANUAL_ONLY_TYPES, REWRITEABLE_TYPES
+
+    items = report.get("items") if isinstance(report, dict) else []
+    if not isinstance(items, list):
+        items = []
+
+    rewriteable_fails: list[dict[str, Any]] = []
+    manual_items: list[dict[str, Any]] = []
+    for raw in items:
+        if not isinstance(raw, dict):
+            continue
+        status = str(raw.get("status") or "")
+        severity = str(raw.get("severity") or "")
+        if status not in {"fail", "warn"}:
+            continue
+        if severity not in {"fatal", "critical", "major"}:
+            continue
+        ctype = str(raw.get("check_type") or "unknown")
+        entry = {
+            "check_id": raw.get("check_id"),
+            "check_type": ctype,
+            "check_name": raw.get("check_name"),
+            "severity": severity,
+            "status": status,
+            "suggestion": raw.get("suggestion"),
+        }
+        if ctype in MANUAL_ONLY_TYPES:
+            manual_items.append(entry)
+        elif ctype in REWRITEABLE_TYPES:
+            rewriteable_fails.append(entry)
+        else:
+            # unknown types: treat as rewriteable major fails for planning
+            rewriteable_fails.append(entry)
+
+    # chapter ids from hints file
+    hints_path = root / "workspace" / "compliance_rewrite_hints.json"
+    chapter_ids: list[str] = []
+    chapter_fix_counts: dict[str, int] = {}
+    if hints_path.exists():
+        try:
+            import json
+
+            hints = json.loads(hints_path.read_text(encoding="utf-8"))
+            chapters = hints.get("chapters") if isinstance(hints, dict) else {}
+            if isinstance(chapters, dict):
+                for cid, fixes in chapters.items():
+                    if isinstance(fixes, list) and fixes:
+                        chapter_ids.append(str(cid))
+                        chapter_fix_counts[str(cid)] = len(fixes)
+        except Exception:
+            pass
+
+    blocking = bool(report.get("blocking")) if isinstance(report, dict) else False
+    if not blocking and isinstance(report, dict):
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        blocking = bool(summary.get("blocking"))
+
+    metrics = {
+        "blocking": blocking,
+        "rewriteable_count": len(rewriteable_fails),
+        "manual_count": len(manual_items),
+        "chapter_ids": chapter_ids,
+        "chapter_fix_counts": chapter_fix_counts,
+        "rewriteable_items": rewriteable_fails[:30],
+        "manual_items": manual_items[:30],
+        "sync_error": sync_error,
+    }
+    text_out = (
+        f"合规分析：blocking={blocking}，可改写项 {len(rewriteable_fails)}，"
+        f"人工项 {len(manual_items)}，建议章节 {chapter_ids}。"
+    )
+    return ToolResult(
+        ok=True,
+        tool="analyze_compliance",
+        args=args,
+        started_at=started,
+        ended_at=_now(),
+        summary_for_llm=text_out[:2000],
+        metrics=metrics,
+        raw_refs=["workspace/compliance_report.json", "workspace/compliance_rewrite_hints.json"],
+    )
+
+
+def _fix_compliance(root: Path, args: dict[str, Any], *, dry_run: bool = False) -> ToolResult:
+    started = _now()
+    confirm_execute = bool(args.get("confirm_execute", False))
+    rerun_check = bool(args.get("rerun_check", False))
+    max_chapters = max(1, int(args.get("max_chapters", 8) or 8))
+    workers = int(args.get("workers", 2) or 2)
+    sync = bool(args.get("sync", True))
+    call_args = {
+        "confirm_execute": confirm_execute,
+        "rerun_check": rerun_check,
+        "max_chapters": max_chapters,
+        "workers": workers,
+        "sync": sync,
+        "dry_run": dry_run,
+    }
+
+    analysis = _analyze_compliance(root, {"sync": sync})
+    if not analysis.ok:
+        return analysis
+    plan = analysis.metrics or {}
+    chapter_ids = list(plan.get("chapter_ids") or [])[:max_chapters]
+    if not chapter_ids:
+        return ToolResult(
+            ok=True,
+            tool="fix_compliance",
+            args=call_args,
+            started_at=started,
+            ended_at=_now(),
+            summary_for_llm="合规定向改稿：没有可自动回灌的章节（可能仅有人工项或报告无 fail）。",
+            metrics={**plan, "executed": False, "chapter_ids": []},
+            skipped=True,
+        )
+
+    if dry_run or not confirm_execute:
+        return ToolResult(
+            ok=True,
+            tool="fix_compliance",
+            args=call_args,
+            started_at=started,
+            ended_at=_now(),
+            summary_for_llm=(
+                f"合规改稿计划：rewrite 章节 {chapter_ids}；"
+                f"人工项 {plan.get('manual_count')}；"
+                f"{'dry_run' if dry_run else '未执行（需 confirm_execute=true）'}。"
+            ),
+            metrics={**plan, "executed": False, "pending_tool": "rewrite_chapters", "chapter_ids": chapter_ids},
+        )
+
+    rewrite = _execute_chapter_tool(
+        root,
+        tool_name="rewrite_chapters",
+        args={"chapter_ids": chapter_ids, "workers": workers},
+        dry_run=False,
+    )
+    post_check = None
+    if rewrite.ok and rerun_check:
+        post_check = _execute_stage(root, "compliance_check", force=True)
+
+    summary = rewrite.summary_for_llm
+    if post_check is not None:
+        summary += f" 重跑合规：{'OK' if post_check.ok else 'FAIL'} {post_check.summary_for_llm}"
+
+    return ToolResult(
+        ok=rewrite.ok and (post_check.ok if post_check is not None else True),
+        tool="fix_compliance",
+        args=call_args,
+        started_at=started,
+        ended_at=_now(),
+        error=rewrite.error if not rewrite.ok else (post_check.error if post_check and not post_check.ok else None),
+        summary_for_llm=summary[:2000],
+        metrics={
+            "executed": True,
+            "chapter_ids": chapter_ids,
+            "pre": plan,
+            "rewrite": rewrite.metrics,
+            "post_check_ok": None if post_check is None else post_check.ok,
+        },
+        artifacts_written=rewrite.artifacts_written,
+    )
+
+
 def invoke(
     tool_name: str,
     args: dict[str, Any] | None = None,
@@ -1170,6 +1369,18 @@ def invoke(
         if err:
             return _fail(name, args, started, code="invalid_args", message=err)
         return _fix_coverage(root, args, dry_run=dry_run)
+
+    if name == "analyze_compliance":
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _analyze_compliance(root, args)
+
+    if name == "fix_compliance":
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _fix_compliance(root, args, dry_run=dry_run)
 
     # Stage-bound tools: execute that stage
     if spec.stage_id:

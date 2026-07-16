@@ -408,6 +408,58 @@ def fix_coverage_tool_spec() -> ToolSpec:
     )
 
 
+
+
+def analyze_compliance_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="analyze_compliance",
+        name="analyze_compliance",
+        label="分析合规缺口",
+        description="只读：读取 compliance_report / rewrite hints，汇总可自动改写章节与人工项。",
+        kind="analysis",
+        params_schema={
+            "type": "object",
+            "properties": {
+                "sync": {"type": "boolean", "description": "是否先 sync_compliance_findings"},
+            },
+            "additionalProperties": False,
+        },
+        risk_level="low",
+        idempotent=True,
+        side_effects=(),
+        tags=("query", "readonly", "compliance"),
+    )
+
+
+def fix_compliance_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="fix_compliance",
+        name="fix_compliance",
+        label="合规定向改稿计划",
+        description=(
+            "根据合规失败项生成定向 rewrite 计划；默认不执行。"
+            "confirm_execute=true 时 rewrite 相关章节；rerun_check=true 时再跑 compliance-check。"
+        ),
+        kind="mutation",
+        params_schema={
+            "type": "object",
+            "properties": {
+                "confirm_execute": {"type": "boolean"},
+                "rerun_check": {"type": "boolean"},
+                "max_chapters": {"type": "integer", "minimum": 1},
+                "workers": {"type": "integer", "minimum": 1},
+                "sync": {"type": "boolean"},
+            },
+            "additionalProperties": False,
+        },
+        risk_level="medium",
+        idempotent=False,
+        side_effects=("write_files", "llm"),
+        human_confirm_required=True,
+        tags=("chapter", "mutation", "compliance"),
+    )
+
+
 def _build_tool_index() -> dict[str, ToolSpec]:
     tools: dict[str, ToolSpec] = {}
     for meta in (
@@ -421,6 +473,8 @@ def _build_tool_index() -> dict[str, ToolSpec]:
         build_export_tool_spec(),
         analyze_coverage_tool_spec(),
         fix_coverage_tool_spec(),
+        analyze_compliance_tool_spec(),
+        fix_compliance_tool_spec(),
     ):
         tools[meta.name] = meta
         tools[meta.id] = meta
@@ -442,6 +496,8 @@ def _build_tool_index() -> dict[str, ToolSpec]:
         build_export_tool_spec(),
         analyze_coverage_tool_spec(),
         fix_coverage_tool_spec(),
+        analyze_compliance_tool_spec(),
+        fix_compliance_tool_spec(),
     ):
         tools[specialized.name] = specialized
         tools[specialized.id] = specialized
@@ -479,6 +535,8 @@ def list_tools(*, include_stage_aliases: bool = False) -> list[ToolSpec]:
         build_export_tool_spec(),
         analyze_coverage_tool_spec(),
         fix_coverage_tool_spec(),
+        analyze_compliance_tool_spec(),
+        fix_compliance_tool_spec(),
     ):
         ordered.append(meta)
         seen.add(meta.id)

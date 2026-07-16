@@ -577,6 +577,12 @@ def build_parser() -> argparse.ArgumentParser:
     tool_parser.add_argument("--dry-run", action="store_true", help="只预览不执行")
     tool_parser.add_argument("--list", action="store_true", dest="list_tools", help="列出可用 tools 后退出")
 
+    agent_graph_parser = subparsers.add_parser("agent-graph-run", help="LangGraph Supervisor 短循环（只读自动，变更需 --yes）")
+    agent_graph_parser.add_argument("--goal", required=True, help="用户目标自然语言")
+    agent_graph_parser.add_argument("--max-steps", type=int, default=5, help="最大步数")
+    agent_graph_parser.add_argument("--yes", action="store_true", help="确认执行变更类 tool")
+    agent_graph_parser.add_argument("--use-llm", action="store_true", help="使用 LLM 决策（默认规则）")
+
 
     return parser
 
@@ -703,6 +709,19 @@ def main() -> int:
         if args.project_type:
             save_project_profile(root, args.project_type)
         run_graph_pipeline(root, workers=args.workers, resume=args.resume, max_retries=args.max_retries)
+    elif args.command == "agent-graph-run":
+        from graph.supervisor_graph import run_supervisor_graph
+        import json
+
+        result = run_supervisor_graph(
+            args.goal,
+            root=root,
+            max_steps=int(getattr(args, "max_steps", 5) or 5),
+            use_llm=bool(getattr(args, "use_llm", False)),
+            user_confirmed=bool(getattr(args, "yes", False)),
+        )
+        print(json.dumps({k: result.get(k) for k in ("reply", "steps", "need_confirm", "done", "last_tool", "goal_id", "last_observation")}, ensure_ascii=False, indent=2))
+        return 0 if result.get("done") or result.get("need_confirm") else 1
     elif args.command == "tool":
         import json
         from agent.tool_registry import tool_manifest

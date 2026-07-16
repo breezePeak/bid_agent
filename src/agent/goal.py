@@ -240,8 +240,12 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
     wants_full = any(k in text for k in ("一键生成", "全部跑完", "全量生成", "从头生成"))
     wants_status = any(k in text for k in ("状态", "进度", "诊断", "失败"))
     wants_coverage = any(k in text for k in ("覆盖率", "评分点", "未覆盖", "补齐评分", "覆盖缺口"))
+    wants_compliance = any(k in text for k in ("合规", "废标", "blocking"))
 
-    if wants_coverage:
+    if wants_compliance:
+        objectives.append({"type": "fix_compliance"})
+        criteria.append({"check": "no_stale", "paths": ["workspace/compliance_report.json"]})
+    elif wants_coverage:
         objectives.append({"type": "fix_coverage"})
         criteria.append({"check": "score_coverage_min", "ratio": 0.95})
         if wants_export:

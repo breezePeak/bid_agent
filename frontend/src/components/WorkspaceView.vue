@@ -28,8 +28,9 @@
       <DocEditor ref="docEditorRef" :run-id="runId" @add-to-chat="onAddToChat" @add-annotation="onAddAnnotation" @update-page-count="docPageCount = $event" @rewrite-applied="onDocRewriteApplied" @rewrite-discarded="onDocRewriteDiscarded" />
     </div>
 
-    <!-- right file explorer (visible in chat mode) -->
+    <!-- right: agent goal + file explorer (chat mode) -->
     <div v-if="mode === 'chat'" class="wl-files">
+      <AgentGoalPanel :run-id="runId" />
       <FileExplorer :run-id="runId" @preview-file="previewFile" />
     </div>
   </div>
@@ -40,6 +41,7 @@ import { ref, watch } from 'vue'
 import ChatPanel from './ChatPanel.vue'
 import DocEditor from './DocEditor.vue'
 import FileExplorer from './FileExplorer.vue'
+import AgentGoalPanel from './AgentGoalPanel.vue'
 
 const props = defineProps({
   runId: { type: String, required: true },

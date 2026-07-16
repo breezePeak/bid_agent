@@ -15,7 +15,7 @@ class PolicyDecision:
     rewrite_tool: str | None = None
 
 
-_READONLY_TOOLS = {"query_status", "query_artifacts", "diagnose_failure", "analyze_coverage"}
+_READONLY_TOOLS = {"query_status", "query_artifacts", "diagnose_failure", "analyze_coverage", "analyze_compliance"}
 
 
 def evaluate_tool_call(
@@ -62,6 +62,10 @@ def evaluate_tool_call(
         command = str(args.get("command") or "")
         if command in {"build-docx", "build-md"} and not user_confirmed and not auto_execute:
             return PolicyDecision(False, "导出类阶段需要确认", ask_human=True)
+
+    if name == "fix_compliance" and not user_confirmed:
+        if bool((args or {}).get("confirm_execute")):
+            return PolicyDecision(False, "合规改稿执行需要确认", ask_human=True)
 
     if name == "fix_coverage" and not user_confirmed:
         # allow planning (confirm_execute false) via invoke path; supervisor still asks human for execute

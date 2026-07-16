@@ -1,42 +1,47 @@
 ﻿# Agent 化阶段完成状态
 
 > 更新日期：2026-07-16  
-> 对应计划：[agentization_development_plan.md](./agentization_development_plan.md)
+> 对应计划：[agentization_development_plan.md](./agentization_development_plan.md)（§20 PR-9~11）
 
 ## 结论
 
 | 阶段 | 状态 |
 |------|------|
-| PR-1 Tool 层 | **完成并验收** |
-| PR-2 只读诊断 | **完成并验收** |
-| PR-3 Supervisor 最小闭环 | **完成并验收** |
-| PR-4 参数化章节 + 失效传播 | **完成并验收** |
-| PR-5 GoalState + build_export | **完成并验收** |
-| PR-6 覆盖率驱动改稿闭环 + 导出门禁 | **完成并验收** |
-| PR-7 前端 Goal / 决策轨迹展示 | **完成** |
-| PR-8 Agent API + fix_coverage 多轮预算 | **完成** |
+| PR-1~8 | **完成并验收** |
+| PR-9 LangGraph Supervisor 图 | **完成** |
+| PR-10 合规定向改写 | **完成** |
+| PR-11 Goal 侧栏轮询 | **完成** |
 
-默认 `AGENT_SUPERVISOR_ENABLED=false`。
+默认 `AGENT_SUPERVISOR_ENABLED=false`；确定性 `run` / `graph-run` 不变。
 
-## PR-7 / PR-8 本批
+## PR-9
 
-- [x] Chat 展示 supervisor_steps / goal 徽章
-- [x] 快捷按钮「评分覆盖」
-- [x] GET `/api/agent/goal` `/api/agent/decisions` `/api/agent/tools`
-- [x] POST `/api/agent/tools/invoke`
-- [x] 前端 api 封装
-- [x] `fix_coverage.max_rounds`（默认 1，最大 3）多轮分析-改稿
+- [x] `src/graph/supervisor_graph.py`
+- [x] CLI `agent-graph-run --goal ... [--yes] [--use-llm] [--max-steps N]`
+- [x] 只读自动执行；变更需 human / `--yes`
+- [x] 测试 `tests/test_supervisor_graph_and_compliance.py`
 
-## 仍未做（可选）
+## PR-10
 
-| 项 | 说明 |
-|----|------|
-| LangGraph supervisor 图 | Phase 4 |
-| 合规项自动定向改写 | 可选 |
-| 前端独立 Goal 侧栏轮询 | 可用现 API 扩展 |
+- [x] `analyze_compliance` / `fix_compliance`
+- [x] 复用 `compliance_feedback` 的 rewriteable / manual-only
+- [x] 默认只出计划；`confirm_execute` 才 rewrite
+- [x] Supervisor 规则与 policy
 
-## 启用
+## PR-11
+
+- [x] `AgentGoalPanel.vue` 轮询 goal + decisions
+- [x] `WorkspaceView` 接入右侧栏
+- [x] 样式与空态
+
+## 用法
+
+```bash
+python -m src.main agent-graph-run --goal "当前状态怎么样"
+python -m src.main tool --name analyze_compliance --args "{\"sync\":true}"
+python -m src.main tool --name fix_compliance --args "{\"confirm_execute\":false}"
+```
 
 ```text
-AGENT_SUPERVISOR_ENABLED=true
+AGENT_SUPERVISOR_ENABLED=true   # 对话 Supervisor + 侧栏有目标
 ```

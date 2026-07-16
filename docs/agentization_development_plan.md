@@ -1,6 +1,6 @@
 # 标书系统 Agent 化改造开发计划
 
-> 状态：草案 v1.2（PR-1~3 已实现骨架）  
+> 状态：草案 v1.3（PR-1~8 已落地；PR-9~11 进行中）  
 > 日期：2026-07-16  
 > 路径：`docs/agentization_development_plan.md`  
 > 关联：
@@ -587,6 +587,143 @@ current_logic_flow.md = 已上线行为；本文 = 目标计划。每 Phase 更�
 | v1.1 | 2026-07-16 | 补强 Runtime/失效表/错误码/DoD/回滚/风险全量 |
 
 ---
+
+
+
+---
+
+## 20. PR-9~11 实施计划（LangGraph Supervisor 图 / 合规定向改写 / Goal 侧栏）
+
+> 立项日期：2026-07-16  
+> 前置：PR-1~8 已完成（Tool 层、Supervisor 短循环、参数化章节、失效传播、GoalState、覆盖闭环、Chat 轨迹、Agent API）
+
+### 20.1 目标一句话
+
+在**不破坏确定性流水线**前提下：
+
+1. 提供可选的 **LangGraph Supervisor 图**入口（agent-graph-run）
+2. 提供 **合规失败 → 定向改稿** tool（fix_compliance）
+3. 前端 **Goal 侧栏**定时轮询 `/api/agent/goal` 与 decisions
+
+### 20.2 PR-9：LangGraph Supervisor 图
+
+**形态：**
+
+```text
+START → supervisor_node → (conditional)
+           ├─ tool_node → supervisor_node
+           ├─ human_node → END（blocked_human）
+           └─ END（done / budget）
+```
+
+**设计约束：**
+
+| 项 | 约定 |
+|----|------|
+| 默认流水线 | 仍用线性 `build_bid_graph()` / `run` / `auto_run` |
+| 新入口 | CLI `agent-graph-run --goal "..."`；可选 Web 后续接 |
+| State | 只存 root_dir、goal 文本、step、last_tool、last_observation、done、need_confirm、messages 摘要 |
+| 决策 | 复用 `agent.supervisor` 规则/LLM，不重写大脑 |
+| 执行 | 复用 `tool_runtime.invoke` |
+| 预算 | max_steps 默认 5，与 AGENT_MAX_STEPS 对齐 |
+| 变更 tool | 默认 need_confirm，图进入 human/END，不自动 mutate |
+
+**交付文件：**
+
+- `src/graph/supervisor_graph.py`
+- `src/graph/supervisor_state.py`（或放在 state.py）
+- `main.py` 增加 `agent-graph-run`
+- `tests/test_supervisor_graph.py`
+
+**验收：**
+
+- [ ] 只读 goal（状态/覆盖）能跑完并 END
+- [ ] 变更类 goal 停在 need_confirm，不自动写盘
+- [ ] flag/默认路径不受影响
+- [ ] 单测 mock tool invoke
+
+### 20.3 PR-10：合规项自动定向改写
+
+**形态：**
+
+```text
+compliance_report (blocking/fail)
+  → sync_compliance_findings（已有）
+  → analyze: 提取 rewriteable chapters + hints
+  → plan: fix_compliance(confirm_execute=false)
+  → execute: rewrite_chapters(chapter_ids) + 可选再跑 compliance-check
+```
+
+**设计约束：**
+
+| 项 | 约定 |
+|----|------|
+| 可改类型 | 复用 `REWRITEABLE_TYPES`；`MANUAL_ONLY_TYPES` 只进人工 |
+| 默认 | 只出计划，不自动 execute |
+| confirm_execute=true | 调 rewrite_chapters；可选 `rerun_check=true` 重跑 compliance-check |
+| 与 export | blocking 时 build_export 仍 gate_blocked（已有） |
+| 轨迹 | 写入 decisions / ToolResult metrics |
+
+**交付文件：**
+
+- `tool_registry`: `analyze_compliance` / `fix_compliance`
+- `tool_runtime`: 实现
+- `supervisor` 规则：合规/废标/blocking → 分析或计划
+- `goal`: 可选 compliance_clear 准则
+- `tests/test_compliance_loop.py`
+
+**验收：**
+
+- [ ] 无 report → missing_requires
+- [ ] 有 fail 项 → 给出 chapter_ids 计划
+- [ ] confirm_execute 默认 false
+- [ ] MANUAL_ONLY 不进入自动 rewrite 列表（可进 manual 提示）
+
+### 20.4 PR-11：前端 Goal 侧栏轮询
+
+**形态：**
+
+- `WorkspaceView` 右侧（chat 模式）在 FileExplorer 上方或下方增加 `AgentGoalPanel`
+- 轮询 `GET /api/agent/goal` + `GET /api/agent/decisions?tail=8`（2~3s，仅当前 run 可见时）
+- 展示：goal_id、status、criteria 列表、最近 decision steps
+- Supervisor 关闭时显示「未启用 Agent 目标（flag off / 无 goal）」
+
+**交付文件：**
+
+- `frontend/src/components/AgentGoalPanel.vue`
+- `WorkspaceView.vue` 接入
+- `main.css` 样式
+- 复用 `api/index.js` 已有 fetchAgentGoal / fetchAgentDecisions
+
+**验收：**
+
+- [ ] 无 goal 时友好空态
+- [ ] 有 goal 时显示 status 与未达成 criteria
+- [ ] 组件卸载清除 timer
+
+### 20.5 风险与不做
+
+| 风险 | 应对 |
+|------|------|
+| Graph 与 chat supervisor 双实现漂移 | Graph 只编排，决策/执行复用 agent.* |
+| 合规自动改写误伤 | 默认仅计划；manual-only 类型排除 |
+| 侧栏轮询干扰 | 仅 chat 模式、页面可见时 poll |
+| 推倒线性 graph | **不做**；deterministic 入口保留 |
+
+### 20.6 实施顺序
+
+1. 写本节计划（本文）  
+2. PR-9 supervisor graph + 测试  
+3. PR-10 compliance tools + 测试  
+4. PR-11 Goal 侧栏  
+5. 更新 `agentization_phase_status.md` + 回归 unittest  
+
+### 20.7 变更记录追加
+
+| 版本 | 日期 | 说明 |
+|------|------|------|
+| v1.3 | 2026-07-16 | 增加 PR-9~11 计划：Supervisor 图、合规定向改写、Goal 侧栏 |
+
 
 ## 19. 总结
 
