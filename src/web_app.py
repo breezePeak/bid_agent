@@ -2248,6 +2248,155 @@ async def api_delete_llm_model(request: Request) -> JSONResponse:
     )
 
 
+
+@app.post("/api/llm-settings/test")
+async def api_test_llm_settings(request: Request) -> JSONResponse:
+    """Probe LLM with a tiny hello request using form or active model config.
+
+    Uses a direct HTTP call so values from the settings form are tested as-is,
+    without being overridden by existing .env / process env merge rules.
+    """
+    import json as _json
+    import time as _time
+    import urllib.error
+    import urllib.request
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+
+    raw_model = body.get("model") if isinstance(body.get("model"), dict) else None
+    if raw_model:
+        model = _normalize_model(raw_model)
+    else:
+        store = _read_models_store()
+        active_id = str(store.get("active_id") or "")
+        models = store.get("models") if isinstance(store.get("models"), list) else []
+        active = next((m for m in models if isinstance(m, dict) and str(m.get("id")) == active_id), None)
+        if not active and models and isinstance(models[0], dict):
+            active = models[0]
+        if not active:
+            return JSONResponse({"ok": False, "message": "没有可测试的模型，请先填写配置。"}, status_code=400)
+        model = _normalize_model(active)
+
+    base_url = str(model.get("base_url") or "").strip().rstrip("/")
+    api_key = str(model.get("api_key") or "").strip()
+    model_id = str(model.get("model") or "").strip()
+    if not base_url or not api_key or not model_id:
+        return JSONResponse(
+            {"ok": False, "message": "Base URL、API Key、模型 ID 均不能为空。"},
+            status_code=400,
+        )
+
+    endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+    timeout = max(5, min(int(model.get("timeout") or 60), 90))
+    verify_ssl = bool(model.get("verify_ssl", True))
+    payload = {
+        "model": model_id,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": "You are a connectivity probe. Reply briefly."},
+            {"role": "user", "content": "hello"},
+        ],
+    }
+    data = _json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        endpoint,
+        data=data,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+
+    try:
+        import ssl
+        import certifi
+
+        if verify_ssl:
+            ctx = ssl.create_default_context(cafile=certifi.where())
+        else:
+            ctx = ssl._create_unverified_context()
+        t0 = _time.time()
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            status_code = getattr(resp, "status", 200)
+        elapsed_ms = int((_time.time() - t0) * 1000)
+        try:
+            parsed = _json.loads(raw)
+        except Exception:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": f"HTTP {status_code} 但响应不是 JSON: {raw[:200]}",
+                    "model": model_id,
+                    "base_url": base_url,
+                    "elapsed_ms": elapsed_ms,
+                }
+            )
+        choices = parsed.get("choices") or []
+        content = ""
+        if choices:
+            message = (choices[0] or {}).get("message") or {}
+            content = message.get("content") or ""
+            if isinstance(content, list):
+                content = "".join(
+                    str(item.get("text") or item.get("content") or "") if isinstance(item, dict) else str(item)
+                    for item in content
+                )
+        text = str(content).strip()
+        if not text:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": f"HTTP 成功但模型返回空内容（status={status_code}）。",
+                    "model": model_id,
+                    "base_url": base_url,
+                    "elapsed_ms": elapsed_ms,
+                }
+            )
+        preview = text if len(text) <= 300 else text[:300] + "…"
+        return JSONResponse(
+            {
+                "ok": True,
+                "message": "连接成功",
+                "reply": preview,
+                "model": model_id,
+                "name": model.get("name") or "",
+                "base_url": base_url,
+                "elapsed_ms": elapsed_ms,
+            }
+        )
+    except urllib.error.HTTPError as exc:
+        err_body = ""
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace")[:400]
+        except Exception:
+            pass
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"连接失败: HTTP {exc.code} {exc.reason}" + (f" | {err_body}" if err_body else ""),
+                "model": model_id,
+                "base_url": base_url,
+            }
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"连接失败: {type(exc).__name__}: {exc}",
+                "model": model_id,
+                "base_url": base_url,
+            }
+        )
+
+
+
 @app.get("/api/file-preview")
 def api_file_preview(path: str = Query(..., min_length=1)) -> JSONResponse:
     root = _active_root().resolve()

@@ -90,6 +90,10 @@ export function deleteLlmModel(id) {
   return api.post('/llm-settings/delete', { id })
 }
 
+export function testLlmModel(model, { useActive = false } = {}) {
+  return api.post('/llm-settings/test', { model, use_active: useActive }, { timeout: 90000 })
+}
+
 export function fetchChatMessages() {
   return api.get('/chat/messages')
 }

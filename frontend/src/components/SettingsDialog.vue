@@ -126,11 +126,20 @@
             <p class="settings-hint">
               修改「使用中」模型后会实时生效；所有工作空间后续发起的大模型请求都会使用新配置。
             </p>
+            <p v-if="testResult" class="settings-test-result" :class="{ ok: testOk === true, bad: testOk === false }">{{ testResult }}</p>
             <p v-if="error" class="form-error">{{ error }}</p>
             <p v-if="success" class="form-success">{{ success }}</p>
             <div class="settings-form-footer">
               <button type="button" class="btn" @click="$emit('close')">关闭</button>
               <div class="settings-form-footer-right">
+                <button
+                  type="button"
+                  class="btn"
+                  :disabled="testing || submitting"
+                  @click="handleTest"
+                >
+                  {{ testing ? '测试中...' : '测试连接' }}
+                </button>
                 <button
                   v-if="!isNew && form.id !== activeId"
                   type="button"
@@ -157,12 +166,10 @@
 
 <script setup>
 import { ref, reactive, watch } from 'vue'
-import {
-  fetchLlmSettings,
+import { fetchLlmSettings,
   saveLlmModel,
   activateLlmModel,
-  deleteLlmModel,
-} from '../api'
+  deleteLlmModel, testLlmModel } from '../api'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -176,6 +183,9 @@ const editingId = ref('')
 const isNew = ref(false)
 const showApiKey = ref(false)
 const submitting = ref(false)
+const testing = ref(false)
+const testResult = ref('')
+const testOk = ref(null)
 const error = ref('')
 const success = ref('')
 
@@ -317,6 +327,53 @@ async function handleSave(forceActive = false) {
     error.value = e.response?.data?.message || '保存失败，请检查后端服务'
   } finally {
     submitting.value = false
+  }
+}
+
+
+async function handleTest() {
+  error.value = ''
+  success.value = ''
+  testResult.value = ''
+  testOk.value = null
+  if (!form.base_url.trim() || !form.api_key.trim() || !form.model.trim()) {
+    error.value = '请先填写 Base URL、API Key 和模型 ID 再测试'
+    return
+  }
+  testing.value = true
+  try {
+    const payload = {
+      id: form.id || '',
+      name: form.name.trim() || 'test',
+      base_url: form.base_url.trim(),
+      api_key: form.api_key.trim(),
+      model: form.model.trim(),
+      timeout: form.timeout || 60,
+      max_retries: 1,
+      retry_initial_delay: form.retry_initial_delay,
+      retry_max_delay: form.retry_max_delay,
+      stream: form.stream,
+      verify_ssl: form.verify_ssl,
+    }
+    const { data } = await testLlmModel(payload, { useActive: false })
+    if (data && data.ok) {
+      testOk.value = true
+      testResult.value = `连接成功（${data.elapsed_ms || '?'} ms）
+模型: ${data.model || payload.model}
+回复: ${data.reply || ''}`
+      success.value = '大模型连接测试通过'
+    } else {
+      testOk.value = false
+      testResult.value = (data && data.message) || '连接失败'
+      error.value = (data && data.message) || '连接失败'
+    }
+  } catch (e) {
+    testOk.value = false
+    const msg = e.response?.data?.message || e.message || '测试请求失败'
+    testResult.value = msg
+    error.value = msg
+  } finally {
+    testing.value = false
   }
 }
 

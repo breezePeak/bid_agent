@@ -2509,3 +2509,26 @@ body {
   0%, 100% { box-shadow: 0 8px 22px rgba(37, 99, 235, 0.06); }
   50% { box-shadow: 0 10px 28px rgba(37, 99, 235, 0.14); }
 }
+
+
+.settings-test-result {
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  border-radius: 8px;
+  margin: 8px 0;
+  border: 1px solid var(--color-border);
+  background: #f8fafc;
+  color: #334155;
+}
+.settings-test-result.ok {
+  border-color: rgba(34, 197, 94, 0.4);
+  background: #f0fdf4;
+  color: #166534;
+}
+.settings-test-result.bad {
+  border-color: rgba(239, 68, 68, 0.35);
+  background: #fef2f2;
+  color: #b91c1c;
+}
