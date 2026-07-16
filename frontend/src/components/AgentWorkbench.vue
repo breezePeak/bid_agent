@@ -1,5 +1,5 @@
 <template>
-  <div class="agent-workbench" v-if="visible">
+  <div class="agent-workbench">
     <div class="aw-header">
       <div class="aw-title-wrap">
         <span class="aw-dot" :class="{ on: isLive }"></span>
@@ -15,7 +15,8 @@
     </div>
 
     <div v-if="!agents.length" class="aw-empty">
-      暂无子 Agent 任务。进入「章节写作 / 审核改稿」后，这里会显示每个 Agent 的工作状态。
+      <div class="aw-empty-title">{{ isLive ? '正在准备子 Agent…' : '当前没有子 Agent 在工作' }}</div>
+      <div>进入「生成章节 / 审核改稿」等并发阶段后，这里会显示每个写作/审核 Agent 的卡片状态（排队 / 工作中 / 完成 / 失败）。</div>
     </div>
 
     <div v-else class="aw-grid">

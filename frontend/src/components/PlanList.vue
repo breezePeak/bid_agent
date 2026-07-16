@@ -3,6 +3,9 @@
     <div class="plan-list-header" @click="planCollapsed = !planCollapsed">
       <span class="plan-list-arrow">{{ planCollapsed ? '▸' : '▾' }}</span>
       <span class="plan-list-title">执行计划</span>
+      <span v-if="activeStep" class="plan-list-current" :class="'status-' + activeStep.status">
+        {{ activeStatusLabel }} · {{ activeStep.label }}
+      </span>
       <span class="plan-list-progress">{{ doneCount }}/{{ steps.length }}</span>
       <span class="plan-list-track">
         <span class="plan-list-fill" :style="{ width: percent + '%' }"></span>
@@ -11,17 +14,7 @@
         <button v-if="running" class="btn btn-sm" @click="$emit('pause')">暂停</button>
       </div>
     </div>
-    <div class="plan-list-summary">
-      <div class="plan-summary-item active" v-if="activeStep">
-        <span class="plan-summary-kicker">{{ activeLabel }}</span>
-        <strong>{{ activeStep.label }}</strong>
-        <small>{{ activeStep.message || activeMeta }}</small>
-      </div>
-      <div class="plan-summary-item" v-if="nextStep">
-        <span class="plan-summary-kicker">下一步</span>
-        <strong>{{ nextStep.label }}</strong>
-        <small>{{ nextStep.message || '等待执行' }}</small>
-      </div>
+    <div v-if="recovery || (compliance && compliance.exists)" class="plan-list-summary">
       <div class="plan-summary-recovery" v-if="recovery">
         正在尝试修复：{{ recovery.reason || '分析失败原因' }} · {{ recovery.action || '自动重试' }}（{{ recovery.attempt || 0 }}/{{ recovery.max_attempts || 2 }}）
       </div>
@@ -31,13 +24,14 @@
         :class="{ blocking: compliance.blocking, warn: !compliance.blocking && compliance.need_manual_review }"
         @click="$emit('preview-compliance')"
       >
-        <span class="plan-summary-kicker">{{ compliance.blocking ? '合规阻断' : (compliance.need_manual_review ? '合规待核' : '合规') }}</span>
+        <span class="plan-summary-kicker">{{ compliance.blocking ? '合规阻断（暂不可出正式稿）' : (compliance.need_manual_review ? '合规待核' : '合规通过') }}</span>
         <strong>
-          fail {{ (compliance.counts && compliance.counts.fail) || 0 }}
-          · warn {{ (compliance.counts && compliance.counts.warn) || 0 }}
-          · {{ compliance.max_severity || 'info' }}
+          失败 {{ (compliance.counts && compliance.counts.fail) || 0 }} 项
+          · 警告 {{ (compliance.counts && compliance.counts.warn) || 0 }} 项
+          · 最高级别 {{ severityLabel(compliance.max_severity) }}
         </strong>
         <small>{{ complianceTopHint }}</small>
+        <small class="plan-summary-help">含义：fail=检查未通过；warn=需关注；fatal/critical=阻断交付。点击查看明细。</small>
       </div>
     </div>
     <div class="plan-list-body" v-show="!planCollapsed" ref="bodyRef">
@@ -76,15 +70,18 @@ import { computed, ref, watch, nextTick } from 'vue'
 const props = defineProps({
   steps: { type: Array, default: () => [] },
   running: { type: Boolean, default: false },
-  executing: { type: Boolean, default: false },
   recovery: { type: Object, default: null },
   compliance: { type: Object, default: null },
-  forceExpand: { type: Boolean, default: false },
 })
 
 defineEmits(['pause', 'preview-compliance'])
 
+function severityLabel(sev) {
+  const m = { fatal: 'fatal(致命)', critical: 'critical(严重)', major: 'major(重要)', minor: 'minor(次要)', info: 'info(提示)' }
+  return m[sev] || sev || 'info'
+}
 const complianceTopHint = computed(() => {
+
   const items = props.compliance?.failed_items
   if (Array.isArray(items) && items.length) {
     const first = items[0]
@@ -100,30 +97,16 @@ const bodyRef = ref(null)
 const doneCount = computed(() => props.steps.filter(s => s.status === 'done').length)
 const percent = computed(() => props.steps.length ? Math.round((doneCount.value / props.steps.length) * 100) : 0)
 const activeStep = computed(() => props.steps.find(s => ['running', 'recovering', 'retrying', 'error'].includes(s.status)) || props.steps.find(s => s.status !== 'done') || props.steps[props.steps.length - 1])
-const nextStep = computed(() => props.steps.find(s => s.status !== 'done' && s !== activeStep.value))
-const activeLabel = computed(() => {
-  if (!activeStep.value) return '当前'
+const activeStatusLabel = computed(() => {
+  if (!activeStep.value) return ''
   if (activeStep.value.status === 'error') return '失败'
   if (activeStep.value.status === 'recovering') return '修复中'
   if (activeStep.value.status === 'retrying') return '重试中'
   if (activeStep.value.status === 'done') return '已完成'
-  return '当前'
-})
-const activeMeta = computed(() => {
-  if (!activeStep.value) return ''
   if (activeStep.value.status === 'running') return '执行中'
-  if (activeStep.value.status === 'recovering') return '正在自主修复'
-  if (activeStep.value.status === 'retrying') return '正在自动重试'
-  if (activeStep.value.status === 'error') return '等待处理'
-  return '等待执行'
+  return '待执行'
 })
 
-watch(() => props.forceExpand, (v) => {
-  if (v) planCollapsed.value = false
-})
-watch(() => props.running || props.executing, (v) => {
-  if (v) planCollapsed.value = false
-})
 watch(() => props.steps.find(s => s.status === 'running'), (s) => {
 
   if (s && bodyRef.value) {

@@ -2471,27 +2471,6 @@ body {
 
 
 /* ===== Live run banner ===== */
-.live-run-banner {
-  margin: 0 0 10px;
-  padding: 12px 14px;
-  border-radius: 12px;
-  border: 1px solid rgba(37, 99, 235, 0.28);
-  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 55%, #eef2ff 100%);
-  animation: live-banner-breathe 2.2s ease-in-out infinite;
-}
-.live-run-top { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
-.live-run-pulse {
-  width: 10px; height: 10px; border-radius: 50%; background: #2563eb;
-  box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.55);
-  animation: live-dot 1.4s ease-out infinite;
-}
-.live-run-title { font-size: 13px; color: #1e3a8a; flex: 1; }
-.live-run-elapsed {
-  font-size: 12px; font-variant-numeric: tabular-nums; color: #1d4ed8;
-  background: rgba(219, 234, 254, 0.9); border-radius: 999px; padding: 2px 8px; font-weight: 600;
-}
-.live-run-sub { font-size: 12px; color: #475569; }
-
 /* ===== Agent workbench cards ===== */
 .agent-workbench {
   margin: 0 0 10px;
