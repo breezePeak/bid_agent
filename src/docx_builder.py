@@ -653,6 +653,9 @@ def build_docx(root: Path | None = None) -> Path:
     root = root or project_root()
 
     from quality_gates import validate_global_review_blocking, validate_compliance_blocking
+
+    from agent.issues import assert_can_proceed
+    assert_can_proceed(root, next_command="build-docx")
     validate_global_review_blocking(root, required=False)
     validate_compliance_blocking(root, required=False)
     final_markdown_path = root / "outputs" / "final.md"

@@ -168,6 +168,26 @@ def run_per_chapter(
         status="done" if not failed else "partial_failed",
         message=f"成功 {len(completed)} / 失败 {len(failed)}",
     )
+    if failed and role == "chapter_writer":
+        try:
+            from agent.root_cause import sync_issues_from_write_failures
+
+            sync_issues_from_write_failures(root, failed)
+        except Exception as exc:
+            print(f"[警告] 同步写作失败 Issue 失败: {exc}")
+        raise RuntimeError(
+            "章节写作质量门禁阻断：存在失败章节 "
+            + str([f.get("chapter_id") for f in failed])
+            + "，请定向重试后再继续。"
+        )
+    if failed and role in {"chapter_reviewer", "chapter_rewriter"}:
+        try:
+            from agent.root_cause import sync_issues_from_write_failures
+            # reuse write failure shape for failed review/rewrite chapters
+            sync_issues_from_write_failures(root, failed)
+        except Exception:
+            pass
+        # review path also raises via review_fix gate; keep soft here
     return {"completed": completed, "failed": failed}
 
 

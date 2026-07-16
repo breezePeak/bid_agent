@@ -380,3 +380,51 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int =
         print(f"缺证据章节: {need_evidence_final}")
     if stuck_final:
         print(f"卡住章节: {stuck_final}")
+
+    # collect still-need-rewrite ids
+    need_rewrite_final: list[str] = []
+    try:
+        reviews_dir = root / "workspace" / "reviews"
+        if reviews_dir.exists():
+            for path in sorted(reviews_dir.glob("*_review.json")):
+                data = read_json(path) if "read_json" in globals() else None
+    except Exception:
+        pass
+    # derive from still_failed lists we already have
+    try:
+        from agent.root_cause import sync_issues_from_review_fix
+        import os
+
+        # reopen reviews for need_rewrite
+        need_rewrite_final = []
+        reviews_dir = root / "workspace" / "reviews"
+        if reviews_dir.exists():
+            from utils import read_json as _rj
+
+            for path in sorted(reviews_dir.glob("*_review.json")):
+                data = _rj(path)
+                if not isinstance(data, dict):
+                    continue
+                cid = str(data.get("chapter_id") or path.name.replace("_review.json", ""))
+                if cid in need_evidence_final or cid in stuck_final:
+                    continue
+                if bool(data.get("need_rewrite")):
+                    need_rewrite_final.append(cid)
+        synced = sync_issues_from_review_fix(
+            root,
+            need_rewrite_ids=need_rewrite_final,
+            need_evidence_ids=need_evidence_final,
+            stuck_ids=stuck_final,
+        )
+        if synced:
+            print(f"[问题单] 已同步章节审核 Issue {len(synced)} 条")
+        gate = str(os.environ.get("CHAPTER_REVIEW_GATE", "1")).strip().lower()
+        if gate not in {"0", "false", "no", "off"} and (need_rewrite_final or need_evidence_final or stuck_final):
+            raise RuntimeError(
+                "章节审核质量门禁阻断：仍有未通过章节，请定向改稿/补证据后再继续。"
+                f" need_rewrite={need_rewrite_final}; need_evidence={need_evidence_final}; stuck={stuck_final}"
+            )
+    except RuntimeError:
+        raise
+    except Exception as exc:
+        print(f"[警告] 章节审核 Issue/门禁处理失败: {exc}")

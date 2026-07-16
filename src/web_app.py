@@ -1878,6 +1878,23 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
 
 
 
+@app.get("/api/issues/metrics")
+def api_issue_metrics() -> JSONResponse:
+    root = _active_root()
+    try:
+        from agent.issues import load_issue_metrics, issues_summary
+
+        return JSONResponse(
+            {
+                "ok": True,
+                "summary": issues_summary(root),
+                "metrics": load_issue_metrics(root),
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
 @app.get("/api/issues")
 def api_list_issues(status: str = "open") -> JSONResponse:
     """List quality issues (open snapshot)."""

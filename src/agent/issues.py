@@ -205,6 +205,10 @@ def can_proceed(root: Path | None = None, *, next_command: str = "") -> dict[str
             "next_command": next_command,
         }
     titles = [str(b.get("title") or b.get("code") or b.get("id")) for b in blocks[:5]]
+    try:
+        record_issue_metric(root, "gate_block", next_command=next_command, block_count=len(blocks))
+    except Exception:
+        pass
     return {
         "ok": True,
         "can_proceed": False,
@@ -262,4 +266,51 @@ def issues_summary(root: Path | None = None) -> dict[str, Any]:
             {"id": b.get("id"), "code": b.get("code"), "title": b.get("title"), "stage_id": b.get("stage_id")}
             for b in blocks[:8]
         ],
+    }
+
+
+def metrics_path(root: Path | None = None) -> Path:
+    return issues_dir(root) / "metrics.jsonl"
+
+
+def record_issue_metric(root: Path | None, event: str, **fields: Any) -> None:
+    root = root or project_root()
+    payload = {"ts": _now(), "event": event, **fields}
+    path = metrics_path(root)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def load_issue_metrics(root: Path | None = None, *, tail: int = 200) -> dict[str, Any]:
+    path = metrics_path(root)
+    if not path.exists():
+        return {"events": [], "block_events": 0, "repair_success": 0, "repair_fail": 0}
+    lines = path.read_text(encoding="utf-8").splitlines()[-max(1, tail):]
+    events = []
+    block_events = repair_success = repair_fail = 0
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(item, dict):
+            continue
+        events.append(item)
+        ev = str(item.get("event") or "")
+        if ev == "gate_block":
+            block_events += 1
+        elif ev == "repair_success":
+            repair_success += 1
+        elif ev == "repair_fail":
+            repair_fail += 1
+    return {
+        "events": events,
+        "block_events": block_events,
+        "repair_success": repair_success,
+        "repair_fail": repair_fail,
+        "repair_success_rate": (
+            round(repair_success / max(1, repair_success + repair_fail), 3)
+            if (repair_success + repair_fail)
+            else None
+        ),
     }

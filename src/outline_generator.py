@@ -426,7 +426,23 @@ def generate_outline(root: Path | None = None) -> Path:
         template_outline=template_outline,
         template_evidence=template_evidence,
     )
-    validate_outline_score_coverage(outline, score_points)
+    try:
+        validate_outline_score_coverage(outline, score_points)
+    except Exception as exc:
+        try:
+            from agent.issues import upsert_issues
+            from agent.root_cause import issues_from_outline_error
+            import re
+
+            missing = re.findall(r"S\d+", str(exc))
+            upsert_issues(
+                root,
+                issues_from_outline_error(str(exc), missing_ids=missing),
+                replace_stage_id="generate_outline",
+            )
+        except Exception:
+            pass
+        raise
 
     output_path = root / "workspace" / "outline.json"
     write_json(output_path, outline)

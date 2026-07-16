@@ -199,4 +199,13 @@ def parse_score(root: Path | None = None) -> Path:
     output_path = root / "workspace" / "score_points.json"
     write_json(output_path, score_points)
     print(f"[完成] 已解析 {len(score_points)} 个评分点: {output_path}")
+    if not score_points:
+        try:
+            from agent.issues import upsert_issues
+            from agent.root_cause import issues_from_empty_score_points
+
+            upsert_issues(root, issues_from_empty_score_points(), replace_stage_id="parse_score")
+        except Exception:
+            pass
+        raise RuntimeError("评分解析结果为空，质量门禁阻断，请检查 inputs/score.md 后重跑 parse-score。")
     return output_path

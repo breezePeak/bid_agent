@@ -631,3 +631,34 @@ Web 控制台不是独立实现的另一套流程，而是读取统一元数据�
 python -m unittest discover -s tests -v
 python -m compileall src tests
 ```
+
+---
+
+## 质量门禁与问题单（2026-07 起）
+
+### 行为摘要
+
+1. 关键阶段结束后可写入 `workspace/issues/open.json`（问题单）。
+2. **block** 级 open 问题会阻止：
+   - 自动流水线进入下一阶段（`pipeline_supervisor`）
+   - Web `start-pipeline` / `run-command`（除 init/validate 等）
+   - `build-docx` 出正式稿
+3. 已实现硬门禁的阶段示例：
+   - `global-review`：不一致/未覆盖评分点/冲突/编造风险等
+   - `compliance-check`：fatal/critical 等 blocking
+   - `review-fix-all`：未通过章（`CHAPTER_REVIEW_GATE=1` 时）
+   - `write-all`：存在失败章节
+   - `parse-score`：评分点为空
+   - `generate-outline`：评分点未绑定章节
+4. 最小修复：`POST /api/issues/{id}/actions/preview|execute`，修复后按根因表重验。
+5. 配置：
+   - `QUALITY_GATE_MODE=strict|soft`
+   - `GLOBAL_REVIEW_GATE=1`
+   - `CHAPTER_REVIEW_GATE=1`
+
+### 相关代码
+
+- `src/agent/issues.py` / `root_cause.py` / `repair.py`
+- `src/quality_gates.py`
+- 前端 `StepDetailView` 问题修复按钮；计划区质量门禁阻断条
+
