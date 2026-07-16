@@ -732,3 +732,8 @@ compliance_report (blocking/fail)
 正确改法：Stage→Tool；Orchestrator→Supervisor 循环；默认全量仍确定性；对话/失败/局部目标走 Agent。按 Phase 推进并以第 9 章风险为 checklist，可把体感从流程台推进到标书 Agent，且不丢可靠性。
 
 **下一步：开 PR-1（types + tool_registry + run_stage + 单测 + flag），零用户体验风险。**
+
+
+---*
+*相关后续计划：[quality_gate_minimal_fix_plan.md](./quality_gate_minimal_fix_plan.md)（门禁停步与最小修复，待审核）*
+
