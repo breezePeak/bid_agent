@@ -1773,7 +1773,78 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
         payload["supervisor_steps"] = plan_result.get("supervisor_steps") or []
         if plan_result.get("goal_id"):
             payload["goal_id"] = plan_result.get("goal_id")
+        if isinstance(plan_result.get("goal"), dict):
+            payload["goal"] = plan_result.get("goal")
     return JSONResponse(payload)
+
+
+
+@app.get("/api/agent/goal")
+def api_agent_goal() -> JSONResponse:
+    """Current GoalState for active workspace (PR-7/8)."""
+    root = _active_root()
+    try:
+        from agent.goal import goal_summary, load_goal, reevaluate_goal
+
+        goal = load_goal(root)
+        if goal:
+            try:
+                goal = reevaluate_goal(root, goal)
+            except Exception:
+                pass
+        return JSONResponse(
+            {
+                "ok": True,
+                "goal": goal,
+                "summary": goal_summary(goal) if goal else "无活动目标",
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/agent/decisions")
+def api_agent_decisions(tail: int = 20) -> JSONResponse:
+    root = _active_root()
+    try:
+        from agent.trace import load_decisions
+
+        items = load_decisions(root, tail=max(1, min(int(tail or 20), 100)))
+        return JSONResponse({"ok": True, "decisions": items, "count": len(items)})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/agent/tools")
+def api_agent_tools() -> JSONResponse:
+    try:
+        from agent.tool_registry import tool_manifest
+
+        return JSONResponse({"ok": True, "tools": tool_manifest()})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/agent/tools/invoke")
+async def api_agent_tools_invoke(request: Request) -> JSONResponse:
+    """Advanced/debug invoke. Mutations still go through tool_runtime policy at call site."""
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    name = str(body.get("name") or body.get("tool") or "").strip()
+    args = body.get("args") if isinstance(body.get("args"), dict) else {}
+    dry_run = bool(body.get("dry_run", False))
+    if not name:
+        return JSONResponse({"ok": False, "message": "缺少 tool name"}, status_code=400)
+    try:
+        from agent.tool_runtime import invoke as tool_invoke
+
+        result = tool_invoke(name, args, root=root, dry_run=dry_run, actor="api")
+        return JSONResponse({"ok": result.ok, "result": result.to_dict()})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
 @app.get("/api/chat/messages")

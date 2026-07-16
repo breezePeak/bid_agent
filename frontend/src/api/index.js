@@ -107,3 +107,20 @@ export function orchestrateChat(message, { selectedCommand = '' } = {}) {
 }
 
 export default api
+
+export function fetchAgentGoal() {
+  return api.get('/agent/goal')
+}
+
+export function fetchAgentDecisions(tail = 20) {
+  return api.get('/agent/decisions', { params: { tail } })
+}
+
+export function fetchAgentTools() {
+  return api.get('/agent/tools')
+}
+
+export function invokeAgentTool(name, args = {}, { dryRun = false } = {}) {
+  return api.post('/agent/tools/invoke', { name, args, dry_run: dryRun }, { timeout: 300000 })
+}
+

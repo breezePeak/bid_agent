@@ -454,6 +454,7 @@ def plan_with_supervisor(
         "actions": result.get("actions") or [],
         "supervisor_steps": result.get("steps") or [],
         "goal_id": result.get("goal_id"),
+        "goal": result.get("goal") or {},
         "supervisor": True,
     }
     # If last step suggested run_stage with need confirm, keep as chat + button

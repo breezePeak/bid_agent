@@ -49,6 +49,31 @@
             <div v-if="msg.actions && msg.actions.length" class="chat-msg-actions">
               <button v-for="act in msg.actions" :key="act.label" class="btn btn-sm" @click="handleAction(act)">{{ act.label }}</button>
             </div>
+            <div v-if="msg.goal && (msg.goal.status || msg.goal_id)" class="chat-goal-badge">
+              <span class="chat-goal-label">目标</span>
+              <span class="chat-goal-status" :class="'goal-' + (msg.goal.status || 'pending')">{{ msg.goal.status || 'pending' }}</span>
+              <span v-if="msg.goal_id" class="chat-goal-id">#{{ msg.goal_id }}</span>
+              <span v-if="msg.goal.all_criteria_ok === true" class="chat-goal-ok">criteria OK</span>
+              <span v-else-if="msg.goal.all_criteria_ok === false" class="chat-goal-bad">criteria pending</span>
+            </div>
+            <div v-if="msg.supervisor_steps && msg.supervisor_steps.length" class="chat-supervisor-steps" :class="{ collapsed: !msg.stepsExpanded }">
+              <div class="chat-supervisor-header" @click="msg.stepsExpanded = !msg.stepsExpanded">
+                <span class="chat-supervisor-arrow">{{ msg.stepsExpanded ? '▼' : '▶' }}</span>
+                <span>Agent 决策轨迹</span>
+                <span class="chat-supervisor-count">{{ msg.supervisor_steps.length }} 步</span>
+              </div>
+              <div v-if="msg.stepsExpanded" class="chat-supervisor-body">
+                <div v-for="(st, si) in msg.supervisor_steps" :key="si" class="chat-supervisor-step">
+                  <div class="chat-supervisor-step-title">
+                    <span class="step-idx">#{{ st.step || (si + 1) }}</span>
+                    <span class="step-tool">{{ st.tool || 'chat' }}</span>
+                    <span class="step-flag" :class="st.executed ? 'exec' : 'plan'">{{ st.executed ? '已执行' : '未执行' }}</span>
+                  </div>
+                  <div v-if="st.thought_summary" class="chat-supervisor-thought">{{ st.thought_summary }}</div>
+                  <div v-if="st.observation" class="chat-supervisor-obs">{{ st.observation }}</div>
+                </div>
+              </div>
+            </div>
           </template>
         </div>
       </div>
@@ -225,7 +250,10 @@ const quickBtns = computed(() => {
     { label: `跳过 "${failedStep.label}"`, type: 'skip_stage', command: failedStep.command },
     { label: '诊断错误', action: 'chat' },
   ]
-  const btns = [{ label: '当前状态', action: 'chat' }]
+  const btns = [
+    { label: '当前状态', action: 'chat' },
+    { label: '评分覆盖', action: 'chat', text: '当前评分覆盖率如何' },
+  ]
   const nextPending = planSteps.value.find(s => s.status !== 'done')
   if (nextPending) {
     if (nextPending.command === 'review-fix-all') {
@@ -244,7 +272,19 @@ const quickBtns = computed(() => {
 function addMessage(role, content, actions = [], opts = {}) {
   const persist = opts.persist !== false
   const kind = opts.kind || (role === 'system' ? 'system' : 'message')
-  messages.value.push({ role, content, actions, thinking: '', thinkingExpanded: false, created_at: opts.created_at || '', kind })
+  messages.value.push({
+    role,
+    content,
+    actions,
+    thinking: '',
+    thinkingExpanded: false,
+    created_at: opts.created_at || '',
+    kind,
+    supervisor_steps: Array.isArray(opts.supervisor_steps) ? opts.supervisor_steps : [],
+    stepsExpanded: opts.stepsExpanded !== false && Array.isArray(opts.supervisor_steps) && opts.supervisor_steps.length > 0,
+    goal: opts.goal && typeof opts.goal === 'object' ? opts.goal : null,
+    goal_id: opts.goal_id || (opts.goal && opts.goal.goal_id) || '',
+  })
   if (persist) {
     saveChatMessage(role, content, { actions, kind }).catch(e => console.error('保存消息失败', e))
   }
@@ -459,6 +499,8 @@ function closeSSE() { if (sseSource) { sseSource.close(); sseSource = null } }
 
 // ---- chat ----
 function handleQuick(btn) {
+  if (btn && btn.text) { send(btn.text); return }
+
   if (btn.type) {
     handleAction({ type: btn.type, label: btn.label, command: btn.command })
     return
@@ -513,7 +555,10 @@ async function doChat(text) {
     }
     const reply = body.reply || ''
     const actions = Array.isArray(body.actions) ? body.actions : []
-    addMessage('assistant', reply, actions)
+    const supervisor_steps = Array.isArray(body.supervisor_steps) ? body.supervisor_steps : []
+    const goal = body.goal && typeof body.goal === 'object' ? body.goal : null
+    const goal_id = body.goal_id || ''
+    addMessage('assistant', reply, actions, { supervisor_steps, goal, goal_id, stepsExpanded: true })
     if (body.triggered_auto_run) {
       nextTick(() => { if (!autoExecuting.value) startAutoRun() })
     } else if (body.triggered_command && workflowCommands().includes(body.triggered_command)) {

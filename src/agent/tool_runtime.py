@@ -957,11 +957,13 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
     confirm_execute = bool(args.get("confirm_execute", False))
     rebuild_matrix = bool(args.get("rebuild_matrix", True))
     workers = int(args.get("workers", 2) or 2)
+    max_rounds = max(1, min(int(args.get("max_rounds", 1) or 1), 3))
     call_args = {
         "max_chapters": max_chapters,
         "confirm_execute": confirm_execute,
         "rebuild_matrix": rebuild_matrix,
         "workers": workers,
+        "max_rounds": max_rounds,
         "dry_run": dry_run,
     }
 
@@ -982,7 +984,7 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
             started_at=started,
             ended_at=_now(),
             summary_for_llm="覆盖率驱动改稿：未发现需要改写的章节（无未覆盖/弱覆盖缺口或无法定位章节）。",
-            metrics={**plan, "executed": False, "chapter_ids": []},
+            metrics={**plan, "executed": False, "chapter_ids": [], "rounds": 0},
             skipped=True,
         )
 
@@ -995,49 +997,79 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
             ended_at=_now(),
             summary_for_llm=(
                 f"覆盖率改稿计划：将 rewrite 章节 {chapter_ids} "
-                f"（缺口评分点 {len(plan.get('gap_score_point_ids') or [])} 个）。"
+                f"（缺口评分点 {len(plan.get('gap_score_point_ids') or [])} 个，最多 {max_rounds} 轮）。"
                 f"{' dry_run' if dry_run else ' 未执行（需 confirm_execute=true）'}。"
             ),
-            metrics={**plan, "executed": False, "pending_tool": "rewrite_chapters"},
+            metrics={**plan, "executed": False, "pending_tool": "rewrite_chapters", "max_rounds": max_rounds},
         )
 
-    # execute rewrite
-    rewrite = _execute_chapter_tool(
-        root,
-        tool_name="rewrite_chapters",
-        args={"chapter_ids": chapter_ids, "workers": workers},
-        dry_run=False,
+    rounds_log: list[dict[str, Any]] = []
+    last_rewrite_ok = True
+    current_plan = plan
+    touched: list[str] = []
+
+    for round_idx in range(1, max_rounds + 1):
+        cids = list(current_plan.get("chapter_ids") or [])
+        if not cids:
+            break
+        rewrite = _execute_chapter_tool(
+            root,
+            tool_name="rewrite_chapters",
+            args={"chapter_ids": cids, "workers": workers},
+            dry_run=False,
+        )
+        last_rewrite_ok = bool(rewrite.ok)
+        for cid in cids:
+            if cid not in touched:
+                touched.append(cid)
+        rounds_log.append(
+            {
+                "round": round_idx,
+                "chapter_ids": cids,
+                "ok": rewrite.ok,
+                "summary": (rewrite.summary_for_llm or "")[:300],
+            }
+        )
+        if not rewrite.ok:
+            break
+        try:
+            matrix = _load_coverage_matrix(root, rebuild=True)
+            current_plan = _coverage_gap_plan(root, matrix, max_chapters=max_chapters)
+        except Exception as exc:  # noqa: BLE001
+            current_plan = {"chapter_ids": [], "error": str(exc)}
+            break
+        # stop if no more gaps
+        if not (current_plan.get("chapter_ids") or current_plan.get("uncovered_score_points") or current_plan.get("weak_score_points")):
+            break
+        # stop if same chapters streak with no progress could be added later
+
+    remaining = list(current_plan.get("chapter_ids") or [])
+    summary = (
+        f"覆盖率改稿完成：执行 {len(rounds_log)}/{max_rounds} 轮，"
+        f"触达章节 {touched}，剩余建议章节 {remaining}，"
+        f"剩余未覆盖 {len(current_plan.get('uncovered_score_points') or [])}。"
     )
-    # rebuild matrix after rewrite for fresh status
-    try:
-        matrix = _load_coverage_matrix(root, rebuild=True)
-        post = _coverage_gap_plan(root, matrix, max_chapters=max_chapters)
-    except Exception:
-        post = {}
-
-    summary = rewrite.summary_for_llm
-    if post:
-        summary += (
-            f" 改后建议章节 {post.get('chapter_ids') or []}，"
-            f"剩余未覆盖 {len(post.get('uncovered_score_points') or [])}。"
-        )
     return ToolResult(
-        ok=rewrite.ok,
+        ok=last_rewrite_ok,
         tool="fix_coverage",
         args=call_args,
         started_at=started,
         ended_at=_now(),
-        error=rewrite.error,
+        error=None,
         summary_for_llm=summary[:2000],
         metrics={
-            "executed": rewrite.ok,
-            "chapter_ids": chapter_ids,
+            "executed": True,
+            "chapter_ids": touched,
+            "rounds": len(rounds_log),
+            "max_rounds": max_rounds,
+            "rounds_log": rounds_log,
             "pre": plan,
-            "post": post,
-            "rewrite": rewrite.metrics,
+            "post": current_plan,
+            "remaining_chapter_ids": remaining,
         },
-        artifacts_written=rewrite.artifacts_written,
+        artifacts_written=["workspace/chapters", "workspace/score_coverage_matrix.json"],
     )
+
 
 
 def invoke(

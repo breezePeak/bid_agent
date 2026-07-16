@@ -131,6 +131,68 @@ class CoverageToolTests(unittest.TestCase):
                 self.assertTrue(result.metrics.get("executed"))
                 self.assertTrue(mocked.called)
 
+    def test_fix_coverage_max_rounds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_matrix(root)
+            calls = {"n": 0}
+
+            def fake_rewrite(root_arg, tool_name=None, args=None, dry_run=False):
+                from agent.tool_runtime import _now
+                from agent.types import ToolResult
+
+                calls["n"] += 1
+                return ToolResult(
+                    ok=True,
+                    tool=tool_name or "rewrite_chapters",
+                    args=args or {},
+                    started_at=_now(),
+                    ended_at=_now(),
+                    summary_for_llm=f"rewrite round {calls['n']}",
+                    metrics={"chapter_ids": list((args or {}).get("chapter_ids") or [])},
+                )
+
+            # first analyze uses real matrix; after each rewrite rebuild returns shrinking gaps
+            matrices = [
+                json.loads((root / "workspace" / "score_coverage_matrix.json").read_text(encoding="utf-8")),
+                {
+                    "summary": {"score_point_count": 3, "fully_covered_score_point_count": 2},
+                    "uncovered_score_points": ["S002"],
+                    "weak_score_points": [],
+                    "matrix": [
+                        {
+                            "score_point_id": "S002",
+                            "covered": False,
+                            "coverage_level": "none",
+                            "bound_chapters": [{"chapter_id": "02"}],
+                            "review_coverage": [{"chapter_id": "02", "covered": False}],
+                        }
+                    ],
+                },
+                {
+                    "summary": {"score_point_count": 3, "fully_covered_score_point_count": 3},
+                    "uncovered_score_points": [],
+                    "weak_score_points": [],
+                    "matrix": [],
+                },
+            ]
+            with mock.patch("agent.tool_runtime._execute_chapter_tool", side_effect=fake_rewrite):
+                with mock.patch("agent.tool_runtime._load_coverage_matrix", side_effect=matrices):
+                    result = invoke(
+                        "fix_coverage",
+                        {
+                            "max_chapters": 2,
+                            "confirm_execute": True,
+                            "rebuild_matrix": False,
+                            "max_rounds": 2,
+                        },
+                        root=root,
+                    )
+            self.assertTrue(result.ok, result.summary_for_llm)
+            self.assertEqual(result.metrics.get("rounds"), 2)
+            self.assertEqual(calls["n"], 2)
+
+
     def test_build_export_blocked_by_compliance(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -186,6 +248,7 @@ class CoverageSupervisorTests(unittest.TestCase):
             r2 = run_supervisor_turn("请根据覆盖缺口修复评分点", root=root, use_llm=False)
             self.assertEqual(r2["steps"][0]["tool"], "fix_coverage")
             self.assertFalse(r2["steps"][0]["executed"])
+
 
 
 if __name__ == "__main__":

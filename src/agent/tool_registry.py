@@ -385,7 +385,8 @@ def fix_coverage_tool_spec() -> ToolSpec:
         label="覆盖率驱动改稿计划",
         description=(
             "分析覆盖缺口并生成定向 rewrite 计划（默认不自动改稿；"
-            "confirm_execute=true 时才会调用 rewrite_chapters）。"
+            "confirm_execute=true 时才会调用 rewrite_chapters；"
+            "max_rounds>1 时在预算内多轮分析-改稿，直到无缺口或达上限）。"
         ),
         kind="mutation",
         params_schema={
@@ -395,6 +396,7 @@ def fix_coverage_tool_spec() -> ToolSpec:
                 "confirm_execute": {"type": "boolean", "description": "true 时执行 rewrite_chapters"},
                 "workers": {"type": "integer", "minimum": 1},
                 "rebuild_matrix": {"type": "boolean"},
+                "max_rounds": {"type": "integer", "minimum": 1, "description": "自动改稿轮数上限，默认 1"},
             },
             "additionalProperties": False,
         },
