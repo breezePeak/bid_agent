@@ -4047,7 +4047,38 @@ async def spa_fallback(full_path: str) -> HTMLResponse:
 
 
 if __name__ == "__main__":
+    import socket
     import uvicorn
 
-    _append_log("[系统] 标书 Agent Web 控制台已启动")
-    uvicorn.run(app, host="127.0.0.1", port=7860, log_level="warning")
+    def _port_free(host: str, port: int) -> bool:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind((host, port))
+                return True
+            except OSError:
+                return False
+
+    host = "127.0.0.1"
+    preferred = 7860
+    candidates = [preferred, 7861, 7862, 7863, 7870, 8000]
+    port = next((p for p in candidates if _port_free(host, p)), None)
+    if port is None:
+        print(
+            f"[错误] 常用端口均被占用（{candidates}）。
+"
+            f"请先结束占用进程，例如 PowerShell:
+"
+            f"  Get-NetTCPConnection -LocalPort 7860 | Select OwningProcess
+"
+            f"  Stop-Process -Id <PID> -Force"
+        )
+        raise SystemExit(1)
+
+    if port != preferred:
+        print(f"[警告] 端口 {preferred} 已被占用，改用 http://{host}:{port}")
+    else:
+        print(f"[启动] 标书 Agent Web 控制台: http://{host}:{port}")
+
+    _append_log(f"[系统] 标书 Agent Web 控制台启动中 port={port}")
+    uvicorn.run(app, host=host, port=port, log_level="info")

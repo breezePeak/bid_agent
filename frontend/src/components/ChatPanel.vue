@@ -35,16 +35,27 @@
           </template>
           <template v-else>
             <div class="chat-msg-text">
-              <div v-if="msg.thinking" class="chat-thinking" :class="{ collapsed: !msg.thinkingExpanded }">
+              <div
+                v-if="msg.thinking"
+                class="chat-thinking"
+                :class="{
+                  collapsed: !msg.thinkingExpanded,
+                  'is-running': !msg.content && msg.thinkingExpanded,
+                  'is-done': !!msg.content
+                }"
+              >
                 <div class="chat-thinking-header" @click="msg.thinkingExpanded = !msg.thinkingExpanded">
                   <span class="chat-thinking-arrow">{{ msg.thinkingExpanded ? '▼' : '▶' }}</span>
-                  <span>思考过程</span>
-                  <span class="chat-thinking-badge">深色思考</span>
+                  <span class="chat-thinking-spinner" v-if="!msg.content && msg.thinkingExpanded"></span>
+                  <span>{{ msg.content ? '思考过程' : '正在思考' }}</span>
+                  <span class="chat-thinking-badge" :class="msg.content ? 'done' : 'running'">{{ msg.content ? '已完成' : '进行中' }}</span>
                 </div>
                 <div v-if="msg.thinkingExpanded" class="chat-thinking-body" :ref="el => { if (el && idx === streamingIdx) el.scrollTop = el.scrollHeight }">{{ msg.thinking }}</div>
               </div>
-              <span v-if="idx === streamingIdx && isStreamingEmpty" class="thinking-dots">AI 正在思考<span class="dot1">.</span><span class="dot2">.</span><span class="dot3">.</span></span>
-              <span v-else style="white-space:pre-wrap">{{ msg.content }}</span>
+              <div v-if="idx === streamingIdx && isStreamingEmpty" class="thinking-live">
+                <span class="thinking-dots">AI 正在思考<span class="dot1">.</span><span class="dot2">.</span><span class="dot3">.</span></span>
+              </div>
+              <span v-else-if="msg.content" style="white-space:pre-wrap">{{ msg.content }}</span>
             </div>
             <div v-if="msg.actions && msg.actions.length" class="chat-msg-actions">
               <button v-for="act in msg.actions" :key="act.label" class="btn btn-sm" @click="handleAction(act)">{{ act.label }}</button>
@@ -276,8 +287,8 @@ function addMessage(role, content, actions = [], opts = {}) {
     role,
     content,
     actions,
-    thinking: '',
-    thinkingExpanded: false,
+    thinking: opts.thinking || '',
+    thinkingExpanded: opts.thinkingExpanded === true || (!!opts.thinking && opts.thinkingExpanded !== false) || (!content && !!opts.thinking),
     created_at: opts.created_at || '',
     kind,
     supervisor_steps: Array.isArray(opts.supervisor_steps) ? opts.supervisor_steps : [],
@@ -545,24 +556,102 @@ async function doChat(text) {
       return
     }
   }
+
+  // 先插入“思考中”气泡，避免页面长时间无反馈
+  addMessage('assistant', '', [], {
+    persist: false,
+    thinking: '正在理解你的意图，并查询当前工作区状态…',
+    thinkingExpanded: true,
+  })
+  const msgIndex = messages.value.length - 1
+  streamingIdx.value = msgIndex
+  isStreamingEmpty.value = true
+  if (messages.value[msgIndex]) {
+    messages.value[msgIndex].thinkingExpanded = true
+    messages.value[msgIndex].thinking = '正在理解你的意图，并查询当前工作区状态…'
+  }
+  await nextTick()
+  scrollBottom()
+
+  const thinkLines = [
+    '正在理解你的意图，并查询当前工作区状态…',
+    '正在调用编排器 / 可选 Supervisor 决策…',
+    '正在汇总结果，请稍候…',
+  ]
+  let thinkStep = 0
+  const thinkTimer = setInterval(() => {
+    thinkStep = Math.min(thinkStep + 1, thinkLines.length - 1)
+    if (messages.value[msgIndex]) {
+      messages.value[msgIndex].thinking = thinkLines[thinkStep]
+      if (thinkStep === thinkLines.length - 1) {
+        messages.value[msgIndex].thinking += `\n（已等待处理，若较慢通常是 LLM 或长任务）`
+      }
+    }
+    nextTick(scrollBottom)
+  }, 1800)
+
   try {
     const resp = await orchestrateChat(text)
     const body = resp && resp.data ? resp.data : {}
+    clearInterval(thinkTimer)
+    streamingIdx.value = -1
+    isStreamingEmpty.value = false
+
     if (body.ok === false) {
-      addMessage('assistant', body.message || '无法获取响应')
+      if (messages.value[msgIndex]) {
+        messages.value[msgIndex].content = body.message || '无法获取响应'
+        messages.value[msgIndex].thinking = (messages.value[msgIndex].thinking || '') + '\n请求结束：编排器返回失败。'
+        messages.value[msgIndex].thinkingExpanded = false
+      }
       sending.value = false
       return
     }
+
     const reply = body.reply || ''
     const actions = Array.isArray(body.actions) ? body.actions : []
     const supervisor_steps = Array.isArray(body.supervisor_steps) ? body.supervisor_steps : []
     const goal = body.goal && typeof body.goal === 'object' ? body.goal : null
     const goal_id = body.goal_id || ''
-    addMessage('assistant', reply, actions, { supervisor_steps, goal, goal_id, stepsExpanded: true })
+
+    // 把决策轨迹整理进 thinking，结果出来后默认折叠
+    let thinkingDone = '已完成分析。'
+    if (supervisor_steps.length) {
+      thinkingDone = supervisor_steps.map((st, i) => {
+        const n = st.step || (i + 1)
+        const tool = st.tool || 'chat'
+        const thought = st.thought_summary || ''
+        const obs = st.observation || ''
+        const flag = st.executed ? '已执行' : '未执行'
+        return `#${n} ${tool}（${flag}）\n${thought}${obs ? '\n→ ' + obs : ''}`
+      }).join('\n\n')
+    } else if (body.supervisor) {
+      thinkingDone = 'Supervisor 已处理，但本轮无逐步 tool 轨迹。'
+    } else {
+      thinkingDone = '编排器已返回结果（经典模式）。'
+    }
+    if (body.orchestrator_note) {
+      thinkingDone += `\n备注：${body.orchestrator_note}`
+    }
+
+    if (messages.value[msgIndex]) {
+      const msg = messages.value[msgIndex]
+      msg.content = reply
+      msg.actions = actions
+      msg.thinking = thinkingDone
+      msg.thinkingExpanded = false
+      msg.supervisor_steps = supervisor_steps
+      msg.stepsExpanded = supervisor_steps.length > 0
+      msg.goal = goal
+      msg.goal_id = goal_id
+      // 结果落盘
+      saveChatMessage('assistant', reply, { actions, kind: 'message' }).catch(e => console.error('保存消息失败', e))
+    } else {
+      addMessage('assistant', reply, actions, { supervisor_steps, goal, goal_id, stepsExpanded: true })
+    }
+
     if (body.triggered_auto_run) {
       nextTick(() => { if (!autoExecuting.value) startAutoRun() })
     } else if (body.triggered_command && workflowCommands().includes(body.triggered_command)) {
-      // 编排器触发的命令属于流水线一环 → 接管为自动推进链，完成后自动跑下一个
       nextTick(() => { if (!autoExecuting.value) startAutoRun(body.triggered_command) })
     } else if (body.triggered_command || body.triggered_rewrite) {
       watchLiveRun()
@@ -571,9 +660,20 @@ async function doChat(text) {
       addMessage('system', `[编排器] ${body.orchestrator_note}`)
     }
   } catch (e) {
-    addMessage('assistant', '请求失败：' + (e && e.message ? e.message : ''))
+    clearInterval(thinkTimer)
+    streamingIdx.value = -1
+    isStreamingEmpty.value = false
+    const errText = '请求失败：' + (e && e.message ? e.message : '')
+    if (messages.value[msgIndex]) {
+      messages.value[msgIndex].content = errText
+      messages.value[msgIndex].thinking = (messages.value[msgIndex].thinking || '请求过程') + '\n发生错误，已停止等待。'
+      messages.value[msgIndex].thinkingExpanded = false
+    } else {
+      addMessage('assistant', errText)
+    }
   }
   sending.value = false
+  nextTick(scrollBottom)
 }
 
 function watchLiveRun() {
