@@ -112,6 +112,10 @@ export function orchestrateChat(message, { selectedCommand = '' } = {}) {
 
 export default api
 
+export function fetchComplianceReport() {
+  return api.get('/compliance-report')
+}
+
 export function fetchAgentActivity() {
   return api.get('/agent/activity')
 }

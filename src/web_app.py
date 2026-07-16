@@ -1514,13 +1514,26 @@ def api_status() -> dict[str, Any]:
                     {
                         "check_id": item.get("check_id"),
                         "check_name": item.get("check_name"),
+                        "check_type": item.get("check_type"),
                         "status": item.get("status"),
                         "severity": item.get("severity"),
+                        "requirement": item.get("requirement"),
                         "suggestion": item.get("suggestion"),
+                        "auto_fixable": item.get("auto_fixable"),
+                        "need_manual_review": item.get("need_manual_review"),
                     }
                     for item in (compliance.get("items") or [])
                     if isinstance(item, dict) and item.get("status") in {"fail", "warn"}
-                ][:12]
+                ]
+                # sort fatal/critical first
+                _sev_order = {"fatal": 0, "critical": 1, "major": 2, "minor": 3, "info": 4}
+                failed_items.sort(
+                    key=lambda x: (
+                        0 if x.get("status") == "fail" else 1,
+                        _sev_order.get(str(x.get("severity") or ""), 9),
+                        str(x.get("check_id") or ""),
+                    )
+                )
                 compliance_summary = {
                     "exists": True,
                     "ok": bool(compliance.get("ok")),
@@ -1780,6 +1793,54 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             payload["goal"] = plan_result.get("goal")
     return JSONResponse(payload)
 
+
+
+@app.get("/api/compliance-report")
+def api_compliance_report() -> JSONResponse:
+    """Full compliance report for right-side issues panel."""
+    root = _active_root()
+    path = root / "workspace" / "compliance_report.json"
+    if not path.exists():
+        return JSONResponse(
+            {
+                "ok": True,
+                "exists": False,
+                "blocking": False,
+                "items": [],
+                "summary": {},
+                "message": "尚未生成合规报告，请先执行 compliance-check。",
+            }
+        )
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": f"读取失败: {exc}"}, status_code=500)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "message": "报告格式无效"}, status_code=500)
+    items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
+    sev_order = {"fatal": 0, "critical": 1, "major": 2, "minor": 3, "info": 4}
+    items_sorted = sorted(
+        items,
+        key=lambda x: (
+            0 if x.get("status") == "fail" else 1 if x.get("status") == "warn" else 2,
+            sev_order.get(str(x.get("severity") or ""), 9),
+            str(x.get("check_id") or ""),
+        ),
+    )
+    summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+    return JSONResponse(
+        {
+            "ok": True,
+            "exists": True,
+            "blocking": bool(data.get("blocking") or summary.get("blocking")),
+            "need_manual_review": bool(data.get("need_manual_review") or summary.get("need_manual_review")),
+            "max_severity": data.get("max_severity") or summary.get("max_severity"),
+            "summary": summary,
+            "counts": summary.get("counts") if isinstance(summary.get("counts"), dict) else {},
+            "items": items_sorted,
+            "total": len(items_sorted),
+        }
+    )
 
 
 @app.get("/api/agent/activity")

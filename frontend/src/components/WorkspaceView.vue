@@ -28,10 +28,10 @@
       <DocEditor ref="docEditorRef" :run-id="runId" @add-to-chat="onAddToChat" @add-annotation="onAddAnnotation" @update-page-count="docPageCount = $event" @rewrite-applied="onDocRewriteApplied" @rewrite-discarded="onDocRewriteDiscarded" />
     </div>
 
-    <!-- right: agent goal + file explorer (chat mode) -->
+    <!-- right: issues / files (chat mode) -->
     <div v-if="mode === 'chat'" class="wl-files">
       <AgentGoalPanel :run-id="runId" />
-      <FileExplorer :run-id="runId" @preview-file="previewFile" />
+      <IssuesPanel ref="issuesRef" :run-id="runId" :focus="rightFocus" @preview-file="previewFile" />
     </div>
   </div>
 </template>
@@ -40,8 +40,8 @@
 import { ref, watch } from 'vue'
 import ChatPanel from './ChatPanel.vue'
 import DocEditor from './DocEditor.vue'
-import FileExplorer from './FileExplorer.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
+import IssuesPanel from './IssuesPanel.vue'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -56,7 +56,23 @@ const docEditorRef = ref(null)
 const chatWidth = ref(Math.round((window.innerWidth - 260) * 0.4))
 const docPageCount = ref(0)
 
-function openPreview(cmd) { mode.value = 'chat' }
+const issuesRef = ref(null)
+const rightFocus = ref('')
+
+function openPreview(cmd) {
+  mode.value = 'chat'
+  const c = String(cmd || '')
+  if (c === 'compliance-check' || c === 'compliance' || c === 'manual-review') {
+    rightFocus.value = 'compliance'
+    // retrigger watch even if same value
+    setTimeout(() => { rightFocus.value = 'compliance' }, 0)
+    if (issuesRef.value?.showIssues) issuesRef.value.showIssues()
+    if (issuesRef.value?.refresh) issuesRef.value.refresh()
+  } else if (c) {
+    rightFocus.value = 'issues'
+  }
+}
+
 function previewFile(path) { previewFileName.value = path }
 function downloadDocx() { window.open('/api/download/final-docx', '_blank') }
 function downloadMd() { window.open('/api/download/final-md', '_blank') }
