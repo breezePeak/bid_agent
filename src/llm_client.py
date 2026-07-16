@@ -11,7 +11,7 @@ from typing import Any
 
 import certifi
 
-from config import get_settings
+from config import Settings, get_settings
 from runtime_context import record_llm_call
 from utils import project_root, strip_code_fences
 
@@ -23,18 +23,58 @@ def _create_ssl_context(verify_ssl: bool = True) -> ssl.SSLContext:
     return ssl._create_unverified_context()
 
 
-def _chat_endpoint(base_url: str) -> str:
+def _normalize_provider(value: str | None) -> str:
+    p = str(value or "openai").strip().lower()
+    if p in {"anthropic", "claude"}:
+        return "anthropic"
+    return "openai"
+
+
+def _openai_chat_endpoint(base_url: str) -> str:
     base = base_url.rstrip("/")
     if base.endswith("/chat/completions"):
         return base
     return f"{base}/chat/completions"
 
 
-def _extract_content(response_data: dict[str, Any]) -> str:
+def _anthropic_messages_endpoint(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    if base.endswith("/messages"):
+        return base
+    if base.endswith("/v1"):
+        return f"{base}/messages"
+    return f"{base}/v1/messages"
+
+
+def _split_system_messages(messages: list[dict]) -> tuple[str, list[dict[str, str]]]:
+    system_parts: list[str] = []
+    converted: list[dict[str, str]] = []
+    for item in messages or []:
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "user")
+        content = item.get("content")
+        if isinstance(content, list):
+            text = "".join(
+                str(part.get("text") or part.get("content") or "") if isinstance(part, dict) else str(part)
+                for part in content
+            )
+        else:
+            text = str(content or "")
+        if role == "system":
+            if text.strip():
+                system_parts.append(text)
+            continue
+        if role not in {"user", "assistant"}:
+            role = "user"
+        converted.append({"role": role, "content": text})
+    return "\n\n".join(system_parts).strip(), converted
+
+
+def _extract_openai_content(response_data: dict[str, Any]) -> str:
     choices = response_data.get("choices") or []
     if not choices:
         raise ValueError(f"LLM 响应缺少 choices: {response_data}")
-
     message = choices[0].get("message") or {}
     content = message.get("content", "")
     if isinstance(content, list):
@@ -46,6 +86,24 @@ def _extract_content(response_data: dict[str, Any]) -> str:
                 parts.append(str(item))
         return "".join(parts)
     return str(content)
+
+
+def _extract_anthropic_content(response_data: dict[str, Any]) -> str:
+    content = response_data.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") in {None, "text"} or "text" in item:
+                    parts.append(str(item.get("text") or ""))
+            else:
+                parts.append(str(item))
+        text = "".join(parts).strip()
+        if text:
+            return text
+    raise ValueError(f"Anthropic 响应缺少 content: {response_data}")
 
 
 def _extract_stream_delta(event_data: dict[str, Any]) -> tuple[str, str]:
@@ -70,7 +128,7 @@ def _extract_stream_delta(event_data: dict[str, Any]) -> tuple[str, str]:
     return str(reasoning) if reasoning else "", "" if content is None else str(content)
 
 
-def _read_streaming_response(response: Any) -> str:
+def _read_openai_streaming_response(response: Any) -> str:
     parts: list[str] = []
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="replace").strip()
@@ -91,7 +149,7 @@ def _read_streaming_response(response: Any) -> str:
     return "".join(parts)
 
 
-def _build_http_error_hint(endpoint: str, status_code: int, error_body: str) -> str:
+def _build_http_error_hint(endpoint: str, status_code: int, error_body: str, provider: str) -> str:
     body = (error_body or "").lower()
     if status_code == 403 and "error code: 1010" in body and "/zen/go/" in endpoint:
         return (
@@ -104,19 +162,25 @@ def _build_http_error_hint(endpoint: str, status_code: int, error_body: str) -> 
     if status_code == 401:
         return "API Key 无效或未授权。"
     if status_code == 400:
+        if provider == "anthropic":
+            return "Anthropic 请求参数不合法，请检查 Base URL（通常 …/v1）、model 与 API Key。"
         return "请求参数不合法，请检查 endpoint、model 和请求体。"
+    if status_code == 404 and provider == "anthropic":
+        return "Anthropic endpoint 可能不正确，请使用 https://api.anthropic.com 或带 /v1 的网关地址。"
     return ""
 
 
-def _build_connection_error_hint(endpoint: str, error: Exception) -> str:
+def _build_connection_error_hint(endpoint: str, error: Exception, provider: str) -> str:
     text = str(error).lower()
     if "remote end closed connection without response" in text or "remotedisconnected" in text:
         return (
             "远端在返回响应前主动断开连接，通常是上游网关/模型服务临时不稳定、限流或 endpoint 不匹配。"
-            "如多次出现，请增大 OPENAI_MAX_RETRIES，或检查 OPENAI_BASE_URL 是否应切换为服务商提供的非 go endpoint。"
+            "如多次出现，请增大 OPENAI_MAX_RETRIES，或检查 Base URL / API 格式是否匹配。"
         )
     if "timed out" in text or "timeout" in text:
-        return "请求超时。可适当增大 OPENAI_TIMEOUT，或降低并发/稍后重试。"
+        return "请求超时。可适当增大超时时间，或降低并发/稍后重试。"
+    if provider == "anthropic":
+        return "Anthropic 连接失败，请确认 API 格式选 Anthropic，且 Base URL 与 Key 匹配。"
     if "/zen/go/" in endpoint:
         return "当前使用 OpenCode Go endpoint。如持续连接失败，请确认该 endpoint、模型和 API Key 组合仍可用。"
     return ""
@@ -128,56 +192,103 @@ def _retry_delay(attempt: int, initial_delay: float, max_delay: float) -> float:
     return base_delay + jitter
 
 
+def _openai_request(settings: Settings, messages: list[dict], temperature: float) -> str:
+    endpoint = _openai_chat_endpoint(settings.base_url)
+    ssl_context = _create_ssl_context(settings.verify_ssl)
+    payload: dict[str, Any] = {
+        "model": settings.model,
+        "messages": messages,
+        "temperature": temperature,
+    }
+    if settings.stream:
+        payload["stream"] = True
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {settings.api_key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Connection": "close",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/137.0.0.0 Safari/537.36"
+        ),
+    }
+    request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
+        if settings.stream:
+            content = _read_openai_streaming_response(response)
+            if not content.strip():
+                raise ValueError("LLM 流式响应为空。")
+            return strip_code_fences(content)
+        response_body = response.read().decode("utf-8")
+        response_data = json.loads(response_body)
+        return strip_code_fences(_extract_openai_content(response_data))
+
+
+def _anthropic_request(settings: Settings, messages: list[dict], temperature: float) -> str:
+    endpoint = _anthropic_messages_endpoint(settings.base_url)
+    ssl_context = _create_ssl_context(settings.verify_ssl)
+    system_text, converted = _split_system_messages(messages)
+    if not converted:
+        converted = [{"role": "user", "content": "hello"}]
+    payload: dict[str, Any] = {
+        "model": settings.model,
+        "max_tokens": 4096,
+        "temperature": temperature,
+        "messages": converted,
+    }
+    if system_text:
+        payload["system"] = system_text
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "x-api-key": settings.api_key,
+        "anthropic-version": "2023-06-01",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Connection": "close",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/137.0.0.0 Safari/537.36"
+        ),
+    }
+    # Some OpenAI-compatible gateways still want bearer for anthropic-shaped routes.
+    if settings.api_key and not settings.api_key.startswith("sk-ant"):
+        headers["Authorization"] = f"Bearer {settings.api_key}"
+    request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
+        response_body = response.read().decode("utf-8")
+        response_data = json.loads(response_body)
+        return strip_code_fences(_extract_anthropic_content(response_data))
+
+
 def chat(messages: list[dict], temperature: float = 0.2) -> str:
     initial_settings = get_settings(project_root())
     last_error: Exception | None = None
     for attempt in range(1, initial_settings.max_retries + 1):
-        # 每次重试都重新读取中央配置；运行中切换模型/API Key 后无需重启工作空间任务。
         settings = get_settings(project_root())
-        endpoint = _chat_endpoint(settings.base_url)
-        ssl_context = _create_ssl_context(settings.verify_ssl)
-        payload = {
-            "model": settings.model,
-            "messages": messages,
-            "temperature": temperature,
-        }
-        if settings.stream:
-            payload["stream"] = True
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers = {
-            "Authorization": f"Bearer {settings.api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Connection": "close",
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/137.0.0.0 Safari/537.36"
-            ),
-        }
-        request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
+        provider = _normalize_provider(getattr(settings, "provider", "openai"))
+        endpoint = (
+            _anthropic_messages_endpoint(settings.base_url)
+            if provider == "anthropic"
+            else _openai_chat_endpoint(settings.base_url)
+        )
         try:
-            with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
-                if settings.stream:
-                    content = _read_streaming_response(response)
-                    if not content.strip():
-                        raise ValueError("LLM 流式响应为空。")
-                    cleaned = strip_code_fences(content)
-                    record_llm_call(messages, cleaned, settings.model, temperature)
-                    return cleaned
-                response_body = response.read().decode("utf-8")
-                response_data = json.loads(response_body)
-                cleaned = strip_code_fences(_extract_content(response_data))
-                record_llm_call(messages, cleaned, settings.model, temperature)
-                return cleaned
+            if provider == "anthropic":
+                cleaned = _anthropic_request(settings, messages, temperature)
+            else:
+                cleaned = _openai_request(settings, messages, temperature)
+            record_llm_call(messages, cleaned, settings.model, temperature)
+            return cleaned
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             last_error = exc
             should_retry = exc.code not in {400, 401, 403}
-            hint = _build_http_error_hint(endpoint, exc.code, error_body)
+            hint = _build_http_error_hint(endpoint, exc.code, error_body, provider)
             print(
                 f"[LLM] 第 {attempt}/{settings.max_retries} 次请求失败: "
-                f"HTTP {exc.code} endpoint={endpoint} model={settings.model} {error_body}",
+                f"HTTP {exc.code} provider={provider} endpoint={endpoint} model={settings.model} {error_body}",
                 file=sys.stderr,
             )
             if hint:
@@ -186,10 +297,10 @@ def chat(messages: list[dict], temperature: float = 0.2) -> str:
                 break
         except Exception as exc:
             last_error = exc
-            hint = _build_connection_error_hint(endpoint, exc)
+            hint = _build_connection_error_hint(endpoint, exc, provider)
             print(
                 f"[LLM] 第 {attempt}/{settings.max_retries} 次请求失败: "
-                f"endpoint={endpoint} model={settings.model} {exc}",
+                f"provider={provider} endpoint={endpoint} model={settings.model} {exc}",
                 file=sys.stderr,
             )
             if hint:
@@ -202,14 +313,22 @@ def chat(messages: list[dict], temperature: float = 0.2) -> str:
 
     raise RuntimeError(
         f"LLM 请求失败，已重试 {initial_settings.max_retries} 次。"
-        "请检查 OPENAI_BASE_URL / OPENAI_MODEL / OPENAI_API_KEY 是否匹配，"
+        "请检查 API 格式（OpenAI/Anthropic）、Base URL、模型 ID 与 API Key 是否匹配，"
         "或临时增大 OPENAI_MAX_RETRIES 后重试。"
     ) from last_error
 
 
 def chat_stream_chunks(messages: list[dict], temperature: float = 0.2):
     settings = get_settings(project_root())
-    endpoint = _chat_endpoint(settings.base_url)
+    provider = _normalize_provider(getattr(settings, "provider", "openai"))
+    if provider == "anthropic":
+        # Anthropic 流式协议不同；这里降级为一次性返回，保证前端可消费
+        text = chat(messages, temperature=temperature)
+        if text:
+            yield ("content", text)
+        return
+
+    endpoint = _openai_chat_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     payload = {
         "model": settings.model,

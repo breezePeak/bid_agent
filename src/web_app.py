@@ -1960,6 +1960,7 @@ LLM_ENV_KEYS: list[tuple[str, str]] = [
     ("OPENAI_RETRY_MAX_DELAY", "retry_max_delay"),
     ("OPENAI_STREAM", "stream"),
     ("OPENAI_VERIFY_SSL", "verify_ssl"),
+    ("OPENAI_PROVIDER", "provider"),
 ]
 _LLM_ALIAS_TO_KEY = {alias: key for key, alias in LLM_ENV_KEYS}
 LLM_MODELS_FILE = ROOT / "models.json"
@@ -2045,9 +2046,15 @@ def _llm_config_revision() -> str:
 
 
 def _normalize_model(raw: dict[str, Any]) -> dict[str, Any]:
+    provider = str(raw.get("provider") or "openai").strip().lower()
+    if provider in {"claude"}:
+        provider = "anthropic"
+    if provider not in {"openai", "anthropic"}:
+        provider = "openai"
     return {
         "id": str(raw.get("id", "")).strip(),
         "name": str(raw.get("name", "")).strip(),
+        "provider": provider,
         "base_url": str(raw.get("base_url", "")).strip(),
         "api_key": str(raw.get("api_key", "")).strip(),
         "model": str(raw.get("model", "")).strip(),
@@ -2066,6 +2073,7 @@ def _sync_model_to_env(model: dict[str, Any]) -> None:
             "base_url": model.get("base_url", ""),
             "api_key": model.get("api_key", ""),
             "model": model.get("model", ""),
+            "provider": model.get("provider", "openai") or "openai",
             "timeout": model.get("timeout", 300),
             "max_retries": model.get("max_retries", 3),
             "retry_initial_delay": model.get("retry_initial_delay", 2),
@@ -2092,6 +2100,7 @@ def _read_models_store() -> dict[str, Any]:
             "base_url": env_values.get("base_url", ""),
             "api_key": env_values.get("api_key", ""),
             "model": env_values.get("model", ""),
+            "provider": env_values.get("provider", "openai") or "openai",
             "timeout": env_values.get("timeout", 300),
             "max_retries": env_values.get("max_retries", 3),
             "retry_initial_delay": env_values.get("retry_initial_delay", 2),
@@ -2251,15 +2260,13 @@ async def api_delete_llm_model(request: Request) -> JSONResponse:
 
 @app.post("/api/llm-settings/test")
 async def api_test_llm_settings(request: Request) -> JSONResponse:
-    """Probe LLM with a tiny hello request using form or active model config.
-
-    Uses a direct HTTP call so values from the settings form are tested as-is,
-    without being overridden by existing .env / process env merge rules.
-    """
+    """Probe LLM with a tiny hello request using form or active model config."""
     import json as _json
     import time as _time
     import urllib.error
     import urllib.request
+    import ssl
+    import certifi
 
     try:
         body = await request.json()
@@ -2285,42 +2292,65 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
     base_url = str(model.get("base_url") or "").strip().rstrip("/")
     api_key = str(model.get("api_key") or "").strip()
     model_id = str(model.get("model") or "").strip()
+    provider = str(model.get("provider") or "openai").strip().lower()
+    if provider not in {"openai", "anthropic"}:
+        provider = "openai"
     if not base_url or not api_key or not model_id:
         return JSONResponse(
             {"ok": False, "message": "Base URL、API Key、模型 ID 均不能为空。"},
             status_code=400,
         )
 
-    endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
     timeout = max(5, min(int(model.get("timeout") or 60), 90))
     verify_ssl = bool(model.get("verify_ssl", True))
-    payload = {
-        "model": model_id,
-        "temperature": 0,
-        "messages": [
-            {"role": "system", "content": "You are a connectivity probe. Reply briefly."},
-            {"role": "user", "content": "hello"},
-        ],
-    }
-    data = _json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        endpoint,
-        data=data,
-        method="POST",
-        headers={
+    if verify_ssl:
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    else:
+        ctx = ssl._create_unverified_context()
+
+    if provider == "anthropic":
+        endpoint = base_url
+        if endpoint.endswith("/messages"):
+            pass
+        elif endpoint.endswith("/v1"):
+            endpoint = f"{endpoint}/messages"
+        else:
+            endpoint = f"{endpoint.rstrip('/')}/v1/messages"
+        payload = {
+            "model": model_id,
+            "max_tokens": 64,
+            "temperature": 0,
+            "messages": [{"role": "user", "content": "hello"}],
+            "system": "You are a connectivity probe. Reply briefly.",
+        }
+        headers = {
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if not api_key.startswith("sk-ant"):
+            headers["Authorization"] = f"Bearer {api_key}"
+    else:
+        endpoint = base_url if base_url.endswith("/chat/completions") else f"{base_url}/chat/completions"
+        payload = {
+            "model": model_id,
+            "temperature": 0,
+            "messages": [
+                {"role": "system", "content": "You are a connectivity probe. Reply briefly."},
+                {"role": "user", "content": "hello"},
+            ],
+        }
+        headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
-        },
-    )
+            "Accept": "application/json",
+        }
+
+    data = _json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=data, method="POST", headers=headers)
 
     try:
-        import ssl
-        import certifi
-
-        if verify_ssl:
-            ctx = ssl.create_default_context(cafile=certifi.where())
-        else:
-            ctx = ssl._create_unverified_context()
         t0 = _time.time()
         with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
@@ -2334,27 +2364,40 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
                     "ok": False,
                     "message": f"HTTP {status_code} 但响应不是 JSON: {raw[:200]}",
                     "model": model_id,
+                    "provider": provider,
                     "base_url": base_url,
                     "elapsed_ms": elapsed_ms,
                 }
             )
-        choices = parsed.get("choices") or []
-        content = ""
-        if choices:
-            message = (choices[0] or {}).get("message") or {}
-            content = message.get("content") or ""
+
+        text = ""
+        if provider == "anthropic":
+            content = parsed.get("content")
             if isinstance(content, list):
-                content = "".join(
-                    str(item.get("text") or item.get("content") or "") if isinstance(item, dict) else str(item)
-                    for item in content
-                )
-        text = str(content).strip()
+                text = "".join(
+                    str(item.get("text") or "") if isinstance(item, dict) else str(item) for item in content
+                ).strip()
+            elif isinstance(content, str):
+                text = content.strip()
+        else:
+            choices = parsed.get("choices") or []
+            if choices:
+                message = (choices[0] or {}).get("message") or {}
+                content = message.get("content") or ""
+                if isinstance(content, list):
+                    content = "".join(
+                        str(item.get("text") or item.get("content") or "") if isinstance(item, dict) else str(item)
+                        for item in content
+                    )
+                text = str(content).strip()
+
         if not text:
             return JSONResponse(
                 {
                     "ok": False,
                     "message": f"HTTP 成功但模型返回空内容（status={status_code}）。",
                     "model": model_id,
+                    "provider": provider,
                     "base_url": base_url,
                     "elapsed_ms": elapsed_ms,
                 }
@@ -2366,6 +2409,7 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
                 "message": "连接成功",
                 "reply": preview,
                 "model": model_id,
+                "provider": provider,
                 "name": model.get("name") or "",
                 "base_url": base_url,
                 "elapsed_ms": elapsed_ms,
@@ -2382,6 +2426,7 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
                 "ok": False,
                 "message": f"连接失败: HTTP {exc.code} {exc.reason}" + (f" | {err_body}" if err_body else ""),
                 "model": model_id,
+                "provider": provider,
                 "base_url": base_url,
             }
         )
@@ -2391,6 +2436,7 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
                 "ok": False,
                 "message": f"连接失败: {type(exc).__name__}: {exc}",
                 "model": model_id,
+                "provider": provider,
                 "base_url": base_url,
             }
         )

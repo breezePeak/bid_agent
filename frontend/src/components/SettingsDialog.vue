@@ -26,7 +26,7 @@
                   {{ m.name || '未命名' }}
                   <span v-if="m.id === activeId" class="settings-active-badge">使用中</span>
                 </div>
-                <div class="settings-list-item-meta">{{ m.model || '—' }}</div>
+                <div class="settings-list-item-meta">{{ (m.provider || 'openai') + ' · ' + (m.model || '—') }}</div>
               </div>
               <button
                 class="settings-list-item-delete"
@@ -57,6 +57,14 @@
                 placeholder="例如：默认模型 / GLM / GPT"
                 required
               />
+            </div>
+            <div class="form-group">
+              <label for="llm-provider">API 格式 <span class="required">*</span></label>
+              <select id="llm-provider" v-model="form.provider" required @change="onProviderChange">
+                <option value="openai">OpenAI 兼容（/chat/completions）</option>
+                <option value="anthropic">Anthropic（/v1/messages）</option>
+              </select>
+              <p class="field-hint">{{ providerHint }}</p>
             </div>
             <div class="form-group">
               <label for="llm-base-url">Base URL <span class="required">*</span></label>
@@ -165,7 +173,7 @@
 </template>
 
 <script setup>
-import { ref, reactive, watch } from 'vue'
+import { ref, reactive, watch, computed } from 'vue'
 import { fetchLlmSettings,
   saveLlmModel,
   activateLlmModel,
@@ -184,6 +192,24 @@ const isNew = ref(false)
 const showApiKey = ref(false)
 const submitting = ref(false)
 const testing = ref(false)
+const providerHint = computed(() => {
+  if (form.provider === 'anthropic') {
+    return 'Anthropic：Base URL 例 https://api.anthropic.com ；模型例 claude-3-5-sonnet-latest；Key 一般为 sk-ant-…'
+  }
+  return 'OpenAI 兼容：Base URL 例 https://api.openai.com/v1 或任意 /v1 网关；走 /chat/completions'
+})
+function onProviderChange() {
+  if (form.provider === 'anthropic') {
+    if (!form.base_url || form.base_url.includes('openai.com') || form.base_url.includes('/v1/chat')) {
+      form.base_url = 'https://api.anthropic.com'
+    }
+  } else if (form.provider === 'openai') {
+    if (!form.base_url || form.base_url.includes('anthropic.com')) {
+      form.base_url = 'https://api.openai.com/v1'
+    }
+  }
+}
+
 const testResult = ref('')
 const testOk = ref(null)
 const error = ref('')
@@ -192,6 +218,7 @@ const success = ref('')
 const form = reactive({
   id: '',
   name: '',
+  provider: 'openai',
   base_url: '',
   api_key: '',
   model: '',
@@ -206,6 +233,7 @@ const form = reactive({
 function emptyForm() {
   form.id = ''
   form.name = ''
+  form.provider = 'openai'
   form.base_url = ''
   form.api_key = ''
   form.model = ''
@@ -220,6 +248,7 @@ function emptyForm() {
 function fillForm(m) {
   form.id = m.id || ''
   form.name = m.name || ''
+  form.provider = m.provider || 'openai'
   form.base_url = m.base_url || ''
   form.api_key = m.api_key || ''
   form.model = m.model || ''
@@ -293,6 +322,7 @@ async function handleSave(forceActive = false) {
     const payload = {
       id: isNew.value ? '' : form.id,
       name: form.name.trim(),
+      provider: form.provider || 'openai',
       base_url: form.base_url.trim(),
       api_key: form.api_key.trim(),
       model: form.model.trim(),
@@ -345,6 +375,7 @@ async function handleTest() {
     const payload = {
       id: form.id || '',
       name: form.name.trim() || 'test',
+      provider: form.provider || 'openai',
       base_url: form.base_url.trim(),
       api_key: form.api_key.trim(),
       model: form.model.trim(),

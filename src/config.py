@@ -16,6 +16,7 @@ class Settings:
     base_url: str
     api_key: str
     model: str
+    provider: str = "openai"  # openai | anthropic
     timeout: int = 300
     max_retries: int = 3
     retry_initial_delay: float = 2.0
@@ -89,10 +90,15 @@ def get_settings(root: Path | None = None) -> Settings:
     stream = _parse_bool(values.get("OPENAI_STREAM"), default=False)
     verify_ssl = _parse_bool(values.get("OPENAI_VERIFY_SSL"), default=True)
 
+    provider = str(values.get("OPENAI_PROVIDER") or values.get("LLM_PROVIDER") or "openai").strip().lower()
+    if provider not in {"openai", "anthropic"}:
+        provider = "openai"
+
     return Settings(
         base_url=str(values["OPENAI_BASE_URL"]).strip().rstrip("/"),
         api_key=str(values["OPENAI_API_KEY"]).strip(),
         model=str(values["OPENAI_MODEL"]).strip(),
+        provider=provider,
         timeout=timeout,
         max_retries=max_retries,
         retry_initial_delay=retry_initial_delay,
