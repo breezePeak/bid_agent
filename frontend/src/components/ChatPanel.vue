@@ -107,12 +107,12 @@
       <div v-if="running || autoExecuting" class="live-run-banner">
         <div class="live-run-top">
           <span class="live-run-pulse"></span>
-          <strong class="live-run-title">{{ liveRunTitle }}</strong>
-          <span class="live-run-elapsed">已用时 {{ liveElapsedLabel }}</span>
+          <strong class="live-run-title">{{ liveBanner.title }}</strong>
+          <span class="live-run-elapsed">已用时 {{ liveBanner.elapsed }}</span>
         </div>
-        <div class="live-run-sub">{{ liveRunSubtitle }}</div>
-        <div v-if="liveRecentLogs.length" class="live-run-logs">
-          <div v-for="(line, i) in liveRecentLogs" :key="i" class="live-run-log-line">{{ line }}</div>
+        <div class="live-run-sub">{{ liveBanner.subtitle }}</div>
+        <div v-if="liveBanner.logs.length" class="live-run-logs">
+          <div v-for="(line, i) in liveBanner.logs" :key="i" class="live-run-log-line">{{ line }}</div>
         </div>
       </div>
       <PlanList
@@ -251,10 +251,37 @@ const uploadedAll = computed(() => files.tender.length > 0 && files.company.leng
 const planDone = computed(() => planSteps.value.length > 0 && planSteps.value.every(s => s.status === 'done'))
 const docxReady = ref(false)
 const recoveryState = ref(null)
-const liveElapsedSec = ref(0)
-const liveRunStartedAt = ref(0)
-const liveRecentLogs = ref([])
+const liveBanner = reactive({
+  title: '流水线执行中',
+  subtitle: '',
+  elapsed: '0秒',
+  logs: [],
+  startedAt: 0,
+})
 let liveTickTimer = null
+let liveElapsedSec = 0
+
+function formatElapsed(sec) {
+  const s = Math.max(0, Number(sec) || 0)
+  if (s < 60) return `${s}秒`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}分${String(r).padStart(2, '0')}秒`
+}
+
+function refreshLiveBanner() {
+  const active = planSteps.value.find(s => ['running', 'recovering', 'retrying'].includes(s.status))
+  const done = planSteps.value.filter(s => s.status === 'done').length
+  const total = planSteps.value.length || 1
+  liveBanner.title = active ? `正在执行: ${active.label}` : '流水线执行中'
+  liveBanner.subtitle = active
+    ? `第 ${done + 1}/${total} 步 — ${active.label}`
+    : `已完成 ${done}/${total} 步`
+  if (liveBanner.startedAt) {
+    liveElapsedSec = Math.max(0, Math.floor((Date.now() - liveBanner.startedAt) / 1000))
+  }
+  liveBanner.elapsed = formatElapsed(liveElapsedSec)
+}
 
 const complianceSummary = ref(null)
 const quickBtns = computed(() => {
@@ -369,7 +396,7 @@ function updateFromStatus(data) {
     prevStatusMap[s.command] = s.status
   })
   running.value = data.running || false
-  if (running.value || autoExecuting.value) startLiveTicker()
+  if (running.value || autoExecuting.value) { startLiveTicker(); refreshLiveBanner() }
   else stopLiveTicker()
   if (data.sources) {
     if (data.sources.tender?.length) files.tender = data.sources.tender.map(f => f.name || f)
@@ -420,9 +447,9 @@ async function startAutoRun(fromCommand = null) {
   if (autoExecuting.value) return
   autoExecuting.value = true
   autoStarted.value = true
-  liveRunStartedAt.value = Date.now()
-  liveElapsedSec.value = 0
-  liveRecentLogs.value = []
+  liveBanner.startedAt = Date.now()
+  liveElapsedSec = 0; liveBanner.elapsed = '0秒'
+  liveBanner.logs = []
   startLiveTicker()
   addMessage('system', fromCommand ? `从 ${stepLabel(fromCommand)} 继续后端流水线...` : '启动后端自动流水线...')
   connectSSE()
@@ -508,14 +535,15 @@ function pushValuableLog(line, kind = 'log') {
 }
 
 function startLiveTicker() {
+  if (!liveBanner.startedAt) liveBanner.startedAt = Date.now()
+  refreshLiveBanner()
   if (liveTickTimer) return
-  if (!liveRunStartedAt.value) liveRunStartedAt.value = Date.now()
   liveTickTimer = setInterval(() => {
     if (!(running.value || autoExecuting.value)) {
       stopLiveTicker()
       return
     }
-    liveElapsedSec.value = Math.max(0, Math.floor((Date.now() - liveRunStartedAt.value) / 1000))
+    refreshLiveBanner()
   }, 1000)
 }
 function stopLiveTicker() {
@@ -527,8 +555,8 @@ function stopLiveTicker() {
 function rememberLiveLog(line) {
   const text = String(line || '').trim()
   if (!text) return
-  const next = [...liveRecentLogs.value, text]
-  liveRecentLogs.value = next.slice(-4)
+  liveBanner.logs = [...liveBanner.logs, text].slice(-4)
+  refreshLiveBanner()
 }
 
 function connectSSE() {

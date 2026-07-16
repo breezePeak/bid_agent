@@ -192,6 +192,21 @@ const isNew = ref(false)
 const showApiKey = ref(false)
 const submitting = ref(false)
 const testing = ref(false)
+const form = reactive({
+  id: '',
+  name: '',
+  provider: 'openai',
+  base_url: '',
+  api_key: '',
+  model: '',
+  timeout: 300,
+  max_retries: 3,
+  retry_initial_delay: 2,
+  retry_max_delay: 30,
+  stream: false,
+  verify_ssl: true,
+})
+
 const providerHint = computed(() => {
   if (form.provider === 'anthropic') {
     return 'Anthropic：Base URL 例 https://api.anthropic.com ；模型例 claude-3-5-sonnet-latest；Key 一般为 sk-ant-…'
@@ -215,20 +230,6 @@ const testOk = ref(null)
 const error = ref('')
 const success = ref('')
 
-const form = reactive({
-  id: '',
-  name: '',
-  provider: 'openai',
-  base_url: '',
-  api_key: '',
-  model: '',
-  timeout: 300,
-  max_retries: 3,
-  retry_initial_delay: 2,
-  retry_max_delay: 30,
-  stream: false,
-  verify_ssl: true,
-})
 
 function emptyForm() {
   form.id = ''
