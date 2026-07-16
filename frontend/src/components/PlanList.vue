@@ -70,6 +70,8 @@ import { computed, ref, watch, nextTick } from 'vue'
 const props = defineProps({
   steps: { type: Array, default: () => [] },
   running: { type: Boolean, default: false },
+  executing: { type: Boolean, default: false },
+  forceExpand: { type: Boolean, default: false },
   recovery: { type: Object, default: null },
   compliance: { type: Object, default: null },
 })
@@ -93,6 +95,9 @@ const complianceTopHint = computed(() => {
 })
 
 const planCollapsed = ref(true)
+watch(() => props.forceExpand, (v) => { if (v) planCollapsed.value = false })
+watch(() => props.running || props.executing, (v) => { if (v) planCollapsed.value = false })
+
 const bodyRef = ref(null)
 const doneCount = computed(() => props.steps.filter(s => s.status === 'done').length)
 const percent = computed(() => props.steps.length ? Math.round((doneCount.value / props.steps.length) * 100) : 0)
