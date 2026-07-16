@@ -471,3 +471,171 @@ def sync_issues_from_write_failures(
     root = root or project_root()
     issues = issues_from_write_failures(failed)
     return upsert_issues(root, issues, replace_stage_id="write_chapters")
+
+
+# Whitelist of stages LLM may attribute to (cannot invent free-form stages)
+ALLOWED_CAUSE_STAGES: set[str] = {
+    "prepare_inputs",
+    "split_docs",
+    "parse_score",
+    "extract_facts",
+    "build_template_evidence",
+    "generate_outline",
+    "plan_chapter_jobs",
+    "select_contexts",
+    "write_chapters",
+    "review_fix_chapters",
+    "build_source_trace_index",
+    "build_score_coverage_matrix",
+    "estimate_final_score",
+    "summarize_chapters",
+    "global_review",
+    "compliance_check",
+    "build_markdown",
+    "build_docx",
+    "check_format",
+}
+
+ALLOWED_ISSUE_CODES: set[str] = set(ROOT_CAUSE_TABLE.keys()) | {
+    "GLOBAL_REVIEW_BLOCK",
+    "COMPLIANCE_FATAL",
+    "COMPLIANCE_CRITICAL",
+    "COMPLIANCE_MAJOR",
+    "COMPLIANCE_MINOR",
+    "COMPLIANCE_INFO",
+}
+
+
+def llm_cause_enabled() -> bool:
+    import os
+
+    flag = str(os.environ.get("ISSUE_LLM_CAUSE_ENABLED", "0")).strip().lower()
+    return flag not in {"0", "false", "no", "off", ""}
+
+
+def refine_issue_cause_with_llm(
+    root: Path | None,
+    issue: dict[str, Any],
+    *,
+    llm_chat=None,
+) -> dict[str, Any]:
+    """Optional LLM-assisted root cause, constrained by whitelist.
+
+    Returns: {ok, likely_cause_stage, reason, confidence, source}
+    Never invents stages outside ALLOWED_CAUSE_STAGES.
+    """
+    import json
+    import os
+    import re
+
+    root = root or project_root()
+    rule_stage = str(issue.get("likely_cause_stage") or issue.get("stage_id") or "write_chapters")
+    if rule_stage not in ALLOWED_CAUSE_STAGES:
+        rule_stage = "write_chapters"
+
+    base = {
+        "ok": True,
+        "likely_cause_stage": rule_stage,
+        "reason": "规则表归因",
+        "confidence": 0.55,
+        "source": "rule",
+        "issue_id": issue.get("id"),
+        "code": issue.get("code"),
+    }
+    if not llm_cause_enabled():
+        base["message"] = "未开启 ISSUE_LLM_CAUSE_ENABLED，使用规则归因"
+        return base
+
+    prompt = {
+        "task": "为标书流水线问题选择最可能根因阶段（只能从白名单选）",
+        "allowed_stages": sorted(ALLOWED_CAUSE_STAGES),
+        "issue": {
+            "code": issue.get("code"),
+            "title": issue.get("title"),
+            "detail": str(issue.get("detail") or "")[:500],
+            "stage_id": issue.get("stage_id"),
+            "command": issue.get("command"),
+            "target": issue.get("target"),
+            "rule_likely_cause_stage": rule_stage,
+        },
+        "output_json_schema": {
+            "likely_cause_stage": "string from allowed_stages",
+            "reason": "short Chinese reason",
+            "confidence": "number 0-1",
+        },
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是投标流水线质量归因助手。只能从 allowed_stages 中选择一个 likely_cause_stage。"
+                "禁止编造白名单外的阶段。只输出 JSON。"
+            ),
+        },
+        {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+    ]
+    try:
+        if llm_chat is None:
+            from llm_client import chat as llm_chat
+        raw = llm_chat(messages, temperature=0)
+    except Exception as exc:
+        base["message"] = f"LLM 归因失败，回退规则: {exc}"
+        return base
+
+    text = str(raw or "").strip()
+    match = re.search(r"\{[\s\S]*\}", text)
+    data = None
+    if match:
+        try:
+            data = json.loads(match.group(0))
+        except Exception:
+            data = None
+    if not isinstance(data, dict):
+        base["message"] = "LLM 未返回合法 JSON，回退规则"
+        return base
+
+    stage = str(data.get("likely_cause_stage") or "").strip()
+    if stage not in ALLOWED_CAUSE_STAGES:
+        base["message"] = f"LLM 返回非法阶段 {stage!r}，已拒绝并回退规则"
+        base["llm_raw_stage"] = stage
+        return base
+
+    conf = data.get("confidence")
+    try:
+        conf_f = float(conf)
+    except Exception:
+        conf_f = 0.6
+    conf_f = max(0.0, min(1.0, conf_f))
+    reason = str(data.get("reason") or "LLM 归因").strip()[:300]
+
+    # persist onto open issue if id present
+    issue_id = str(issue.get("id") or "")
+    if issue_id:
+        try:
+            from agent.issues import load_open_issues, save_open_issues, append_issue_log, _now, _lock
+
+            with _lock:
+                issues = load_open_issues(root)
+                for item in issues:
+                    if str(item.get("id")) == issue_id:
+                        item["likely_cause_stage"] = stage
+                        item["cause_reason"] = reason
+                        item["cause_confidence"] = conf_f
+                        item["cause_source"] = "llm+whitelist"
+                        item["updated_at"] = _now()
+                        append_issue_log(root, item)
+                        break
+                save_open_issues(root, issues)
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "likely_cause_stage": stage,
+        "reason": reason,
+        "confidence": conf_f,
+        "source": "llm+whitelist",
+        "issue_id": issue.get("id"),
+        "code": issue.get("code"),
+        "message": "LLM 归因已通过白名单校验",
+    }

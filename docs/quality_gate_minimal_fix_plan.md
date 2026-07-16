@@ -1,6 +1,6 @@
 ﻿# 质量门禁与最小修复开发计划
 
-> 状态：**G0–G3 已落地（G4 可选未做）**  
+> 状态：**G0–G4 已全部落地**  
 > 日期：2026-07-16  
 > 路径：`docs/quality_gate_minimal_fix_plan.md`  
 > 审核约定：**仅当产品明确回复「开始执行」后，才允许按本计划改代码。**  
@@ -574,3 +574,12 @@ init → prepare_inputs → split_docs → parse_score → extract_facts
 - 流水线阶段间 + 出稿前 `assert_can_proceed`
 - `GET /api/issues/metrics` 阻断/修复计数
 - `docs/current_logic_flow.md` 已同步门禁行为
+
+
+### G4 实施记录
+
+- `ISSUE_LLM_CAUSE_ENABLED`：LLM 归因，阶段白名单校验，非法阶段回退规则表
+- `ISSUE_ACCEPT_RISK_ENABLED`：接受风险（需原因），accepted 不再阻断
+- 批量修复：`/api/issues/actions/batch-preview|batch-execute`
+- 详情页：智能归因 / 接受风险 / 批量修复按钮
+- 测试：`tests/test_g4_enhancements.py`

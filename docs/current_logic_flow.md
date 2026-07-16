@@ -655,6 +655,9 @@ python -m compileall src tests
    - `QUALITY_GATE_MODE=strict|soft`
    - `GLOBAL_REVIEW_GATE=1`
    - `CHAPTER_REVIEW_GATE=1`
+   - `ISSUE_ACCEPT_RISK_ENABLED=0`（默认关）
+   - `ISSUE_LLM_CAUSE_ENABLED=0`（默认关）
+   - 批量修复 / 智能归因 / 接受风险见 `/api/issues/*`
 
 ### 相关代码
 

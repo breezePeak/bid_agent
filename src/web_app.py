@@ -1983,6 +1983,91 @@ async def api_execute_repair(issue_id: str, request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
+
+@app.post("/api/issues/{issue_id}/actions/accept")
+async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    reason = str(body.get("reason") or "").strip()
+    actor = str(body.get("actor") or "web_user").strip() or "web_user"
+    try:
+        from agent.issues import accept_issue_risk
+
+        result = accept_issue_risk(root, issue_id, reason=reason, actor=actor)
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/issues/{issue_id}/actions/explain")
+async def api_explain_issue_cause(issue_id: str, request: Request) -> JSONResponse:
+    """Rule + optional LLM whitelist root-cause refinement."""
+    root = _active_root()
+    try:
+        from agent.issues import load_open_issues
+        from agent.root_cause import refine_issue_cause_with_llm
+
+        issue = next((i for i in load_open_issues(root) if str(i.get("id")) == issue_id), None)
+        if not issue:
+            return JSONResponse({"ok": False, "message": "未找到问题"}, status_code=404)
+        result = refine_issue_cause_with_llm(root, issue)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/issues/actions/batch-preview")
+async def api_batch_preview_repair(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON"}, status_code=400)
+    ids = body.get("issue_ids") if isinstance(body, dict) else None
+    if not isinstance(ids, list):
+        return JSONResponse({"ok": False, "message": "issue_ids 必须是数组"}, status_code=400)
+    try:
+        from agent.repair import execute_repair_batch
+
+        result = execute_repair_batch(root, [str(x) for x in ids], confirm=False, dry_run=True)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/issues/actions/batch-execute")
+async def api_batch_execute_repair(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "请求体必须是对象"}, status_code=400)
+    ids = body.get("issue_ids")
+    if not isinstance(ids, list) or not ids:
+        return JSONResponse({"ok": False, "message": "issue_ids 必须是非空数组"}, status_code=400)
+    confirm = bool(body.get("confirm", False))
+    try:
+        from agent.repair import execute_repair_batch
+
+        result = execute_repair_batch(
+            root,
+            [str(x) for x in ids],
+            confirm=confirm,
+            dry_run=not confirm,
+        )
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
 @app.post("/api/gates/revalidate")
 async def api_revalidate_gate(request: Request) -> JSONResponse:
     root = _active_root()

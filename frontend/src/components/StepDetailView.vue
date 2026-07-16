@@ -16,6 +16,10 @@
     <div class="sdv-body" v-else>
       <div class="sdv-section" v-if="stageIssues.length">
         <h4>阻断/待处理问题（{{ stageIssues.length }}）</h4>
+        <div class="sdv-actions-row" style="margin-bottom:8px">
+          <button class="btn btn-sm" :disabled="!!repairBusy" @click="batchPreview">批量预览修复</button>
+          <button class="btn btn-sm btn-primary" :disabled="!!repairBusy" @click="batchRepair">批量最小修复</button>
+        </div>
         <div v-if="repairMsg" class="sdv-repair-msg">{{ repairMsg }}</div>
         <div v-for="iss in stageIssues" :key="iss.id" class="sdv-item" :class="'sev-' + (iss.severity === 'block' ? 'fatal' : 'info')">
           <div class="sdv-item-head">
@@ -30,7 +34,10 @@
             <button class="btn btn-sm btn-primary" :disabled="!!repairBusy" @click="runRepair(iss)">
               {{ repairBusy === iss.id ? '修复中…' : '确认最小修复' }}
             </button>
+            <button class="btn btn-sm" :disabled="!!repairBusy" @click="explainCause(iss)">智能归因</button>
+            <button class="btn btn-sm" :disabled="!!repairBusy || iss.severity !== 'block'" @click="acceptRisk(iss)">接受风险</button>
           </div>
+          <div class="sdv-req" v-if="iss.cause_reason">归因：{{ iss.likely_cause_stage }} — {{ iss.cause_reason }}</div>
           <div class="sdv-detail" v-if="iss._plan">
             <div><b>计划：</b>{{ iss._plan.summary }}</div>
             <div v-for="(st, si) in (iss._plan.steps || [])" :key="si">• {{ st.label || st.type }}</div>
@@ -246,7 +253,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { fetchComplianceReport, fetchWorkflowStepDetail, fetchIssues, previewIssueRepair, executeIssueRepair } from '../api'
+import { fetchComplianceReport, fetchWorkflowStepDetail, fetchIssues, previewIssueRepair, executeIssueRepair, acceptIssueRisk, explainIssueCause, batchPreviewRepairs, batchExecuteRepairs } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -401,6 +408,69 @@ async function runRepair(iss) {
     await refresh()
   } catch (e) {
     repairMsg.value = e.message || '修复失败'
+  } finally {
+    repairBusy.value = ''
+  }
+}
+
+
+async function explainCause(iss) {
+  repairMsg.value = '正在归因…'
+  try {
+    const { data } = await explainIssueCause(iss.id)
+    if (data && data.ok) {
+      iss.likely_cause_stage = data.likely_cause_stage
+      iss.cause_reason = data.reason
+      iss.cause_confidence = data.confidence
+      repairMsg.value = `归因：${data.likely_cause_stage}（${data.source}，置信 ${data.confidence ?? '-'}） ${data.reason || ''}`
+      await loadIssues()
+    } else {
+      repairMsg.value = (data && data.message) || '归因失败'
+    }
+  } catch (e) {
+    repairMsg.value = e.message || '归因失败'
+  }
+}
+
+async function acceptRisk(iss) {
+  const reason = prompt('接受风险原因（将写入记录，且仅当管理员开启开关时可用）：')
+  if (reason == null) return
+  repairBusy.value = iss.id
+  try {
+    const { data } = await acceptIssueRisk(iss.id, reason)
+    repairMsg.value = (data && data.message) || (data && data.ok ? '已接受风险' : '失败')
+    await loadIssues()
+  } catch (e) {
+    repairMsg.value = e.response?.data?.message || e.message || '接受风险失败'
+  } finally {
+    repairBusy.value = ''
+  }
+}
+
+async function batchPreview() {
+  const ids = stageIssues.value.map(i => i.id).filter(Boolean)
+  if (!ids.length) return
+  repairMsg.value = '批量预览中…'
+  try {
+    const { data } = await batchPreviewRepairs(ids)
+    repairMsg.value = (data && data.message) || `已预览 ${ids.length} 条`
+  } catch (e) {
+    repairMsg.value = e.message || '批量预览失败'
+  }
+}
+
+async function batchRepair() {
+  const ids = stageIssues.value.map(i => i.id).filter(Boolean)
+  if (!ids.length) return
+  if (!confirm(`确认批量最小修复 ${ids.length} 条问题？可能耗时较长。`)) return
+  repairBusy.value = 'batch'
+  repairMsg.value = '批量修复中…'
+  try {
+    const { data } = await batchExecuteRepairs(ids, { confirm: true })
+    repairMsg.value = (data && data.message) || '批量修复结束'
+    await refresh()
+  } catch (e) {
+    repairMsg.value = e.message || '批量修复失败'
   } finally {
     repairBusy.value = ''
   }

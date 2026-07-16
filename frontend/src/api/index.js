@@ -155,3 +155,19 @@ export function executeIssueRepair(issueId, { confirm = true, dryRun = false } =
 export function revalidateGate(command) {
   return api.post('/gates/revalidate', { command }, { timeout: 600000 })
 }
+
+export function acceptIssueRisk(issueId, reason, actor = 'web_user') {
+  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/accept`, { reason, actor })
+}
+
+export function explainIssueCause(issueId) {
+  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/explain`, {})
+}
+
+export function batchPreviewRepairs(issueIds) {
+  return api.post('/issues/actions/batch-preview', { issue_ids: issueIds })
+}
+
+export function batchExecuteRepairs(issueIds, { confirm = true } = {}) {
+  return api.post('/issues/actions/batch-execute', { issue_ids: issueIds, confirm }, { timeout: 900000 })
+}

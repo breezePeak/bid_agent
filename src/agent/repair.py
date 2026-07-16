@@ -502,3 +502,55 @@ def revalidate_gate(root: Path | None, command: str) -> dict[str, Any]:
 
     }
 
+
+def execute_repair_batch(
+    root: Path | None,
+    issue_ids: list[str],
+    *,
+    confirm: bool = False,
+    dry_run: bool = False,
+    max_issues: int | None = None,
+) -> dict[str, Any]:
+    """Execute repairs for multiple issues sequentially."""
+    import os
+
+    root = root or project_root()
+    ids = [str(x).strip() for x in (issue_ids or []) if str(x).strip()]
+    if not ids:
+        return {"ok": False, "message": "issue_ids 为空", "results": []}
+    limit = max_issues
+    if limit is None:
+        try:
+            limit = max(1, int(os.environ.get("REPAIR_MAX_ISSUES", "5")))
+        except ValueError:
+            limit = 5
+    ids = ids[:limit]
+
+    if dry_run or not confirm:
+        plans = [build_repair_plan(root, i) for i in ids]
+        return {
+            "ok": True,
+            "executed": False,
+            "issue_ids": ids,
+            "plans": plans,
+            "message": f"批量预览 {len(ids)} 条问题（confirm=true 后执行）",
+        }
+
+    results = []
+    ok_count = 0
+    for iid in ids:
+        one = execute_repair_plan(root, iid, confirm=True, dry_run=False)
+        results.append(one)
+        if one.get("ok") and one.get("final_status") == "fixed":
+            ok_count += 1
+        elif one.get("ok") and one.get("executed"):
+            ok_count += 1  # executed even if still open after revalidate
+    return {
+        "ok": ok_count == len(ids),
+        "executed": True,
+        "issue_ids": ids,
+        "results": results,
+        "success_count": ok_count,
+        "total": len(ids),
+        "message": f"批量修复完成：成功 {ok_count}/{len(ids)}",
+    }

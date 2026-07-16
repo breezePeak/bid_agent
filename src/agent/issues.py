@@ -314,3 +314,66 @@ def load_issue_metrics(root: Path | None = None, *, tail: int = 200) -> dict[str
             else None
         ),
     }
+
+
+def accept_risk_enabled() -> bool:
+    flag = str(os.environ.get("ISSUE_ACCEPT_RISK_ENABLED", "0")).strip().lower()
+    return flag not in {"0", "false", "no", "off", ""}
+
+
+def accept_issue_risk(
+    root: Path | None,
+    issue_id: str,
+    *,
+    reason: str = "",
+    actor: str = "user",
+) -> dict[str, Any]:
+    """Mark a block issue as accepted risk (does not delete evidence)."""
+    if not accept_risk_enabled():
+        return {
+            "ok": False,
+            "message": "未开启接受风险功能。请设置 ISSUE_ACCEPT_RISK_ENABLED=1（管理员）。",
+        }
+    root = root or project_root()
+    reason = str(reason or "").strip()
+    if len(reason) < 4:
+        return {"ok": False, "message": "接受风险必须填写原因（至少 4 个字）。"}
+
+    with _lock:
+        issues = load_open_issues(root)
+        found = None
+        for item in issues:
+            if str(item.get("id")) == issue_id:
+                found = item
+                break
+        if found is None:
+            return {"ok": False, "message": f"未找到问题: {issue_id}"}
+        if str(found.get("severity")) != "block":
+            return {"ok": False, "message": "仅阻断级（block）问题支持接受风险。"}
+        found["status"] = "accepted"
+        found["updated_at"] = _now()
+        found["accepted_at"] = _now()
+        found["accepted_by"] = actor
+        found["accept_reason"] = reason[:500]
+        append_issue_log(root, found)
+        save_open_issues(root, issues)
+        try:
+            record_issue_metric(
+                root,
+                "accept_risk",
+                issue_id=issue_id,
+                code=str(found.get("code") or ""),
+                actor=actor,
+            )
+        except Exception:
+            pass
+        return {
+            "ok": True,
+            "issue": found,
+            "message": "已接受风险，该问题不再阻断流水线（仍保留记录）。",
+            "can_proceed": can_proceed(root).get("can_proceed"),
+        }
+
+
+def batch_issue_ids_open_blocks(root: Path | None = None) -> list[str]:
+    return [str(i.get("id")) for i in open_block_issues(root) if i.get("id")]
