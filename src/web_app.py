@@ -1470,6 +1470,7 @@ def api_status() -> dict[str, Any]:
         "project_profile": project_profile,
         "project_profile_choices": project_profile_choices(),
         "llm_config": _active_llm_summary(),
+        "agent_activity": _safe_agent_activity(),
         "manual_review_summary": review_summary,
         "latest_agent_runs": _latest_agent_runs(root),
         "run_metrics": load_stage_metrics(root),
@@ -1779,6 +1780,19 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             payload["goal"] = plan_result.get("goal")
     return JSONResponse(payload)
 
+
+
+@app.get("/api/agent/activity")
+def api_agent_activity() -> JSONResponse:
+    """Current sub-agent workbench snapshot for UI cards."""
+    root = _active_root()
+    try:
+        from agent.activity import activity_for_api
+
+        data = activity_for_api(root)
+        return JSONResponse({"ok": True, "activity": data})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc), "activity": {"status": "idle", "agents": []}})
 
 
 @app.get("/api/agent/goal")
@@ -2117,6 +2131,14 @@ def _read_models_store() -> dict[str, Any]:
     return store
 
 
+def _safe_agent_activity() -> dict:
+    try:
+        from agent.activity import activity_for_api
+        return activity_for_api(_active_root())
+    except Exception:
+        return {"status": "idle", "agents": [], "summary": {}}
+
+
 def _active_llm_summary() -> dict[str, Any]:
     store = _read_models_store()
     active_id = str(store.get("active_id", ""))
@@ -2328,6 +2350,12 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Connection": "close",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/137.0.0.0 Safari/537.36"
+            ),
         }
         if not api_key.startswith("sk-ant"):
             headers["Authorization"] = f"Bearer {api_key}"
@@ -2345,6 +2373,12 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
             "Content-Type": "application/json",
             "Authorization": f"Bearer {api_key}",
             "Accept": "application/json",
+            "Connection": "close",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/137.0.0.0 Safari/537.36"
+            ),
         }
 
     data = _json.dumps(payload).encode("utf-8")

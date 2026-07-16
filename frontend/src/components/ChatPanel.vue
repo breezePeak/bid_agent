@@ -104,6 +104,11 @@
 
     <!-- plan list above input -->
     <div v-if="showPlan" class="chat-plan-area">
+      <AgentWorkbench
+        :run-id="runId"
+        :active="running || autoExecuting"
+        :activity="agentActivity"
+      />
       <div v-if="running || autoExecuting" class="live-run-banner">
         <div class="live-run-top">
           <span class="live-run-pulse"></span>
@@ -111,15 +116,10 @@
           <span class="live-run-elapsed">已用时 {{ liveBanner.elapsed }}</span>
         </div>
         <div class="live-run-sub">{{ liveBanner.subtitle }}</div>
-        <div v-if="liveBanner.logs.length" class="live-run-logs">
-          <div v-for="(line, i) in liveBanner.logs" :key="i" class="live-run-log-line">{{ line }}</div>
-        </div>
       </div>
       <PlanList
         :steps="planSteps"
         :running="running"
-        :executing="autoExecuting"
-        :force-expand="running || autoExecuting"
         :recovery="recoveryState"
         :compliance="complianceSummary"
         @pause="pauseAutoRun"
@@ -155,6 +155,7 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import PlanList from './PlanList.vue'
+import AgentWorkbench from './AgentWorkbench.vue'
 import UploadTile from './UploadTile.vue'
 import { fetchChatMessages, saveChatMessage, orchestrateChat } from '../api'
 
@@ -251,11 +252,11 @@ const uploadedAll = computed(() => files.tender.length > 0 && files.company.leng
 const planDone = computed(() => planSteps.value.length > 0 && planSteps.value.every(s => s.status === 'done'))
 const docxReady = ref(false)
 const recoveryState = ref(null)
+const agentActivity = ref(null)
 const liveBanner = reactive({
   title: '流水线执行中',
   subtitle: '',
   elapsed: '0秒',
-  logs: [],
   startedAt: 0,
 })
 let liveTickTimer = null
@@ -268,20 +269,28 @@ function formatElapsed(sec) {
   const r = s % 60
   return `${m}分${String(r).padStart(2, '0')}秒`
 }
-
 function refreshLiveBanner() {
   const active = planSteps.value.find(s => ['running', 'recovering', 'retrying'].includes(s.status))
   const done = planSteps.value.filter(s => s.status === 'done').length
   const total = planSteps.value.length || 1
   liveBanner.title = active ? `正在执行: ${active.label}` : '流水线执行中'
-  liveBanner.subtitle = active
-    ? `第 ${done + 1}/${total} 步 — ${active.label}`
-    : `已完成 ${done}/${total} 步`
-  if (liveBanner.startedAt) {
-    liveElapsedSec = Math.max(0, Math.floor((Date.now() - liveBanner.startedAt) / 1000))
-  }
+  liveBanner.subtitle = active ? `第 ${done + 1}/${total} 步 — ${active.label}` : `已完成 ${done}/${total} 步`
+  if (liveBanner.startedAt) liveElapsedSec = Math.max(0, Math.floor((Date.now() - liveBanner.startedAt) / 1000))
   liveBanner.elapsed = formatElapsed(liveElapsedSec)
 }
+function startLiveTicker() {
+  if (!liveBanner.startedAt) liveBanner.startedAt = Date.now()
+  refreshLiveBanner()
+  if (liveTickTimer) return
+  liveTickTimer = setInterval(() => {
+    if (!(running.value || autoExecuting.value)) { stopLiveTicker(); return }
+    refreshLiveBanner()
+  }, 1000)
+}
+function stopLiveTicker() {
+  if (liveTickTimer) { clearInterval(liveTickTimer); liveTickTimer = null }
+}
+
 
 const complianceSummary = ref(null)
 const quickBtns = computed(() => {
@@ -396,8 +405,8 @@ function updateFromStatus(data) {
     prevStatusMap[s.command] = s.status
   })
   running.value = data.running || false
-  if (running.value || autoExecuting.value) { startLiveTicker(); refreshLiveBanner() }
-  else stopLiveTicker()
+  if (data.agent_activity) agentActivity.value = data.agent_activity
+  if (running.value || autoExecuting.value) { startLiveTicker(); refreshLiveBanner() } else { stopLiveTicker() }
   if (data.sources) {
     if (data.sources.tender?.length) files.tender = data.sources.tender.map(f => f.name || f)
     if (data.sources.company?.length) files.company = data.sources.company.map(f => f.name || f)
@@ -447,10 +456,6 @@ async function startAutoRun(fromCommand = null) {
   if (autoExecuting.value) return
   autoExecuting.value = true
   autoStarted.value = true
-  liveBanner.startedAt = Date.now()
-  liveElapsedSec = 0; liveBanner.elapsed = '0秒'
-  liveBanner.logs = []
-  startLiveTicker()
   addMessage('system', fromCommand ? `从 ${stepLabel(fromCommand)} 继续后端流水线...` : '启动后端自动流水线...')
   connectSSE()
   if (statusTimer) clearInterval(statusTimer)
@@ -472,7 +477,7 @@ async function startAutoRun(fromCommand = null) {
   }
 }
 function pauseAutoRun() {
-  autoExecuting.value = false; clearInterval(statusTimer); closeSSE(); stopLiveTicker()
+  autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
   fetch('/api/pause-run', { method: 'POST' }); addMessage('system', '流程已暂停')
 }
 function skipFailedStage(failedCmd) {
@@ -515,13 +520,12 @@ function pushValuableLog(line, kind = 'log') {
   const text = String(line || '').trim()
   if (!text || text === lastLogLine) return
   lastLogLine = text
-  rememberLiveLog(text)
   const label = currentStageLabel()
   let m = activeStageLog.value
   if (!m || m.stageLabel !== label) {
     // 进入新阶段 → 先折叠上一块
     if (m) collapseActiveStageLog()
-    m = { role: 'system', kind: 'stage_log', content: text, stageLabel: label, collapsed: false, logCount: 1, thinking: '', thinkingExpanded: false, created_at: '', actions: [] }
+    m = { role: 'system', kind: 'stage_log', content: text, stageLabel: label, collapsed: true, logCount: 1, thinking: '', thinkingExpanded: false, created_at: '', actions: [] }
     messages.value.push(m)
     activeStageLog.value = m
   } else {
@@ -532,31 +536,6 @@ function pushValuableLog(line, kind = 'log') {
     scrollBottom()
     if (activeLogBodyEl) activeLogBodyEl.scrollTop = activeLogBodyEl.scrollHeight
   })
-}
-
-function startLiveTicker() {
-  if (!liveBanner.startedAt) liveBanner.startedAt = Date.now()
-  refreshLiveBanner()
-  if (liveTickTimer) return
-  liveTickTimer = setInterval(() => {
-    if (!(running.value || autoExecuting.value)) {
-      stopLiveTicker()
-      return
-    }
-    refreshLiveBanner()
-  }, 1000)
-}
-function stopLiveTicker() {
-  if (liveTickTimer) {
-    clearInterval(liveTickTimer)
-    liveTickTimer = null
-  }
-}
-function rememberLiveLog(line) {
-  const text = String(line || '').trim()
-  if (!text) return
-  liveBanner.logs = [...liveBanner.logs, text].slice(-4)
-  refreshLiveBanner()
 }
 
 function connectSSE() {

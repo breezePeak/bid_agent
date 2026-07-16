@@ -7,6 +7,16 @@ from typing import Any, Callable
 from graph.chapter_subgraph import build_chapter_subgraph
 from utils import project_root
 
+try:
+    from agent.activity import begin_phase, end_phase, mark_agent
+except Exception:  # pragma: no cover
+    def begin_phase(*args, **kwargs):  # type: ignore
+        return {}
+    def end_phase(*args, **kwargs):  # type: ignore
+        return {}
+    def mark_agent(*args, **kwargs):  # type: ignore
+        return {}
+
 
 def _write_worker(chapter_id: str, root: Path) -> None:
     graph = build_chapter_subgraph()
@@ -30,18 +40,43 @@ def _run_with_retry(
     chapter_id: str,
     root: Path,
     max_retries: int,
+    role: str = "chapter_writer",
 ) -> tuple[str, str | None, int]:
     attempts = max(1, max_retries + 1)
     last_error: str | None = None
     for attempt in range(1, attempts + 1):
         try:
             print(f"[执行] 章节 {chapter_id} 开始（第 {attempt}/{attempts} 次）…", flush=True)
+            mark_agent(
+                root,
+                role=role,
+                chapter_id=chapter_id,
+                status="running",
+                message=f"第 {attempt}/{attempts} 次执行中",
+                attempt=attempt,
+            )
             worker(chapter_id, root)
             print(f"[完成] 章节 {chapter_id} 本轮执行成功", flush=True)
+            mark_agent(
+                root,
+                role=role,
+                chapter_id=chapter_id,
+                status="done",
+                message="完成",
+                attempt=attempt,
+            )
             return chapter_id, None, attempt
         except Exception as exc:
             last_error = str(exc)
             print(f"[重试] 章节 {chapter_id} 第 {attempt}/{attempts} 次失败: {last_error}")
+            mark_agent(
+                root,
+                role=role,
+                chapter_id=chapter_id,
+                status="running" if attempt < attempts else "failed",
+                message=f"失败: {last_error[:120]}",
+                attempt=attempt,
+            )
     return chapter_id, last_error, attempts
 
 
@@ -67,6 +102,17 @@ def _resolve_chapter_ids(root: Path, chapter_ids: list[str] | None) -> list[str]
     return selected
 
 
+def _label_to_role(label: str) -> str:
+    text = str(label or "")
+    if "审核" in text or "review" in text.lower():
+        return "chapter_reviewer"
+    if "改稿" in text or "rewrite" in text.lower():
+        return "chapter_rewriter"
+    if "写作" in text or "write" in text.lower():
+        return "chapter_writer"
+    return "chapter_writer"
+
+
 def run_per_chapter(
     worker: Callable[[str, Path], None],
     root: Path | None = None,
@@ -78,9 +124,17 @@ def run_per_chapter(
     root = root or project_root()
     selected = _resolve_chapter_ids(root, chapter_ids)
     effective_workers = max(1, min(workers, 5))
+    role = _label_to_role(label)
     print(
         f"[启动] 并发执行 {len(selected)} 个章节 {label}, "
         f"workers={effective_workers}, max_retries={max(0, max_retries)}"
+    )
+    begin_phase(
+        root,
+        phase=role,
+        phase_label=label,
+        role=role,
+        chapter_ids=selected,
     )
 
     completed: list[str] = []
@@ -88,7 +142,7 @@ def run_per_chapter(
 
     with ThreadPoolExecutor(max_workers=effective_workers) as executor:
         futures = {
-            executor.submit(_run_with_retry, worker, cid, root, max_retries): cid
+            executor.submit(_run_with_retry, worker, cid, root, max_retries, role): cid
             for cid in selected
         }
         for future in as_completed(futures):
@@ -109,6 +163,11 @@ def run_per_chapter(
     print(f"[完成] {label} 成功 {len(completed)} 个, 失败 {len(failed)} 个")
     if failed:
         print(f"[详情] 失败章节: {[f['chapter_id'] for f in failed]}")
+    end_phase(
+        root,
+        status="done" if not failed else "partial_failed",
+        message=f"成功 {len(completed)} / 失败 {len(failed)}",
+    )
     return {"completed": completed, "failed": failed}
 
 
@@ -118,7 +177,7 @@ def run_write_chapter(
     max_retries: int = 0,
 ) -> tuple[str, str | None, int]:
     root = root or project_root()
-    return _run_with_retry(_write_worker, chapter_id, root, max_retries)
+    return _run_with_retry(_write_worker, chapter_id, root, max_retries, role="chapter_writer")
 
 
 def run_write_all(
