@@ -60,7 +60,7 @@
         <span class="plan-row-label" :class="{ strike: step.status === 'done' }">{{ step.label }}</span>
         <span class="plan-row-meta">
           <span v-if="step.status === 'done' && step.durationLabel" class="plan-row-duration">{{ step.durationLabel }}</span>
-          <span v-else-if="step.status === 'running'" class="plan-row-running">执行中{{ step.durationLabel ? ' · ' + step.durationLabel : '' }}</span>
+          <span v-else-if="step.status === 'running'" class="plan-row-running"><span class="plan-row-pulse"></span>执行中{{ step.durationLabel ? ' · ' + step.durationLabel : '' }}</span>
           <span v-else-if="step.status === 'recovering'" class="plan-row-running">修复中</span>
           <span v-else-if="step.status === 'retrying'" class="plan-row-running">重试中</span>
           <span v-else-if="step.status === 'error'" class="plan-row-err">失败</span>
@@ -79,6 +79,7 @@ const props = defineProps({
   executing: { type: Boolean, default: false },
   recovery: { type: Object, default: null },
   compliance: { type: Object, default: null },
+  forceExpand: { type: Boolean, default: false },
 })
 
 defineEmits(['pause', 'preview-compliance'])
@@ -117,7 +118,14 @@ const activeMeta = computed(() => {
   return '等待执行'
 })
 
+watch(() => props.forceExpand, (v) => {
+  if (v) planCollapsed.value = false
+})
+watch(() => props.running || props.executing, (v) => {
+  if (v) planCollapsed.value = false
+})
 watch(() => props.steps.find(s => s.status === 'running'), (s) => {
+
   if (s && bodyRef.value) {
     nextTick(() => {
       const el = bodyRef.value.querySelector('.plan-row.running')

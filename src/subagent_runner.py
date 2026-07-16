@@ -35,7 +35,9 @@ def _run_with_retry(
     last_error: str | None = None
     for attempt in range(1, attempts + 1):
         try:
+            print(f"[执行] 章节 {chapter_id} 开始（第 {attempt}/{attempts} 次）…", flush=True)
             worker(chapter_id, root)
+            print(f"[完成] 章节 {chapter_id} 本轮执行成功", flush=True)
             return chapter_id, None, attempt
         except Exception as exc:
             last_error = str(exc)

@@ -104,10 +104,22 @@
 
     <!-- plan list above input -->
     <div v-if="showPlan" class="chat-plan-area">
+      <div v-if="running || autoExecuting" class="live-run-banner">
+        <div class="live-run-top">
+          <span class="live-run-pulse"></span>
+          <strong class="live-run-title">{{ liveRunTitle }}</strong>
+          <span class="live-run-elapsed">已用时 {{ liveElapsedLabel }}</span>
+        </div>
+        <div class="live-run-sub">{{ liveRunSubtitle }}</div>
+        <div v-if="liveRecentLogs.length" class="live-run-logs">
+          <div v-for="(line, i) in liveRecentLogs" :key="i" class="live-run-log-line">{{ line }}</div>
+        </div>
+      </div>
       <PlanList
         :steps="planSteps"
         :running="running"
         :executing="autoExecuting"
+        :force-expand="running || autoExecuting"
         :recovery="recoveryState"
         :compliance="complianceSummary"
         @pause="pauseAutoRun"
@@ -239,6 +251,11 @@ const uploadedAll = computed(() => files.tender.length > 0 && files.company.leng
 const planDone = computed(() => planSteps.value.length > 0 && planSteps.value.every(s => s.status === 'done'))
 const docxReady = ref(false)
 const recoveryState = ref(null)
+const liveElapsedSec = ref(0)
+const liveRunStartedAt = ref(0)
+const liveRecentLogs = ref([])
+let liveTickTimer = null
+
 const complianceSummary = ref(null)
 const quickBtns = computed(() => {
   if (!uploadedAll.value) return []
@@ -352,6 +369,8 @@ function updateFromStatus(data) {
     prevStatusMap[s.command] = s.status
   })
   running.value = data.running || false
+  if (running.value || autoExecuting.value) startLiveTicker()
+  else stopLiveTicker()
   if (data.sources) {
     if (data.sources.tender?.length) files.tender = data.sources.tender.map(f => f.name || f)
     if (data.sources.company?.length) files.company = data.sources.company.map(f => f.name || f)
@@ -401,6 +420,10 @@ async function startAutoRun(fromCommand = null) {
   if (autoExecuting.value) return
   autoExecuting.value = true
   autoStarted.value = true
+  liveRunStartedAt.value = Date.now()
+  liveElapsedSec.value = 0
+  liveRecentLogs.value = []
+  startLiveTicker()
   addMessage('system', fromCommand ? `从 ${stepLabel(fromCommand)} 继续后端流水线...` : '启动后端自动流水线...')
   connectSSE()
   if (statusTimer) clearInterval(statusTimer)
@@ -422,7 +445,7 @@ async function startAutoRun(fromCommand = null) {
   }
 }
 function pauseAutoRun() {
-  autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+  autoExecuting.value = false; clearInterval(statusTimer); closeSSE(); stopLiveTicker()
   fetch('/api/pause-run', { method: 'POST' }); addMessage('system', '流程已暂停')
 }
 function skipFailedStage(failedCmd) {
@@ -442,7 +465,7 @@ async function runCommand(cmd) {
 
 // ---- SSE ----
 // 把有价值的实时日志按阶段聚合成一个可折叠块，写入聊天并入库；不再单独显示日志面板。
-const VALUABLE_LOG_RE = /(失败|错误|重试|质量门禁|SubAgent|warn|启动|完成|✗)/
+const VALUABLE_LOG_RE = /(失败|错误|重试|质量门禁|SubAgent|warn|启动|完成|执行|章节|并发|生成|写作|审核|改稿|进度|LLM|开始|成功|跳过|警告|✗)/i
 let lastLogLine = ''
 
 function currentStageLabel() {
@@ -465,6 +488,7 @@ function pushValuableLog(line, kind = 'log') {
   const text = String(line || '').trim()
   if (!text || text === lastLogLine) return
   lastLogLine = text
+  rememberLiveLog(text)
   const label = currentStageLabel()
   let m = activeStageLog.value
   if (!m || m.stageLabel !== label) {
@@ -483,7 +507,32 @@ function pushValuableLog(line, kind = 'log') {
   })
 }
 
+function startLiveTicker() {
+  if (liveTickTimer) return
+  if (!liveRunStartedAt.value) liveRunStartedAt.value = Date.now()
+  liveTickTimer = setInterval(() => {
+    if (!(running.value || autoExecuting.value)) {
+      stopLiveTicker()
+      return
+    }
+    liveElapsedSec.value = Math.max(0, Math.floor((Date.now() - liveRunStartedAt.value) / 1000))
+  }, 1000)
+}
+function stopLiveTicker() {
+  if (liveTickTimer) {
+    clearInterval(liveTickTimer)
+    liveTickTimer = null
+  }
+}
+function rememberLiveLog(line) {
+  const text = String(line || '').trim()
+  if (!text) return
+  const next = [...liveRecentLogs.value, text]
+  liveRecentLogs.value = next.slice(-4)
+}
+
 function connectSSE() {
+
   closeSSE()
   sseSource = new EventSource('/api/logs/stream')
   sseSource.onmessage = (e) => {
@@ -888,5 +937,9 @@ onMounted(async () => {
     maybeAutoStart()
   }
 })
-onBeforeUnmount(() => { clearInterval(statusTimer); closeSSE() })
+onBeforeUnmount(() => {
+  stopLiveTicker()
+  clearInterval(statusTimer)
+  closeSSE()
+})
 </script>

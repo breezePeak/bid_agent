@@ -2410,3 +2410,102 @@ body {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+
+/* ===== Live run activity banner ===== */
+.live-run-banner {
+  margin: 0 0 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(37, 99, 235, 0.28);
+  background: linear-gradient(135deg, #eff6ff 0%, #f8fafc 55%, #eef2ff 100%);
+  box-shadow: 0 8px 22px rgba(37, 99, 235, 0.08);
+  animation: live-banner-breathe 2.2s ease-in-out infinite;
+}
+.live-run-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.live-run-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #2563eb;
+  box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.55);
+  animation: live-dot 1.4s ease-out infinite;
+  flex-shrink: 0;
+}
+.live-run-title {
+  font-size: 13px;
+  color: #1e3a8a;
+  flex: 1;
+  min-width: 0;
+}
+.live-run-elapsed {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: #1d4ed8;
+  background: rgba(219, 234, 254, 0.9);
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-weight: 600;
+}
+.live-run-sub {
+  font-size: 12px;
+  color: #475569;
+  margin-bottom: 6px;
+}
+.live-run-logs {
+  border-top: 1px dashed rgba(148, 163, 184, 0.55);
+  padding-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-height: 88px;
+  overflow: hidden;
+}
+.live-run-log-line {
+  font-size: 11px;
+  line-height: 1.4;
+  color: #334155;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.plan-row.running {
+  background: linear-gradient(90deg, rgba(219, 234, 254, 0.85), rgba(248, 250, 252, 0.4));
+  border-radius: 8px;
+}
+.plan-row-running {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #1d4ed8 !important;
+  font-weight: 600;
+}
+.plan-row-pulse {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2563eb;
+  animation: live-dot 1.2s ease-out infinite;
+}
+.plan-summary-item.active {
+  border-color: rgba(37, 99, 235, 0.35);
+  background: #eff6ff;
+}
+.plan-summary-item.active strong {
+  color: #1e40af;
+}
+@keyframes live-dot {
+  0% { transform: scale(0.9); box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.55); }
+  70% { transform: scale(1.05); box-shadow: 0 0 0 8px rgba(37, 99, 235, 0); }
+  100% { transform: scale(0.9); box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+}
+@keyframes live-banner-breathe {
+  0%, 100% { box-shadow: 0 8px 22px rgba(37, 99, 235, 0.06); }
+  50% { box-shadow: 0 10px 28px rgba(37, 99, 235, 0.14); }
+}
