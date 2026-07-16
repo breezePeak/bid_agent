@@ -62,6 +62,10 @@ export function fetchFilePreview(path) {
   return api.get('/file-preview', { params: { path } })
 }
 
+export function fetchWorkspaceFiles() {
+  return api.get('/workspace-files')
+}
+
 export function downloadFinalMd() {
   window.open('/api/download/final-md', '_blank')
 }
@@ -170,4 +174,8 @@ export function batchPreviewRepairs(issueIds) {
 
 export function batchExecuteRepairs(issueIds, { confirm = true } = {}) {
   return api.post('/issues/actions/batch-execute', { issue_ids: issueIds, confirm }, { timeout: 900000 })
+}
+
+export function fetchExportPreflight() {
+  return api.get('/export-preflight')
 }

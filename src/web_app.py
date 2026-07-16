@@ -311,6 +311,142 @@ def _list_source_files(category: str) -> list[dict[str, Any]]:
     return files
 
 
+def _workspace_file_item(root: Path, path: Path) -> dict[str, Any]:
+    st = path.stat()
+    return {
+        "name": path.name,
+        "path": str(path.relative_to(root)).replace("\\", "/"),
+        "size": st.st_size,
+        "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+    }
+
+
+def _expand_artifact_file_items(root: Path, artifact_path: str, artifact_kind: str = "file") -> list[dict[str, Any]]:
+    if artifact_kind == "virtual":
+        return []
+    text = artifact_path.replace("\\", "/")
+    if artifact_kind == "glob" or "*" in text:
+        if "/" not in text:
+            return []
+        directory_text, pattern = text.rsplit("/", 1)
+        directory = root / directory_text
+        if not directory.exists() or not directory.is_dir():
+            return []
+        return [_workspace_file_item(root, path) for path in sorted(directory.glob(pattern)) if path.is_file()]
+    target = root / text
+    if target.is_file():
+        return [_workspace_file_item(root, target)]
+    if target.is_dir():
+        return [_workspace_file_item(root, path) for path in sorted(target.iterdir()) if path.is_file()]
+    return []
+
+
+def _list_dir_file_items(root: Path, relative_dir: str) -> list[dict[str, Any]]:
+    directory = root / relative_dir
+    if not directory.exists() or not directory.is_dir():
+        return []
+    return [_workspace_file_item(root, path) for path in sorted(directory.iterdir()) if path.is_file()]
+
+
+def build_workspace_file_tree(root: Path) -> dict[str, Any]:
+    """List run inputs / stage intermediates / outputs for the frontend file explorer."""
+    seen_paths: set[str] = set()
+    sections: list[dict[str, Any]] = []
+
+    def _push_section(
+        key: str,
+        label: str,
+        items: list[dict[str, Any]],
+        *,
+        open_default: bool = False,
+        stage_command: str = "",
+        mark_seen: bool = True,
+        skip_seen: bool = True,
+    ) -> None:
+        unique: list[dict[str, Any]] = []
+        local_seen: set[str] = set()
+        for item in items:
+            path = str(item.get("path") or "")
+            if not path or path in local_seen:
+                continue
+            if skip_seen and path in seen_paths:
+                continue
+            local_seen.add(path)
+            if mark_seen:
+                seen_paths.add(path)
+            unique.append(item)
+        if not unique and key not in {"tender", "company", "template", "outputs"}:
+            return
+        sections.append(
+            {
+                "key": key,
+                "label": label,
+                "open": open_default,
+                "stage_command": stage_command,
+                "items": unique,
+            }
+        )
+
+    for category, label in (("tender", "招标文件"), ("company", "公司资料"), ("template", "标书模板")):
+        _push_section(category, label, _list_dir_file_items(root, f"sources/{category}"), open_default=True)
+
+    for stage in workflow_stage_specs(include_utility=False):
+        items: list[dict[str, Any]] = []
+        for artifact in stage.produces:
+            items.extend(_expand_artifact_file_items(root, artifact.path, artifact.kind))
+        _push_section(
+            f"stage_{stage.id}",
+            stage.label,
+            items,
+            open_default=bool(items) and stage.command in {"write-all", "review-fix-all", "build-md", "build-docx"},
+            stage_command=stage.command,
+        )
+
+    # Catch intermediate products not declared on a single stage produces list.
+    extra_globs = [
+        ("workspace/issues/*", "问题单"),
+        ("workspace/manual_review/*", "人工复核"),
+        ("workspace/source_traces/*", "来源追溯明细"),
+        ("workspace/agent/*", "Agent 状态"),
+        ("workspace/debug_*", "调试中间文件"),
+    ]
+    extra_items: list[dict[str, Any]] = []
+    for pattern, _label in extra_globs:
+        if pattern.startswith("workspace/debug_"):
+            workspace_dir = root / "workspace"
+            if workspace_dir.exists():
+                for path in sorted(workspace_dir.glob("debug_*")):
+                    if path.is_file():
+                        extra_items.append(_workspace_file_item(root, path))
+            continue
+        extra_items.extend(_expand_artifact_file_items(root, pattern, "glob"))
+
+    # Top-level workspace json not already covered (reports / state / etc.)
+    workspace_dir = root / "workspace"
+    if workspace_dir.exists():
+        for path in sorted(workspace_dir.iterdir()):
+            if not path.is_file():
+                continue
+            rel = str(path.relative_to(root)).replace("\\", "/")
+            if rel in seen_paths:
+                continue
+            if path.suffix.lower() in {".json", ".jsonl", ".md", ".txt", ".log"}:
+                extra_items.append(_workspace_file_item(root, path))
+
+    _push_section("other_workspace", "其他中间产物", extra_items, open_default=False)
+    _push_section(
+        "outputs",
+        "最终输出",
+        _list_dir_file_items(root, "outputs"),
+        open_default=True,
+        skip_seen=False,
+        mark_seen=True,
+    )
+
+    total = sum(len(section["items"]) for section in sections)
+    return {"ok": True, "sections": sections, "total": total}
+
+
 def _latest_mtime_in_dir(directory: Path) -> float:
     if not directory.exists():
         return 0.0
@@ -1878,6 +2014,17 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
 
 
 
+@app.get("/api/export-preflight")
+def api_export_preflight() -> JSONResponse:
+    root = _active_root()
+    try:
+        from agent.issues import export_preflight
+
+        return JSONResponse(export_preflight(root))
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
 @app.get("/api/issues/metrics")
 def api_issue_metrics() -> JSONResponse:
     root = _active_root()
@@ -2858,6 +3005,12 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
 
 
 
+@app.get("/api/workspace-files")
+def api_workspace_files() -> JSONResponse:
+    root = _active_root().resolve()
+    return JSONResponse(build_workspace_file_tree(root))
+
+
 @app.get("/api/file-preview")
 def api_file_preview(path: str = Query(..., min_length=1)) -> JSONResponse:
     root = _active_root().resolve()
@@ -2883,14 +3036,37 @@ def api_file_preview(path: str = Query(..., min_length=1)) -> JSONResponse:
                         "size": item.stat().st_size,
                         "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.stat().st_mtime)),
                     }
-                    for item in files[:200]
+                    for item in files[:500]
                 ],
                 "total": len(files),
             }
         )
 
     target = (root / relative).resolve()
-    if not target.is_relative_to(root) or not target.exists() or not target.is_file():
+    if not target.is_relative_to(root) or not target.exists():
+        return JSONResponse({"ok": False, "message": f"文件不存在: {relative}"}, status_code=404)
+
+    if target.is_dir():
+        files = sorted(path for path in target.iterdir() if path.is_file())
+        return JSONResponse(
+            {
+                "ok": True,
+                "path": relative,
+                "kind": "list",
+                "items": [
+                    {
+                        "name": item.name,
+                        "path": str(item.relative_to(root)).replace("\\", "/"),
+                        "size": item.stat().st_size,
+                        "modified": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.stat().st_mtime)),
+                    }
+                    for item in files[:500]
+                ],
+                "total": len(files),
+            }
+        )
+
+    if not target.is_file():
         return JSONResponse({"ok": False, "message": f"文件不存在: {relative}"}, status_code=404)
 
     suffix = target.suffix.lower()

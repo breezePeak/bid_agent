@@ -204,6 +204,20 @@ def can_proceed(root: Path | None = None, *, next_command: str = "") -> dict[str
             "message": "无 open block 问题",
             "next_command": next_command,
         }
+    # Allow re-running the gate stage that produced the blocks (so repair can revalidate)
+    if next_command:
+        block_commands = {str(b.get("command") or "") for b in blocks}
+        if next_command in block_commands:
+            return {
+                "ok": True,
+                "can_proceed": True,
+                "mode": mode,
+                "block_count": len(blocks),
+                "blocks": blocks,
+                "next_command": next_command,
+                "message": f"允许重验门禁阶段 `{next_command}`（当前仍有 {len(blocks)} 条 block）",
+                "revalidate_allowed": True,
+            }
     titles = [str(b.get("title") or b.get("code") or b.get("id")) for b in blocks[:5]]
     try:
         record_issue_metric(root, "gate_block", next_command=next_command, block_count=len(blocks))
@@ -377,3 +391,93 @@ def accept_issue_risk(
 
 def batch_issue_ids_open_blocks(root: Path | None = None) -> list[str]:
     return [str(i.get("id")) for i in open_block_issues(root) if i.get("id")]
+
+
+def export_preflight(root: Path | None = None) -> dict[str, Any]:
+    """Pre-export checklist: all open blocks must be zero; surface key report flags."""
+    root = root or project_root()
+    # refresh from latest reports
+    try:
+        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+        sync_issues_from_global_review(root)
+        sync_issues_from_compliance(root)
+    except Exception:
+        pass
+
+    summary = issues_summary(root)
+    blocks = open_block_issues(root)
+    checks: list[dict[str, Any]] = []
+
+    gr_path = root / "workspace" / "global_review.json"
+    if gr_path.exists():
+        try:
+            gr = json.loads(gr_path.read_text(encoding="utf-8"))
+        except Exception:
+            gr = {}
+        gr_block = bool(isinstance(gr, dict) and (gr.get("blocking") or open_block_issues(root)))
+        # more precise: global stage blocks
+        gr_blocks = [b for b in blocks if str(b.get("stage_id")) == "global_review"]
+        checks.append(
+            {
+                "id": "global_review",
+                "label": "全文审核门禁",
+                "ok": len(gr_blocks) == 0 and not (isinstance(gr, dict) and gr.get("blocking")),
+                "detail": "通过" if not gr_blocks and not (isinstance(gr, dict) and gr.get("blocking")) else f"阻断 {len(gr_blocks)} 项",
+            }
+        )
+    else:
+        checks.append({"id": "global_review", "label": "全文审核门禁", "ok": False, "detail": "缺少 global_review.json"})
+
+    cr_path = root / "workspace" / "compliance_report.json"
+    if cr_path.exists():
+        try:
+            cr = json.loads(cr_path.read_text(encoding="utf-8"))
+        except Exception:
+            cr = {}
+        summary_cr = cr.get("summary") if isinstance(cr, dict) and isinstance(cr.get("summary"), dict) else {}
+        blocking = bool(isinstance(cr, dict) and (cr.get("blocking") or summary_cr.get("blocking")))
+        cr_blocks = [b for b in blocks if str(b.get("stage_id")) == "compliance_check"]
+        checks.append(
+            {
+                "id": "compliance_check",
+                "label": "专项合规门禁",
+                "ok": (not blocking) and len(cr_blocks) == 0,
+                "detail": "通过" if not blocking and not cr_blocks else f"阻断 blocking={blocking}, issues={len(cr_blocks)}",
+            }
+        )
+    else:
+        checks.append({"id": "compliance_check", "label": "专项合规门禁", "ok": False, "detail": "缺少 compliance_report.json"})
+
+    open_blocks_ok = len(blocks) == 0
+    checks.append(
+        {
+            "id": "open_blocks",
+            "label": "无 open block 问题单",
+            "ok": open_blocks_ok,
+            "detail": "通过" if open_blocks_ok else f"仍有 {len(blocks)} 条 block",
+        }
+    )
+
+    md = root / "outputs" / "final.md"
+    checks.append(
+        {
+            "id": "final_md",
+            "label": "存在 final.md",
+            "ok": md.exists() and md.stat().st_size > 0,
+            "detail": str(md) if md.exists() else "缺失",
+        }
+    )
+
+    can_export = all(bool(c.get("ok")) for c in checks)
+    return {
+        "ok": True,
+        "can_export": can_export,
+        "checks": checks,
+        "issues_summary": summary,
+        "block_issues": [
+            {"id": b.get("id"), "code": b.get("code"), "title": b.get("title"), "stage_id": b.get("stage_id")}
+            for b in blocks[:20]
+        ],
+        "message": "可以出正式稿" if can_export else "出稿前检查未通过，请先处理阻断项",
+    }

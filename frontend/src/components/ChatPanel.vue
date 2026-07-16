@@ -152,7 +152,7 @@ import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } 
 import PlanList from './PlanList.vue'
 import AgentWorkbench from './AgentWorkbench.vue'
 import UploadTile from './UploadTile.vue'
-import { fetchChatMessages, saveChatMessage, orchestrateChat } from '../api'
+import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -254,6 +254,7 @@ const quickBtns = computed(() => {
   if (!uploadedAll.value) return []
   if (planDone.value || docxReady.value) {
     const btns = [
+      { label: '出稿前检查', type: 'export_preflight' },
       { label: '下载 Word', action: 'download-docx' },
       { label: '预览 Word', action: 'doc-editor' },
       { label: '查看全文审核', type: 'show_step', command: 'global-review' },
@@ -786,6 +787,24 @@ function triggerAndAutoAdvance(cmd, label) {
   if (!autoExecuting.value) startAutoRun(cmd)
 }
 function handleAction(act) {
+  if (act && act.type === 'export_preflight') {
+    ;(async () => {
+      try {
+        const { data } = await fetchExportPreflight()
+        const lines = (data.checks || []).map(c => `${c.ok ? '✓' : '✗'} ${c.label}: ${c.detail}`).join('\n')
+        addMessage('system', (data.message || '出稿前检查') + '\n' + lines)
+        if (!data.can_export && data.block_issues && data.block_issues.length) {
+          const top = data.block_issues[0]
+          const cmd = top.stage_id === 'compliance_check' ? 'compliance-check' : 'global-review'
+          emit('preview', cmd)
+        }
+      } catch (e) {
+        addMessage('system', '出稿前检查失败: ' + (e.message || ''))
+      }
+    })()
+    return
+  }
+
   if (act.type === 'chat_prompt') send(act.label)
   else if (act.type === 'run_command') triggerAndAutoAdvance(act.command, '执行')
   else if (act.type === 'retry_stage') { addMessage('system', `重试: ${stepLabel(act.command)}`); triggerAndAutoAdvance(act.command, '重试') }

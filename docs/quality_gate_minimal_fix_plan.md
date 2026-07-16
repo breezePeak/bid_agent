@@ -1,6 +1,6 @@
 ﻿# 质量门禁与最小修复开发计划
 
-> 状态：**G0–G4 已全部落地**  
+> 状态：**G0–G5 已落地**  
 > 日期：2026-07-16  
 > 路径：`docs/quality_gate_minimal_fix_plan.md`  
 > 审核约定：**仅当产品明确回复「开始执行」后，才允许按本计划改代码。**  
@@ -575,6 +575,15 @@ init → prepare_inputs → split_docs → parse_score → extract_facts
 - `GET /api/issues/metrics` 阻断/修复计数
 - `docs/current_logic_flow.md` 已同步门禁行为
 
+
+### G5 实施记录（工具层贯通 + 出稿清单）
+
+- Tool：`list_issues` / `explain_issue` / `repair_issue` / `export_preflight`
+- `run_stage` / `build_export` 接入质量门禁；允许重验产生阻断的门禁阶段本身
+- `GET /api/export-preflight` 出稿前检查清单
+- 前端快捷按钮「出稿前检查」
+- 修复：sync 在报告缺失时不再清空 Issue
+- 测试：`tests/test_g5_tools_preflight.py`
 
 ### G4 实施记录
 

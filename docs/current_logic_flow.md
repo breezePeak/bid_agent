@@ -651,7 +651,9 @@ python -m compileall src tests
    - `parse-score`：评分点为空
    - `generate-outline`：评分点未绑定章节
 4. 最小修复：`POST /api/issues/{id}/actions/preview|execute`，修复后按根因表重验。
-5. 配置：
+5. Tool 层：`list_issues` / `repair_issue` / `export_preflight`；`run_stage` 受门禁约束。
+6. 出稿前检查：`GET /api/export-preflight` 或前端「出稿前检查」。
+7. 配置：
    - `QUALITY_GATE_MODE=strict|soft`
    - `GLOBAL_REVIEW_GATE=1`
    - `CHAPTER_REVIEW_GATE=1`

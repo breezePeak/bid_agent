@@ -15,7 +15,7 @@ class PolicyDecision:
     rewrite_tool: str | None = None
 
 
-_READONLY_TOOLS = {"query_status", "query_artifacts", "diagnose_failure", "analyze_coverage", "analyze_compliance"}
+_READONLY_TOOLS = {"query_status", "query_artifacts", "diagnose_failure", "analyze_coverage", "analyze_compliance", "list_issues", "export_preflight", "explain_issue"}
 
 
 def evaluate_tool_call(
@@ -62,6 +62,10 @@ def evaluate_tool_call(
         command = str(args.get("command") or "")
         if command in {"build-docx", "build-md"} and not user_confirmed and not auto_execute:
             return PolicyDecision(False, "导出类阶段需要确认", ask_human=True)
+
+    if name == "repair_issue" and not user_confirmed:
+        if bool((args or {}).get("confirm_execute")):
+            return PolicyDecision(False, "修复问题需要确认", ask_human=True)
 
     if name == "fix_compliance" and not user_confirmed:
         if bool((args or {}).get("confirm_execute")):

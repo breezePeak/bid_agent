@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import importlib
 import inspect
@@ -162,6 +162,24 @@ def _execute_stage(
         "max_retries": max_retries,
         "dry_run": dry_run,
     }
+
+    # quality gate (skip dry_run / pure init)
+    if not dry_run and stage.command not in {"init", "validate"}:
+        try:
+            from agent.issues import can_proceed
+
+            gate = can_proceed(root, next_command=str(stage.command or ""))
+            if not gate.get("can_proceed", True):
+                return _fail(
+                    tool_name,
+                    args,
+                    started,
+                    code="gate_blocked",
+                    message=str(gate.get("message") or "质量门禁阻断"),
+                    suggested_tools=["list_issues", "export_preflight", "repair_issue"],
+                )
+        except Exception:
+            pass
 
     missing = _missing_requires(root, stage.id)
     if missing:
@@ -663,6 +681,23 @@ def _execute_build_export(
 
     force = bool(args.get("force", False))
     call_args = {"targets": targets, "force": force, "dry_run": dry_run, "skip_if_gate_fail": bool(args.get("skip_if_gate_fail", False))}
+
+    if not dry_run:
+        try:
+            from agent.issues import export_preflight
+
+            pre = export_preflight(root)
+            if not pre.get("can_export"):
+                return _fail(
+                    "build_export",
+                    {"targets": targets, "force": force},
+                    started,
+                    code="gate_blocked",
+                    message=str(pre.get("message") or "出稿前检查未通过"),
+                    suggested_tools=["list_issues", "export_preflight", "repair_issue"],
+                )
+        except Exception:
+            pass
 
     from agent.invalidation import clear_stale_if_rebuilt, is_stale, load_stale
 
@@ -1271,6 +1306,109 @@ def _fix_compliance(root: Path, args: dict[str, Any], *, dry_run: bool = False) 
     )
 
 
+
+
+def _list_issues_tool(root: Path, args: dict[str, Any]) -> ToolResult:
+    started = _now()
+    from agent.issues import issues_summary, load_open_issues
+    from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+    try:
+        sync_issues_from_global_review(root)
+        sync_issues_from_compliance(root)
+    except Exception:
+        pass
+    status = str(args.get("status") or "open")
+    issues = load_open_issues(root)
+    if status == "open":
+        issues = [i for i in issues if str(i.get("status")) in {"open", "in_progress"}]
+    elif status == "block":
+        issues = [
+            i
+            for i in issues
+            if str(i.get("severity")) == "block" and str(i.get("status")) in {"open", "in_progress"}
+        ]
+    summary = issues_summary(root)
+    text = (
+        f"问题单：open_block={summary.get('block_count')}，open={summary.get('open_count')}，"
+        f"can_proceed={summary.get('can_proceed')}。"
+    )
+    if issues:
+        tops = "；".join(str(i.get("title") or i.get("code")) for i in issues[:5])
+        text += " 例：" + tops
+    return ToolResult(
+        ok=True,
+        tool="list_issues",
+        args=args,
+        started_at=started,
+        ended_at=_now(),
+        summary_for_llm=text[:2000],
+        metrics={"summary": summary, "issues": issues[:50], "count": len(issues)},
+        raw_refs=["workspace/issues/open.json"],
+    )
+
+
+def _explain_issue_tool(root: Path, args: dict[str, Any]) -> ToolResult:
+    started = _now()
+    issue_id = str(args.get("issue_id") or "").strip()
+    if not issue_id:
+        return _fail("explain_issue", args, started, code="invalid_args", message="缺少 issue_id")
+    from agent.issues import load_open_issues
+    from agent.root_cause import refine_issue_cause_with_llm
+
+    issue = next((i for i in load_open_issues(root) if str(i.get("id")) == issue_id), None)
+    if not issue:
+        return _fail("explain_issue", args, started, code="missing_requires", message=f"未找到问题 {issue_id}")
+    result = refine_issue_cause_with_llm(root, issue)
+    return ToolResult(
+        ok=bool(result.get("ok")),
+        tool="explain_issue",
+        args=args,
+        started_at=started,
+        ended_at=_now(),
+        summary_for_llm=str(result.get("message") or result)[:2000],
+        metrics=result,
+    )
+
+
+def _repair_issue_tool(root: Path, args: dict[str, Any], *, dry_run: bool = False) -> ToolResult:
+    started = _now()
+    issue_id = str(args.get("issue_id") or "").strip()
+    if not issue_id:
+        return _fail("repair_issue", args, started, code="invalid_args", message="缺少 issue_id")
+    confirm = bool(args.get("confirm_execute", False))
+    from agent.repair import execute_repair_plan
+
+    result = execute_repair_plan(root, issue_id, confirm=confirm and not dry_run, dry_run=dry_run or not confirm)
+    return ToolResult(
+        ok=bool(result.get("ok")),
+        tool="repair_issue",
+        args=args,
+        started_at=started,
+        ended_at=_now(),
+        summary_for_llm=str(result.get("message") or result.get("summary") or "")[:2000],
+        metrics=result,
+        skipped=not result.get("executed"),
+    )
+
+
+def _export_preflight_tool(root: Path, args: dict[str, Any]) -> ToolResult:
+    started = _now()
+    from agent.issues import export_preflight
+
+    pre = export_preflight(root)
+    return ToolResult(
+        ok=True,
+        tool="export_preflight",
+        args=args,
+        started_at=started,
+        ended_at=_now(),
+        summary_for_llm=str(pre.get("message") or "")[:2000],
+        metrics=pre,
+        raw_refs=["workspace/issues/open.json", "workspace/global_review.json", "workspace/compliance_report.json"],
+    )
+
+
 def invoke(
     tool_name: str,
     args: dict[str, Any] | None = None,
@@ -1381,6 +1519,30 @@ def invoke(
         if err:
             return _fail(name, args, started, code="invalid_args", message=err)
         return _fix_compliance(root, args, dry_run=dry_run)
+
+    if name == "list_issues":
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _list_issues_tool(root, args)
+
+    if name == "explain_issue":
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _explain_issue_tool(root, args)
+
+    if name == "repair_issue":
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _repair_issue_tool(root, args, dry_run=dry_run)
+
+    if name == "export_preflight":
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _export_preflight_tool(root, args)
 
     # Stage-bound tools: execute that stage
     if spec.stage_id:

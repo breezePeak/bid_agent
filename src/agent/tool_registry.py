@@ -460,6 +460,91 @@ def fix_compliance_tool_spec() -> ToolSpec:
     )
 
 
+
+
+def list_issues_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="list_issues",
+        name="list_issues",
+        label="列出质量问题",
+        description="只读：列出 workspace 中 open/block 质量问题单。",
+        kind="analysis",
+        params_schema={
+            "type": "object",
+            "properties": {
+                "status": {"type": "string", "description": "open|block|all"},
+            },
+            "additionalProperties": False,
+        },
+        risk_level="low",
+        idempotent=True,
+        side_effects=(),
+        tags=("query", "readonly", "issues"),
+    )
+
+
+def explain_issue_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="explain_issue",
+        name="explain_issue",
+        label="解释问题根因",
+        description="规则归因 + 可选 LLM 白名单归因。",
+        kind="analysis",
+        params_schema={
+            "type": "object",
+            "properties": {
+                "issue_id": {"type": "string"},
+            },
+            "required": ["issue_id"],
+            "additionalProperties": False,
+        },
+        risk_level="low",
+        idempotent=True,
+        side_effects=(),
+        tags=("query", "issues"),
+    )
+
+
+def repair_issue_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="repair_issue",
+        name="repair_issue",
+        label="最小修复问题",
+        description="预览或执行单条 Issue 的最小修复计划（confirm_execute=true 才执行）。",
+        kind="mutation",
+        params_schema={
+            "type": "object",
+            "properties": {
+                "issue_id": {"type": "string"},
+                "confirm_execute": {"type": "boolean"},
+                "dry_run": {"type": "boolean"},
+            },
+            "required": ["issue_id"],
+            "additionalProperties": False,
+        },
+        risk_level="high",
+        idempotent=False,
+        side_effects=("write_files", "llm"),
+        human_confirm_required=True,
+        tags=("mutation", "issues"),
+    )
+
+
+def export_preflight_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="export_preflight",
+        name="export_preflight",
+        label="出稿前检查清单",
+        description="只读：检查全文审核/合规/open block/final.md 是否允许出正式稿。",
+        kind="analysis",
+        params_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        risk_level="low",
+        idempotent=True,
+        side_effects=(),
+        tags=("query", "readonly", "export"),
+    )
+
+
 def _build_tool_index() -> dict[str, ToolSpec]:
     tools: dict[str, ToolSpec] = {}
     for meta in (
@@ -475,6 +560,10 @@ def _build_tool_index() -> dict[str, ToolSpec]:
         fix_coverage_tool_spec(),
         analyze_compliance_tool_spec(),
         fix_compliance_tool_spec(),
+        list_issues_tool_spec(),
+        explain_issue_tool_spec(),
+        repair_issue_tool_spec(),
+        export_preflight_tool_spec(),
     ):
         tools[meta.name] = meta
         tools[meta.id] = meta
@@ -498,6 +587,10 @@ def _build_tool_index() -> dict[str, ToolSpec]:
         fix_coverage_tool_spec(),
         analyze_compliance_tool_spec(),
         fix_compliance_tool_spec(),
+        list_issues_tool_spec(),
+        explain_issue_tool_spec(),
+        repair_issue_tool_spec(),
+        export_preflight_tool_spec(),
     ):
         tools[specialized.name] = specialized
         tools[specialized.id] = specialized
@@ -537,6 +630,10 @@ def list_tools(*, include_stage_aliases: bool = False) -> list[ToolSpec]:
         fix_coverage_tool_spec(),
         analyze_compliance_tool_spec(),
         fix_compliance_tool_spec(),
+        list_issues_tool_spec(),
+        explain_issue_tool_spec(),
+        repair_issue_tool_spec(),
+        export_preflight_tool_spec(),
     ):
         ordered.append(meta)
         seen.add(meta.id)

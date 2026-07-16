@@ -6,7 +6,16 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent.issues import make_issue, upsert_issues
+from agent.issues import load_open_issues, make_issue, upsert_issues
+
+
+def load_open_stage_issues(root: Path | None, stage_id: str) -> list[dict[str, Any]]:
+    return [
+        i
+        for i in load_open_issues(root)
+        if str(i.get("stage_id")) == stage_id and str(i.get("status")) in {"open", "in_progress"}
+    ]
+
 from quality_gates import global_review_blocking_reasons
 from utils import project_root, read_json, stringify
 
@@ -301,7 +310,8 @@ def sync_issues_from_global_review(root: Path | None = None, review: dict[str, A
     if review is None:
         path = root / "workspace" / "global_review.json"
         if not path.exists():
-            return upsert_issues(root, [], replace_stage_id="global_review")
+            # do not wipe existing issues when report is absent
+            return load_open_stage_issues(root, "global_review")
         review = read_json(path)
     issues = issues_from_global_review(review if isinstance(review, dict) else {})
     return upsert_issues(root, issues, replace_stage_id="global_review")
@@ -312,7 +322,7 @@ def sync_issues_from_compliance(root: Path | None = None, report: dict[str, Any]
     if report is None:
         path = root / "workspace" / "compliance_report.json"
         if not path.exists():
-            return upsert_issues(root, [], replace_stage_id="compliance_check")
+            return load_open_stage_issues(root, "compliance_check")
         report = read_json(path)
     issues = issues_from_compliance_report(report if isinstance(report, dict) else {})
     return upsert_issues(root, issues, replace_stage_id="compliance_check")
