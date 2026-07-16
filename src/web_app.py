@@ -4050,7 +4050,12 @@ def reconcile_interrupted_pipeline() -> None:
     _load_active_run_from_disk()
     if ACTIVE_RUN_ROOT is None:
         return
-    if SUPERVISOR.reconcile(ACTIVE_RUN_ID, ACTIVE_RUN_ROOT, _run_sync):
+    try:
+        _resumed = SUPERVISOR.reconcile(ACTIVE_RUN_ID, ACTIVE_RUN_ROOT, _run_sync)
+    except Exception as exc:
+        _append_log(f"[warn] pipeline resume skipped: {exc}")
+        _resumed = False
+    if _resumed:
         _append_log(f"[自动恢复] 已接管工作空间流水线: {ACTIVE_RUN_ID}")
 
 

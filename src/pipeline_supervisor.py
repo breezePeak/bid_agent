@@ -19,12 +19,45 @@ def _now() -> str:
 
 
 def _pid_alive(pid: int) -> bool:
+    """Return True if process appears alive. Never raise (Windows-safe)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
     if pid <= 0:
         return False
+
+    # Windows: os.kill(pid, 0) can raise SystemError / WinError 87 on stale PIDs.
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, wintypes.DWORD(pid))
+            if handle:
+                kernel32.CloseHandle(handle)
+                return True
+            err = ctypes.get_last_error()
+            # 5 = ACCESS_DENIED => process exists
+            if err == 5:
+                return True
+            return False
+        except Exception:
+            # last resort: never crash startup
+            try:
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                return False
+
     try:
         os.kill(pid, 0)
         return True
     except OSError:
+        return False
+    except Exception:
         return False
 
 
@@ -230,8 +263,18 @@ class PipelineSupervisor:
         if control.get("status") not in {"running", "recovering", "retrying"}:
             return False
         command = str(control.get("current_stage", ""))
-        pid = int(control.get("worker_pid", 0) or 0)
-        if pid and _pid_alive(pid):
+        try:
+            pid = int(control.get("worker_pid", 0) or 0)
+        except (TypeError, ValueError):
+            pid = 0
+        # Stale Windows PID from previous boot can be invalid; never crash here.
+        alive = False
+        try:
+            alive = bool(pid and _pid_alive(pid))
+        except Exception:
+            alive = False
+            pid = 0
+        if alive:
             with self._lock:
                 if self._thread and self._thread.is_alive():
                     return False
