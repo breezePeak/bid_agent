@@ -1,21 +1,25 @@
 <template>
-  <div class="workspace-layout" :class="{ 'doc-mode': mode === 'doc' }">
+  <div class="workspace-layout" :class="{ 'doc-mode': mode === 'doc' || mode === 'detail' }">
     <!-- chat panel -->
-    <div class="wl-chat" :class="{ narrow: mode === 'doc' }" :style="mode === 'doc' ? { flex: '0 0 ' + chatWidth + 'px', maxWidth: chatWidth + 'px' } : {}">
+    <div
+      class="wl-chat"
+      :class="{ narrow: mode === 'doc' || mode === 'detail' }"
+      :style="(mode === 'doc' || mode === 'detail') ? { flex: '0 0 ' + chatWidth + 'px', maxWidth: chatWidth + 'px' } : {}"
+    >
       <ChatPanel
         ref="chatPanelRef"
         :run-id="runId"
-        :narrow="mode === 'doc'"
+        :narrow="mode === 'doc' || mode === 'detail'"
         @preview="openPreview"
-        @open-doc-editor="mode = 'doc'"
+        @open-doc-editor="openDoc"
         @rewrite-done="onRewriteDone"
       />
     </div>
 
     <!-- splitter -->
-    <div v-if="mode === 'doc'" class="splitter" @mousedown="onSplitterDown"></div>
+    <div v-if="mode === 'doc' || mode === 'detail'" class="splitter" @mousedown="onSplitterDown"></div>
 
-    <!-- doc editor (visible in doc mode) -->
+    <!-- doc editor -->
     <div v-if="mode === 'doc'" class="wl-doc">
       <div class="wl-doc-header">
         <h3>文档编辑 <span v-if="docPageCount > 0" class="wl-doc-pagecount">— 约 {{ docPageCount }} 页 (A4)</span></h3>
@@ -25,13 +29,30 @@
           <button class="btn btn-sm" @click="downloadMd">下载 MD</button>
         </div>
       </div>
-      <DocEditor ref="docEditorRef" :run-id="runId" @add-to-chat="onAddToChat" @add-annotation="onAddAnnotation" @update-page-count="docPageCount = $event" @rewrite-applied="onDocRewriteApplied" @rewrite-discarded="onDocRewriteDiscarded" />
+      <DocEditor
+        ref="docEditorRef"
+        :run-id="runId"
+        @add-to-chat="onAddToChat"
+        @add-annotation="onAddAnnotation"
+        @update-page-count="docPageCount = $event"
+        @rewrite-applied="onDocRewriteApplied"
+        @rewrite-discarded="onDocRewriteDiscarded"
+      />
     </div>
 
-    <!-- right: issues / files (chat mode) -->
+    <!-- step / compliance detail (same layout as Word preview) -->
+    <div v-else-if="mode === 'detail'" class="wl-doc">
+      <StepDetailView
+        :run-id="runId"
+        :command="detailCommand"
+        @close="mode = 'chat'"
+      />
+    </div>
+
+    <!-- right: goal + files only (chat mode) -->
     <div v-if="mode === 'chat'" class="wl-files">
       <AgentGoalPanel :run-id="runId" />
-      <IssuesPanel ref="issuesRef" :run-id="runId" :focus="rightFocus" @preview-file="previewFile" />
+      <FileExplorer :run-id="runId" @preview-file="previewFile" />
     </div>
   </div>
 </template>
@@ -40,59 +61,61 @@
 import { ref, watch } from 'vue'
 import ChatPanel from './ChatPanel.vue'
 import DocEditor from './DocEditor.vue'
+import FileExplorer from './FileExplorer.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
-import IssuesPanel from './IssuesPanel.vue'
+import StepDetailView from './StepDetailView.vue'
 
 const props = defineProps({
   runId: { type: String, required: true },
   run: { type: Object, default: null },
 })
 
-const mode = ref('chat')
+const mode = ref('chat') // chat | doc | detail
+const detailCommand = ref('')
 const previewFileName = ref('')
-const previewFileContent = ref('')
 const chatPanelRef = ref(null)
 const docEditorRef = ref(null)
 const chatWidth = ref(Math.round((window.innerWidth - 260) * 0.4))
 const docPageCount = ref(0)
 
-const issuesRef = ref(null)
-const rightFocus = ref('')
-
-function openPreview(cmd) {
-  mode.value = 'chat'
-  const c = String(cmd || '')
-  if (c === 'compliance-check' || c === 'compliance' || c === 'manual-review') {
-    rightFocus.value = 'compliance'
-    // retrigger watch even if same value
-    setTimeout(() => { rightFocus.value = 'compliance' }, 0)
-    if (issuesRef.value?.showIssues) issuesRef.value.showIssues()
-    if (issuesRef.value?.refresh) issuesRef.value.refresh()
-  } else if (c) {
-    rightFocus.value = 'issues'
-  }
+function openDoc() {
+  mode.value = 'doc'
 }
 
-function previewFile(path) { previewFileName.value = path }
+function openPreview(cmd) {
+  const c = String(cmd || '').trim()
+  if (!c) {
+    mode.value = 'chat'
+    return
+  }
+  // Word preview path
+  if (c === 'build-docx' || c === 'final-docx' || c === 'doc-editor') {
+    mode.value = 'doc'
+    return
+  }
+  // Step / compliance / reports -> full detail pane like Word
+  detailCommand.value = c
+  mode.value = 'detail'
+}
+
+function previewFile(path) {
+  previewFileName.value = path
+}
 function downloadDocx() { window.open('/api/download/final-docx', '_blank') }
 function downloadMd() { window.open('/api/download/final-md', '_blank') }
 
 function onRewriteDone() {
   setTimeout(() => { if (docEditorRef.value?.loadDoc) docEditorRef.value.loadDoc() }, 800)
 }
-
 function onDocRewriteApplied() {
   if (chatPanelRef.value?.notifyRewriteApplied) chatPanelRef.value.notifyRewriteApplied()
 }
-
 function onDocRewriteDiscarded() {
   if (chatPanelRef.value?.notifyRewriteDiscarded) chatPanelRef.value.notifyRewriteDiscarded()
 }
-
 function onAddToChat(text) {
   if (chatPanelRef.value?.addInputText) chatPanelRef.value.addInputText(text)
 }
-
 function onAddAnnotation(payload) {
   if (chatPanelRef.value?.addInputText) {
     const tagPart = payload.line ? `@L${payload.line} ` : ''
@@ -100,11 +123,9 @@ function onAddAnnotation(payload) {
   }
 }
 
-// ---- splitter drag ----
 let dragging = false
 let dragStartX = 0
 let dragStartW = 0
-
 function onSplitterDown(e) {
   dragging = true
   dragStartX = e.clientX
@@ -114,13 +135,11 @@ function onSplitterDown(e) {
   document.body.style.cursor = 'col-resize'
   document.body.style.userSelect = 'none'
 }
-
 function onSplitterMove(e) {
   if (!dragging) return
   const dx = e.clientX - dragStartX
   chatWidth.value = Math.max(280, Math.min(700, dragStartW + dx))
 }
-
 function onSplitterUp() {
   dragging = false
   document.removeEventListener('mousemove', onSplitterMove)
@@ -129,5 +148,5 @@ function onSplitterUp() {
   document.body.style.userSelect = ''
 }
 
-watch(() => props.runId, () => { mode.value = 'chat' })
+watch(() => props.runId, () => { mode.value = 'chat'; detailCommand.value = '' })
 </script>
