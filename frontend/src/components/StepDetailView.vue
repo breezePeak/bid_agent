@@ -14,6 +14,30 @@
     <div class="sdv-body" v-if="loading"><div class="sdv-loading">加载中…</div></div>
     <div class="sdv-body" v-else-if="error"><div class="sdv-error">{{ error }}</div></div>
     <div class="sdv-body" v-else>
+      <div class="sdv-section" v-if="stageIssues.length">
+        <h4>阻断/待处理问题（{{ stageIssues.length }}）</h4>
+        <div v-if="repairMsg" class="sdv-repair-msg">{{ repairMsg }}</div>
+        <div v-for="iss in stageIssues" :key="iss.id" class="sdv-item" :class="'sev-' + (iss.severity === 'block' ? 'fatal' : 'info')">
+          <div class="sdv-item-head">
+            <span class="sdv-id">{{ iss.code }}</span>
+            <span class="sdv-badge">{{ iss.severity }}</span>
+            <span class="sdv-name">{{ iss.title }}</span>
+          </div>
+          <div class="sdv-req">{{ iss.detail }}</div>
+          <div class="sdv-req" v-if="iss.likely_cause_stage">可能根因阶段：{{ iss.likely_cause_stage }}</div>
+          <div class="sdv-actions-row">
+            <button class="btn btn-sm" :disabled="!!repairBusy" @click="previewRepair(iss)">预览修复计划</button>
+            <button class="btn btn-sm btn-primary" :disabled="!!repairBusy" @click="runRepair(iss)">
+              {{ repairBusy === iss.id ? '修复中…' : '确认最小修复' }}
+            </button>
+          </div>
+          <div class="sdv-detail" v-if="iss._plan">
+            <div><b>计划：</b>{{ iss._plan.summary }}</div>
+            <div v-for="(st, si) in (iss._plan.steps || [])" :key="si">• {{ st.label || st.type }}</div>
+            <div v-if="(iss._plan.revalidate || []).length"><b>重验：</b>{{ (iss._plan.revalidate || []).join(' → ') }}</div>
+          </div>
+        </div>
+      </div>
       <!-- Compliance -->
       <template v-if="isCompliance && compliance">
         <div class="sdv-banner" :class="{ blocking: compliance.blocking }">
@@ -222,7 +246,7 @@
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { fetchComplianceReport, fetchWorkflowStepDetail } from '../api'
+import { fetchComplianceReport, fetchWorkflowStepDetail, fetchIssues, previewIssueRepair, executeIssueRepair } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -238,6 +262,10 @@ const detail = ref({})
 const compliance = ref(null)
 const filter = ref('fail')
 const openId = ref(null)
+const issueList = ref([])
+const repairBusy = ref('')
+const repairMsg = ref('')
+
 
 const isCompliance = computed(() => props.command === 'compliance-check' || props.command === 'compliance')
 const counts = computed(() => compliance.value?.counts || {})
@@ -322,6 +350,62 @@ function toggle(id) {
   openId.value = openId.value === id ? null : id
 }
 
+
+const stageIssues = computed(() => {
+  const cmd = props.command
+  const stageMap = {
+    'global-review': 'global_review',
+    'compliance-check': 'compliance_check',
+  }
+  const sid = stageMap[cmd] || String(cmd || '').replace(/-/g, '_')
+  return (issueList.value || []).filter((i) => {
+    const st = String(i.status || '')
+    if (!['open', 'in_progress'].includes(st)) return false
+    return i.command === cmd || i.stage_id === sid
+  })
+})
+
+async function loadIssues() {
+  try {
+    const { data } = await fetchIssues('open')
+    if (data && data.ok) issueList.value = data.issues || []
+    else issueList.value = []
+  } catch (e) {
+    issueList.value = []
+  }
+}
+
+async function previewRepair(iss) {
+  repairMsg.value = ''
+  try {
+    const { data } = await previewIssueRepair(iss.id)
+    if (data && data.ok) {
+      iss._plan = data
+      repairMsg.value = data.summary || '已生成修复计划'
+    } else {
+      repairMsg.value = (data && data.message) || '预览失败'
+    }
+  } catch (e) {
+    repairMsg.value = e.message || '预览失败'
+  }
+}
+
+async function runRepair(iss) {
+  if (!confirm('确认按最小修复计划执行？可能重写相关章节并重验门禁。')) return
+  repairBusy.value = iss.id
+  repairMsg.value = '正在修复…'
+  try {
+    if (!iss._plan) await previewRepair(iss)
+    const { data } = await executeIssueRepair(iss.id, { confirm: true })
+    repairMsg.value = (data && data.message) || (data && data.ok ? '完成' : '失败')
+    await refresh()
+  } catch (e) {
+    repairMsg.value = e.message || '修复失败'
+  } finally {
+    repairBusy.value = ''
+  }
+}
+
 async function refresh() {
   loading.value = true
   error.value = ''
@@ -354,6 +438,7 @@ async function refresh() {
     error.value = e.message || '加载失败'
   } finally {
     loading.value = false
+    await loadIssues()
   }
 }
 

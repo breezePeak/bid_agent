@@ -136,3 +136,22 @@ export function invokeAgentTool(name, args = {}, { dryRun = false } = {}) {
   return api.post('/agent/tools/invoke', { name, args, dry_run: dryRun }, { timeout: 300000 })
 }
 
+
+export function fetchIssues(status = 'open') {
+  return api.get('/issues', { params: { status } })
+}
+
+export function previewIssueRepair(issueId) {
+  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/preview`)
+}
+
+export function executeIssueRepair(issueId, { confirm = true, dryRun = false } = {}) {
+  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/execute`, {
+    confirm,
+    dry_run: dryRun,
+  }, { timeout: 600000 })
+}
+
+export function revalidateGate(command) {
+  return api.post('/gates/revalidate', { command }, { timeout: 600000 })
+}

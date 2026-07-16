@@ -1918,6 +1918,73 @@ def api_list_issues(status: str = "open") -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
+
+@app.get("/api/issues/{issue_id}")
+def api_get_issue(issue_id: str) -> JSONResponse:
+    root = _active_root()
+    try:
+        from agent.issues import load_open_issues
+
+        issue = next((i for i in load_open_issues(root) if str(i.get("id")) == issue_id), None)
+        if not issue:
+            return JSONResponse({"ok": False, "message": "未找到问题"}, status_code=404)
+        return JSONResponse({"ok": True, "issue": issue})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/issues/{issue_id}/actions/preview")
+def api_preview_repair(issue_id: str) -> JSONResponse:
+    root = _active_root()
+    try:
+        from agent.repair import build_repair_plan
+
+        plan = build_repair_plan(root, issue_id)
+        status = 200 if plan.get("ok") else 404
+        return JSONResponse(plan, status_code=status)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/issues/{issue_id}/actions/execute")
+async def api_execute_repair(issue_id: str, request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    confirm = bool(body.get("confirm", False))
+    dry_run = bool(body.get("dry_run", False))
+    try:
+        from agent.repair import execute_repair_plan
+
+        result = execute_repair_plan(root, issue_id, confirm=confirm, dry_run=dry_run)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/gates/revalidate")
+async def api_revalidate_gate(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON"}, status_code=400)
+    command = str(body.get("command") or "").strip()
+    if not command:
+        return JSONResponse({"ok": False, "message": "缺少 command"}, status_code=400)
+    try:
+        from agent.repair import revalidate_gate
+
+        result = revalidate_gate(root, command)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
 @app.get("/api/compliance-report")
 def api_compliance_report() -> JSONResponse:
     """Full compliance report for right-side issues panel."""

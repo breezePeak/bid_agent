@@ -2753,3 +2753,6 @@ body {
 }
 .issues-block-banner strong { font-size: 13px; }
 .issues-block-banner small { color: #991b1b; opacity: 0.9; }
+
+.sdv-actions-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+.sdv-repair-msg { font-size: 12px; color: #1d4ed8; margin-bottom: 8px; }

@@ -1,6 +1,6 @@
 ﻿# 质量门禁与最小修复开发计划
 
-> 状态：**执行中（G0/G1 已开工）**  
+> 状态：**G0/G1 完成，G2 已落地骨架**  
 > 日期：2026-07-16  
 > 路径：`docs/quality_gate_minimal_fix_plan.md`  
 > 审核约定：**仅当产品明确回复「开始执行」后，才允许按本计划改代码。**  
@@ -562,6 +562,7 @@ init → prepare_inputs → split_docs → parse_score → extract_facts
 
 | 阶段 | 状态 | 说明 |
 |------|------|------|
-| G0 | 进行中/已落地骨架 | Issue 模型、落盘、global/compliance 适配 |
-| G1 | 进行中 | can_proceed + start/run 门禁 + UI 阻断条 |
-| G2 | 未开始 | RepairPlan 一键修复 |
+| G0 | **完成** | Issue 模型、落盘、global/compliance 适配 |
+| G1 | **完成** | can_proceed + 流水线阶段间门禁 + start/run 门禁 + UI 阻断条 |
+| G2 | **完成骨架** | RepairPlan 预览/执行 API + 详情页修复按钮 + 重验链 |
+| G3 | 未开始 | 更多阶段门禁与出稿总检查 |

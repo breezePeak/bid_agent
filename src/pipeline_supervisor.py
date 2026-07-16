@@ -186,6 +186,25 @@ class PipelineSupervisor:
                 if self._pause.is_set():
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
+                # quality gate: open block issues stop progression before next stage
+                try:
+                    from agent.issues import can_proceed
+
+                    gate = can_proceed(root, next_command=command)
+                    if not gate.get("can_proceed", True):
+                        self._save(
+                            root,
+                            {
+                                "status": "failed",
+                                "current_stage": command,
+                                "worker_pid": 0,
+                                "error": gate.get("message") or f"质量门禁阻断，禁止执行 {command}",
+                                "message": gate.get("message") or "质量门禁阻断",
+                            },
+                        )
+                        return
+                except Exception:
+                    pass
                 spec = stage_spec_by_command(command)
                 if stage_outputs_ready(root, spec.id):
                     self._save(
