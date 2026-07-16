@@ -1343,6 +1343,15 @@ def run_compliance_check(
     except Exception as exc:
         print(f"[警告] 合规/claim 回灌失败: {exc}")
 
+    try:
+        from agent.root_cause import sync_issues_from_compliance
+
+        synced = sync_issues_from_compliance(root, report)
+        if synced:
+            print(f"[问题单] 已同步合规 Issue {len(synced)} 条到 workspace/issues/")
+    except Exception as exc:
+        print(f"[警告] 同步合规 Issue 失败: {exc}")
+
     if raise_on_blocking and report.get("blocking"):
         fatal_or_critical = [
             f"{item.get('check_id')}:{item.get('check_name')}"

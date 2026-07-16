@@ -1553,6 +1553,7 @@ def api_status() -> dict[str, Any]:
         "project_profile_choices": project_profile_choices(),
         "llm_config": _active_llm_summary(),
         "agent_activity": _safe_agent_activity(),
+        "issues_summary": _safe_issues_summary(),
         "manual_review_summary": review_summary,
         "latest_agent_runs": _latest_agent_runs(root),
         "run_metrics": load_stage_metrics(root),
@@ -1875,6 +1876,46 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             payload["goal"] = plan_result.get("goal")
     return JSONResponse(payload)
 
+
+
+@app.get("/api/issues")
+def api_list_issues(status: str = "open") -> JSONResponse:
+    """List quality issues (open snapshot)."""
+    root = _active_root()
+    try:
+        from agent.issues import issues_summary, load_open_issues
+        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+        try:
+            sync_issues_from_global_review(root)
+        except Exception:
+            pass
+        try:
+            sync_issues_from_compliance(root)
+        except Exception:
+            pass
+        issues = load_open_issues(root)
+        if status and status != "all":
+            if status == "open":
+                issues = [i for i in issues if str(i.get("status")) in {"open", "in_progress"}]
+            elif status == "block":
+                issues = [
+                    i
+                    for i in issues
+                    if str(i.get("severity")) == "block" and str(i.get("status")) in {"open", "in_progress"}
+                ]
+            else:
+                issues = [i for i in issues if str(i.get("status")) == status]
+        return JSONResponse(
+            {
+                "ok": True,
+                "summary": issues_summary(root),
+                "issues": issues,
+                "count": len(issues),
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
 @app.get("/api/compliance-report")
@@ -2272,6 +2313,34 @@ def _read_models_store() -> dict[str, Any]:
     }
     _write_models_store(store)
     return store
+
+
+def _gate_can_proceed(next_command: str = "") -> dict:
+    try:
+        from agent.issues import can_proceed
+        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+        root = _active_root()
+        # refresh issues from latest reports (non-destructive)
+        try:
+            sync_issues_from_global_review(root)
+        except Exception:
+            pass
+        try:
+            sync_issues_from_compliance(root)
+        except Exception:
+            pass
+        return can_proceed(root, next_command=next_command)
+    except Exception as exc:
+        return {"ok": False, "can_proceed": True, "message": f"门禁检查异常(放行): {exc}", "blocks": []}
+
+
+def _safe_issues_summary() -> dict:
+    try:
+        from agent.issues import issues_summary
+        return issues_summary(_active_root())
+    except Exception:
+        return {"open_count": 0, "block_count": 0, "can_proceed": True}
 
 
 def _safe_agent_activity() -> dict:
@@ -3316,6 +3385,18 @@ async def api_run_command(request: Request) -> JSONResponse:
             {"ok": False, "message": f"未知命令: {command}，可用: {', '.join(sorted(COMMANDS))}"},
             status_code=400,
         )
+    # quality gate: open block issues stop progression (except pure query/init tools)
+    if command not in {"validate", "init", "init-demo", "set-project-profile"}:
+        gate = _gate_can_proceed(command)
+        if not gate.get("can_proceed", True):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": gate.get("message") or "质量门禁阻断，禁止执行该命令",
+                    "gate": gate,
+                },
+                status_code=409,
+            )
     if command not in {"validate", "init-demo"} and ACTIVE_RUN_ROOT is None:
         return JSONResponse(
             {"ok": False, "message": "请先点击“开始生成”，创建本次运行工作空间后再执行流程命令。"},
@@ -3350,6 +3431,16 @@ async def api_start_pipeline(request: Request) -> JSONResponse:
     start_command = str(body.get("start_command", "")).strip()
     if start_command and start_command not in auto_run_commands():
         return JSONResponse({"ok": False, "message": f"无效起始阶段: {start_command}"}, status_code=400)
+    gate = _gate_can_proceed(start_command or "auto_run")
+    if not gate.get("can_proceed", True):
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": gate.get("message") or "质量门禁阻断，禁止启动流水线",
+                "gate": gate,
+            },
+            status_code=409,
+        )
     started = SUPERVISOR.start(ACTIVE_RUN_ID, _active_root(), _run_sync, start_command=start_command)
     if not started:
         return JSONResponse({"ok": False, "message": "流水线未启动，已有调度线程正在运行。"}, status_code=409)

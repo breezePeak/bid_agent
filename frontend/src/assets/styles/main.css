@@ -2737,3 +2737,19 @@ body {
 .sdv-item.soft { background: #fff; cursor: default; }
 .plan-row.clickable { cursor: pointer; }
 .plan-row.clickable:hover { background: #f1f5f9; }
+
+.issues-block-banner {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  background: #fef2f2;
+  color: #7f1d1d;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+.issues-block-banner strong { font-size: 13px; }
+.issues-block-banner small { color: #991b1b; opacity: 0.9; }

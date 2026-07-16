@@ -249,6 +249,7 @@ const docxReady = ref(false)
 const recoveryState = ref(null)
 const agentActivity = ref(null)
 const complianceSummary = ref(null)
+const issuesSummary = ref(null)
 const quickBtns = computed(() => {
   if (!uploadedAll.value) return []
   if (planDone.value || docxReady.value) {
@@ -374,6 +375,9 @@ function updateFromStatus(data) {
   complianceSummary.value = (data.compliance_summary && typeof data.compliance_summary === 'object')
     ? data.compliance_summary
     : null
+  issuesSummary.value = (data.issues_summary && typeof data.issues_summary === 'object')
+    ? data.issues_summary
+    : null
   if (data.recovery_resolved) {
     const note = '✓ LLM 已恢复，当前阶段正在正常继续执行。'
     const recoveryMessage = [...messages.value].reverse().find(m =>
@@ -422,9 +426,17 @@ async function startAutoRun(fromCommand = null) {
     })
     const body = await resp.json()
     // 409 通常表示聊天编排器已经在后端启动了同一条流水线，此时继续观察即可。
-    if (!body.ok && resp.status !== 409) {
-      autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
-      addMessage('system', `流水线启动失败: ${body.message || ''}`)
+    if (!body.ok) {
+      // 409 + gate: quality block; 409 without gate: already running
+      if (resp.status === 409 && body.gate && body.gate.can_proceed === false) {
+        autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+        addMessage('system', body.message || '质量门禁阻断，请先处理问题再继续')
+        return
+      }
+      if (resp.status !== 409) {
+        autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+        addMessage('system', `流水线启动失败: ${body.message || ''}`)
+      }
     }
   } catch (e) {
     autoExecuting.value = false; clearInterval(statusTimer); closeSSE()

@@ -349,6 +349,14 @@ def run_global_review(root: Path | None = None) -> Path:
     output_path = root / "workspace" / "global_review.json"
     write_json(output_path, review)
     print(f"[完成] 已完成全文一致性审核: {output_path}")
+    try:
+        from agent.root_cause import sync_issues_from_global_review
+
+        synced = sync_issues_from_global_review(root, review)
+        if synced:
+            print(f"[问题单] 已同步全文审核 Issue {len(synced)} 条到 workspace/issues/")
+    except Exception as exc:
+        print(f"[警告] 同步全文审核 Issue 失败: {exc}")
     if reasons:
         print("[阻断] 全文审核质量门禁触发，后续阶段将停止：")
         for item in reasons:

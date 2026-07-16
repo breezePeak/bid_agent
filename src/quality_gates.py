@@ -132,6 +132,12 @@ def validate_global_review_blocking(root: Path, *, required: bool = False) -> No
     review = read_json(report_path)
     if not isinstance(review, dict):
         raise ValueError("global_review.json 必须是 JSON 对象")
+    try:
+        from agent.root_cause import sync_issues_from_global_review
+
+        sync_issues_from_global_review(root, review)
+    except Exception:
+        pass
     reasons = global_review_blocking_reasons(review)
     if reasons:
         detail = "；".join(reasons)
@@ -162,6 +168,12 @@ def validate_compliance_blocking(root: Path, *, required: bool = True) -> None:
     report = read_json(report_path)
     if not isinstance(report, dict):
         raise ValueError("compliance_report.json 必须是 JSON 对象")
+    try:
+        from agent.root_cause import sync_issues_from_compliance
+
+        sync_issues_from_compliance(root, report)
+    except Exception:
+        pass
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     blocking = bool(report.get("blocking") or summary.get("blocking"))
     if blocking:
