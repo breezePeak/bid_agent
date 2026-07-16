@@ -78,7 +78,7 @@ const props = defineProps({
   compliance: { type: Object, default: null },
 })
 
-defineEmits(['pause', 'preview-compliance'])
+defineEmits(['pause', 'preview-compliance', 'preview'])
 
 function severityLabel(sev) {
   const m = { fatal: 'fatal(致命)', critical: 'critical(严重)', major: 'major(重要)', minor: 'minor(次要)', info: 'info(提示)' }
