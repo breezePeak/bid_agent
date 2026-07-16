@@ -1197,6 +1197,10 @@ def run_compliance_check(
       - final: 终稿复检（优先 final.md，用于硬门禁）
     """
     root = root or project_root()
+
+    from quality_gates import validate_global_review_blocking
+    # 全文审核未通过则不应继续专项合规/出稿链路
+    validate_global_review_blocking(root, required=False)
     corpus = _load_text_corpus(root)
     if phase == "final" and not corpus.get("final.md"):
         # 终稿阶段若无 final.md，强制记一条 fatal，避免空过

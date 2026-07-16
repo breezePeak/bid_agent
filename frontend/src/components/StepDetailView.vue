@@ -59,6 +59,14 @@
 
         <!-- Global review -->
         <div class="sdv-section" v-if="globalReview">
+          <div class="sdv-banner" :class="{ blocking: globalReview.blocking || (globalReview.blocking_reasons || []).length }" style="margin-bottom:12px">
+            <div class="sdv-banner-title">
+              {{ (globalReview.blocking || (globalReview.blocking_reasons || []).length) ? '全文审核阻断 · 请先处理下列问题再继续' : '全文审核已通过门禁' }}
+            </div>
+            <div class="sdv-banner-stats" v-if="(globalReview.blocking_reasons || []).length">
+              <div v-for="(r, i) in globalReview.blocking_reasons" :key="i">• {{ r }}</div>
+            </div>
+          </div>
           <h4>全文审核结论</h4>
           <div class="sdv-flags">
             <span class="sdv-flag" :class="{ bad: globalReview.project_name_consistent === false }">项目名一致: {{ yn(globalReview.project_name_consistent) }}</span>

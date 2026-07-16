@@ -44,6 +44,9 @@ def _iter_chapter_paths(root: Path) -> list[Path]:
 
 def build_markdown(root: Path | None = None) -> Path:
     root = root or project_root()
+
+    from quality_gates import validate_global_review_blocking
+    validate_global_review_blocking(root, required=False)
     chunks: list[str] = []
 
     for chapter_path in _iter_chapter_paths(root):
@@ -648,6 +651,10 @@ def _add_markdown_to_document(document, markdown: str, profile: dict[str, Any] |
 
 def build_docx(root: Path | None = None) -> Path:
     root = root or project_root()
+
+    from quality_gates import validate_global_review_blocking, validate_compliance_blocking
+    validate_global_review_blocking(root, required=False)
+    validate_compliance_blocking(root, required=False)
     final_markdown_path = root / "outputs" / "final.md"
     markdown = read_nonempty_text(final_markdown_path, f"最终 Markdown {final_markdown_path}")
 

@@ -63,10 +63,82 @@ def validate_template_fill_report(root: Path) -> None:
         raise ValueError(f"Word 模板填充门禁失败，请检查: {report_path}")
 
 
+def global_review_blocking_reasons(global_review: dict[str, Any] | None) -> list[str]:
+    """全文审核阻断原因。有实质质量问题时阻断后续合规/出稿。"""
+    if not isinstance(global_review, dict):
+        return []
+    reasons: list[str] = []
+
+    consistency_fields = [
+        ("project_name_consistent", "项目名称前后不一致"),
+        ("bidder_name_consistent", "投标人名称前后不一致"),
+        ("service_period_consistent", "服务期前后不一致"),
+        ("warranty_period_consistent", "质保期前后不一致"),
+    ]
+    for key, label in consistency_fields:
+        if key in global_review and global_review.get(key) is False:
+            reasons.append(label)
+
+    conflicts = global_review.get("chapter_conflicts")
+    if isinstance(conflicts, list) and conflicts:
+        reasons.append(f"章节冲突 {len(conflicts)} 项")
+
+    fabrication = global_review.get("fabrication_risks")
+    if isinstance(fabrication, list) and fabrication:
+        reasons.append(f"编造风险 {len(fabrication)} 项")
+
+    missing = global_review.get("missing_chapters")
+    if isinstance(missing, list) and missing:
+        reasons.append(f"缺失章节 {len(missing)} 项")
+
+    uncovered = global_review.get("uncovered_score_points")
+    if isinstance(uncovered, list) and uncovered:
+        reasons.append(f"未覆盖评分点 {len(uncovered)} 个: {', '.join(str(x) for x in uncovered[:12])}"
+                       + ("…" if len(uncovered) > 12 else ""))
+
+    # 明确标注阻断
+    if global_review.get("blocking") is True and not reasons:
+        extra = global_review.get("blocking_reasons")
+        if isinstance(extra, list) and extra:
+            reasons.extend(str(x) for x in extra if str(x).strip())
+        else:
+            reasons.append("全文审核标记为 blocking")
+
+    return reasons
+
+
 def final_review_status(global_review: dict[str, Any]) -> str:
     if not isinstance(global_review, dict):
         return "ok"
+    if global_review_blocking_reasons(global_review):
+        return "error"
     return "warn" if bool(global_review.get("need_manual_review")) else "ok"
+
+
+def validate_global_review_blocking(root: Path, *, required: bool = False) -> None:
+    """全文审核质量门禁：存在不一致/冲突/编造风险/未覆盖评分点时阻断后续阶段。"""
+    import os
+
+    # allow opt-out: GLOBAL_REVIEW_GATE=0/false
+    flag = str(os.environ.get("GLOBAL_REVIEW_GATE", "1")).strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return
+
+    report_path = root / "workspace" / "global_review.json"
+    if not report_path.exists():
+        if required:
+            raise ValueError(f"全文审核报告不存在，无法通过质量门禁: {report_path}")
+        return
+    review = read_json(report_path)
+    if not isinstance(review, dict):
+        raise ValueError("global_review.json 必须是 JSON 对象")
+    reasons = global_review_blocking_reasons(review)
+    if reasons:
+        detail = "；".join(reasons)
+        raise RuntimeError(
+            "全文审核质量门禁阻断：存在未解决问题，请先处理 global-review 问题后再继续。"
+            f" 原因: {detail}。报告: {report_path}"
+        )
 
 
 def compliance_review_status(compliance_report: dict[str, Any]) -> str:
