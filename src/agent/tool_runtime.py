@@ -150,6 +150,7 @@ def _execute_stage(
     workers: int = 1,
     max_retries: int = 0,
     dry_run: bool = False,
+    actor: str = "pipeline",
 ) -> ToolResult:
     started = _now()
     stage = stage_spec_by_id(stage_id)
@@ -163,8 +164,23 @@ def _execute_stage(
         "dry_run": dry_run,
     }
 
-    # quality gate (skip dry_run / pure init)
-    if not dry_run and stage.command not in {"init", "validate"}:
+    # A repair operation may execute only known root-cause/revalidation stages.
+    # Downstream delivery stages remain protected by the normal quality gate.
+    repair_stage_commands = {
+        "parse-score",
+        "extract-facts",
+        "generate-outline",
+        "select-context-all",
+        "write-all",
+        "review-fix-all",
+        "build-score-coverage",
+        "global-review",
+        "compliance-check",
+    }
+    repair_gate_override = actor == "repair" and str(stage.command or "") in repair_stage_commands
+
+    # quality gate (skip dry_run / pure init / whitelisted repair root actions)
+    if not dry_run and not repair_gate_override and stage.command not in {"init", "validate"}:
         try:
             from agent.issues import can_proceed
 
@@ -1042,11 +1058,26 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
     last_rewrite_ok = True
     current_plan = plan
     touched: list[str] = []
+    no_progress = False
+
+    def _gap_signature(value: dict[str, Any]) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        chapters = tuple(sorted(str(item) for item in (value.get("chapter_ids") or [])))
+        gaps = value.get("gap_score_point_ids") or value.get("uncovered_score_points") or []
+        gap_ids = tuple(
+            sorted(
+                str(item.get("score_point_id") or item.get("id") or item)
+                if isinstance(item, dict)
+                else str(item)
+                for item in gaps
+            )
+        )
+        return chapters, gap_ids
 
     for round_idx in range(1, max_rounds + 1):
         cids = list(current_plan.get("chapter_ids") or [])
         if not cids:
             break
+        before_signature = _gap_signature(current_plan)
         rewrite = _execute_chapter_tool(
             root,
             tool_name="rewrite_chapters",
@@ -1076,7 +1107,10 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
         # stop if no more gaps
         if not (current_plan.get("chapter_ids") or current_plan.get("uncovered_score_points") or current_plan.get("weak_score_points")):
             break
-        # stop if same chapters streak with no progress could be added later
+        if _gap_signature(current_plan) == before_signature:
+            no_progress = True
+            rounds_log[-1]["no_progress"] = True
+            break
 
     remaining = list(current_plan.get("chapter_ids") or [])
     summary = (
@@ -1101,6 +1135,7 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
             "pre": plan,
             "post": current_plan,
             "remaining_chapter_ids": remaining,
+            "no_progress": no_progress,
         },
         artifacts_written=["workspace/chapters", "workspace/score_coverage_matrix.json"],
     )
@@ -1451,6 +1486,7 @@ def invoke(
             workers=int(args.get("workers", 1) or 1),
             max_retries=int(args.get("max_retries", 0) or 0),
             dry_run=dry_run,
+            actor=actor,
         )
 
     spec = get_tool(name)
@@ -1560,6 +1596,7 @@ def invoke(
             workers=int(stage_args.get("workers", 1) or 1),
             max_retries=int(stage_args.get("max_retries", 0) or 0),
             dry_run=dry_run,
+            actor=actor,
         )
 
     return _fail(

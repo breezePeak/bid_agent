@@ -116,6 +116,25 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         prompt_agents=("tender_requirement_extractor", "company_facts_extractor"),
     ),
     StageSpec(
+        id="build_materials_checklist",
+        label="材料资格清单",
+        command="build-materials-checklist",
+        kind="core",
+        requires=(
+            _artifact("workspace/tender_requirements.json"),
+            _artifact("workspace/company_facts.json", required_nonempty=False),
+            _artifact("workspace/global_facts.json"),
+            _artifact("inputs/tender.md"),
+            _artifact("inputs/score.md", required_nonempty=False),
+            _artifact("inputs/company.md", required_nonempty=False),
+        ),
+        produces=(_artifact("workspace/materials_checklist.json"),),
+        runner="materials_checklist.build_materials_checklist",
+        notes=(
+            "解析后生成资格/废标/必交材料清单；缺材料默认 deferred，写作时结构化留白",
+        ),
+    ),
+    StageSpec(
         id="build_template_evidence",
         label="生成模板依据",
         command="build-template-evidence",

@@ -35,6 +35,13 @@ INVALIDATION_MAP: dict[str, tuple[str, ...]] = {
         "workspace/score_coverage_matrix.json",
         "workspace/final_score_estimate.json",
     ),
+    "extract_facts": (
+        "workspace/materials_checklist.json",
+        "workspace/jobs",
+    ),
+    "build_materials_checklist": (
+        "workspace/jobs",
+    ),
     "generate_outline": (
         "workspace/jobs",
         "workspace/contexts",

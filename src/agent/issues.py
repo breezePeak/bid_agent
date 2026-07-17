@@ -331,7 +331,7 @@ def load_issue_metrics(root: Path | None = None, *, tail: int = 200) -> dict[str
 
 
 def accept_risk_enabled() -> bool:
-    flag = str(os.environ.get("ISSUE_ACCEPT_RISK_ENABLED", "0")).strip().lower()
+    flag = str(os.environ.get("ISSUE_ACCEPT_RISK_ENABLED", "1")).strip().lower()
     return flag not in {"0", "false", "no", "off", ""}
 
 
@@ -350,8 +350,6 @@ def accept_issue_risk(
         }
     root = root or project_root()
     reason = str(reason or "").strip()
-    if len(reason) < 4:
-        return {"ok": False, "message": "接受风险必须填写原因（至少 4 个字）。"}
 
     with _lock:
         issues = load_open_issues(root)

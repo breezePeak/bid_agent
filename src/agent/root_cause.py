@@ -279,6 +279,18 @@ def issues_from_compliance_report(report: dict[str, Any] | None) -> list[dict[st
         check_id = stringify(item.get("check_id")) or "UNKNOWN"
         check_type = stringify(item.get("check_type")) or "unknown"
         title = f"{check_id} {stringify(item.get('check_name')) or check_type}".strip()
+        suggested_actions = _actions_for("COMPLIANCE_BLOCK")
+        manual_only = bool(item.get("need_manual_review")) or item.get("auto_fixable") is False
+        if manual_only:
+            suggested_actions = [
+                action for action in suggested_actions
+                if str(action.get("type") or "") != "fix_compliance"
+            ]
+        elif item.get("auto_fixable") is True:
+            suggested_actions = [
+                action for action in suggested_actions
+                if str(action.get("type") or "") != "upload_evidence"
+            ]
         issues.append(
             make_issue(
                 stage_id="compliance_check",
@@ -290,7 +302,7 @@ def issues_from_compliance_report(report: dict[str, Any] | None) -> list[dict[st
                 target_type="compliance_item",
                 target_ids=[check_id],
                 likely_cause_stage=_cause("COMPLIANCE_BLOCK", "write_chapters"),
-                suggested_actions=_actions_for("COMPLIANCE_BLOCK"),
+                suggested_actions=suggested_actions,
                 evidence={
                     "check_id": check_id,
                     "check_type": check_type,
@@ -489,6 +501,7 @@ ALLOWED_CAUSE_STAGES: set[str] = {
     "split_docs",
     "parse_score",
     "extract_facts",
+    "build_materials_checklist",
     "build_template_evidence",
     "generate_outline",
     "plan_chapter_jobs",

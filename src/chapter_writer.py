@@ -7,6 +7,7 @@ from context_budget import summarize_chunk_payload, summarize_for_prompt
 from file_loader import load_global_facts, load_score_points, load_tender_requirements
 from llm_client import chat
 from manual_review import manual_review_context_for_chapter
+from materials_checklist import ensure_placeholders_in_content, items_for_chapter
 from project_profile_registry import load_project_profile
 from prompt_registry import load_agent_prompt
 from quality_gates import validate_chapter_claims_gate, validate_weak_evidence_language
@@ -108,6 +109,9 @@ def write_chapter_from_job_context(
     tender_payload = _build_chunk_payload(selected_tender_chunks, context.get("selected_tender_chunks", []))
     company_payload = _build_chunk_payload(selected_company_chunks, context.get("selected_company_chunks", []))
     manual_review = manual_review_context_for_chapter(root, stringify(job.get("chapter_id")))
+    materials_items = job.get("materials_checklist_items")
+    if not isinstance(materials_items, list) or not materials_items:
+        materials_items = items_for_chapter(root, job=job)
     chapter = {
         "id": stringify(job.get("chapter_id")),
         "title": stringify(job.get("chapter_title")),
@@ -174,6 +178,8 @@ def write_chapter_from_job_context(
                         f"{compact_json(job.get('template_tasks', []))}\n\n"
                         "## 人工复核补充要求\n\n"
                         f"{compact_json(manual_review)}\n\n"
+                        "## 材料/资格待响应清单\n\n"
+                        f"{compact_json(materials_items)}\n\n"
                         "## 上下文摘要\n\n"
                         f"{summarize_for_prompt({'max_context_chars': WRITER_CONTEXT_MAX_CHARS, 'tender_chunks': len(tender_context), 'company_chunks': len(company_context)}, 1200)}\n\n"
                         "## 选中的招标文件片段\n\n"
@@ -184,7 +190,9 @@ def write_chapter_from_job_context(
                         "如果 sections 为空，不要额外创造小节标题；"
                         "章节标题必须使用当前章节任务包中的 heading_level 对应的 Markdown 标题层级；"
                         "模板任务中的 fill_slot 和 writing_task 必须优先响应；"
-                        "如果模板任务状态为 weak/missing 或证据不足，不要硬写成既成事实。"
+                        "如果模板任务状态为 weak/missing 或证据不足，不要硬写成既成事实；"
+                        "对 materials_checklist_items 中 response_status=deferred 的项，必须输出 MATERIAL_GAP 结构化占位块"
+                        "（含要求/留白原因/建议附件），禁止 XXX/TODO/待填写，禁止写已具备/已提供。"
                         f"{length_guidance}"
                     ),
                 },
@@ -192,6 +200,7 @@ def write_chapter_from_job_context(
             temperature=0.2,
         )
     content = _ensure_chapter_heading(raw, chapter)
+    content = ensure_placeholders_in_content(content, materials_items if isinstance(materials_items, list) else [])
     validate_weak_evidence_language(job, content)
     # claim 防编造：无证据的金额/资质/业绩既成事实直接失败，迫使改写或补材料
     validate_chapter_claims_gate(root, chapter["id"], content, raise_on_blocker=True)

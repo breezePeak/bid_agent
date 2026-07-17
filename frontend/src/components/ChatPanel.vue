@@ -58,7 +58,13 @@
               <span v-else-if="msg.content" style="white-space:pre-wrap">{{ msg.content }}</span>
             </div>
             <div v-if="msg.actions && msg.actions.length" class="chat-msg-actions">
-              <button v-for="act in msg.actions" :key="act.label" class="btn btn-sm" @click="handleAction(act)">{{ act.label }}</button>
+              <button
+                v-for="act in msg.actions"
+                :key="`${act.type || 'action'}:${act.confirmation_id || act.label}`"
+                class="btn btn-sm"
+                :disabled="isActionDisabled(act)"
+                @click="handleAction(act, msg)"
+              >{{ act.label }}</button>
             </div>
             <div v-if="(msg.goal && (msg.goal.status || msg.goal.all_criteria_ok !== undefined)) || msg.goal_id" class="chat-goal-badge">
               <span class="chat-goal-label">目标</span>
@@ -92,23 +98,56 @@
       <!-- valuable logs are written into chat as system messages (persisted) -->
     </div>
 
+    <section
+      v-if="repairJob || repairExecuting"
+      class="chat-repair-card"
+      :class="`repair-${repairStatus}`"
+      aria-live="polite"
+    >
+      <div class="chat-repair-header">
+        <div>
+          <div class="chat-repair-title">最小修复</div>
+          <div class="chat-repair-phase">{{ repairPhaseText }}</div>
+        </div>
+        <span class="chat-repair-status">{{ repairStatusText }}</span>
+      </div>
+      <div class="chat-repair-progress" role="progressbar" :aria-valuenow="repairProgress" aria-valuemin="0" aria-valuemax="100">
+        <span :style="{ width: `${repairProgress}%` }"></span>
+      </div>
+      <div class="chat-repair-counts">
+        <span>共 {{ repairCount('total_count') }} 项</span>
+        <span>自动 {{ repairCount('auto_count') }}</span>
+        <span>需人工 {{ repairCount('manual_count') }}</span>
+        <span class="ok">已解决 {{ repairCount('resolved_count') }}</span>
+        <span>剩余 {{ repairCount('remaining_count') }}</span>
+        <span v-if="repairCount('failed_count')" class="bad">失败 {{ repairCount('failed_count') }}</span>
+      </div>
+      <div v-if="repairJob && repairJob.message" class="chat-repair-message">{{ repairJob.message }}</div>
+      <div v-if="repairJob && repairJob.resume_command" class="chat-repair-resume">
+        后续节点：{{ stepLabel(repairJob.resume_command) }} · {{ repairJob.resume_attempted ? '已尝试恢复' : '等待恢复' }}
+      </div>
+      <div v-if="repairResultText || repairResultItems.length" class="chat-repair-result">
+        <strong>修复结果</strong>
+        <div v-if="repairResultText">{{ repairResultText }}</div>
+        <ul v-if="repairResultItems.length">
+          <li v-for="(item, ri) in repairResultItems" :key="item.issue_id || item.id || ri">{{ repairResultItemText(item, ri) }}</li>
+        </ul>
+      </div>
+    </section>
+
     <!-- quick actions -->
     <div class="chat-quick-row" v-if="quickBtns.length">
       <button
         v-for="btn in quickBtns"
         :key="btn.label"
         class="btn btn-sm"
+        :disabled="interactionBusy"
         @click="handleQuick(btn)"
       >{{ btn.label }}</button>
     </div>
 
     <!-- plan list above input -->
     <div v-if="showPlan || running || autoExecuting || (agentActivity && agentActivity.agents && agentActivity.agents.length)" class="chat-plan-area">
-      <AgentWorkbench
-        :run-id="runId"
-        :active="running || autoExecuting"
-        :activity="agentActivity"
-      />
       <PlanList
         :steps="planSteps"
         :running="running"
@@ -132,16 +171,17 @@
         </span>
       </div>
       <div class="chat-input-row">
-        <button class="btn btn-sm btn-icon" @click="openChatFile" title="上传文件">&#x1F4CE;</button>
+        <button class="btn btn-sm btn-icon" :disabled="interactionBusy" @click="openChatFile" title="上传文件">&#x1F4CE;</button>
         <textarea
           v-model="input"
           class="chat-input"
           placeholder="输入问题或指令，Enter 发送..."
           rows="3"
+          :disabled="interactionBusy"
           @keydown.enter.exact.prevent="submit"
         ></textarea>
         <input type="file" ref="chatFileInput" hidden multiple @change="onChatFileSelected" />
-        <button class="btn btn-sm btn-primary" @click="submit" :disabled="(!input.trim() && !tags.length) || sending">发送</button>
+        <button class="btn btn-sm btn-primary" @click="submit" :disabled="(!input.trim() && !tags.length) || interactionBusy">发送</button>
       </div>
     </div>
   </div>
@@ -150,9 +190,8 @@
 <script setup>
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import PlanList from './PlanList.vue'
-import AgentWorkbench from './AgentWorkbench.vue'
 import UploadTile from './UploadTile.vue'
-import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight } from '../api'
+import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight, fetchCurrentRepairJob } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -237,6 +276,14 @@ const showPlan = ref(false)
 let sseSource = null; let statusTimer = null
 let tagSeq = 0
 
+const repairExecuting = ref(false)
+const repairJob = ref(null)
+let repairTimer = null
+let repairPollInFlight = false
+let repairPollStarting = null
+let activeRepairJobId = ''
+let terminalRepairHandledId = ''
+
 const tags = ref([])
 const streamingIdx = ref(-1)
 const isStreamingEmpty = ref(true)
@@ -250,6 +297,93 @@ const recoveryState = ref(null)
 const agentActivity = ref(null)
 const complianceSummary = ref(null)
 const issuesSummary = ref(null)
+const interactionBusy = computed(() => sending.value || repairExecuting.value)
+const ACTIVE_REPAIR_STATUSES = new Set(['running', 'revalidating'])
+const TERMINAL_REPAIR_STATUSES = new Set(['completed', 'partial', 'failed'])
+
+const repairStatus = computed(() => {
+  const status = String(repairJob.value?.status || '').trim()
+  return status || (repairExecuting.value ? 'running' : 'awaiting_confirmation')
+})
+const repairStatusText = computed(() => ({
+  awaiting_confirmation: '等待确认',
+  running: '修复中',
+  revalidating: '重验中',
+  completed: '已完成',
+  partial: '部分完成',
+  failed: '失败',
+}[repairStatus.value] || repairStatus.value || '准备中'))
+const repairPhaseText = computed(() => {
+  const phase = String(repairJob.value?.phase || '').trim()
+  const labels = {
+    awaiting_confirmation: '等待用户确认',
+    analyzing: '正在分析并合并根因',
+    analysis: '正在分析并合并根因',
+    edit: '正在执行根因修复',
+    executing: '正在执行最小修复',
+    repairing: '正在执行最小修复',
+    revalidate: '正在重验修复结果',
+    revalidating: '正在重验修复结果',
+    resuming: '正在恢复后续节点',
+    completed: '修复与重验已完成',
+    partial: '部分问题仍需处理',
+    declined: '已选择暂不修复',
+    failed: '修复任务失败',
+    interrupted: '修复任务已中断',
+  }
+  if (phase) return labels[phase] || phase
+  return repairStatus.value === 'revalidating' ? '正在重验修复结果' : '正在准备修复任务'
+})
+const repairProgress = computed(() => {
+  const persisted = Number(repairJob.value?.progress_percent)
+  if (Number.isFinite(persisted)) return Math.max(0, Math.min(100, Math.round(persisted)))
+  const total = repairNumber(repairJob.value?.total_count)
+  if (!total) return TERMINAL_REPAIR_STATUSES.has(repairStatus.value) ? 100 : 0
+  const remainingValue = repairJob.value?.remaining_count
+  const processed = remainingValue !== undefined && remainingValue !== null
+    ? total - repairNumber(remainingValue)
+    : repairNumber(repairJob.value?.resolved_count) + repairNumber(repairJob.value?.failed_count)
+  return Math.max(0, Math.min(100, Math.round((processed / total) * 100)))
+})
+const repairResultText = computed(() => {
+  const result = repairJob.value?.result
+  if (!result) return ''
+  if (typeof result === 'string') return result
+  if (typeof result !== 'object') return String(result)
+  return String(result.message || result.summary || '').trim()
+})
+const repairResultItems = computed(() => {
+  const items = repairJob.value?.result?.results
+  return Array.isArray(items) ? items.slice(0, 8) : []
+})
+
+function repairNumber(value) {
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? n : 0
+}
+
+function repairCount(field) {
+  return repairNumber(repairJob.value?.[field])
+}
+
+function repairResultItemText(item, index) {
+  if (!item || typeof item !== 'object') return String(item || `第 ${index + 1} 项`)
+  const id = item.issue_id || item.id || item.plan?.issue_id || `第 ${index + 1} 项`
+  const detail = item.message || item.summary || item.final_status || (item.ok === false ? '修复失败' : '已处理')
+  return `${id}：${detail}`
+}
+
+function actionConfirmationId(action) {
+  return String(action?.confirmation_id || action?.params?.confirmation_id || '').trim()
+}
+
+function isActionDisabled(action) {
+  if (interactionBusy.value || action?.consumed) return true
+  const confirmationId = actionConfirmationId(action)
+  if (!confirmationId || !repairJob.value) return false
+  return confirmationId === String(repairJob.value.confirmation_id || '')
+    && repairStatus.value !== 'awaiting_confirmation'
+}
 const quickBtns = computed(() => {
   if (!uploadedAll.value) return []
   if (planDone.value || docxReady.value) {
@@ -341,6 +475,83 @@ function onChatFileSelected(e) {
 }
 
 // ---- status ----
+function isRepairTaskName(value) {
+  return /(minimal[-_ ]?repair|repair[-_ ]?issues?|最小修复|修复问题)/i.test(String(value || ''))
+}
+
+function stopRepairPolling() {
+  if (repairTimer) clearInterval(repairTimer)
+  repairTimer = null
+}
+
+function applyRepairJob(job) {
+  if (!job || typeof job !== 'object' || Array.isArray(job)) return false
+  const incomingId = String(job.job_id || '').trim()
+  const previous = repairJob.value
+  const previousId = String(previous?.job_id || '').trim()
+  repairJob.value = previous && (!incomingId || !previousId || incomingId === previousId)
+    ? { ...previous, ...job }
+    : { ...job }
+  activeRepairJobId = incomingId || previousId || activeRepairJobId
+  autoStarted.value = true
+
+  const status = String(repairJob.value?.status || '').trim()
+  repairExecuting.value = ACTIVE_REPAIR_STATUSES.has(status)
+  if (TERMINAL_REPAIR_STATUSES.has(status)) stopRepairPolling()
+  nextTick(scrollBottom)
+  return true
+}
+
+async function refreshCurrentRepairJob(expectedJobId = '') {
+  if (repairPollInFlight) return
+  repairPollInFlight = true
+  try {
+    const resp = await fetchCurrentRepairJob()
+    const body = resp && resp.data ? resp.data : {}
+    const job = body.repair_job || body.job || null
+    const returnedId = String(job?.job_id || '').trim()
+    if (job && (!expectedJobId || !returnedId || returnedId === expectedJobId)) {
+      applyRepairJob(job)
+      if (TERMINAL_REPAIR_STATUSES.has(String(job.status || '')) && terminalRepairHandledId !== returnedId) {
+        terminalRepairHandledId = returnedId
+        await loadChatHistory()
+        await loadStatus()
+        if (running.value && !autoExecuting.value && !repairExecuting.value) {
+          autoExecuting.value = true
+          autoStarted.value = true
+          watchLiveRun()
+        }
+      }
+    }
+  } catch (_) {
+    // Keep the last known job visible; the next poll or /api/status can recover.
+  } finally {
+    repairPollInFlight = false
+  }
+}
+
+async function beginRepairTracking(jobId = '', initialJob = null) {
+  if (initialJob) applyRepairJob(initialJob)
+  activeRepairJobId = String(jobId || initialJob?.job_id || activeRepairJobId || '').trim()
+  if (TERMINAL_REPAIR_STATUSES.has(repairStatus.value)) return
+  repairExecuting.value = true
+  autoExecuting.value = false
+  autoStarted.value = true
+  if (statusTimer) clearInterval(statusTimer)
+  statusTimer = null
+  closeSSE()
+
+  if (repairPollStarting) return repairPollStarting
+  repairPollStarting = (async () => {
+    stopRepairPolling()
+    await refreshCurrentRepairJob(activeRepairJobId)
+    if (repairExecuting.value) {
+      repairTimer = setInterval(() => refreshCurrentRepairJob(activeRepairJobId), 1500)
+    }
+  })().finally(() => { repairPollStarting = null })
+  return repairPollStarting
+}
+
 async function loadStatus() {
   try {
     const data = await fetch('/api/status').then(r => r.json())
@@ -348,7 +559,22 @@ async function loadStatus() {
   } catch (e) { /* */ }
 }
 function updateFromStatus(data) {
-  if (!data || !data.workflow) return
+  if (!data || typeof data !== 'object') return
+  if (data.repair_job) applyRepairJob(data.repair_job)
+  const hasActiveRepairJob = ACTIVE_REPAIR_STATUSES.has(String(data.repair_job?.status || repairJob.value?.status || ''))
+  const repairTaskRunning = hasActiveRepairJob || (!!data.running && isRepairTaskName(data.current_task))
+  if (repairTaskRunning) {
+    repairExecuting.value = true
+    autoExecuting.value = false
+    if (statusTimer) clearInterval(statusTimer)
+    statusTimer = null
+    closeSSE()
+    if (!repairTimer && !repairPollStarting) {
+      void beginRepairTracking(data.repair_job?.job_id || repairJob.value?.job_id || '', data.repair_job || null)
+    }
+  }
+  running.value = !!data.running && !repairTaskRunning
+  if (!data.workflow) return
   const wf = data.workflow || []
   const timings = (data.timings && typeof data.timings === 'object') ? data.timings : {}
   const before = Object.fromEntries(planSteps.value.map(s => [s.command, s.status]))
@@ -362,7 +588,6 @@ function updateFromStatus(data) {
     }
     prevStatusMap[s.command] = s.status
   })
-  running.value = data.running || false
   if (data.agent_activity) agentActivity.value = data.agent_activity
   if (data.sources) {
     if (data.sources.tender?.length) files.tender = data.sources.tender.map(f => f.name || f)
@@ -405,7 +630,7 @@ function updateFromStatus(data) {
 // ---- auto run ----
 function maybeAutoStart() {
   if (!uploadedAll.value) return
-  if (autoStarted.value || autoExecuting.value || running.value) return
+  if (autoStarted.value || autoExecuting.value || running.value || repairExecuting.value) return
   if (planDone.value) return
   autoStarted.value = true
   showPlan.value = true
@@ -413,7 +638,7 @@ function maybeAutoStart() {
   nextTick(() => startAutoRun())
 }
 async function startAutoRun(fromCommand = null) {
-  if (autoExecuting.value) return
+  if (autoExecuting.value || sending.value || repairExecuting.value) return
   autoExecuting.value = true
   autoStarted.value = true
   addMessage('system', fromCommand ? `从 ${stepLabel(fromCommand)} 继续后端流水线...` : '启动后端自动流水线...')
@@ -534,10 +759,17 @@ function closeSSE() { if (sseSource) { sseSource.close(); sseSource = null } }
 
 // ---- chat ----
 function handleQuick(btn) {
+  if (interactionBusy.value) return
   if (btn && btn.text) { send(btn.text); return }
 
   if (btn.type) {
-    handleAction({ type: btn.type, label: btn.label, command: btn.command })
+    handleAction({
+      type: btn.type,
+      label: btn.label,
+      command: btn.command,
+      category: btn.category,
+      ...btn,
+    })
     return
   }
   if (btn.action === 'download-docx') {
@@ -551,10 +783,22 @@ function handleQuick(btn) {
   }
   send(btn.label)
 }
-function send(msg) { addMessage('user', msg); doChat(msg) }
+function isRewriteRequest(text) {
+  return /@L\d+\s/.test(String(text || ''))
+}
+
+function send(msg, { action = null } = {}) {
+  if (interactionBusy.value) return false
+  const text = String(msg || '').trim()
+  if (!text && !action) return false
+  // The orchestrator persists both sides atomically. Direct block rewrites still use the legacy chat store.
+  addMessage('user', text, [], { persist: !action && isRewriteRequest(text) })
+  void doChat(text, { action })
+  return true
+}
 function submit() {
   const t = input.value.trim()
-  if ((!t && !tags.value.length) || sending.value) return
+  if ((!t && !tags.value.length) || interactionBusy.value) return
   let msg = ''
   if (tags.value.length) {
     const tagRefs = tags.value.map(tag => `@L${tag.line} ${tag.preview}`).join('\n')
@@ -565,12 +809,12 @@ function submit() {
   }
   if (!msg) return
   input.value = ''
-  addMessage('user', msg)
-  doChat(msg)
+  send(msg)
 }
-async function doChat(text) {
+async function doChat(text, { action = null } = {}) {
+  if (sending.value || repairExecuting.value) return
   sending.value = true
-  const match = text.match(/@L(\d+)\s/)
+  const match = !action && text.match(/@L(\d+)\s/)
   if (match) {
     const lineNumber = parseInt(match[1])
     const instruction = text.replace(/@L\d+\s*/g, '').trim()
@@ -615,7 +859,7 @@ async function doChat(text) {
   }, 1800)
 
   try {
-    const resp = await orchestrateChat(text)
+    const resp = await orchestrateChat(text, { action })
     const body = resp && resp.data ? resp.data : {}
     clearInterval(thinkTimer)
     streamingIdx.value = -1
@@ -631,30 +875,41 @@ async function doChat(text) {
       return
     }
 
-    const reply = body.reply || ''
-    const actions = Array.isArray(body.actions) ? body.actions : []
-    const supervisor_steps = Array.isArray(body.supervisor_steps) ? body.supervisor_steps : []
-    const goal = body.goal && typeof body.goal === 'object' ? body.goal : null
-    const goal_id = body.goal_id || ''
+    const assistantPayload = body.assistant && typeof body.assistant === 'object' ? body.assistant : null
+    const reply = typeof body.assistant === 'string'
+      ? body.assistant
+      : (assistantPayload?.content || assistantPayload?.reply || assistantPayload?.message || assistantPayload?.text || body.reply || body.message || '')
+    const actions = Array.isArray(body.actions)
+      ? body.actions
+      : (Array.isArray(assistantPayload?.actions) ? assistantPayload.actions : [])
+    const supervisor_steps = Array.isArray(body.supervisor_steps)
+      ? body.supervisor_steps
+      : (Array.isArray(assistantPayload?.supervisor_steps) ? assistantPayload.supervisor_steps : [])
+    const goalPayload = body.goal || assistantPayload?.goal
+    const goal = goalPayload && typeof goalPayload === 'object' ? goalPayload : null
+    const goal_id = body.goal_id || assistantPayload?.goal_id || ''
 
-    // 把决策轨迹整理进 thinking，结果出来后默认折叠
-    let thinkingDone = '已完成分析。'
-    if (supervisor_steps.length) {
-      thinkingDone = supervisor_steps.map((st, i) => {
-        const n = st.step || (i + 1)
-        const tool = st.tool || 'chat'
-        const thought = st.thought_summary || ''
-        const obs = st.observation || ''
-        const flag = st.executed ? '已执行' : '未执行'
-        return `#${n} ${tool}（${flag}）\n${thought}${obs ? '\n→ ' + obs : ''}`
-      }).join('\n\n')
-    } else if (body.supervisor) {
-      thinkingDone = 'Supervisor 已处理，但本轮无逐步 tool 轨迹。'
-    } else {
-      thinkingDone = '编排器已返回结果（经典模式）。'
+    // 优先展示模型真实思考过程；否则回退到决策轨迹摘要
+    const modelThinking = String(body.thinking || body.reasoning || assistantPayload?.thinking || '').trim()
+    let thinkingDone = modelThinking
+    if (!thinkingDone) {
+      if (supervisor_steps.length) {
+        thinkingDone = supervisor_steps.map((st, i) => {
+          const n = st.step || (i + 1)
+          const tool = st.tool || 'chat'
+          const thought = st.thought_summary || ''
+          const obs = st.observation || ''
+          const flag = st.executed ? '已执行' : '未执行'
+          return `#${n} ${tool}（${flag}）\n${thought}${obs ? '\n→ ' + obs : ''}`
+        }).join('\n\n')
+      } else if (body.supervisor) {
+        thinkingDone = 'Supervisor 已处理，但本轮无逐步 tool 轨迹。'
+      } else {
+        thinkingDone = '编排器已返回结果（经典模式）。'
+      }
     }
     if (body.orchestrator_note) {
-      thinkingDone += `\n备注：${body.orchestrator_note}`
+      thinkingDone = (thinkingDone ? thinkingDone + '\n' : '') + `备注：${body.orchestrator_note}`
     }
 
     if (messages.value[msgIndex]) {
@@ -667,13 +922,14 @@ async function doChat(text) {
       msg.stepsExpanded = supervisor_steps.length > 0
       msg.goal = goal
       msg.goal_id = goal_id
-      // 结果落盘
-      saveChatMessage('assistant', reply, { actions, kind: 'message' }).catch(e => console.error('保存消息失败', e))
     } else {
-      addMessage('assistant', reply, actions, { supervisor_steps, goal, goal_id, stepsExpanded: true })
+      addMessage('assistant', reply, actions, { persist: false, thinking: thinkingDone, supervisor_steps, goal, goal_id, stepsExpanded: true })
     }
 
-    if (body.triggered_auto_run) {
+    if (body.repair_job) applyRepairJob(body.repair_job)
+    if (body.triggered_repair && (body.job_id || body.repair_job)) {
+      await beginRepairTracking(body.job_id || body.repair_job?.job_id || '', body.repair_job || null)
+    } else if (body.triggered_auto_run) {
       nextTick(() => { if (!autoExecuting.value) startAutoRun() })
     } else if (body.triggered_command && workflowCommands().includes(body.triggered_command)) {
       nextTick(() => { if (!autoExecuting.value) startAutoRun(body.triggered_command) })
@@ -681,7 +937,7 @@ async function doChat(text) {
       watchLiveRun()
     }
     if (body.orchestrator_note) {
-      addMessage('system', `[编排器] ${body.orchestrator_note}`)
+      addMessage('system', `[编排器] ${body.orchestrator_note}`, [], { persist: false })
     }
   } catch (e) {
     clearInterval(thinkTimer)
@@ -786,7 +1042,12 @@ function triggerAndAutoAdvance(cmd, label) {
   runCommand(cmd)
   if (!autoExecuting.value) startAutoRun(cmd)
 }
-function handleAction(act) {
+function handleAction(act, sourceMessage = null) {
+  if (!act || interactionBusy.value || act.consumed) return
+  act.consumed = true
+  if (sourceMessage && ['confirm_minimal_repair', 'decline_minimal_repair'].includes(act.type)) {
+    sourceMessage.actions.forEach(action => { action.consumed = true })
+  }
   if (act && act.type === 'export_preflight') {
     ;(async () => {
       try {
@@ -806,6 +1067,23 @@ function handleAction(act) {
   }
 
   if (act.type === 'chat_prompt') send(act.label)
+  else if (act.type === 'confirm_minimal_repair') {
+    const confirmationId = actionConfirmationId(act)
+    const text = act.label || '是，执行最小修复'
+    if (confirmationId) {
+      send(text, { action: { type: 'confirm_minimal_repair', confirmation_id: confirmationId } })
+    } else {
+      send('是，执行最小修复')
+    }
+  }
+  else if (act.type === 'decline_minimal_repair') {
+    const confirmationId = actionConfirmationId(act)
+    send(act.label || '否，暂不修复', {
+      action: confirmationId
+        ? { type: 'decline_minimal_repair', confirmation_id: confirmationId }
+        : null,
+    })
+  }
   else if (act.type === 'run_command') triggerAndAutoAdvance(act.command, '执行')
   else if (act.type === 'retry_stage') { addMessage('system', `重试: ${stepLabel(act.command)}`); triggerAndAutoAdvance(act.command, '重试') }
   else if (act.type === 'skip_stage') { skipFailedStage(act.command) }
@@ -814,9 +1092,16 @@ function handleAction(act) {
   else if (act.type === 'dispatch_rewrite') { send('对需要改稿的章节定向改稿') }
   else if (act.type === 'global_review') triggerAndAutoAdvance('global-review', '触发全文审核子 Agent')
   else if (act.type === 'auto_run') { if (!autoExecuting.value) startAutoRun() }
-  else if (act.type === 'show_step') emit('preview', act.command)
+  else if (act.type === 'show_step') emit('preview', act.command || act.params?.command)
+  else if (act.type === 'open_detail') {
+    const cmd = act.command || act.params?.command || act.params?.stage_command || ''
+    if (cmd) emit('preview', cmd)
+  }
   else if (act.type === 'show_doc_editor') emit('open-doc-editor')
-  else if (act.type === 'show_manual_review') emit('preview', 'manual-review')
+  else if (act.type === 'show_manual_review') {
+    const cat = String(act.category || act.params?.category || '').trim()
+    emit('preview', cat ? `manual-review:${cat}` : 'manual-review')
+  }
   else if (act.type === 'upload_batch') { /* handled by file input */ }
   else if (act.type === 'accept_rewrite') acceptRewrite(act)
   else if (act.type === 'discard_rewrite') discardRewrite()
@@ -921,7 +1206,9 @@ onMounted(async () => {
     addMessage('assistant', '你好！请上传招标文件、公司资料和标书模板，我会自动生成执行计划并帮你生成投标文件。')
   }
   await loadStatus()
-  if (running.value) {
+  if (repairExecuting.value) {
+    await beginRepairTracking(repairJob.value?.job_id || '', repairJob.value)
+  } else if (running.value) {
     autoExecuting.value = true
     autoStarted.value = true
     connectSSE()
@@ -932,6 +1219,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   clearInterval(statusTimer)
+  stopRepairPolling()
   closeSSE()
 })
 </script>

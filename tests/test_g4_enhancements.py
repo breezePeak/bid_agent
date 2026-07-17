@@ -16,7 +16,7 @@ from agent.root_cause import ALLOWED_CAUSE_STAGES, refine_issue_cause_with_llm
 
 
 class AcceptRiskTests(unittest.TestCase):
-    def test_disabled_by_default(self) -> None:
+    def test_can_disable_via_env(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "workspace").mkdir(parents=True)
@@ -45,8 +45,9 @@ class AcceptRiskTests(unittest.TestCase):
             )
             upsert_issues(root, [iss])
             self.assertTrue(open_block_issues(root))
-            with mock.patch.dict(os.environ, {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
-                result = accept_issue_risk(root, iss["id"], reason="已人工确认可接受")
+            env = {k: v for k, v in os.environ.items() if k != "ISSUE_ACCEPT_RISK_ENABLED"}
+            with mock.patch.dict(os.environ, env, clear=True):
+                result = accept_issue_risk(root, iss["id"], reason="")
             self.assertTrue(result["ok"], result)
             self.assertFalse(open_block_issues(root))
             self.assertTrue(can_proceed(root)["can_proceed"])

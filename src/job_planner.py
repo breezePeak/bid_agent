@@ -5,6 +5,7 @@ from typing import Any
 
 from file_loader import load_outline, load_score_points, load_template_evidence_map
 from manual_review import manual_review_context_for_chapter, score_coverage_assignment_overrides
+from materials_checklist import items_for_chapter, writing_requirement_lines
 from utils import project_root, select_score_points, stringify, write_json
 
 
@@ -64,6 +65,26 @@ def _evidence_for_chapter(chapter: dict[str, Any], evidence_map: dict[str, Any])
 def _build_job(chapter: dict[str, Any], root: Path, evidence_map: dict[str, Any]) -> dict[str, Any]:
     chapter_id = stringify(chapter.get("id"))
     review_context = manual_review_context_for_chapter(root, chapter_id)
+    writing_requirements = [stringify(item) for item in chapter.get("writing_requirements", []) if stringify(item)]
+    materials_items = items_for_chapter(root, chapter=chapter)
+    compact_materials = [
+        {
+            "item_id": stringify(item.get("item_id")),
+            "category": stringify(item.get("category")),
+            "requirement": stringify(item.get("requirement")),
+            "response_status": stringify(item.get("response_status")),
+            "evidence_status": stringify(item.get("evidence_status")),
+            "reason": stringify(item.get("reason")),
+            "suggested_attachment": stringify(item.get("suggested_attachment")),
+            "suggested_placeholder_language": stringify(item.get("suggested_placeholder_language")),
+            "severity": stringify(item.get("severity")),
+        }
+        for item in materials_items
+        if isinstance(item, dict)
+    ]
+    for line in writing_requirement_lines(materials_items):
+        if line not in writing_requirements:
+            writing_requirements.append(line)
     return {
         "job_id": f"chapter_{chapter_id}",
         "chapter_id": chapter_id,
@@ -72,7 +93,7 @@ def _build_job(chapter: dict[str, Any], root: Path, evidence_map: dict[str, Any]
         "template_order": int(chapter.get("template_order", 0) or 0),
         "parent_id": stringify(chapter.get("parent_id")),
         "score_point_ids": [stringify(item) for item in chapter.get("score_point_ids", [])],
-        "writing_requirements": [stringify(item) for item in chapter.get("writing_requirements", []) if stringify(item)],
+        "writing_requirements": writing_requirements,
         "sections": chapter.get("sections", []),
         "description": stringify(chapter.get("description")),
         "output_path": str(root / "workspace" / "chapters" / f"{chapter_id}.md"),
@@ -80,6 +101,7 @@ def _build_job(chapter: dict[str, Any], root: Path, evidence_map: dict[str, Any]
         "context_path": str(root / "workspace" / "contexts" / f"{chapter_id}_context.json"),
         "template_tasks": _evidence_for_chapter(chapter, evidence_map),
         "manual_review": review_context,
+        "materials_checklist_items": compact_materials,
     }
 
 

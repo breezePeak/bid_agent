@@ -90,22 +90,24 @@
     </div>
 
     <!-- full rewrite dialog -->
-    <div v-if="fullRewriteVisible" class="dialog-overlay" @click.self="fullRewriteVisible = false">
-      <div class="dialog" style="width:560px">
-        <div class="dialog-header"><h2>AI 全文改写</h2><button class="btn btn-icon" @click="fullRewriteVisible = false">&times;</button></div>
-        <div class="dialog-body">
-          <div class="form-group">
-            <label>改写指令</label>
-            <textarea v-model="fullRewriteInstruction" rows="4" style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;" placeholder="例如：让全文语气更正式；补充评分点响应..."></textarea>
-          </div>
-          <p v-if="fullRewriteError" class="form-error">{{ fullRewriteError }}</p>
-          <div class="dialog-footer">
-            <button class="btn" @click="fullRewriteVisible = false">取消</button>
-            <button class="btn btn-primary" @click="submitFullRewrite" :disabled="fullRewriteSubmitting">{{ fullRewriteSubmitting ? '生成中...' : '开始改写' }}</button>
+    <Teleport to="body">
+      <div v-if="fullRewriteVisible" class="dialog-overlay" @click.self="fullRewriteVisible = false">
+        <div class="dialog" style="width:560px">
+          <div class="dialog-header"><h2>AI 全文改写</h2><button class="btn btn-icon" @click="fullRewriteVisible = false">&times;</button></div>
+          <div class="dialog-body">
+            <div class="form-group">
+              <label>改写指令</label>
+              <textarea v-model="fullRewriteInstruction" rows="4" style="width:100%;padding:8px;border:1px solid var(--color-border);border-radius:6px;font-size:13px;font-family:inherit;resize:vertical;" placeholder="例如：让全文语气更正式；补充评分点响应..."></textarea>
+            </div>
+            <p v-if="fullRewriteError" class="form-error">{{ fullRewriteError }}</p>
+            <div class="dialog-footer">
+              <button class="btn" @click="fullRewriteVisible = false">取消</button>
+              <button class="btn btn-primary" @click="submitFullRewrite" :disabled="fullRewriteSubmitting">{{ fullRewriteSubmitting ? '生成中...' : '开始改写' }}</button>
+            </div>
           </div>
         </div>
       </div>
-    </div>
+    </Teleport>
   </div>
 </template>
 

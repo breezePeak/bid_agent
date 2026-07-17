@@ -656,7 +656,14 @@ def check_document_completeness(root: Path, corpus: dict[str, str], facts: dict[
             )
         )
 
-    placeholders = PLACEHOLDER_RE.findall(bid_text) if bid_text else []
+    # Structured MATERIAL_GAP placeholders are intentional deferred slots; exclude before residual scan.
+    try:
+        from materials_checklist import strip_material_gap_blocks
+
+        scan_text = strip_material_gap_blocks(bid_text) if bid_text else ""
+    except Exception:
+        scan_text = bid_text or ""
+    placeholders = PLACEHOLDER_RE.findall(scan_text) if scan_text else []
     if placeholders:
         items.append(
             make_check_item(

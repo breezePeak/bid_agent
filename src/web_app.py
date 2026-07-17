@@ -24,6 +24,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 
 ROOT = Path(__file__).resolve().parent.parent
 # Web 进程与流水线子进程统一：配置以项目根 .env / models.json 为准
@@ -35,7 +36,16 @@ ACTIVE_RUN_FILE = RUNS_DIR / ".active_run"
 
 sys.path.insert(0, str(ROOT / "src"))
 
-from chat_store import clear_messages, load_messages, save_message
+from chat_store import clear_messages, close_chat_store, load_messages, save_message
+from agent.repair_jobs import (
+    RUNNING_REPAIR_STATUSES,
+    claim_repair_job,
+    create_confirmation,
+    decline_repair_job,
+    load_repair_job,
+    reconcile_interrupted_repair,
+    update_repair_job,
+)
 from session_orchestrator import plan as orchestrator_plan, resolve_execution as orchestrator_resolve
 from graph.state_recorder import load_run_events, load_stage_metrics, save_run_state
 from manual_review import apply_manual_review_update, manual_review_items, manual_review_summary
@@ -51,6 +61,7 @@ from pipeline_supervisor import PipelineSupervisor
 from stage_validation import COLLECTION_STAGE_IDS, stage_collection_status
 from project_profile_registry import load_project_profile, project_profile_choices, save_project_profile
 from prompt_registry import AGENT_SPECS
+from utils import read_json
 
 app = FastAPI(title="标书 Agent 控制台", docs_url=None, redoc_url=None)
 
@@ -58,6 +69,9 @@ LOG_LINES: list[str] = []
 LOG_MAX = 2000
 RUNNING = False
 CURRENT_TASK = ""
+_REPAIR_START_LOCK = threading.RLock()
+_CHAT_TURN_LOCK_GUARD = threading.Lock()
+_CHAT_TURN_LOCKS: dict[str, asyncio.Lock] = {}
 CURRENT_PROCESS: subprocess.Popen | None = None
 CURRENT_RUN_ID = ""
 CURRENT_RUN_ROOT: Path | None = None
@@ -145,6 +159,16 @@ def _same_path(left: Path | None, right: Path | None) -> bool:
         return left.resolve() == right.resolve()
     except Exception:
         return str(left) == str(right)
+
+
+def _chat_turn_lock(root: Path, run_id: str) -> asyncio.Lock:
+    key = f"{root.resolve()}::{run_id}"
+    with _CHAT_TURN_LOCK_GUARD:
+        lock = _CHAT_TURN_LOCKS.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _CHAT_TURN_LOCKS[key] = lock
+        return lock
 
 
 def _read_run_state(root: Path) -> dict[str, Any]:
@@ -388,7 +412,7 @@ def build_workspace_file_tree(root: Path) -> dict[str, Any]:
         )
 
     for category, label in (("tender", "招标文件"), ("company", "公司资料"), ("template", "标书模板")):
-        _push_section(category, label, _list_dir_file_items(root, f"sources/{category}"), open_default=True)
+        _push_section(category, label, _list_dir_file_items(root, f"sources/{category}"), open_default=False)
 
     for stage in workflow_stage_specs(include_utility=False):
         items: list[dict[str, Any]] = []
@@ -398,7 +422,7 @@ def build_workspace_file_tree(root: Path) -> dict[str, Any]:
             f"stage_{stage.id}",
             stage.label,
             items,
-            open_default=bool(items) and stage.command in {"write-all", "review-fix-all", "build-md", "build-docx"},
+            open_default=False,
             stage_command=stage.command,
         )
 
@@ -438,7 +462,7 @@ def build_workspace_file_tree(root: Path) -> dict[str, Any]:
         "outputs",
         "最终输出",
         _list_dir_file_items(root, "outputs"),
-        open_default=True,
+        open_default=False,
         skip_seen=False,
         mark_seen=True,
     )
@@ -1244,6 +1268,7 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         "workspace/score_requirements.json": status["workspace"]["score_requirements"],
         "workspace/score_points.json": status["workspace"]["score_points"],
         "workspace/global_facts.json": status["workspace"]["global_facts"],
+        "workspace/materials_checklist.json": status["workspace"]["materials_checklist"],
         "workspace/template_evidence_map.json": status["workspace"]["template_evidence_map"],
         "workspace/template_quality_report.json": status["workspace"]["template_quality_report"],
         "workspace/outline.json": status["workspace"]["outline"],
@@ -1560,6 +1585,15 @@ def api_status() -> dict[str, Any]:
     project_profile = load_project_profile(root)
     review_summary = manual_review_summary(root)
     pipeline_control = SUPERVISOR.load(root)
+    repair_job = load_repair_job(root)
+    pending_confirmation = None
+    if str(repair_job.get("status") or "") == "awaiting_confirmation":
+        pending_confirmation = {
+            "type": "minimal_repair",
+            "confirmation_id": str(repair_job.get("confirmation_id") or ""),
+            "job_id": str(repair_job.get("job_id") or ""),
+            "count": int(repair_job.get("total_count") or 0),
+        }
     pipeline_running = SUPERVISOR.is_running(root) or str(pipeline_control.get("status", "")) in {
         "running",
         "recovering",
@@ -1638,6 +1672,7 @@ def api_status() -> dict[str, Any]:
             "score_requirements": _exists(root / "workspace" / "score_requirements.json"),
             "score_points": _exists(root / "workspace" / "score_points.json"),
             "global_facts": _exists(root / "workspace" / "global_facts.json"),
+            "materials_checklist": _exists(root / "workspace" / "materials_checklist.json"),
             "template_evidence_map": _exists(root / "workspace" / "template_evidence_map.json"),
             "template_quality_report": _exists(root / "workspace" / "template_quality_report.json"),
             "outline": _exists(root / "workspace" / "outline.json"),
@@ -1690,6 +1725,8 @@ def api_status() -> dict[str, Any]:
         "llm_config": _active_llm_summary(),
         "agent_activity": _safe_agent_activity(),
         "issues_summary": _safe_issues_summary(),
+        "pending_confirmation": pending_confirmation,
+        "repair_job": repair_job or None,
         "manual_review_summary": review_summary,
         "latest_agent_runs": _latest_agent_runs(root),
         "run_metrics": load_stage_metrics(root),
@@ -1809,6 +1846,306 @@ def api_workflow_step_detail(command: str = Query(..., min_length=1)) -> JSONRes
             "run_root": str(root),
         }
     )
+
+
+def _minimal_repair_candidates(root: Path) -> list[dict[str, Any]]:
+    """Return actionable blocking issues for a chat-based minimal-repair prompt."""
+    try:
+        from agent.issues import load_open_issues
+        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+        sync_issues_from_global_review(root)
+        sync_issues_from_compliance(root)
+        return [
+            issue for issue in load_open_issues(root)
+            if str(issue.get("status")) in {"open", "in_progress"}
+            and str(issue.get("severity")) == "block"
+        ]
+    except Exception:
+        return []
+
+
+def _minimal_repair_resume_command(root: Path) -> str:
+    commands = auto_run_commands()
+    pipeline_command = str(SUPERVISOR.load(root).get("current_stage") or "")
+    if pipeline_command in commands:
+        return pipeline_command
+    state_command = _command_for_stage(str(_read_run_state(root).get("stage") or ""))
+    if state_command in commands:
+        return state_command
+    for command in commands:
+        try:
+            if not stage_outputs_ready(root, stage_spec_by_command(command).id):
+                return command
+        except Exception:
+            continue
+    return commands[-1] if commands else ""
+
+
+def _issue_repair_fingerprint(issue: dict[str, Any]) -> str:
+    try:
+        from agent.repair import issue_fingerprint
+
+        return str(issue_fingerprint(issue))
+    except Exception:
+        target = issue.get("target") if isinstance(issue.get("target"), dict) else {}
+        target_key = json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"{issue.get('stage_id', '')}|{issue.get('code', '')}|{target_key}"
+
+
+def _issue_has_auto_repair(issue: dict[str, Any]) -> bool:
+    auto_types = {"fix_compliance", "fix_coverage", "rewrite_chapters", "rerun_stage", "regenerate_artifact"}
+    evidence = issue.get("evidence") if isinstance(issue.get("evidence"), dict) else {}
+    if bool(evidence.get("need_manual_review")) and evidence.get("auto_fixable") is not True:
+        return False
+    actions = issue.get("suggested_actions") if isinstance(issue.get("suggested_actions"), list) else []
+    return any(isinstance(action, dict) and str(action.get("type") or "") in auto_types for action in actions)
+
+
+def _ensure_minimal_repair_confirmation(root: Path) -> dict[str, Any]:
+    issues = _minimal_repair_candidates(root)
+    if not issues:
+        current = load_repair_job(root)
+        if str(current.get("status") or "") == "awaiting_confirmation":
+            update_repair_job(
+                root,
+                str(current.get("job_id") or ""),
+                status="completed",
+                phase="complete",
+                resolved_count=int(current.get("total_count") or 0),
+                remaining_count=0,
+                message="阻断问题已不存在，无需执行最小修复",
+                result={"no_longer_blocked": True},
+            )
+        return {}
+    auto_count = sum(1 for issue in issues if _issue_has_auto_repair(issue))
+    return create_confirmation(
+        root,
+        issue_fingerprints=[_issue_repair_fingerprint(issue) for issue in issues],
+        total_count=len(issues),
+        auto_count=auto_count,
+        manual_count=max(0, len(issues) - auto_count),
+        resume_command=_minimal_repair_resume_command(root),
+    )
+
+
+def _persistent_minimal_repair_prompt(root: Path) -> tuple[str, list[dict[str, Any]]]:
+    current = load_repair_job(root)
+    if str(current.get("status") or "") in {"completed", "partial", "failed"}:
+        return "", []
+    job = _ensure_minimal_repair_confirmation(root)
+    if not job or str(job.get("status") or "") != "awaiting_confirmation":
+        return "", []
+    count = int(job.get("total_count") or 0)
+    auto_count = int(job.get("auto_count") or 0)
+    manual_count = int(job.get("manual_count") or 0)
+    return (
+        f"发现 {count} 个阻断问题，其中预计 {auto_count} 项可自动处理、{manual_count} 项需人工处理。"
+        "是否执行最小修复？确认后会自动修改、强制重验，并尝试从原阻塞步骤继续一次。",
+        [
+            {
+                "type": "confirm_minimal_repair",
+                "label": "是，自动最小修复",
+                "confirmation_id": str(job.get("confirmation_id") or ""),
+                "job_id": str(job.get("job_id") or ""),
+            },
+            {
+                "type": "decline_minimal_repair",
+                "label": "否，暂不修复",
+                "confirmation_id": str(job.get("confirmation_id") or ""),
+                "job_id": str(job.get("job_id") or ""),
+            },
+        ],
+    )
+
+
+def _minimal_repair_intent(message: str, *, has_pending: bool) -> str:
+    normalized = re.sub(r"[\s，。！？!、,.？]", "", message.strip().lower())
+    if not normalized:
+        return ""
+    negative_exact = {"否", "不用", "暂不", "取消", "不需要", "先不", "不要"}
+    negative_repair = re.search(
+        r"(?:不|别|勿|无需|不用|暂不|取消)(?:要|用|需要|执行|进行|自动|最小|再|先){0,3}(?:修复|处理)",
+        normalized,
+    )
+    if normalized in negative_exact or negative_repair:
+        return "decline" if has_pending else "query"
+    if re.search(r"(?:怎么修|如何修|为什么失败|失败原因|查看(?:问题|详情|报告|修复计划)|修复会改什么|哪些问题)", normalized):
+        return "query"
+    if has_pending and (
+        normalized in {"是", "好的", "好", "确认", "同意", "需要", "可以", "执行"}
+        or normalized.startswith(("是的", "确认执行", "同意执行"))
+    ):
+        return "confirm"
+    if normalized in {"修复", "修复吧"}:
+        return "confirm" if has_pending else "start"
+    if re.search(
+        r"(?:自动修复|最小修复|修复啊|修一下|开始修复|立即修复|赶紧修复|一键修复|"
+        r"帮我.{0,8}修复|执行.{0,6}修复|修复这些|处理.{0,8}阻断)",
+        normalized,
+    ):
+        return "confirm" if has_pending else "start"
+    return ""
+
+
+def _repair_result_count(result: dict[str, Any], key: str, count_key: str) -> int:
+    value = result.get(key)
+    if isinstance(value, list):
+        return len(value)
+    try:
+        return int(result.get(count_key) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _trigger_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
+    """Claim exactly one repair slot and run the persisted job in the background."""
+    global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
+    with _REPAIR_START_LOCK:
+        current = load_repair_job(root)
+        if str(current.get("status") or "") in RUNNING_REPAIR_STATUSES:
+            return {"ok": True, "duplicate": True, "job": current, "message": current.get("message", "修复任务正在执行")}
+        pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
+        pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
+        if RUNNING or SUPERVISOR.is_running() or pipeline_busy:
+            return {"ok": False, "busy": True, "job": current, "message": "当前已有任务正在运行，修复确认已保留，请稍后重试"}
+        claimed = claim_repair_job(root, confirmation_id)
+        if not claimed.get("ok"):
+            return {"ok": False, "job": current, "message": claimed.get("message", "无法确认修复任务")}
+        job = claimed.get("job") if isinstance(claimed.get("job"), dict) else {}
+        if claimed.get("duplicate"):
+            return {"ok": True, "duplicate": True, "job": job, "message": job.get("message", "已处理该修复确认")}
+        job_id = str(job.get("job_id") or "")
+        job_run_id = ACTIVE_RUN_ID or root.name
+        RUNNING = True
+        CURRENT_TASK = "minimal-repair"
+        CURRENT_RUN_ID = job_run_id
+        CURRENT_RUN_ROOT = root
+        PAUSE_REQUESTED = False
+
+    def _progress(phase: str, progress: dict[str, Any] | None = None) -> None:
+        details = progress if isinstance(progress, dict) else {}
+        status = "revalidating" if phase in {"revalidate", "revalidating"} else "running"
+        message = str(details.get("message") or "")
+        if not message:
+            message = {
+                "analysis": "正在分析阻断问题并合并根因动作",
+                "edit": "正在执行根因修复",
+                "revalidate": "正在强制重验质量门禁",
+                "complete": "正在汇总修复结果",
+            }.get(phase, "正在执行最小修复")
+        completed = int(details.get("completed") or 0)
+        total = int(details.get("total") or 0)
+        ratio = (completed / total) if total > 0 else 0.0
+        if phase == "analysis":
+            percent = 10
+        elif phase == "edit":
+            percent = 10 + round(60 * ratio)
+        elif phase in {"revalidate", "revalidating"}:
+            percent = 70 + round(25 * ratio)
+        elif phase == "complete":
+            percent = 98
+        else:
+            percent = 5
+        changes: dict[str, Any] = {
+            "status": status,
+            "phase": phase,
+            "message": message,
+            "phase_completed": completed,
+            "phase_total": total,
+            "progress_percent": max(0, min(98, percent)),
+        }
+        for key in ("total_count", "auto_count", "manual_count", "resolved_count", "remaining_count", "failed_count"):
+            if key in details:
+                changes[key] = details[key]
+        update_repair_job(root, job_id, **changes)
+
+    def _run() -> None:
+        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
+        result: dict[str, Any]
+        failure: Exception | None = None
+        try:
+            from agent.repair import execute_repair_batch
+
+            issues = _minimal_repair_candidates(root)
+            issue_ids = [str(issue.get("id") or "") for issue in issues if issue.get("id")]
+            result = execute_repair_batch(
+                root,
+                issue_ids,
+                confirm=True,
+                dry_run=False,
+                progress_callback=_progress,
+            )
+        except Exception as exc:
+            failure = exc
+            result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
+
+        resolved_count = _repair_result_count(result, "resolved", "resolved_count")
+        remaining_count = _repair_result_count(result, "still_open", "remaining_count")
+        manual_count = _repair_result_count(result, "manual", "manual_count")
+        failed_count = _repair_result_count(result, "failed", "failed_count")
+        if failure and failed_count == 0:
+            failed_count = 1
+        if failure:
+            terminal_status = "failed"
+        elif remaining_count or manual_count or failed_count:
+            terminal_status = "partial"
+        else:
+            terminal_status = "completed"
+
+        with _REPAIR_START_LOCK:
+            RUNNING = False
+            CURRENT_TASK = ""
+            CURRENT_RUN_ID = ""
+            CURRENT_RUN_ROOT = None
+
+        resume_command = str(job.get("resume_command") or "")
+        resume_started = False
+        if resume_command:
+            try:
+                resume_started = SUPERVISOR.start(
+                    job_run_id,
+                    root,
+                    _run_sync,
+                    start_command=resume_command,
+                )
+            except Exception as exc:
+                result["resume_error"] = str(exc)
+        result["resume_command"] = resume_command
+        result["resume_started"] = resume_started
+        result_message = str(result.get("message") or "").strip()
+        summary = (
+            f"最小修复结束：已解决 {resolved_count} 项，仍存在 {remaining_count} 项，"
+            f"需人工 {manual_count} 项，失败 {failed_count} 项。"
+        )
+        if resume_command:
+            summary += f" 已从 {resume_command} 尝试恢复流水线一次。"
+        if result_message and result_message not in summary:
+            summary = f"{summary}\n{result_message}"
+        try:
+            save_message(root, job_run_id, "assistant", summary, actions=[], kind="repair_result")
+        except Exception:
+            pass
+        final_job = update_repair_job(
+            root,
+            job_id,
+            status=terminal_status,
+            phase="complete" if terminal_status == "completed" else terminal_status,
+            resolved_count=resolved_count,
+            remaining_count=remaining_count,
+            manual_count=manual_count,
+            failed_count=failed_count,
+            progress_percent=100,
+            resume_attempted=bool(resume_command),
+            message=summary,
+            result=result,
+        )
+        _append_log(f"[最小修复] {summary}")
+        if not final_job:
+            _append_log("[警告] 最小修复结果未能写入任务状态")
+
+    threading.Thread(target=_run, daemon=True, name=f"repair-{job_id}").start()
+    return {"ok": True, "duplicate": False, "job": job, "message": "已开始最小修复，将按根因合并处理并统一重验"}
 
 
 @app.post("/api/chat")
@@ -1933,6 +2270,49 @@ def _trigger_rewrite_targets_inline(targets: list[dict[str, Any]]) -> dict[str, 
     return {"ok": True, "message": f"定向改稿已启动: {chapter_ids}"}
 
 
+def _chat_response(
+    root: Path,
+    run_id: str,
+    reply: str,
+    *,
+    actions: list[dict[str, Any]] | None = None,
+    thinking: str = "",
+    kind: str = "message",
+    **extra: Any,
+) -> JSONResponse:
+    action_items = actions or []
+    assistant = save_message(root, run_id, "assistant", reply, thinking, action_items, kind)
+    payload: dict[str, Any] = {
+        "ok": True,
+        "reply": reply,
+        "actions": action_items,
+        "assistant": assistant,
+        **extra,
+    }
+    if thinking:
+        payload["thinking"] = thinking
+    return JSONResponse(payload)
+
+
+def _repair_retry_actions(job: dict[str, Any]) -> list[dict[str, Any]]:
+    if str(job.get("status") or "") != "awaiting_confirmation":
+        return []
+    return [
+        {
+            "type": "confirm_minimal_repair",
+            "label": "是，自动最小修复",
+            "confirmation_id": str(job.get("confirmation_id") or ""),
+            "job_id": str(job.get("job_id") or ""),
+        },
+        {
+            "type": "decline_minimal_repair",
+            "label": "否，暂不修复",
+            "confirmation_id": str(job.get("confirmation_id") or ""),
+            "job_id": str(job.get("job_id") or ""),
+        },
+    ]
+
+
 @app.post("/api/chat/orchestrate")
 async def api_chat_orchestrate(request: Request) -> JSONResponse:
     root = _active_root()
@@ -1940,78 +2320,177 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
     try:
         body = await request.json()
     except Exception:
-        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
-    message = str(body.get("message", "")).strip()
-    if not message:
-        return JSONResponse(
-            {"ok": True, "reply": "可以直接告诉我你想做什么，比如：当前状态、继续执行下一步、查看评分覆盖、一键生成。", "actions": []}
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON 对象"}, status_code=400)
+    action = body.get("action") if isinstance(body.get("action"), dict) else {}
+    message = str(body.get("message") or "").strip()
+    action_type = str(action.get("type") or "").strip()
+    if not message and action_type == "confirm_minimal_repair":
+        message = "是，执行最小修复"
+    elif not message and action_type == "decline_minimal_repair":
+        message = "否，暂不修复"
+
+    async with _chat_turn_lock(root, run_id):
+        history = load_messages(root, run_id, limit=20)
+        if message:
+            save_message(root, run_id, "user", message, actions=[], kind="message")
+        if not message:
+            return _chat_response(
+                root,
+                run_id,
+                "可以直接告诉我你想做什么，例如查看状态、继续流程或自动修复阻断问题。",
+                actions=[],
+            )
+
+        current_job = load_repair_job(root)
+        has_pending = str(current_job.get("status") or "") == "awaiting_confirmation"
+        intent = _minimal_repair_intent(message, has_pending=has_pending)
+        if action_type == "confirm_minimal_repair":
+            intent = "confirm"
+        elif action_type == "decline_minimal_repair":
+            intent = "decline"
+
+        if intent == "decline" and has_pending:
+            confirmation_id = str(action.get("confirmation_id") or current_job.get("confirmation_id") or "")
+            job = decline_repair_job(root, confirmation_id)
+            return _chat_response(
+                root,
+                run_id,
+                "好的，暂不执行最小修复。阻断问题会保留，之后仍可直接说“自动修复”。",
+                actions=[],
+                intent="decline_minimal_repair",
+                repair_job=job or None,
+            )
+
+        if intent in {"confirm", "start"}:
+            if intent == "start" or not current_job:
+                current_job = _ensure_minimal_repair_confirmation(root)
+                has_pending = str(current_job.get("status") or "") == "awaiting_confirmation"
+            confirmation_id = str(action.get("confirmation_id") or current_job.get("confirmation_id") or "")
+            if not current_job or not confirmation_id:
+                return _chat_response(
+                    root,
+                    run_id,
+                    "当前没有可自动修复的阻断问题。",
+                    actions=[],
+                    intent="minimal_repair",
+                    triggered_repair=False,
+                    repair_job=current_job or None,
+                )
+            result = _trigger_repair_job(root, confirmation_id)
+            job = result.get("job") if isinstance(result.get("job"), dict) else load_repair_job(root)
+            triggered = bool(result.get("ok"))
+            return _chat_response(
+                root,
+                run_id,
+                str(result.get("message") or "已提交最小修复任务"),
+                actions=_repair_retry_actions(job) if not triggered else [],
+                intent="minimal_repair",
+                triggered_repair=triggered,
+                job_id=str(job.get("job_id") or ""),
+                repair_job=job or None,
+                busy=bool(result.get("busy")),
+            )
+
+        status = api_status()
+        review_context = _load_review_context(root)
+        try:
+            plan_result = await run_in_threadpool(
+                orchestrator_plan,
+                message,
+                history,
+                status,
+                review_context=review_context,
+            )
+        except Exception as exc:
+            plan_result = {
+                "reply": f"对话编排暂时失败：{exc}",
+                "actions": [],
+                "error": str(exc),
+            }
+        resolved = orchestrator_resolve(plan_result, status)
+
+        trigger_command = str(resolved.get("trigger_command") or "").strip()
+        trigger_auto_run = bool(resolved.get("trigger_auto_run", False))
+        trigger_rewrite_targets = (
+            resolved.get("trigger_rewrite_targets", [])
+            if isinstance(resolved.get("trigger_rewrite_targets"), list)
+            else []
+        )
+        actions = resolved.get("actions", []) if isinstance(resolved.get("actions"), list) else []
+        reply = str(resolved.get("reply") or "").strip()
+
+        if trigger_command:
+            trigger_result = _trigger_command_inline(trigger_command)
+            if trigger_result.get("ok"):
+                label = WORKFLOW_COMMAND_LABELS.get(trigger_command, trigger_command)
+                reply = f"{reply}\n已为你启动「{label}」。".strip()
+            else:
+                reply = f"{reply}\n（启动失败：{trigger_result.get('message', '')}）".strip()
+                actions = [item for item in actions if item.get("command") != trigger_command]
+
+        if trigger_rewrite_targets:
+            rewrite_result = _trigger_rewrite_targets_inline(trigger_rewrite_targets)
+            if rewrite_result.get("ok"):
+                ids = ", ".join(
+                    str(item.get("chapter_id") or "")
+                    for item in trigger_rewrite_targets
+                    if item.get("chapter_id")
+                )
+                reply = f"{reply}\n已派发写作子 Agent 定向改稿：{ids}。".strip()
+            else:
+                reply = f"{reply}\n（定向改稿失败：{rewrite_result.get('message', '')}）".strip()
+
+        if trigger_auto_run:
+            actions = [item for item in actions if item.get("type") != "auto_run"]
+            actions = [{"type": "auto_run", "label": "一键跑完剩余步骤"}, *actions]
+
+        repair_prompt, repair_actions = _persistent_minimal_repair_prompt(root)
+        if repair_prompt and not has_pending:
+            reply = f"{reply}\n\n{repair_prompt}".strip()
+            actions = [*actions, *repair_actions]
+
+        thinking = str(
+            plan_result.get("thinking")
+            or plan_result.get("reasoning")
+            or resolved.get("thinking")
+            or ""
+        ).strip()
+        response_repair_job = load_repair_job(root)
+        extra: dict[str, Any] = {
+            "action": resolved.get("action", "chat"),
+            "intent": resolved.get("intent", ""),
+            "auto_execute": bool(resolved.get("auto_execute", False)),
+            "triggered_command": trigger_command,
+            "triggered_auto_run": trigger_auto_run,
+            "triggered_rewrite": bool(trigger_rewrite_targets),
+            "triggered_repair": False,
+            "job_id": str(response_repair_job.get("job_id") or ""),
+            "repair_job": response_repair_job or None,
+        }
+        if plan_result.get("error"):
+            extra["orchestrator_note"] = plan_result.get("error")
+        if plan_result.get("supervisor") or plan_result.get("supervisor_steps"):
+            extra["supervisor"] = True
+            extra["supervisor_steps"] = plan_result.get("supervisor_steps") or []
+            if plan_result.get("goal_id"):
+                extra["goal_id"] = plan_result.get("goal_id")
+            if isinstance(plan_result.get("goal"), dict):
+                extra["goal"] = plan_result.get("goal")
+        return _chat_response(
+            root,
+            run_id,
+            reply,
+            actions=actions,
+            thinking=thinking,
+            **extra,
         )
 
-    history = load_messages(root, run_id, limit=20)
-    status = api_status()
-    review_context = _load_review_context(root)
-    plan_result = orchestrator_plan(message, history, status, review_context=review_context)
-    resolved = orchestrator_resolve(plan_result, status)
 
-    trigger_command = str(resolved.get("trigger_command", "")).strip()
-    trigger_auto_run = bool(resolved.get("trigger_auto_run", False))
-    trigger_rewrite_targets = resolved.get("trigger_rewrite_targets", []) if isinstance(resolved.get("trigger_rewrite_targets"), list) else []
-    actions = resolved.get("actions", []) if isinstance(resolved.get("actions"), list) else []
-
-    if trigger_command:
-        trigger_result = _trigger_command_inline(trigger_command)
-        if trigger_result.get("ok"):
-            label = WORKFLOW_COMMAND_LABELS.get(trigger_command, trigger_command)
-            resolved["reply"] = f"{resolved.get('reply', '')}".strip()
-            if trigger_command == "write-all":
-                resolved["reply"] += "\n已派发多个章节写作子 Agent 并发写作。"
-            elif trigger_command == "review-fix-all":
-                resolved["reply"] += "\n已派发审核子 Agent 并发审核，需要时由写作子 Agent 改稿。"
-            elif trigger_command == "global-review":
-                resolved["reply"] += "\n已触发全文审核子 Agent（单实例，自带上下文装配）。"
-            else:
-                resolved["reply"] += f"\n已为你启动「{label}」。"
-        else:
-            resolved["reply"] = f"{resolved.get('reply', '')}".strip()
-            resolved["reply"] += f"\n（启动失败：{trigger_result.get('message', '')}）"
-            actions = [a for a in actions if a.get("command") != trigger_command]
-
-    if trigger_rewrite_targets:
-        rewrite_result = _trigger_rewrite_targets_inline(trigger_rewrite_targets)
-        resolved["reply"] = f"{resolved.get('reply', '')}".strip()
-        if rewrite_result.get("ok"):
-            ids = ", ".join(str(t.get("chapter_id", "")) for t in trigger_rewrite_targets if t.get("chapter_id"))
-            resolved["reply"] += f"\n已派发写作子 Agent 定向改稿：{ids}。"
-        else:
-            resolved["reply"] += f"\n（定向改稿失败：{rewrite_result.get('message', '')}）"
-
-    if trigger_auto_run:
-        actions = [a for a in actions if a.get("type") != "auto_run"]
-        actions = [{"type": "auto_run", "label": "一键跑完剩余"}, *actions]
-
-    payload = {
-        "ok": True,
-        "reply": resolved.get("reply", ""),
-        "actions": actions,
-        "action": resolved.get("action", "chat"),
-        "intent": resolved.get("intent", ""),
-        "auto_execute": bool(resolved.get("auto_execute", False)),
-        "triggered_command": trigger_command,
-        "triggered_auto_run": trigger_auto_run,
-        "triggered_rewrite": bool(trigger_rewrite_targets),
-    }
-    if plan_result.get("error"):
-        payload["orchestrator_note"] = plan_result.get("error")
-    # PR-3: optional supervisor decision steps (only when flag enabled path used)
-    if plan_result.get("supervisor") or plan_result.get("supervisor_steps"):
-        payload["supervisor"] = True
-        payload["supervisor_steps"] = plan_result.get("supervisor_steps") or []
-        if plan_result.get("goal_id"):
-            payload["goal_id"] = plan_result.get("goal_id")
-        if isinstance(plan_result.get("goal"), dict):
-            payload["goal"] = plan_result.get("goal")
-    return JSONResponse(payload)
-
+@app.get("/api/repair-jobs/current")
+def api_current_repair_job() -> JSONResponse:
+    return JSONResponse({"ok": True, "repair_job": load_repair_job(_active_root()) or None})
 
 
 @app.get("/api/export-preflight")
@@ -2396,6 +2875,106 @@ def api_chat_messages_delete() -> JSONResponse:
     run_id = ACTIVE_RUN_ID or root.name
     removed = clear_messages(root, run_id)
     return JSONResponse({"ok": True, "removed": removed})
+
+
+@app.get("/api/materials-checklist")
+def api_materials_checklist() -> JSONResponse:
+    root = _active_root()
+    try:
+        from materials_checklist import (
+            chapters_ready_for_refill,
+            chapters_with_material_gaps,
+            load_materials_checklist,
+        )
+
+        data = load_materials_checklist(root)
+        exists = (root / "workspace" / "materials_checklist.json").exists()
+        return JSONResponse(
+            {
+                "ok": True,
+                "exists": exists,
+                "checklist": data,
+                "summary": data.get("summary") or {},
+                "items": data.get("items") or [],
+                "gap_chapters": chapters_with_material_gaps(root),
+                "refill_plans": chapters_ready_for_refill(root),
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/materials-checklist/update")
+async def api_materials_checklist_update(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    try:
+        from materials_checklist import batch_update_item_responses, update_item_response
+
+        if isinstance(body.get("updates"), list):
+            result = batch_update_item_responses(root, body.get("updates") or [], rebuild=True)
+        else:
+            result = update_item_response(
+                root,
+                str(body.get("item_id") or ""),
+                response_status=str(body.get("response_status") or body.get("status") or ""),
+                reason=str(body.get("reason") or body.get("note") or ""),
+                suggested_attachment=str(body.get("suggested_attachment") or ""),
+                rebuild=True,
+            )
+        status = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=status)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/materials-checklist/rebuild")
+def api_materials_checklist_rebuild() -> JSONResponse:
+    root = _active_root()
+    try:
+        from materials_checklist import build_materials_checklist, load_materials_checklist
+
+        path = build_materials_checklist(root)
+        data = load_materials_checklist(root)
+        return JSONResponse(
+            {
+                "ok": True,
+                "path": str(path),
+                "summary": data.get("summary") or {},
+                "items": data.get("items") or [],
+                "message": "材料清单已重建",
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/materials-checklist/refill")
+async def api_materials_checklist_refill(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from materials_checklist import refill_material_gaps
+
+        chapter_ids = body.get("chapter_ids") if isinstance(body, dict) else None
+        if chapter_ids is not None and not isinstance(chapter_ids, list):
+            return JSONResponse({"ok": False, "message": "chapter_ids 必须是数组"}, status_code=400)
+        result = refill_material_gaps(
+            root,
+            chapter_ids=[str(x) for x in chapter_ids] if chapter_ids is not None else None,
+            replan_jobs=bool(body.get("replan_jobs", True)) if isinstance(body, dict) else True,
+            max_chapters=int(body.get("max_chapters", 20) or 20) if isinstance(body, dict) else 20,
+        )
+        status = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=status)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
 @app.get("/api/manual-review/summary")
@@ -4805,6 +5384,7 @@ async def api_delete_run(request: Request) -> JSONResponse:
     if not run_root.is_relative_to(runs_root) or not run_root.exists() or not run_root.is_dir():
         return JSONResponse({"ok": False, "message": f"工作空间不存在: {run_id}"}, status_code=404)
 
+    close_chat_store(run_root)
     shutil.rmtree(str(run_root))
 
     if run_id == ACTIVE_RUN_ID:
@@ -4822,6 +5402,7 @@ def api_clean_workspace() -> JSONResponse:
     global LOG_LINES
 
     root = _active_root()
+    close_chat_store(root)
     for sub in ["workspace", "outputs"]:
         target = root / sub
         if target.exists():
@@ -4856,6 +5437,10 @@ def reconcile_interrupted_pipeline() -> None:
         _append_log(f"[警告] 加载大模型配置失败: {exc}")
 
     _load_active_run_from_disk()
+    try:
+        reconcile_interrupted_repair(ACTIVE_RUN_ROOT or ROOT)
+    except Exception as exc:
+        _append_log(f"[警告] 修复任务恢复检查失败: {exc}")
     if ACTIVE_RUN_ROOT is None:
         return
     try:

@@ -24,12 +24,20 @@ DEFAULT_STATUS = {
     "global_review": "pending",
 }
 
+CLOSED_OVERRIDE_STATUSES = {"accepted", "resolved", "dismissed", "confirmed"}
+
 REPLAY_STAGE_BY_CATEGORY = {
     "template_evidence": "select_contexts",
     "score_coverage": "plan_chapter_jobs",
     "chapter_review": "write_chapters",
     "global_review": "global_review",
 }
+
+
+def _override_is_closed(override: Any) -> bool:
+    if not isinstance(override, dict):
+        return False
+    return stringify(override.get("status")).lower() in CLOSED_OVERRIDE_STATUSES
 
 
 def manual_review_dir(root: Path) -> Path:
@@ -256,11 +264,11 @@ def _template_evidence_items(root: Path) -> list[dict[str, Any]]:
     return items if isinstance(items, list) else []
 
 
-def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]]:
+def manual_review_items(root: Path | None, category: str, *, include_closed: bool = False) -> list[dict[str, Any]]:
     root = root or project_root()
     overrides = _load_indexed_overrides(root, category)["items"]
+    rows: list[dict[str, Any]] = []
     if category == "template_evidence":
-        rows: list[dict[str, Any]] = []
         for item in _template_evidence_items(root):
             if not isinstance(item, dict):
                 continue
@@ -269,6 +277,8 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
                 continue
             item_id = stringify(item.get("id"))
             override = overrides.get(item_id, {})
+            if not include_closed and _override_is_closed(override):
+                continue
             evidence = item.get("evidence", {}) if isinstance(item.get("evidence"), dict) else {}
             rows.append(
                 {
@@ -292,13 +302,15 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
         matrix_path = root / "workspace" / "score_coverage_matrix.json"
         data = _read_json_or_default(matrix_path, {})
         matrix = data.get("matrix") if isinstance(data.get("matrix"), list) else []
-        rows = []
         for item in matrix:
             if not isinstance(item, dict):
                 continue
             if stringify(item.get("risk_level")) not in {"high", "medium"}:
                 continue
             item_id = stringify(item.get("score_point_id"))
+            override = overrides.get(item_id, {})
+            if not include_closed and _override_is_closed(override):
+                continue
             rows.append(
                 {
                     "item_id": item_id,
@@ -308,13 +320,12 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
                     "risk_level": stringify(item.get("risk_level")),
                     "bound_chapters": item.get("bound_chapters", []),
                     "review_coverage": item.get("review_coverage", []),
-                    "override": overrides.get(item_id, {}),
+                    "override": override,
                 }
             )
         return rows
     if category == "chapter_review":
         reviews_dir = root / "workspace" / "reviews"
-        rows = []
         for path in sorted(reviews_dir.glob("*_review.json")) if reviews_dir.exists() else []:
             review = _read_json_or_default(path, {})
             if not isinstance(review, dict):
@@ -324,6 +335,9 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
                 if not isinstance(problem, dict):
                     continue
                 item_id = f"{chapter_id}:P{index:02d}"
+                override = overrides.get(item_id, {})
+                if not include_closed and _override_is_closed(override):
+                    continue
                 rows.append(
                     {
                         "item_id": item_id,
@@ -336,13 +350,12 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
                         "suggestion": stringify(problem.get("suggestion")),
                         "need_rewrite": bool(review.get("need_rewrite")),
                         "max_severity": stringify(review.get("max_severity")),
-                        "override": overrides.get(item_id, {}),
+                        "override": override,
                     }
                 )
         return rows
     if category == "global_review":
         review = _read_json_or_default(root / "workspace" / "global_review.json", {})
-        rows = []
         if not isinstance(review, dict):
             return rows
         for key in ("chapter_conflicts", "uncovered_score_points", "fabrication_risks", "suggestions"):
@@ -350,6 +363,9 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
             for index, value in enumerate(values, start=1):
                 text = stringify(value)
                 item_id = f"{key}:{index:02d}"
+                override = overrides.get(item_id, {})
+                if not include_closed and _override_is_closed(override):
+                    continue
                 rows.append(
                     {
                         "item_id": item_id,
@@ -357,11 +373,11 @@ def manual_review_items(root: Path | None, category: str) -> list[dict[str, Any]
                         "risk_type": key,
                         "target_scope": text,
                         "description": text,
-                        "override": overrides.get(item_id, {}),
+                        "override": override,
                     }
                 )
         return rows
-    return []
+    return rows
 
 
 def manual_review_summary(root: Path | None = None) -> dict[str, Any]:

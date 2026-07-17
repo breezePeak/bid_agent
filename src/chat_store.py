@@ -87,7 +87,10 @@ def load_messages(run_root: Path, run_id: str, limit: int = 1000) -> list[dict[s
     with _DB_LOCK:
         rows = conn.execute(
             "SELECT id, run_id, role, content, thinking, actions, kind, created_at "
-            "FROM chat_messages WHERE run_id = ? ORDER BY id ASC LIMIT ?",
+            "FROM ("
+            "SELECT id, run_id, role, content, thinking, actions, kind, created_at "
+            "FROM chat_messages WHERE run_id = ? ORDER BY id DESC LIMIT ?"
+            ") AS recent_messages ORDER BY id ASC",
             (run_id, limit),
         ).fetchall()
     result: list[dict[str, Any]] = []
@@ -116,3 +119,12 @@ def clear_messages(run_root: Path, run_id: str) -> int:
         cur = conn.execute("DELETE FROM chat_messages WHERE run_id = ?", (run_id,))
         conn.commit()
         return cur.rowcount
+
+
+def close_chat_store(run_root: Path) -> None:
+    """Close the cached SQLite handle before deleting or releasing a run root."""
+    db_path = run_root / "workspace" / "chat.db"
+    with _DB_LOCK:
+        conn = _DB_CACHE.pop(db_path, None)
+        if conn is not None:
+            conn.close()

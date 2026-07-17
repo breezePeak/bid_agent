@@ -93,7 +93,8 @@ function openPreview(cmd) {
     mode.value = 'doc'
     return
   }
-  // Step / compliance / reports -> full detail pane like Word
+  // manual-review / compliance / any workflow step -> detail pane
+  // (manual-review is NOT a workflow command; StepDetailView handles it via dedicated APIs)
   detailCommand.value = c
   mode.value = 'detail'
 }

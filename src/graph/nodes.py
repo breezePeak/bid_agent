@@ -35,6 +35,7 @@ from score_estimator import estimate_final_score
 from source_trace import build_source_trace_index
 from stage_validation import chapter_ids, context_ids, review_ids, summary_ids
 from subagent_runner import run_write_all as concurrent_write_all
+from materials_checklist import build_materials_checklist
 from template_evidence import build_template_evidence
 from utils import ensure_dirs, ensure_file, project_root, read_json, stringify
 
@@ -333,6 +334,31 @@ def extract_facts_node(state) -> dict:
         return update
     except Exception as exc:
         _persist_error_state(state, "extract_facts", exc)
+        raise
+
+
+def build_materials_checklist_node(state) -> dict:
+    root = _root(state)
+    print(_stage_progress("build_materials_checklist") + "...")
+    _start_stage(state, "build_materials_checklist", "生成材料/资格清单")
+    try:
+        path = root / "workspace" / "materials_checklist.json"
+        if _is_resume(state) and stage_resume_ready(root, "build_materials_checklist"):
+            update = {"materials_checklist_path": str(path)}
+            _persist_state(
+                state,
+                update,
+                stage="build_materials_checklist",
+                status="ok",
+                message="resume: 复用材料/资格清单",
+            )
+            return update
+        path = build_materials_checklist(root)
+        update = {"materials_checklist_path": str(path)}
+        _persist_state(state, update, stage="build_materials_checklist")
+        return update
+    except Exception as exc:
+        _persist_error_state(state, "build_materials_checklist", exc)
         raise
 
 

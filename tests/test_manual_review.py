@@ -42,7 +42,8 @@ class ManualReviewTests(unittest.TestCase):
             summary = manual_review_summary(root)
 
             self.assertEqual(result["recommended_stage"], "select_contexts")
-            self.assertEqual(summary["template_evidence_pending"], 1)
+            # closed override should drop out of pending list/summary
+            self.assertEqual(summary["template_evidence_pending"], 0)
             self.assertEqual(recommended_replay_stage("score_coverage", {"target_chapter_id": "2.1"}), "plan_chapter_jobs")
 
             reloaded_map = json.loads((root / "workspace" / "template_evidence_map.json").read_text(encoding="utf-8"))

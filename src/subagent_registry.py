@@ -111,6 +111,7 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
     "split_docs": "切分招标文件和公司资料为 chunk。",
     "parse_score": "解析评分要求和评分点。",
     "extract_facts": "提取招标需求、公司事实和全局事实。",
+    "build_materials_checklist": "生成材料/资格/废标待补清单，驱动写作留白与补料。",
     "build_template_evidence": "生成模板依据映射和质量报告。",
     "generate_outline": "基于评分点和事实生成标书大纲。",
     "plan_chapter_jobs": "将大纲拆解为章节任务包。",

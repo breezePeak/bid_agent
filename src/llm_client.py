@@ -71,7 +71,34 @@ def _split_system_messages(messages: list[dict]) -> tuple[str, list[dict[str, st
     return "\n\n".join(system_parts).strip(), converted
 
 
+def _extract_openai_reasoning(message: dict[str, Any]) -> str:
+    if not isinstance(message, dict):
+        return ""
+    for key in ("reasoning_content", "reasoning", "thinking", "thought"):
+        value = message.get(key)
+        if value is None:
+            continue
+        if isinstance(value, list):
+            parts: list[str] = []
+            for item in value:
+                if isinstance(item, dict):
+                    parts.append(str(item.get("text") or item.get("content") or ""))
+                else:
+                    parts.append(str(item))
+            text = "".join(parts).strip()
+        else:
+            text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
 def _extract_openai_content(response_data: dict[str, Any]) -> str:
+    content, _ = _extract_openai_message(response_data)
+    return content
+
+
+def _extract_openai_message(response_data: dict[str, Any]) -> tuple[str, str]:
     choices = response_data.get("choices") or []
     if not choices:
         raise ValueError(f"LLM 响应缺少 choices: {response_data}")
@@ -84,8 +111,10 @@ def _extract_openai_content(response_data: dict[str, Any]) -> str:
                 parts.append(str(item.get("text") or item.get("content") or ""))
             else:
                 parts.append(str(item))
-        return "".join(parts)
-    return str(content)
+        content_text = "".join(parts)
+    else:
+        content_text = str(content) if content is not None else ""
+    return content_text, _extract_openai_reasoning(message)
 
 
 def _extract_anthropic_content(response_data: dict[str, Any]) -> str:
@@ -112,11 +141,17 @@ def _extract_stream_delta(event_data: dict[str, Any]) -> tuple[str, str]:
         return "", ""
     choice = choices[0] or {}
     delta = choice.get("delta") or {}
+    message = choice.get("message") or {}
     content = delta.get("content")
-    reasoning = delta.get("reasoning_content") or ""
     if content is None:
-        message = choice.get("message") or {}
         content = message.get("content")
+    reasoning = (
+        delta.get("reasoning_content")
+        or delta.get("reasoning")
+        or delta.get("thinking")
+        or _extract_openai_reasoning(message)
+        or ""
+    )
     if isinstance(content, list):
         parts: list[str] = []
         for item in content:
@@ -128,8 +163,9 @@ def _extract_stream_delta(event_data: dict[str, Any]) -> tuple[str, str]:
     return str(reasoning) if reasoning else "", "" if content is None else str(content)
 
 
-def _read_openai_streaming_response(response: Any) -> str:
-    parts: list[str] = []
+def _read_openai_streaming_response(response: Any) -> tuple[str, str]:
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line or line.startswith(":"):
@@ -143,10 +179,12 @@ def _read_openai_streaming_response(response: Any) -> str:
             event_data = json.loads(data)
         except json.JSONDecodeError:
             continue
-        _, content = _extract_stream_delta(event_data)
+        reasoning, content = _extract_stream_delta(event_data)
+        if reasoning:
+            reasoning_parts.append(reasoning)
         if content:
-            parts.append(content)
-    return "".join(parts)
+            content_parts.append(content)
+    return "".join(content_parts), "".join(reasoning_parts)
 
 
 def _build_http_error_hint(endpoint: str, status_code: int, error_body: str, provider: str) -> str:
@@ -192,7 +230,7 @@ def _retry_delay(attempt: int, initial_delay: float, max_delay: float) -> float:
     return base_delay + jitter
 
 
-def _openai_request(settings: Settings, messages: list[dict], temperature: float) -> str:
+def _openai_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str]:
     endpoint = _openai_chat_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     payload: dict[str, Any] = {
@@ -217,16 +255,17 @@ def _openai_request(settings: Settings, messages: list[dict], temperature: float
     request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
         if settings.stream:
-            content = _read_openai_streaming_response(response)
+            content, reasoning = _read_openai_streaming_response(response)
             if not content.strip():
                 raise ValueError("LLM 流式响应为空。")
-            return strip_code_fences(content)
+            return strip_code_fences(content), str(reasoning or "").strip()
         response_body = response.read().decode("utf-8")
         response_data = json.loads(response_body)
-        return strip_code_fences(_extract_openai_content(response_data))
+        content, reasoning = _extract_openai_message(response_data)
+        return strip_code_fences(content), str(reasoning or "").strip()
 
 
-def _anthropic_request(settings: Settings, messages: list[dict], temperature: float) -> str:
+def _anthropic_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str]:
     endpoint = _anthropic_messages_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     system_text, converted = _split_system_messages(messages)
@@ -260,10 +299,11 @@ def _anthropic_request(settings: Settings, messages: list[dict], temperature: fl
     with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
         response_body = response.read().decode("utf-8")
         response_data = json.loads(response_body)
-        return strip_code_fences(_extract_anthropic_content(response_data))
+        return strip_code_fences(_extract_anthropic_content(response_data)), ""
 
 
-def chat(messages: list[dict], temperature: float = 0.2) -> str:
+def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, str]:
+    """Call LLM and return both answer content and model reasoning (if any)."""
     initial_settings = get_settings(project_root())
     last_error: Exception | None = None
     for attempt in range(1, initial_settings.max_retries + 1):
@@ -276,11 +316,11 @@ def chat(messages: list[dict], temperature: float = 0.2) -> str:
         )
         try:
             if provider == "anthropic":
-                cleaned = _anthropic_request(settings, messages, temperature)
+                cleaned, reasoning = _anthropic_request(settings, messages, temperature)
             else:
-                cleaned = _openai_request(settings, messages, temperature)
+                cleaned, reasoning = _openai_request(settings, messages, temperature)
             record_llm_call(messages, cleaned, settings.model, temperature)
-            return cleaned
+            return {"content": cleaned, "reasoning": str(reasoning or "").strip()}
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             last_error = exc
@@ -316,6 +356,10 @@ def chat(messages: list[dict], temperature: float = 0.2) -> str:
         "请检查 API 格式（OpenAI/Anthropic）、Base URL、模型 ID 与 API Key 是否匹配，"
         "或临时增大 OPENAI_MAX_RETRIES 后重试。"
     ) from last_error
+
+
+def chat(messages: list[dict], temperature: float = 0.2) -> str:
+    return chat_with_meta(messages, temperature=temperature)["content"]
 
 
 def chat_stream_chunks(messages: list[dict], temperature: float = 0.2):

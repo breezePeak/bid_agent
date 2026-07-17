@@ -11,10 +11,11 @@
       </div>
     </div>
 
-    <div class="sdv-body" v-if="loading"><div class="sdv-loading">加载中…</div></div>
-    <div class="sdv-body" v-else-if="error"><div class="sdv-error">{{ error }}</div></div>
+    <div class="sdv-body" v-if="loading && !hasLoadedOnce"><div class="sdv-loading">加载中…</div></div>
     <div class="sdv-body" v-else>
-      <div class="sdv-section" v-if="stageIssues.length">
+      <div v-if="error" class="sdv-error" style="padding:12px 0">{{ error }}</div>
+      <template v-if="!error || hasLoadedOnce">
+      <div class="sdv-section" v-if="!isManualReview && stageIssues.length">
         <h4>阻断/待处理问题（{{ stageIssues.length }}）</h4>
         <div class="sdv-actions-row" style="margin-bottom:8px">
           <button class="btn btn-sm" :disabled="!!repairBusy" @click="batchPreview">批量预览修复</button>
@@ -45,8 +46,65 @@
           </div>
         </div>
       </div>
+      <!-- Manual review -->
+      <template v-if="isManualReview">
+        <div class="sdv-banner" :class="{ blocking: (summary?.total_pending || 0) > 0 }">
+          <div class="sdv-banner-title">人工复核</div>
+          <div class="sdv-banner-stats">
+            待处理 {{ summary?.total_pending ?? 0 }}
+            · 弱证据 {{ summary?.template_evidence_pending ?? 0 }}
+            · 评分覆盖 {{ summary?.score_coverage_pending ?? 0 }}
+            · 章节 {{ summary?.chapter_review_pending ?? 0 }}
+            · 全文 {{ summary?.global_review_pending ?? 0 }}
+            · 合规 {{ summary?.compliance_pending ?? 0 }}
+          </div>
+        </div>
+        <div class="sdv-filters">
+          <button
+            v-for="f in mrCategories"
+            :key="f.key"
+            class="sdv-filter"
+            :class="{ on: mrCategory === f.key }"
+            @click="switchMrCategory(f.key)"
+          >{{ f.label }}</button>
+        </div>
+        <div v-if="actionMsg" class="sdv-repair-msg">{{ actionMsg }}</div>
+        <div class="sdv-list">
+          <div v-for="item in mrItems" :key="item.item_id" class="sdv-item soft">
+            <div class="sdv-item-head">
+              <span class="sdv-id">{{ item.item_id }}</span>
+              <span class="sdv-badge">{{ itemStatus(item) }}</span>
+              <span class="sdv-name">{{ itemTitle(item) }}</span>
+            </div>
+            <div class="sdv-req" v-if="itemMeta(item)">{{ itemMeta(item) }}</div>
+            <div class="sdv-req" v-if="item.description || item.suggestion">
+              {{ item.description || item.suggestion }}
+            </div>
+            <textarea
+              class="sdv-note"
+              :value="notes[item.item_id] ?? noteOf(item)"
+              @input="notes[item.item_id] = $event.target.value"
+              placeholder="填写人工说明或修订指令"
+              rows="2"
+            ></textarea>
+            <div class="sdv-actions-row">
+              <button class="btn btn-sm btn-primary" :disabled="!!busyId" @click="submitMr(item, 'accepted')">接受/确认</button>
+              <button class="btn btn-sm" :disabled="!!busyId" @click="submitMr(item, 'resolved')">已处理</button>
+              <button class="btn btn-sm" :disabled="!!busyId" @click="submitMr(item, 'dismissed')">忽略</button>
+            </div>
+          </div>
+          <div v-if="!mrItems.length" class="sdv-empty">当前分类暂无待处理项</div>
+        </div>
+        <div class="sdv-section" v-if="(summary?.latest_replay_requests || []).length">
+          <h4>最近重跑建议</h4>
+          <div v-for="(r, i) in summary.latest_replay_requests" :key="i" class="sdv-line">
+            {{ r.category }} / {{ r.item_id }} → {{ r.recommended_stage }}
+          </div>
+        </div>
+      </template>
+
       <!-- Compliance -->
-      <template v-if="isCompliance && compliance">
+      <template v-else-if="isCompliance && compliance">
         <div class="sdv-banner" :class="{ blocking: compliance.blocking }">
           <div class="sdv-banner-title">
             {{ compliance.blocking ? '合规阻断 · 暂不可出正式稿' : (compliance.need_manual_review ? '合规待人工复核' : '合规检查结果') }}
@@ -245,15 +303,79 @@
           </div>
         </div>
 
-        <div v-if="!hasAnyContent" class="sdv-empty">该节点暂无可展示成果，可能尚未执行完成。</div>
+        <div v-if="!hasAnyContent && !error" class="sdv-empty">该节点暂无可展示成果，可能尚未执行完成。</div>
+      </template>
       </template>
     </div>
+    <Teleport to="body">
+      <div v-if="repairDialog" class="dialog-overlay sdv-repair-overlay" @click.self="closeRepairDialog">
+        <section class="dialog sdv-repair-dialog" role="dialog" aria-modal="true" aria-labelledby="repair-dialog-title">
+          <div class="dialog-header">
+            <h2 id="repair-dialog-title">{{ repairDialog.title }}</h2>
+            <button class="btn btn-icon" aria-label="关闭" @click="closeRepairDialog">&times;</button>
+          </div>
+          <div class="dialog-body">
+            <p v-if="repairDialog.description" class="sdv-dialog-description">{{ repairDialog.description }}</p>
+            <template v-if="repairDialog.kind === 'risk'">
+              <label class="sdv-dialog-label" for="repair-risk-reason">备注（可选）</label>
+              <textarea id="repair-risk-reason" v-model="riskReason" class="sdv-note" rows="3" placeholder="可选填写说明，不填也可直接确认"></textarea>
+              <p class="sdv-dialog-hint">该操作会保留审计记录；管理员未开启该功能时将无法提交。</p>
+            </template>
+            <template v-else-if="repairDialog.kind === 'result'">
+              <div class="sdv-repair-result" :class="{ bad: !repairDialog.result?.ok }">
+                {{ repairDialog.result?.message || '操作已结束' }}
+              </div>
+              <div v-if="repairDialog.result?.results?.length" class="sdv-plan-list">
+                <div v-for="(result, index) in repairDialog.result.results" :key="index" class="sdv-plan-row">
+                  <b>{{ result.issue_id || result.plan?.issue?.code || `问题 ${index + 1}` }}</b>：{{ result.message || (result.ok ? '已执行' : '执行失败') }}
+                </div>
+              </div>
+            </template>
+            <template v-else>
+              <div v-for="plan in repairDialog.plans" :key="plan.issue_id" class="sdv-plan-card">
+                <div class="sdv-plan-title">{{ plan.issue?.code || plan.issue_id }} · {{ plan.issue?.title || '修复计划' }}</div>
+                <div class="sdv-dialog-hint">{{ plan.summary }}</div>
+                <ol v-if="plan.steps?.length" class="sdv-plan-list">
+                  <li v-for="(step, index) in plan.steps" :key="index" class="sdv-plan-row" :class="{ manual: isManualStep(step) }">
+                    <b>{{ step.label || actionLabel(step.type) }}</b><span v-if="isManualStep(step)">（需人工处理，不会自动修改文件）</span>
+                  </li>
+                </ol>
+                <p v-else class="sdv-dialog-hint">此问题没有可自动执行的修复动作，仅会重跑检查。</p>
+                <div v-if="plan.revalidate?.length" class="sdv-dialog-hint">完成后将重验：{{ plan.revalidate.join(' → ') }}</div>
+              </div>
+            </template>
+            <div class="dialog-footer">
+              <button class="btn" @click="closeRepairDialog">{{ repairDialog.kind === 'result' ? '关闭' : '取消' }}</button>
+              <button v-if="repairDialog.kind === 'execute' || repairDialog.kind === 'batch-execute'" class="btn btn-primary" :disabled="!!repairBusy" @click="confirmRepairDialog">
+                {{ repairBusy ? '执行中…' : '确认执行' }}
+              </button>
+              <button v-else-if="repairDialog.kind === 'risk'" class="btn btn-danger" :disabled="!!repairBusy" @click="confirmRepairDialog">
+                {{ repairBusy ? '提交中…' : '确认接受风险' }}
+              </button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </Teleport>
   </div>
 </template>
 
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { fetchComplianceReport, fetchWorkflowStepDetail, fetchIssues, previewIssueRepair, executeIssueRepair, acceptIssueRisk, explainIssueCause, batchPreviewRepairs, batchExecuteRepairs } from '../api'
+import {
+  fetchComplianceReport,
+  fetchWorkflowStepDetail,
+  fetchIssues,
+  previewIssueRepair,
+  executeIssueRepair,
+  acceptIssueRisk,
+  explainIssueCause,
+  batchPreviewRepairs,
+  batchExecuteRepairs,
+  fetchManualReviewSummary,
+  fetchManualReviewItems,
+  updateManualReview,
+} from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -263,6 +385,7 @@ defineEmits(['close'])
 
 const loading = ref(false)
 const error = ref('')
+const hasLoadedOnce = ref(false)
 const title = ref('')
 const subtitle = ref('')
 const detail = ref({})
@@ -272,9 +395,29 @@ const openId = ref(null)
 const issueList = ref([])
 const repairBusy = ref('')
 const repairMsg = ref('')
+const repairDialog = ref(null)
+const riskReason = ref('')
+const summary = ref(null)
+const mrItems = ref([])
+const mrCategory = ref('score_coverage')
+const notes = ref({})
+const busyId = ref('')
+const actionMsg = ref('')
 
+const mrCategories = [
+  { key: 'template_evidence', label: '弱证据/模板缺口' },
+  { key: 'score_coverage', label: '未覆盖评分点' },
+  { key: 'chapter_review', label: '章节审核问题' },
+  { key: 'global_review', label: '全文风险' },
+]
 
+const isManualReview = computed(() => String(props.command || '').startsWith('manual-review'))
 const isCompliance = computed(() => props.command === 'compliance-check' || props.command === 'compliance')
+const workflowCommand = computed(() => {
+  const c = String(props.command || '')
+  if (c.startsWith('manual-review')) return ''
+  return c
+})
 const counts = computed(() => compliance.value?.counts || {})
 const filters = [
   { key: 'fail', label: '失败' },
@@ -359,7 +502,8 @@ function toggle(id) {
 
 
 const stageIssues = computed(() => {
-  const cmd = props.command
+  if (isManualReview.value) return []
+  const cmd = workflowCommand.value || props.command
   const stageMap = {
     'global-review': 'global_review',
     'compliance-check': 'compliance_check',
@@ -388,7 +532,7 @@ async function previewRepair(iss) {
     const { data } = await previewIssueRepair(iss.id)
     if (data && data.ok) {
       iss._plan = data
-      repairMsg.value = data.summary || '已生成修复计划'
+      repairDialog.value = { kind: 'preview', title: '最小修复计划', description: '以下仅为预览，不会修改文件。', plans: [data] }
     } else {
       repairMsg.value = (data && data.message) || '预览失败'
     }
@@ -398,18 +542,15 @@ async function previewRepair(iss) {
 }
 
 async function runRepair(iss) {
-  if (!confirm('确认按最小修复计划执行？可能重写相关章节并重验门禁。')) return
-  repairBusy.value = iss.id
-  repairMsg.value = '正在修复…'
   try {
-    if (!iss._plan) await previewRepair(iss)
-    const { data } = await executeIssueRepair(iss.id, { confirm: true })
-    repairMsg.value = (data && data.message) || (data && data.ok ? '完成' : '失败')
-    await refresh()
+    if (!iss._plan) {
+      const { data } = await previewIssueRepair(iss.id)
+      if (!data?.ok) throw new Error(data?.message || '无法生成修复计划')
+      iss._plan = data
+    }
+    repairDialog.value = { kind: 'execute', title: '确认执行最小修复', description: '系统只会执行下列可自动化动作，并在完成后重验合规门禁。', plans: [iss._plan], issueIds: [iss.id] }
   } catch (e) {
     repairMsg.value = e.message || '修复失败'
-  } finally {
-    repairBusy.value = ''
   }
 }
 
@@ -433,18 +574,8 @@ async function explainCause(iss) {
 }
 
 async function acceptRisk(iss) {
-  const reason = prompt('接受风险原因（将写入记录，且仅当管理员开启开关时可用）：')
-  if (reason == null) return
-  repairBusy.value = iss.id
-  try {
-    const { data } = await acceptIssueRisk(iss.id, reason)
-    repairMsg.value = (data && data.message) || (data && data.ok ? '已接受风险' : '失败')
-    await loadIssues()
-  } catch (e) {
-    repairMsg.value = e.response?.data?.message || e.message || '接受风险失败'
-  } finally {
-    repairBusy.value = ''
-  }
+  riskReason.value = ''
+  repairDialog.value = { kind: 'risk', title: '接受阻断风险', description: `问题：${iss.code} · ${iss.title}`, issueIds: [iss.id] }
 }
 
 async function batchPreview() {
@@ -453,7 +584,14 @@ async function batchPreview() {
   repairMsg.value = '批量预览中…'
   try {
     const { data } = await batchPreviewRepairs(ids)
-    repairMsg.value = (data && data.message) || `已预览 ${ids.length} 条`
+    if (!data?.ok) throw new Error(data?.message || '批量预览失败')
+    const plannedIds = data.issue_ids || ids
+    repairDialog.value = {
+      kind: 'preview',
+      title: `批量修复计划（${plannedIds.length} 条）`,
+      description: data.message || '以下仅为预览，不会修改文件。',
+      plans: data.plans || [],
+    }
   } catch (e) {
     repairMsg.value = e.message || '批量预览失败'
   }
@@ -462,17 +600,148 @@ async function batchPreview() {
 async function batchRepair() {
   const ids = stageIssues.value.map(i => i.id).filter(Boolean)
   if (!ids.length) return
-  if (!confirm(`确认批量最小修复 ${ids.length} 条问题？可能耗时较长。`)) return
-  repairBusy.value = 'batch'
-  repairMsg.value = '批量修复中…'
   try {
-    const { data } = await batchExecuteRepairs(ids, { confirm: true })
-    repairMsg.value = (data && data.message) || '批量修复结束'
-    await refresh()
+    const { data } = await batchPreviewRepairs(ids)
+    if (!data?.ok) throw new Error(data?.message || '无法生成批量修复计划')
+    const plannedIds = data.issue_ids || ids
+    repairDialog.value = {
+      kind: 'batch-execute',
+      title: `确认批量最小修复（${plannedIds.length} 条）`,
+      description: `${data.message || ''} 请确认下列动作。需要人工处理的动作不会自动修改文件。`.trim(),
+      plans: data.plans || [],
+      issueIds: plannedIds,
+    }
   } catch (e) {
     repairMsg.value = e.message || '批量修复失败'
+  }
+}
+
+function actionLabel(type) {
+  return ({ rewrite_chapters: '定向改写章节', fix_coverage: '补齐评分覆盖', fix_compliance: '合规定向修复', rerun_stage: '重跑处理阶段', revalidate_gate: '重验门禁', upload_evidence: '补充证明材料', open_detail: '查看关联详情', accept_risk: '人工接受风险' })[type] || type || '未命名动作'
+}
+
+function isManualStep(step) {
+  return ['upload_evidence', 'open_detail', 'accept_risk'].includes(step?.type)
+}
+
+function closeRepairDialog() {
+  if (!repairBusy.value) repairDialog.value = null
+}
+
+async function confirmRepairDialog() {
+  const dialog = repairDialog.value
+  if (!dialog) return
+  repairBusy.value = dialog.kind === 'risk' ? dialog.issueIds[0] : (dialog.kind === 'batch-execute' ? 'batch' : dialog.issueIds[0])
+  repairMsg.value = dialog.kind === 'risk' ? '正在提交…' : '正在执行修复…'
+  try {
+    let data
+    if (dialog.kind === 'risk') {
+      ({ data } = await acceptIssueRisk(dialog.issueIds[0], riskReason.value.trim()))
+    } else if (dialog.kind === 'batch-execute') {
+      ({ data } = await batchExecuteRepairs(dialog.issueIds, { confirm: true }))
+    } else {
+      ({ data } = await executeIssueRepair(dialog.issueIds[0], { confirm: true }))
+    }
+    if (!data?.ok && !data?.executed) throw new Error(data?.message || '操作失败')
+    repairMsg.value = data.message || '操作完成'
+    repairDialog.value = { kind: 'result', title: data.ok ? '操作完成' : '操作完成，但仍有待处理项', result: data }
+    await refresh()
+  } catch (e) {
+    repairMsg.value = e.response?.data?.message || e.message || '操作失败'
+    repairDialog.value = { kind: 'result', title: '操作未完成', result: { ok: false, message: repairMsg.value } }
   } finally {
     repairBusy.value = ''
+  }
+}
+
+function parseMrCategory() {
+  const c = String(props.command || '')
+  if (c.startsWith('manual-review:')) {
+    const cat = c.slice('manual-review:'.length).trim()
+    if (mrCategories.some(x => x.key === cat)) return cat
+  }
+  return mrCategory.value || 'score_coverage'
+}
+
+function itemTitle(item) {
+  return item.title || item.description || item.score_point_id || item.target_scope || item.item_id || '—'
+}
+function itemStatus(item) {
+  return (item.override && item.override.status) || item.status || item.risk_level || 'pending'
+}
+function itemMeta(item) {
+  const parts = []
+  if (item.chapter_id) parts.push(`章节 ${item.chapter_id}`)
+  if (item.problem_type) parts.push(item.problem_type)
+  if (item.severity) parts.push(item.severity)
+  if (item.risk_type) parts.push(item.risk_type)
+  if (item.risk_level) parts.push(`风险 ${item.risk_level}`)
+  return parts.join(' · ')
+}
+function noteOf(item) {
+  const o = item.override || {}
+  return o.operator_instruction || o.operator_note || ''
+}
+
+async function loadManualReview() {
+  const cat = parseMrCategory()
+  mrCategory.value = cat
+  const [sumRes, itemsRes] = await Promise.all([
+    fetchManualReviewSummary(),
+    fetchManualReviewItems(cat),
+  ])
+  if (!sumRes.data?.ok) throw new Error(sumRes.data?.message || '加载人工复核摘要失败')
+  if (!itemsRes.data?.ok) throw new Error(itemsRes.data?.message || '加载人工复核项失败')
+  summary.value = sumRes.data.summary || {}
+  mrItems.value = itemsRes.data.items || []
+  notes.value = {}
+  title.value = '人工复核'
+  subtitle.value = mrCategories.find(x => x.key === cat)?.label || cat
+  compliance.value = null
+  detail.value = {}
+}
+
+async function switchMrCategory(cat, { keepMsg = false } = {}) {
+  mrCategory.value = cat
+  loading.value = true
+  error.value = ''
+  if (!keepMsg) actionMsg.value = ''
+  try {
+    const { data } = await fetchManualReviewItems(cat)
+    if (!data?.ok) throw new Error(data?.message || '加载失败')
+    mrItems.value = data.items || []
+    notes.value = {}
+    subtitle.value = mrCategories.find(x => x.key === cat)?.label || cat
+    const sum = await fetchManualReviewSummary()
+    if (sum.data?.ok) summary.value = sum.data.summary || {}
+    hasLoadedOnce.value = true
+  } catch (e) {
+    error.value = e.message || '加载失败'
+  } finally {
+    loading.value = false
+  }
+}
+
+async function submitMr(item, status) {
+  busyId.value = item.item_id
+  actionMsg.value = ''
+  try {
+    const note = (notes.value[item.item_id] ?? noteOf(item) ?? '').trim()
+    const { data } = await updateManualReview(mrCategory.value, {
+      item_id: item.item_id,
+      status,
+      operator_note: note,
+      operator_instruction: note,
+      target_chapter_id: item.chapter_id || item.target_chapter_id || '',
+    })
+    if (!data?.ok) throw new Error(data?.message || '更新失败')
+    actionMsg.value = `已更新 ${item.item_id} → ${status}` + (data.result?.recommended_stage ? `，建议从 ${data.result.recommended_stage} 重跑` : '')
+    if (data.summary) summary.value = data.summary
+    await switchMrCategory(mrCategory.value, { keepMsg: true })
+  } catch (e) {
+    actionMsg.value = e.message || '更新失败'
+  } finally {
+    busyId.value = ''
   }
 }
 
@@ -480,8 +749,12 @@ async function refresh() {
   loading.value = true
   error.value = ''
   openId.value = null
+  actionMsg.value = ''
   try {
-    if (isCompliance.value) {
+    if (isManualReview.value) {
+      await loadManualReview()
+      hasLoadedOnce.value = true
+    } else if (isCompliance.value) {
       const { data } = await fetchComplianceReport()
       if (!data?.ok) throw new Error(data?.message || '加载失败')
       compliance.value = {
@@ -496,19 +769,26 @@ async function refresh() {
       subtitle.value = data.exists ? (data.blocking ? '阻断中' : '已完成') : '尚未生成报告'
       if (!data.exists) error.value = data.message || '尚未生成合规报告'
       detail.value = {}
+      summary.value = null
+      mrItems.value = []
+      hasLoadedOnce.value = true
     } else {
       compliance.value = null
-      const { data } = await fetchWorkflowStepDetail(props.command)
+      summary.value = null
+      mrItems.value = []
+      const cmd = workflowCommand.value || props.command
+      const { data } = await fetchWorkflowStepDetail(cmd)
       if (!data?.ok) throw new Error(data?.message || '加载失败')
       detail.value = data
-      title.value = data.step?.label || props.command
-      subtitle.value = props.command
+      title.value = data.step?.label || cmd
+      subtitle.value = cmd
+      hasLoadedOnce.value = true
     }
   } catch (e) {
     error.value = e.message || '加载失败'
   } finally {
     loading.value = false
-    await loadIssues()
+    if (!isManualReview.value) await loadIssues()
   }
 }
 

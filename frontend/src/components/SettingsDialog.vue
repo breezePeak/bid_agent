@@ -1,11 +1,12 @@
 <template>
-  <div v-if="visible" class="dialog-overlay" @click.self="$emit('close')">
-    <div class="dialog settings-dialog">
-      <div class="dialog-header">
-        <h2>大模型设置</h2>
-        <button class="btn btn-icon" @click="$emit('close')">&times;</button>
-      </div>
-      <div class="settings-dialog-body">
+  <Teleport to="body">
+    <div v-if="visible" class="dialog-overlay" @click.self="$emit('close')">
+      <div class="dialog settings-dialog">
+        <div class="dialog-header">
+          <h2>大模型设置</h2>
+          <button class="btn btn-icon" @click="$emit('close')">&times;</button>
+        </div>
+        <div class="settings-dialog-body">
         <div class="settings-layout">
           <div class="settings-list">
             <button class="btn btn-sm btn-block settings-add-btn" @click="startNewModel">
@@ -170,6 +171,7 @@
       </div>
     </div>
   </div>
+  </Teleport>
 </template>
 
 <script setup>

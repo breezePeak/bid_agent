@@ -206,16 +206,29 @@ def _llm_decision(
         },
         ensure_ascii=False,
     )
+    reasoning = ""
     if llm_chat is None:
-        from llm_client import chat as llm_chat  # type: ignore
+        from llm_client import chat_with_meta
 
-    raw = llm_chat(
-        [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        temperature=0.1,
-    )
+        meta = chat_with_meta(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.1,
+        )
+        raw = meta.get("content") or ""
+        reasoning = str(meta.get("reasoning") or "").strip()
+    else:
+        raw = llm_chat(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            temperature=0.1,
+        )
+        if isinstance(raw, dict):
+            reasoning = str(raw.get("reasoning") or "").strip()
+            raw = raw.get("content") or ""
     data = _extract_json(raw)
     if not data:
         raise ValueError("supervisor LLM 未返回合法 JSON")
+    if reasoning:
+        data["_reasoning"] = reasoning
     return data
 
 
@@ -284,6 +297,7 @@ def run_supervisor_turn(
     steps: list[dict[str, Any]] = []
     final_reply_parts: list[str] = []
     actions: list[dict[str, Any]] = []
+    reasoning_parts: list[str] = []
 
     for step_index in range(1, steps_limit + 1):
         decision_raw: dict[str, Any]
@@ -298,6 +312,9 @@ def run_supervisor_turn(
             decision_raw = _rule_based_decision(message, snapshot)
             decision_raw["reply"] = (decision_raw.get("reply") or "") + f"（规则兜底：{error_note[:120]}）"
 
+        step_reasoning = str(decision_raw.pop("_reasoning", "") or "").strip()
+        if step_reasoning:
+            reasoning_parts.append(step_reasoning)
         decision = _normalize_decision(decision_raw)
         tool = decision["tool"]
         args = dict(decision["args"])
@@ -429,6 +446,9 @@ def run_supervisor_turn(
         "auto_execute": False,
         "intent": "supervisor_turn",
     }
+    thinking = "\n\n".join(part for part in reasoning_parts if part).strip()
+    if thinking:
+        payload["thinking"] = thinking
     save_last_plan(root, payload)
     return payload
 
@@ -476,5 +496,7 @@ def plan_with_supervisor(
         "goal": result.get("goal") or {},
         "supervisor": True,
     }
+    if result.get("thinking"):
+        plan["thinking"] = result.get("thinking")
     # If last step suggested run_stage with need confirm, keep as chat + button
     return plan

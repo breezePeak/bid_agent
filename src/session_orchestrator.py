@@ -89,7 +89,7 @@ def _compact_status_snapshot(status: dict[str, Any]) -> dict[str, Any]:
                 "done": bool(item.get("done")),
             }
         )
-    return {
+    snapshot = {
         "active_run": status.get("active_run", {}),
         "running": bool(status.get("running")),
         "run_state_status": run_state_status,
@@ -111,6 +111,70 @@ def _compact_status_snapshot(status: dict[str, Any]) -> dict[str, Any]:
         "failed_stage_error": status.get("failed_stage_error"),
         "recovery": status.get("recovery"),
     }
+    issues_summary = status.get("issues_summary")
+    if isinstance(issues_summary, dict):
+        snapshot["issues_summary"] = issues_summary
+
+    pending_confirmation = status.get("pending_confirmation")
+    if isinstance(pending_confirmation, dict):
+        snapshot["pending_confirmation"] = {
+            key: pending_confirmation.get(key)
+            for key in ("confirmation_id", "type", "count")
+            if key in pending_confirmation
+        }
+
+    repair_job = status.get("repair_job")
+    if not isinstance(repair_job, dict):
+        repair_job = status.get("current_repair_job")
+    if isinstance(repair_job, dict):
+        snapshot["repair_job"] = {
+            key: repair_job.get(key)
+            for key in (
+                "job_id",
+                "status",
+                "phase",
+                "counts",
+                "total_count",
+                "auto_count",
+                "manual_count",
+                "resolved_count",
+                "remaining_count",
+                "failed_count",
+                "progress_percent",
+                "message",
+                "resume_command",
+                "resume_attempted",
+            )
+            if key in repair_job
+        }
+    return snapshot
+
+
+def _recent_assistant_actions(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep a small, model-useful record of actions offered by the assistant."""
+    recent_actions: list[dict[str, Any]] = []
+    for msg in history[-6:]:
+        if msg.get("role") != "assistant" or not isinstance(msg.get("actions"), list):
+            continue
+        for action in msg["actions"]:
+            if not isinstance(action, dict):
+                continue
+            compact_action = {
+                key: value
+                for key, value in action.items()
+                if key in {
+                    "type",
+                    "command",
+                    "label",
+                    "category",
+                    "issue_id",
+                    "issue_ids",
+                    "confirmation_id",
+                }
+            }
+            if compact_action:
+                recent_actions.append(compact_action)
+    return recent_actions[-8:]
 
 
 def _build_user_prompt(
@@ -133,6 +197,12 @@ def _build_user_prompt(
         parts.append(
             "各章审核结果摘要（用于 dispatch_rewrite 综合改稿目标）：\n"
             + json.dumps(review_context, ensure_ascii=False, default=str)
+        )
+    recent_actions = _recent_assistant_actions(history)
+    if recent_actions:
+        parts.append(
+            "最近助手动作（JSON）：\n"
+            + json.dumps(recent_actions, ensure_ascii=False, default=str)
         )
     parts.append(f"最近对话：\n{history_text}")
     parts.append(f"用户最新消息：\n{message}")
@@ -251,16 +321,32 @@ def plan(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
+    reasoning = ""
     try:
         if llm_chat is None:
-            from llm_client import chat as llm_chat
-        raw = llm_chat(messages, temperature=0.1)
+            from llm_client import chat_with_meta
+
+            meta = chat_with_meta(messages, temperature=0.1)
+            raw = meta.get("content") or ""
+            reasoning = str(meta.get("reasoning") or "").strip()
+        else:
+            raw = llm_chat(messages, temperature=0.1)
+            if isinstance(raw, dict):
+                reasoning = str(raw.get("reasoning") or "").strip()
+                raw = raw.get("content") or ""
     except Exception as exc:
         return _fallback_plan(message, snapshot) | {"error": f"LLM 编排失败: {exc}"}
     plan_json = _extract_json(raw)
     if not plan_json:
-        return _fallback_plan(message, snapshot) | {"error": "LLM 未返回合法 JSON", "raw": raw}
-    return _normalize_plan(plan_json, message)
+        return _fallback_plan(message, snapshot) | {
+            "error": "LLM 未返回合法 JSON",
+            "raw": raw,
+            "thinking": reasoning,
+        }
+    plan = _normalize_plan(plan_json, message)
+    if reasoning:
+        plan["thinking"] = reasoning
+    return plan
 
 
 def build_query_reply(query_type: str, status: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:

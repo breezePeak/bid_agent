@@ -21,3 +21,4 @@
 16. 模板任务优先级高于通用扩写：writing_task 要落成章节内容，fill_slot 要保证后续可被事实填充。
 17. 对模板任务状态为 weak/missing 的内容，只能写成拟响应、按要求提交、随投标文件附后或需人工补证，不能写成已具备、已提供、已完成。
 18. 不允许替换、改写或新增模板标题；标题文本和层级必须服从当前章节任务包。
+19. 若任务包含 materials_checklist_items：response_status=deferred 的项必须在正文使用结构化占位（MATERIAL_GAP 注释块或「材料待补清单」小节），写明要求、留白原因、建议附件；response_status=waived 仅作保守响应、不编造证明；禁止使用 XXX/TODO/待填写/请输入 等残留占位符。

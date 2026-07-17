@@ -58,6 +58,18 @@ export function fetchWorkflowStepDetail(command) {
   return api.get('/workflow-step-detail', { params: { command } })
 }
 
+export function fetchManualReviewSummary() {
+  return api.get('/manual-review/summary')
+}
+
+export function fetchManualReviewItems(category) {
+  return api.get('/manual-review/items', { params: { category } })
+}
+
+export function updateManualReview(category, payload) {
+  return api.post('/manual-review/update', { category, payload })
+}
+
 export function fetchFilePreview(path) {
   return api.get('/file-preview', { params: { path } })
 }
@@ -110,8 +122,14 @@ export function clearChatMessages() {
   return api.delete('/chat/messages')
 }
 
-export function orchestrateChat(message, { selectedCommand = '' } = {}) {
-  return api.post('/chat/orchestrate', { message, selected_command: selectedCommand }, { timeout: 120000 })
+export function orchestrateChat(message, { selectedCommand = '', action = null } = {}) {
+  const payload = { message, selected_command: selectedCommand }
+  if (action && typeof action === 'object') payload.action = action
+  return api.post('/chat/orchestrate', payload, { timeout: 120000 })
+}
+
+export function fetchCurrentRepairJob() {
+  return api.get('/repair-jobs/current')
 }
 
 export default api
@@ -178,4 +196,20 @@ export function batchExecuteRepairs(issueIds, { confirm = true } = {}) {
 
 export function fetchExportPreflight() {
   return api.get('/export-preflight')
+}
+
+export function fetchMaterialsChecklist() {
+  return api.get('/materials-checklist')
+}
+
+export function updateMaterialsChecklistItem(payload) {
+  return api.post('/materials-checklist/update', payload)
+}
+
+export function rebuildMaterialsChecklist() {
+  return api.post('/materials-checklist/rebuild', {}, { timeout: 120000 })
+}
+
+export function refillMaterialsChecklist(payload = {}) {
+  return api.post('/materials-checklist/refill', payload, { timeout: 900000 })
 }

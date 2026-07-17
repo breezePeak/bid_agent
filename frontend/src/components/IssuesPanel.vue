@@ -2,11 +2,16 @@
   <div class="issues-panel">
     <div class="ip-tabs">
       <button class="ip-tab" :class="{ on: tab === 'issues' }" @click="tab = 'issues'">问题</button>
+      <button class="ip-tab" :class="{ on: tab === 'materials' }" @click="tab = 'materials'; materialsRef?.refresh?.()">材料</button>
       <button class="ip-tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
     </div>
 
     <div v-if="tab === 'files'" class="ip-files">
       <FileExplorer :run-id="runId" @preview-file="$emit('preview-file', $event)" />
+    </div>
+
+    <div v-else-if="tab === 'materials'" class="ip-materials">
+      <MaterialsChecklistPanel ref="materialsRef" :run-id="runId" />
     </div>
 
     <div v-else class="ip-issues">
@@ -68,6 +73,7 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import FileExplorer from './FileExplorer.vue'
+import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 import { fetchComplianceReport } from '../api'
 
 const props = defineProps({
@@ -81,6 +87,7 @@ const tab = ref('issues')
 const loading = ref(false)
 const filter = ref('fail')
 const selected = ref(null)
+const materialsRef = ref(null)
 const report = ref({ exists: false, blocking: false, items: [], counts: {}, max_severity: '' })
 const emptyMsg = ref('暂无合规报告。跑完 compliance-check 后会显示失败/警告明细。')
 
@@ -137,6 +144,9 @@ watch(() => props.focus, (v) => {
     tab.value = 'issues'
     filter.value = 'fail'
     refresh()
+  } else if (v === 'materials' || v === 'materials-checklist' || v === 'build-materials-checklist') {
+    tab.value = 'materials'
+    materialsRef.value?.refresh?.()
   } else if (v === 'files') {
     tab.value = 'files'
   }
@@ -144,5 +154,9 @@ watch(() => props.focus, (v) => {
 
 onMounted(refresh)
 
-defineExpose({ refresh, showIssues: () => { tab.value = 'issues'; refresh() } })
+defineExpose({
+  refresh,
+  showIssues: () => { tab.value = 'issues'; refresh() },
+  showMaterials: () => { tab.value = 'materials'; materialsRef.value?.refresh?.() },
+})
 </script>

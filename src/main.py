@@ -10,6 +10,7 @@ from chapter_summarizer import summarize_all_chapters, summarize_chapter
 from chapter_writer import write_all, write_chapter
 from docx_builder import build_docx, build_markdown
 from fact_extractor import extract_facts
+from materials_checklist import build_materials_checklist
 from compliance_checker import run_compliance_check
 from global_reviewer import run_global_review
 from format_checker import check_output_format
@@ -455,6 +456,7 @@ def run_pipeline(root: Path | None = None, workers: int = 1, max_retries: int = 
         "split_docs": lambda: _run_split_docs(root),
         "parse_score": lambda: parse_score(root),
         "extract_facts": lambda: extract_facts(root),
+        "build_materials_checklist": lambda: build_materials_checklist(root),
         "build_template_evidence": lambda: build_template_evidence(root),
         "generate_outline": lambda: generate_outline(root),
         "plan_chapter_jobs": lambda: _run_plan_jobs(root),
@@ -514,6 +516,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("split-docs", help="切分招标文件和公司资料为 chunk")
     subparsers.add_parser("parse-score", help="解析评分标准")
     subparsers.add_parser("extract-facts", help="提取全局事实")
+    subparsers.add_parser("build-materials-checklist", help="生成材料/资格待补清单（解析后、写作前）")
     subparsers.add_parser("build-template-evidence", help="根据模板 schema 生成依据映射和质量报告")
     subparsers.add_parser("generate-outline", help="生成标书大纲")
     subparsers.add_parser("plan-jobs", help="生成章节任务包")
@@ -613,6 +616,9 @@ def main() -> int:
     elif args.command == "extract-facts":
         print("[执行] 提取全局事实...")
         extract_facts(root)
+    elif args.command == "build-materials-checklist":
+        print("[执行] 生成材料/资格清单...")
+        build_materials_checklist(root)
     elif args.command == "build-template-evidence":
         print("[执行] 生成模板依据映射...")
         build_template_evidence(root)

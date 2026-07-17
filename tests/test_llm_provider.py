@@ -13,6 +13,8 @@ sys.path.insert(0, str(ROOT / "src"))
 from llm_client import (
     _anthropic_messages_endpoint,
     _extract_anthropic_content,
+    _extract_openai_message,
+    _extract_stream_delta,
     _normalize_provider,
     _openai_chat_endpoint,
     _split_system_messages,
@@ -46,6 +48,29 @@ class LlmProviderTests(unittest.TestCase):
     def test_extract_anthropic(self) -> None:
         text = _extract_anthropic_content({"content": [{"type": "text", "text": "hello"}]})
         self.assertEqual(text, "hello")
+
+    def test_extract_openai_message_reasoning(self) -> None:
+        content, reasoning = _extract_openai_message(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "final answer",
+                            "reasoning_content": "step by step",
+                        }
+                    }
+                ]
+            }
+        )
+        self.assertEqual(content, "final answer")
+        self.assertEqual(reasoning, "step by step")
+
+    def test_extract_stream_delta_reasoning_aliases(self) -> None:
+        reasoning, content = _extract_stream_delta(
+            {"choices": [{"delta": {"reasoning": "think", "content": "hi"}}]}
+        )
+        self.assertEqual(reasoning, "think")
+        self.assertEqual(content, "hi")
 
 
 if __name__ == "__main__":

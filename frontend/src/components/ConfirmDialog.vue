@@ -9,12 +9,12 @@
         <div class="dialog-body">
           <p v-if="message">{{ message }}</p>
           <slot />
-        </div>
-        <div class="dialog-footer">
-          <button class="btn" @click="onCancel">取消</button>
-          <button class="btn btn-danger" @click="onConfirm" :disabled="confirming">
-            {{ confirmText }}
-          </button>
+          <div class="dialog-footer">
+            <button class="btn" @click="onCancel">取消</button>
+            <button class="btn btn-danger" @click="onConfirm" :disabled="confirming">
+              {{ confirmText }}
+            </button>
+          </div>
         </div>
       </div>
     </div>

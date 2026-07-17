@@ -38,11 +38,13 @@
         </div>
       </div>
     </div>
+    <AgentWorkbench class="agp-workbench" :run-id="runId" />
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import AgentWorkbench from './AgentWorkbench.vue'
 import { fetchAgentGoal, fetchAgentDecisions } from '../api'
 
 const props = defineProps({
