@@ -185,6 +185,27 @@ function scrollToBlock(blockId) {
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
+function scrollToChapter(chapterId) {
+  const cid = String(chapterId || '').trim()
+  if (!cid) return false
+  const list = Array.isArray(blocks.value) ? blocks.value : []
+  // match heading/block text containing chapter id (e.g. "1.2" / "01")
+  const hit = list.find((b) => {
+    if (!b) return false
+    const t = String(b.text || b.heading || '')
+    const id = String(b.block_id || b.id || '')
+    return t.includes(cid) || id.includes(cid) || new RegExp(`(^|\\s)${cid.replace(/\./g, '\\.')}(\\s|$)`).test(t)
+  })
+  if (hit) {
+    scrollToBlock(hit.block_id || hit.id)
+    return true
+  }
+  // fallback: first heading-like block
+  const first = list.find((b) => b && (b.type === 'heading' || String(b.block_id || '').startsWith('h')))
+  if (first) scrollToBlock(first.block_id || first.id)
+  return !!first
+}
+
 const pendingOld = computed(() => pendingDocEdit.value?.old_text || pendingDocEdit.value?.selected_text || '')
 const pendingNew = computed(() => pendingDocEdit.value?.new_text || '')
 
@@ -324,5 +345,5 @@ onBeforeUnmount(() => { if (docPageRef.value) docPageRef.value.removeEventListen
 watch(pageCount, (val) => emit('update-page-count', val))
 watch(() => props.runId, loadDoc)
 
-defineExpose({ loadDoc })
+defineExpose({ loadDoc, scrollToBlock, scrollToChapter })
 </script>

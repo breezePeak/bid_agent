@@ -1485,8 +1485,211 @@ async function loadStatus() {
     updateChrome();
     loadRuns();
     maybeAutoReloadDocEditor();
+    loadAgentWorkbench(false);
   } catch (error) {
     appendLog("[前端] 状态加载失败: " + error);
+  }
+}
+
+let agentWorkbenchCache = { goal: null, decisions: [], materials: null, snapshot: null };
+
+function planStepIcon(status) {
+  const s = String(status || "pending");
+  if (s === "done" || s === "skipped") return "✓";
+  if (s === "running") return "●";
+  if (s === "blocked" || s === "failed") return "!";
+  return "○";
+}
+
+function renderAgentGoalCard(goal, summary) {
+  const el = document.getElementById("agent-goal-card");
+  if (!el) return;
+  if (!goal) {
+    el.innerHTML = `<p class="muted">暂无活动目标。在聊天中提出如「补齐评分点并出 Word」即可创建。</p>`;
+    return;
+  }
+  const progress = goal.progress || {};
+  const criteria = goal.criteria_results || [];
+  const failed = criteria.filter((c) => !c.ok).slice(0, 5);
+  const criteriaHtml = criteria.length
+    ? `<ul class="agent-list">${criteria
+        .map((c) => `<li class="${c.ok ? "ok" : "bad"}">${escapeHtml(c.check)}: ${escapeHtml(c.detail || "")}</li>`)
+        .join("")}</ul>`
+    : "<p class='muted'>无成功条件</p>";
+  el.innerHTML = `
+    <div class="agent-kv"><span>原始目标</span><strong>${escapeHtml(goal.raw_user_goal || "")}</strong></div>
+    <div class="agent-kv"><span>状态</span><strong class="status-${escapeHtml(goal.status || "")}">${escapeHtml(goal.status || "")}</strong></div>
+    <div class="agent-kv"><span>完成度</span><strong>${escapeHtml(
+      progress.plan_total
+        ? `${progress.plan_done || 0}/${progress.plan_total}`
+        : progress.criteria_total
+          ? `${progress.criteria_ok || 0}/${progress.criteria_total}`
+          : goal.all_criteria_ok
+            ? "已达成"
+            : "进行中"
+    )}</strong></div>
+    ${goal.blocked_reason ? `<div class="agent-block">阻断：${escapeHtml(goal.blocked_reason)}</div>` : ""}
+    ${goal.status === "awaiting_confirmation" ? `<div class="agent-block">等待确认后执行变更类操作</div>` : ""}
+    <div class="agent-sub">成功条件</div>
+    ${criteriaHtml}
+    <p class="muted small">${escapeHtml(summary || "")}</p>
+  `;
+}
+
+function renderAgentPlanCard(goal) {
+  const el = document.getElementById("agent-plan-card");
+  if (!el) return;
+  const plan = (goal && goal.plan) || [];
+  if (!plan.length) {
+    el.innerHTML = `<p class="muted">当前目标没有结构化计划（只读查询/对话类）。</p>`;
+    return;
+  }
+  const idx = Number(goal.current_plan_index || 0);
+  el.innerHTML = `<ol class="agent-plan-list">${plan
+    .map((step, i) => {
+      const st = step.status || "pending";
+      const active = i === idx && !["done", "skipped"].includes(st);
+      return `<li class="${active ? "is-active" : ""} ${st}">
+        <span class="plan-icon">${planStepIcon(active ? "running" : st)}</span>
+        <span>${escapeHtml(step.label || step.step_id || step.tool || "")}</span>
+        <span class="muted small">${escapeHtml(st)}</span>
+      </li>`;
+    })
+    .join("")}</ol>`;
+}
+
+function renderAgentDecisions() {
+  const el = document.getElementById("agent-decisions-card");
+  if (!el) return;
+  const debug = document.getElementById("agent-debug-trace")?.checked;
+  const items = agentWorkbenchCache.decisions || [];
+  if (!items.length) {
+    el.innerHTML = `<p class="muted">暂无决策记录。</p>`;
+    return;
+  }
+  el.innerHTML = `<ul class="agent-list decisions">${items
+    .slice()
+    .reverse()
+    .slice(0, 12)
+    .map((d) => {
+      const summary = d.user_summary || d.thought_summary || d.selected_tool || "观察";
+      if (!debug) {
+        return `<li>${escapeHtml(summary)}</li>`;
+      }
+      return `<li>
+        <div>${escapeHtml(summary)}</div>
+        <div class="muted small">tool=${escapeHtml(d.selected_tool || "")} ok=${escapeHtml(String(d.ok))} exec=${escapeHtml(String(d.executed))}</div>
+        <div class="muted small">${escapeHtml((d.observation_summary || "").slice(0, 160))}</div>
+      </li>`;
+    })
+    .join("")}</ul>`;
+}
+
+function renderAgentHumanCard(materials, goal, snapshot) {
+  const el = document.getElementById("agent-human-card");
+  if (!el) return;
+  const missing = (materials && materials.missing) || (snapshot && snapshot.materials && snapshot.materials.missing) || [];
+  const blocked = goal && (goal.status === "blocked_human" || goal.blocked_reason);
+  if (!missing.length && !blocked) {
+    el.innerHTML = `<p class="muted">当前无需人工补料。若导出前检查未过，请处理质量问题单。</p>
+      <div class="toolbar"><button onclick="sendQuickChat('出稿前检查')">出稿前检查</button></div>`;
+    return;
+  }
+  const rows = (missing || []).slice(0, 8).map((m) => {
+    const id = m.item_id || "";
+    return `<li>
+      <strong>${escapeHtml(m.requirement || id)}</strong>
+      <div class="muted small">缺什么：${escapeHtml(m.suggested_attachment || "对应证明材料")}；影响：${escapeHtml((m.target_chapter_hints || []).join("、") || "相关章节")}；等级：${escapeHtml(m.severity || "")}</div>
+      <button onclick="markMaterialUploaded('${escapeHtml(id)}')">标记已上传并恢复</button>
+    </li>`;
+  });
+  el.innerHTML = `
+    ${blocked ? `<div class="agent-block">${escapeHtml(goal.blocked_reason || "需要人工处理")}</div>` : ""}
+    <ul class="agent-list">${rows.join("") || "<li>见材料清单</li>"}</ul>
+    <div class="toolbar">
+      <button onclick="showStepDetail('build-materials-checklist')">打开材料清单</button>
+      <button class="primary" onclick="refillMaterials()">补料后局部回填</button>
+      <button onclick="resumeAgentGoal()">从阻断继续</button>
+    </div>
+    <p class="muted small">补充后只重跑受影响章节，不会全量重跑。</p>
+  `;
+}
+
+async function loadAgentWorkbench(force) {
+  if (!hasActiveWorkspace() && !force) return;
+  try {
+    const [goalRes, decRes, matRes, snapRes] = await Promise.all([
+      fetch("/api/agent/goal").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/agent/decisions?tail=20").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/materials-checklist").then((r) => r.json()).catch(() => ({})),
+      fetch("/api/agent/snapshot").then((r) => r.json()).catch(() => ({})),
+    ]);
+    agentWorkbenchCache.goal = goalRes.goal || null;
+    agentWorkbenchCache.decisions = decRes.decisions || [];
+    agentWorkbenchCache.materials = matRes;
+    agentWorkbenchCache.snapshot = snapRes.snapshot || null;
+    const snapMats = (snapRes.snapshot && snapRes.snapshot.materials) || {};
+    renderAgentGoalCard(goalRes.goal, goalRes.summary);
+    renderAgentPlanCard(goalRes.goal);
+    renderAgentDecisions();
+    renderAgentHumanCard(snapMats, goalRes.goal, snapRes.snapshot);
+  } catch (error) {
+    // non-fatal
+  }
+}
+
+async function resumeAgentGoal() {
+  try {
+    const response = await fetch("/api/agent/goal/resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ note: "web_resume" }),
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      alert(data.message || "恢复失败");
+      return;
+    }
+    await loadAgentWorkbench(true);
+    sendQuickChat("继续");
+  } catch (error) {
+    alert("恢复失败: " + error);
+  }
+}
+
+async function markMaterialUploaded(itemId) {
+  if (!itemId) return;
+  try {
+    const response = await fetch("/api/materials-checklist/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ item_id: itemId, note: "用户在工作台标记已上传" }),
+    });
+    const data = await response.json();
+    if (!data.ok) {
+      alert(data.message || "标记失败");
+      return;
+    }
+    appendLog("[材料] " + (data.message || itemId));
+    await loadAgentWorkbench(true);
+  } catch (error) {
+    alert("标记失败: " + error);
+  }
+}
+
+async function refillMaterials() {
+  try {
+    const response = await fetch("/api/materials-checklist/refill", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ replan_jobs: true, max_chapters: 10 }),
+    });
+    const data = await response.json();
+    alert(data.message || (data.ok ? "回填完成" : "回填失败"));
+    await loadAgentWorkbench(true);
+    setTimeout(loadStatus, 500);
+  } catch (error) {
+    alert("回填失败: " + error);
   }
 }
 

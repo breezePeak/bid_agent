@@ -5,47 +5,25 @@
         <span class="aw-dot" :class="{ on: isLive }"></span>
         <strong>Agent 办公室</strong>
         <span class="aw-phase" v-if="phaseLabel">{{ phaseLabel }}</span>
+        <span class="aw-pool">工位池 {{ poolSize }} 并发</span>
       </div>
-      <div class="aw-summary" v-if="summary">
-        <span class="aw-chip run">工位 {{ summary.running || 0 }}</span>
-        <span class="aw-chip queue">排队 {{ summary.queued || 0 }}</span>
-        <span class="aw-chip done">休息 {{ summary.done || 0 }}</span>
-        <span class="aw-chip fail" v-if="summary.failed">加班救火 {{ summary.failed }}</span>
+      <div class="aw-summary">
+        <span class="aw-chip run">在岗 {{ stats.running }}</span>
+        <span class="aw-chip queue">待领 {{ stats.queued }}</span>
+        <span class="aw-chip done">已交 {{ stats.done }}</span>
+        <span class="aw-chip fail" v-if="stats.failed">失败 {{ stats.failed }}</span>
       </div>
     </div>
 
-    <div v-if="!agents.length" class="aw-empty">
-      <div class="aw-empty-scene" aria-hidden="true">
-        <div class="mini-person idle">
-          <span class="head"></span>
-          <span class="body"></span>
+    <div class="office-room" aria-label="Agent 办公室平面图">
+      <!-- 主控 -->
+      <div class="room room-boss">
+        <div class="room-label">
+          <span class="room-tag">主办公室</span>
+          <strong>主 Agent · 统筹调度</strong>
         </div>
-        <div class="empty-desk">
-          <span class="screen"></span>
-        </div>
-      </div>
-      <div class="aw-empty-title">{{ isLive ? '小人们正在入场…' : '办公室空着，还没人开工' }}</div>
-      <div>进入「生成章节 / 审核改稿」后：排队的站队等，开工的敲键盘，干完的去隔壁休息室摸鱼。</div>
-    </div>
-
-    <div v-else class="aw-office">
-      <!-- 工位区 -->
-      <section class="zone zone-work">
-        <div class="zone-head">
-          <span class="zone-icon">💻</span>
-          <div>
-            <strong>工位区</strong>
-            <em>正在干活 · {{ workingAgents.length }}</em>
-          </div>
-        </div>
-        <div class="zone-body desks" v-if="workingAgents.length">
-          <div
-            v-for="a in workingAgents"
-            :key="a.id"
-            class="desk-unit"
-            :class="'c-' + (a.color || 'slate')"
-            :title="cardTitle(a)"
-          >
+        <div class="boss-bar">
+          <div class="desk-unit c-indigo boss-desk" :title="coordinatorTitle">
             <div class="desk-top">
               <div class="monitor">
                 <div class="screen typing">
@@ -65,116 +43,136 @@
             </div>
             <div class="desk-board"></div>
             <div class="desk-label">
-              <span class="role">{{ shortRole(a) }}</span>
-              <span class="ch">章 {{ a.chapter_id || '—' }}</span>
+              <span class="role">Coordinator</span>
+              <span class="ch">主控</span>
             </div>
-            <div class="desk-msg">{{ a.message || '敲键盘改稿中…' }}</div>
+          </div>
+          <div class="boss-status">
+            <div class="boss-msg">{{ coordinatorMsg }}</div>
+            <div class="boss-progress" v-if="stats.total > 0">
+              <div class="bp-track">
+                <div class="bp-fill done" :style="{ width: pct(stats.done) + '%' }"></div>
+                <div class="bp-fill run" :style="{ width: pct(stats.running) + '%' }"></div>
+                <div class="bp-fill fail" :style="{ width: pct(stats.failed) + '%' }"></div>
+              </div>
+              <div class="bp-text">
+                章节任务 {{ stats.done + stats.failed }}/{{ stats.total }}
+                <template v-if="stats.running"> · 在写 {{ stats.running }}</template>
+                <template v-if="stats.queued"> · 排队 {{ stats.queued }}</template>
+              </div>
+            </div>
+            <div v-if="materialsDeferred > 0" class="boss-materials-flag">待补材料 {{ materialsDeferred }} 条</div>
           </div>
         </div>
-        <div v-else class="zone-empty">工位空闲，等待调度</div>
-      </section>
+      </div>
 
-      <!-- 排队区 -->
-      <section class="zone zone-queue">
-        <div class="zone-head">
-          <span class="zone-icon">🧍</span>
-          <div>
-            <strong>排队廊</strong>
-            <em>等待上场 · {{ queuedAgents.length }}</em>
-          </div>
+      <!-- 角色工位池 -->
+      <div class="room room-pools">
+        <div class="room-label">
+          <span class="room-tag work">开放办公区</span>
+          <strong>角色工位池</strong>
+          <em>固定 {{ poolSize }} 个工位 · 章节任务轮流领取</em>
         </div>
-        <div class="zone-body queue-line" v-if="queuedAgents.length">
+        <div class="pool-grid">
           <div
-            v-for="(a, idx) in queuedAgents"
-            :key="a.id"
-            class="queue-person"
-            :class="'c-' + (a.color || 'slate')"
-            :style="{ animationDelay: `${idx * 0.12}s` }"
-            :title="cardTitle(a)"
+            v-for="team in roleTeams"
+            :key="team.role"
+            class="role-pool"
+            :class="['c-' + team.color, { active: team.running.length || team.queued }]"
           >
-            <div class="person standing">
-              <span class="head"></span>
-              <span class="body"></span>
-              <span class="leg left"></span>
-              <span class="leg right"></span>
+            <div class="rp-head">
+              <span class="rp-emoji">{{ team.emoji }}</span>
+              <div class="rp-titles">
+                <strong>{{ team.label }}</strong>
+                <em>{{ team.running.length }}/{{ team.seats.length }} 在岗</em>
+              </div>
+              <div class="rp-stats">
+                <span v-if="team.queued" class="mini queue">待 {{ team.queued }}</span>
+                <span v-if="team.done" class="mini done">完 {{ team.done }}</span>
+                <span v-if="team.failed" class="mini fail">败 {{ team.failed }}</span>
+              </div>
             </div>
-            <div class="q-badge">#{{ idx + 1 }}</div>
-            <div class="q-label">
-              <span>{{ shortRole(a) }}</span>
-              <em>章 {{ a.chapter_id || '—' }}</em>
+            <div class="seat-row">
+              <div
+                v-for="seat in team.seats"
+                :key="seat.id"
+                class="seat"
+                :class="{ busy: seat.busy, idle: !seat.busy }"
+                :title="seat.title"
+              >
+                <div class="desk-top compact">
+                  <div class="monitor mini">
+                    <div class="screen" :class="{ typing: seat.busy }">
+                      <template v-if="seat.busy">
+                        <span class="code-line"></span>
+                        <span class="code-line short"></span>
+                        <span class="cursor"></span>
+                      </template>
+                    </div>
+                    <div class="stand"></div>
+                  </div>
+                  <div class="worker" :class="seat.busy ? 'working' : 'idle'">
+                    <span class="head"></span>
+                    <span class="body"></span>
+                    <template v-if="seat.busy">
+                      <span class="arm left"></span>
+                      <span class="arm right"></span>
+                    </template>
+                  </div>
+                </div>
+                <div class="desk-board short"></div>
+                <div class="seat-meta">
+                  <span class="seat-no">#{{ seat.no }}</span>
+                  <span class="seat-ch">{{ seat.busy ? ('章 ' + seat.chapter) : '空闲' }}</span>
+                </div>
+                <div v-if="seat.busy && seat.message" class="seat-msg">{{ seat.message }}</div>
+              </div>
+            </div>
+            <div v-if="team.currentChapters.length" class="rp-current">
+              正在处理：{{ team.currentChapters.join('、') }}
             </div>
           </div>
         </div>
-        <div v-else class="zone-empty">没人排队，真好</div>
-      </section>
+      </div>
 
-      <!-- 休息室 -->
-      <section class="zone zone-lounge">
-        <div class="zone-head">
-          <span class="zone-icon">☕</span>
-          <div>
-            <strong>休息室</strong>
-            <em>干完摸鱼 · {{ doneAgents.length }}</em>
+      <!-- 任务看板：排队 / 完成 / 失败 -->
+      <div class="room room-board">
+        <div class="board-col queue">
+          <div class="board-h">
+            <span class="room-tag queue">任务走廊</span>
+            <strong>待领取</strong>
+            <em>{{ stats.queued }} 章</em>
+          </div>
+          <div class="chip-list" v-if="queuedPreview.length">
+            <span v-for="c in queuedPreview" :key="'q' + c" class="ch-chip queue">{{ c }}</span>
+            <span v-if="stats.queued > queuedPreview.length" class="ch-more">+{{ stats.queued - queuedPreview.length }}</span>
+          </div>
+          <div v-else class="board-empty">暂无排队任务</div>
+        </div>
+        <div class="board-col done">
+          <div class="board-h">
+            <span class="room-tag lounge">交稿台</span>
+            <strong>已完成</strong>
+            <em>{{ stats.done }} 章</em>
+          </div>
+          <div class="chip-list" v-if="donePreview.length">
+            <span v-for="c in donePreview" :key="'d' + c" class="ch-chip done">{{ c }}</span>
+            <span v-if="stats.done > donePreview.length" class="ch-more">+{{ stats.done - donePreview.length }}</span>
+          </div>
+          <div v-else class="board-empty">还没有交稿</div>
+        </div>
+        <div class="board-col fail" v-if="stats.failed">
+          <div class="board-h">
+            <span class="room-tag fail">救火台</span>
+            <strong>失败</strong>
+            <em>{{ stats.failed }} 章</em>
+          </div>
+          <div class="chip-list">
+            <span v-for="c in failedPreview" :key="'f' + c" class="ch-chip fail">{{ c }}</span>
+            <span v-if="stats.failed > failedPreview.length" class="ch-more">+{{ stats.failed - failedPreview.length }}</span>
           </div>
         </div>
-        <div class="zone-body lounge" v-if="doneAgents.length || failedAgents.length || skippedAgents.length">
-          <div
-            v-for="a in doneAgents"
-            :key="a.id"
-            class="lounge-seat"
-            :class="'c-' + (a.color || 'slate')"
-            :title="cardTitle(a)"
-          >
-            <div class="sofa">
-              <div class="person lounging">
-                <span class="head"></span>
-                <span class="body"></span>
-              </div>
-              <div class="phone"></div>
-            </div>
-            <div class="l-label">
-              <span>{{ shortRole(a) }} · 章 {{ a.chapter_id || '—' }}</span>
-              <em>摸鱼中</em>
-            </div>
-          </div>
-          <div
-            v-for="a in failedAgents"
-            :key="a.id"
-            class="lounge-seat fail"
-            :title="cardTitle(a)"
-          >
-            <div class="sofa panic">
-              <div class="person stressed">
-                <span class="head"></span>
-                <span class="body"></span>
-              </div>
-              <div class="fire">🔥</div>
-            </div>
-            <div class="l-label">
-              <span>{{ shortRole(a) }} · 章 {{ a.chapter_id || '—' }}</span>
-              <em class="bad">救火中</em>
-            </div>
-          </div>
-          <div
-            v-for="a in skippedAgents"
-            :key="a.id"
-            class="lounge-seat skip"
-            :title="cardTitle(a)"
-          >
-            <div class="sofa">
-              <div class="person idle-skip">
-                <span class="head"></span>
-                <span class="body"></span>
-              </div>
-            </div>
-            <div class="l-label">
-              <span>{{ shortRole(a) }} · 章 {{ a.chapter_id || '—' }}</span>
-              <em>未上场</em>
-            </div>
-          </div>
-        </div>
-        <div v-else class="zone-empty">休息室还空着</div>
-      </section>
+      </div>
     </div>
   </div>
 </template>
@@ -182,6 +180,16 @@
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { fetchAgentActivity } from '../api'
+
+const POOL_SIZE = 10
+const PREVIEW_N = 12
+
+const ROLE_TEAMS = [
+  { role: 'chapter_writer', label: '写作组', emoji: '✍️', color: 'blue' },
+  { role: 'chapter_reviewer', label: '审核组', emoji: '🔍', color: 'purple' },
+  { role: 'chapter_rewriter', label: '改稿组', emoji: '📝', color: 'orange' },
+  { role: 'global_reviewer', label: '全文审核', emoji: '📋', color: 'teal', single: true },
+]
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -199,19 +207,103 @@ const summary = computed(() => data.value.summary || {})
 const phaseLabel = computed(() => data.value.phase_label || data.value.phase || '')
 const isLive = computed(() => props.active || String(data.value.status || '') === 'running' || (summary.value.running || 0) > 0)
 
-const workingAgents = computed(() => agents.value.filter((a) => a.status === 'running'))
-const queuedAgents = computed(() => agents.value.filter((a) => a.status === 'queued'))
-const doneAgents = computed(() => agents.value.filter((a) => a.status === 'done'))
-const failedAgents = computed(() => agents.value.filter((a) => a.status === 'failed'))
-const skippedAgents = computed(() => agents.value.filter((a) => a.status === 'skipped'))
+const isCoordinator = (a) => a && (a.is_coordinator || a.role === 'coordinator')
+const coordinator = computed(() => agents.value.find(isCoordinator) || data.value.coordinator || null)
+const materialsDeferred = computed(() => Number(data.value.materials_deferred || 0) || 0)
+const coordinatorMsg = computed(() => {
+  if (coordinator.value?.message) return coordinator.value.message
+  if (materialsDeferred.value > 0) return `值班统筹 · 待补材料 ${materialsDeferred.value} 条`
+  return '值班统筹 · 等待用户指令'
+})
+const coordinatorTitle = computed(() => `主 Agent · ${coordinatorMsg.value}`)
 
-function shortRole(a) {
-  const label = String(a?.label || a?.role || 'Agent')
-  return label.replace(/子\s*Agent|Agent/gi, '').trim() || 'Agent'
-}
-function cardTitle(a) {
-  const st = { running: '工作中', queued: '排队', done: '完成', failed: '失败', skipped: '跳过' }[a.status] || a.status
-  return `${a.label || a.role} · 章节 ${a.chapter_id || '—'} · ${st}${a.message ? ' · ' + a.message : ''}`
+const tasks = computed(() => agents.value.filter((a) => !isCoordinator(a)))
+
+const stats = computed(() => {
+  const list = tasks.value
+  const running = list.filter((a) => a.status === 'running').length
+  const queued = list.filter((a) => a.status === 'queued').length
+  const done = list.filter((a) => a.status === 'done').length
+  const failed = list.filter((a) => a.status === 'failed').length
+  return {
+    total: list.length,
+    running: running || Number(summary.value.running || 0),
+    queued: queued || Number(summary.value.queued || 0),
+    done: done || Number(summary.value.done || 0),
+    failed: failed || Number(summary.value.failed || 0),
+  }
+})
+
+const poolSize = computed(() => {
+  const n = Math.max(stats.value.running, Number(data.value.workers || 0), 1)
+  return Math.min(POOL_SIZE, Math.max(n, Math.min(POOL_SIZE, stats.value.running + Math.min(2, stats.value.queued))))
+})
+
+const activeRole = computed(() => {
+  const running = tasks.value.find((a) => a.status === 'running')
+  if (running?.role) return running.role
+  const any = tasks.value[0]
+  return any?.role || 'chapter_writer'
+})
+
+const roleTeams = computed(() => {
+  const byRole = {}
+  for (const a of tasks.value) {
+    const r = a.role || 'chapter_writer'
+    if (!byRole[r]) byRole[r] = []
+    byRole[r].push(a)
+  }
+  const rolesPresent = new Set(Object.keys(byRole))
+  if (!rolesPresent.size) rolesPresent.add(activeRole.value)
+
+  return ROLE_TEAMS
+    .filter((t) => rolesPresent.has(t.role) || t.role === activeRole.value)
+    .map((t) => {
+      const list = byRole[t.role] || []
+      const running = list.filter((a) => a.status === 'running')
+      const queued = list.filter((a) => a.status === 'queued').length
+      const done = list.filter((a) => a.status === 'done').length
+      const failed = list.filter((a) => a.status === 'failed').length
+      const seatCount = t.single ? 1 : Math.max(running.length, Math.min(POOL_SIZE, poolSize.value || POOL_SIZE))
+      const seats = Array.from({ length: seatCount }, (_, i) => {
+        const job = running[i]
+        return {
+          id: `${t.role}-seat-${i}`,
+          no: i + 1,
+          busy: !!job,
+          chapter: job?.chapter_id || '',
+          message: job?.message || '',
+          title: job
+            ? `${t.label} #${i + 1} · 章 ${job.chapter_id} · ${job.message || '执行中'}`
+            : `${t.label} #${i + 1} · 空闲`,
+        }
+      })
+      return {
+        ...t,
+        running,
+        queued,
+        done,
+        failed,
+        seats,
+        currentChapters: running.map((a) => a.chapter_id).filter(Boolean).slice(0, 8),
+      }
+    })
+})
+
+const queuedPreview = computed(() =>
+  tasks.value.filter((a) => a.status === 'queued').map((a) => a.chapter_id).filter(Boolean).slice(0, PREVIEW_N)
+)
+const donePreview = computed(() =>
+  tasks.value.filter((a) => a.status === 'done').map((a) => a.chapter_id).filter(Boolean).slice(-PREVIEW_N).reverse()
+)
+const failedPreview = computed(() =>
+  tasks.value.filter((a) => a.status === 'failed').map((a) => a.chapter_id).filter(Boolean).slice(0, PREVIEW_N)
+)
+
+function pct(n) {
+  const t = stats.value.total || 0
+  if (!t) return 0
+  return Math.max(0, Math.min(100, Math.round((Number(n || 0) / t) * 100)))
 }
 
 async function refresh() {

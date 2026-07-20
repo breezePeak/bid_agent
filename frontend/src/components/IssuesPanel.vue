@@ -1,9 +1,28 @@
 <template>
   <div class="issues-panel">
     <div class="ip-tabs">
+      <button class="ip-tab" :class="{ on: tab === 'office' }" @click="tab = 'office'; goalPanelRef?.refresh?.()">办公室</button>
       <button class="ip-tab" :class="{ on: tab === 'issues' }" @click="tab = 'issues'">问题</button>
-      <button class="ip-tab" :class="{ on: tab === 'materials' }" @click="tab = 'materials'; materialsRef?.refresh?.()">材料</button>
+      <button
+        class="ip-tab"
+        :class="{ on: tab === 'materials', alert: deferredCount > 0 }"
+        @click="tab = 'materials'; materialsRef?.refresh?.()"
+      >
+        材料
+        <span v-if="deferredCount > 0" class="ip-badge-alert" :title="`待补 ${deferredCount} 条材料`">{{ deferredCount }}</span>
+      </button>
+      <button class="ip-tab" :class="{ on: tab === 'logs' }" @click="tab = 'logs'">日志</button>
       <button class="ip-tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
+    </div>
+
+    <div v-if="deferredCount > 0 && tab !== 'materials'" class="ip-materials-alert" @click="tab = 'materials'; materialsRef?.refresh?.()">
+      <span class="ip-alert-dot"></span>
+      <strong>待补材料 {{ deferredCount }} 条</strong>
+      <span>请补充公司资料或在材料清单中处理</span>
+    </div>
+
+    <div v-show="tab === 'office'" class="ip-office">
+      <AgentGoalPanel ref="goalPanelRef" :run-id="runId" />
     </div>
 
     <div v-if="tab === 'files'" class="ip-files">
@@ -11,10 +30,27 @@
     </div>
 
     <div v-else-if="tab === 'materials'" class="ip-materials">
-      <MaterialsChecklistPanel ref="materialsRef" :run-id="runId" />
+      <MaterialsChecklistPanel ref="materialsRef" :run-id="runId" @status="onMaterialsPanelStatus" />
     </div>
 
-    <div v-else class="ip-issues">
+    <div v-else-if="tab === 'logs'" class="ip-logs">
+      <div class="ip-header">
+        <div class="ip-title-row">
+          <strong>流水线日志</strong>
+          <button class="btn btn-sm" @click="clearLogs">清空</button>
+        </div>
+        <div class="ip-empty-soft">阶段执行细节在此查看，聊天里只保留关键节点。</div>
+      </div>
+      <div class="ip-log-list" v-if="displayLogs.length">
+        <div v-for="(row, i) in displayLogs" :key="i" class="ip-log-line">
+          <span v-if="row.stage" class="ip-log-stage">{{ row.stage }}</span>
+          <span>{{ row.line }}</span>
+        </div>
+      </div>
+      <div v-else class="ip-empty-soft" style="padding:12px">暂无日志。启动流水线后会实时汇入。</div>
+    </div>
+
+    <div v-else-if="tab === 'issues'" class="ip-issues">
       <div class="ip-header">
         <div class="ip-title-row">
           <strong>问题与合规</strong>
@@ -71,25 +107,31 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import FileExplorer from './FileExplorer.vue'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
-import { fetchComplianceReport } from '../api'
+import AgentGoalPanel from './AgentGoalPanel.vue'
+import { fetchComplianceReport, fetchMaterialsChecklist } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
-  /** when parent asks to focus compliance */
   focus: { type: String, default: '' },
+  pipelineLogs: { type: Array, default: () => [] },
 })
-defineEmits(['preview-file'])
+const emit = defineEmits(['preview-file', 'open-chapter', 'materials-status'])
 
-const tab = ref('issues')
+const tab = ref('office')
 const loading = ref(false)
 const filter = ref('fail')
 const selected = ref(null)
 const materialsRef = ref(null)
+const goalPanelRef = ref(null)
+const localLogs = ref([])
+const deferredCount = ref(0)
+const materialsExists = ref(false)
 const report = ref({ exists: false, blocking: false, items: [], counts: {}, max_severity: '' })
 const emptyMsg = ref('暂无合规报告。跑完 compliance-check 后会显示失败/警告明细。')
+let materialsTimer = null
 
 const counts = computed(() => report.value.counts || {})
 const filters = [
@@ -107,9 +149,52 @@ const filteredItems = computed(() => {
   return items.filter(i => i.severity === filter.value)
 })
 
+const displayLogs = computed(() => {
+  const fromParent = Array.isArray(props.pipelineLogs) ? props.pipelineLogs : []
+  return fromParent.length ? fromParent.slice().reverse() : localLogs.value.slice().reverse()
+})
+
 function severityLabel(sev) {
   const m = { fatal: '致命', critical: '严重', major: '重要', minor: '次要', info: '提示' }
   return m[sev] || sev || '—'
+}
+
+function clearLogs() {
+  localLogs.value = []
+}
+
+function publishMaterialsStatus(payload) {
+  const n = Number(payload?.deferred || 0) || 0
+  deferredCount.value = n
+  materialsExists.value = !!payload?.exists
+  emit('materials-status', {
+    exists: !!payload?.exists,
+    deferred: n,
+    total: Number(payload?.total || 0) || 0,
+    ready: Number(payload?.ready || 0) || 0,
+    waived: Number(payload?.waived || 0) || 0,
+    items: Array.isArray(payload?.items) ? payload.items : [],
+  })
+}
+
+function onMaterialsPanelStatus(payload) {
+  publishMaterialsStatus(payload || {})
+}
+
+async function refreshMaterialsBadge() {
+  try {
+    const { data } = await fetchMaterialsChecklist()
+    if (!data?.ok) return
+    const summary = data.summary || data.checklist?.summary || {}
+    publishMaterialsStatus({
+      exists: !!data.exists,
+      deferred: Number(summary.deferred || 0) || 0,
+      total: Number(summary.total || 0) || 0,
+      ready: Number(summary.ready || 0) || 0,
+      waived: Number(summary.waived || 0) || 0,
+      items: Array.isArray(data.items) ? data.items : [],
+    })
+  } catch (e) { /* ignore */ }
 }
 
 async function refresh() {
@@ -136,27 +221,53 @@ async function refresh() {
   } finally {
     loading.value = false
   }
+  await refreshMaterialsBadge()
 }
 
-watch(() => props.runId, () => refresh())
+watch(() => props.runId, () => {
+  localLogs.value = []
+  deferredCount.value = 0
+  materialsExists.value = false
+  tab.value = 'office'
+  refresh()
+})
 watch(() => props.focus, (v) => {
-  if (v === 'compliance' || v === 'compliance-check' || v === 'issues') {
+  if (v === 'goal' || v === 'office' || v === 'agent') {
+    tab.value = 'office'
+    goalPanelRef.value?.refresh?.()
+  } else if (v === 'compliance' || v === 'compliance-check' || v === 'issues') {
     tab.value = 'issues'
     filter.value = 'fail'
     refresh()
   } else if (v === 'materials' || v === 'materials-checklist' || v === 'build-materials-checklist') {
     tab.value = 'materials'
     materialsRef.value?.refresh?.()
+    refreshMaterialsBadge()
+  } else if (v === 'logs' || v === 'pipeline-logs') {
+    tab.value = 'logs'
   } else if (v === 'files') {
     tab.value = 'files'
   }
 })
 
-onMounted(refresh)
+onMounted(() => {
+  refresh()
+  materialsTimer = setInterval(refreshMaterialsBadge, 4000)
+})
+onBeforeUnmount(() => {
+  if (materialsTimer) clearInterval(materialsTimer)
+})
 
 defineExpose({
   refresh,
+  refreshMaterialsBadge,
+  showOffice: () => { tab.value = 'office'; goalPanelRef.value?.refresh?.() },
   showIssues: () => { tab.value = 'issues'; refresh() },
-  showMaterials: () => { tab.value = 'materials'; materialsRef.value?.refresh?.() },
+  showMaterials: () => { tab.value = 'materials'; materialsRef.value?.refresh?.(); refreshMaterialsBadge() },
+  showLogs: () => { tab.value = 'logs' },
+  refreshGoal: () => goalPanelRef.value?.refresh?.(),
+  pushLog: (line, stage = '') => {
+    localLogs.value = [...localLogs.value.slice(-400), { line, stage, at: new Date().toISOString() }]
+  },
 })
 </script>

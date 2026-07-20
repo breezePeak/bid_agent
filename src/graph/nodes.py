@@ -484,7 +484,7 @@ def write_chapters_node(state) -> dict:
     max_retries = max(0, int(state.get("max_retries") or 0))
     print(f"{_stage_progress('write_chapters')}... workers={workers}")
     _start_stage(state, "write_chapters", "章节写作")
-    effective_workers = max(1, min(workers, 5))
+    effective_workers = max(1, min(workers, 10))
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
     existing_chapter_ids = sorted(chapter_ids(root))

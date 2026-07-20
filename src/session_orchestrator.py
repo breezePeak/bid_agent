@@ -58,12 +58,17 @@ _ORCHESTRATOR_SYSTEM_PROMPT = """你是标书 Agent 的主 Agent（全局会话�
    当用户问"是什么/为什么/怎么做/依据是什么/当前还有什么问题"且没有明确执行意图时，action=chat 或 query，直接用状态快照和常识回答，不要强行触发流程。
 10. 自动恢复规则：
    当快照 run_state_status 是 recovering 或 retrying 时，reply 必须说明系统正在自主修复，写出 recovery.reason/action/attempt，不要要求用户手动重试。
-11. 诊断规则（Claude Code 模式——coordinator 必须读错误、写具体 spec，禁止懒转交）：
-   当用户消息含"诊断/失败/错误/修复"且快照中有 failed_stage_error.lines 时：
-   - 必须从 lines 中提取具体信息：哪个文件、哪一行、什么错误。
-   - 若可以定位到具体文件+行号（如 NameError/ImportError/FileNotFoundError），写明「修改 src/xxx.py 第 N 行」。
-   - 不可写"请检查错误日志"或"根据错误信息修复"——这是把理解工作推给用户，绝对禁止。
-   - 诊断结果写入 reply；actions 给 [retry_stage, skip_stage]，不要给泛泛的"继续下一步"。
+ 11. 诊断规则（Claude Code 模式——coordinator 必须读错误、写具体 spec，禁止懒转交）：
+    当用户消息含"诊断/失败/错误/修复"且快照中有 failed_stage_error.lines 时：
+    - 必须从 lines 中提取具体信息：哪个文件、哪一行、什么错误。
+    - 若可以定位到具体文件+行号（如 NameError/ImportError/FileNotFoundError），写明「修改 src/xxx.py 第 N 行」。
+    - 不可写"请检查错误日志"或"根据错误信息修复"——这是把理解工作推给用户，绝对禁止。
+    - 诊断结果写入 reply；actions 给 [retry_stage, skip_stage]，不要给泛泛的"继续下一步"。
+ 12. 材料待补规则：
+    当 materials_summary.exists 且 materials_summary.deferred > 0 时：
+    - 你只知道「待补条数」等数量，不知道每条明细（明细在右侧材料清单）。
+    - 用户问状态/进度/缺什么/材料时，必须点明「还有 N 条材料待补充」，并引导打开材料清单或上传公司资料。
+    - 不要编造具体证书/附件名称；需要明细时 action=show_step command=build-materials-checklist。
 """
 
 
@@ -114,6 +119,17 @@ def _compact_status_snapshot(status: dict[str, Any]) -> dict[str, Any]:
     issues_summary = status.get("issues_summary")
     if isinstance(issues_summary, dict):
         snapshot["issues_summary"] = issues_summary
+
+    # 仅数量级材料摘要（无明细），供主 Agent 提醒用户补料
+    materials_summary = status.get("materials_summary")
+    if isinstance(materials_summary, dict):
+        snapshot["materials_summary"] = {
+            "exists": bool(materials_summary.get("exists")),
+            "total": int(materials_summary.get("total") or 0),
+            "deferred": int(materials_summary.get("deferred") or 0),
+            "ready": int(materials_summary.get("ready") or 0),
+            "waived": int(materials_summary.get("waived") or 0),
+        }
 
     pending_confirmation = status.get("pending_confirmation")
     if isinstance(pending_confirmation, dict):
@@ -357,6 +373,13 @@ def build_query_reply(query_type: str, status: dict[str, Any]) -> tuple[str, lis
     sources_count = snapshot.get("sources_count", {}) if isinstance(snapshot.get("sources_count"), dict) else {}
     outputs = snapshot.get("outputs", {}) if isinstance(snapshot.get("outputs"), dict) else {}
     recovery = snapshot.get("recovery", {}) if isinstance(snapshot.get("recovery"), dict) else {}
+    materials = snapshot.get("materials_summary", {}) if isinstance(snapshot.get("materials_summary"), dict) else {}
+    materials_deferred = int(materials.get("deferred") or 0)
+    materials_line = (
+        f"待补材料 {materials_deferred} 条。"
+        if materials.get("exists") and materials_deferred > 0
+        else ("材料清单已就绪，无待补项。" if materials.get("exists") else "")
+    )
 
     if query_type == "manual_review":
         reply = (
@@ -398,13 +421,17 @@ def build_query_reply(query_type: str, status: dict[str, Any]) -> tuple[str, lis
             f"全文风险 {manual.get('global_review_pending', 0)}，"
             f"弱证据/模板缺口 {manual.get('template_evidence_pending', 0)}；"
             f"专项合规检查：{'已完成' if compliance_done else '未完成'}。"
+            + (f" {materials_line}" if materials_line else "")
         )
-        return reply, [
+        actions = [
             {"type": "show_manual_review", "category": "global_review", "label": "看全文风险"},
             {"type": "show_manual_review", "category": "chapter_review", "label": "看章节问题"},
             {"type": "show_step", "command": "global-review", "label": "查看全文审核"},
             {"type": "show_step", "command": "compliance-check", "label": "查看专项合规"},
         ]
+        if materials_deferred > 0:
+            actions.insert(0, {"type": "show_step", "command": "build-materials-checklist", "label": "打开材料清单"})
+        return reply, actions
 
     if query_type == "inputs":
         reply = (
@@ -447,7 +474,11 @@ def build_query_reply(query_type: str, status: dict[str, Any]) -> tuple[str, lis
         reply += f" 阻塞点：{snapshot.get('blocked_step', {}).get('label', '')}。"
     if snapshot.get("run_state_message"):
         reply += f" 说明：{snapshot.get('run_state_message')}。"
+    if materials_line:
+        reply += f" {materials_line}"
     actions: list[dict[str, Any]] = []
+    if materials_deferred > 0:
+        actions.append({"type": "show_step", "command": "build-materials-checklist", "label": "打开材料清单"})
     if next_step:
         actions.append({"type": "run_command", "command": str(next_step.get("command", "")), "label": f"执行 {next_step.get('label', '')}"})
         actions.append({"type": "auto_run", "label": "一键跑完剩余"})
@@ -471,11 +502,26 @@ def resolve_execution(plan_result: dict[str, Any], status: dict[str, Any]) -> di
     }
 
     if action == "query":
+        # 保留模型原话；规则模板仅在无有效回复时兜底，按钮可叠加
+        llm_reply = str(plan_result.get("reply") or "").strip()
         reply, actions = build_query_reply(plan_result.get("query_type", "status"), status)
-        if reply:
+        if llm_reply:
+            result["reply"] = llm_reply
+        elif reply:
             result["reply"] = reply
         if actions:
-            result["actions"] = actions
+            existing = result.get("actions") if isinstance(result.get("actions"), list) else []
+            # 去重叠加：规则动作补在后
+            labels = {str(a.get("label") or a.get("type")) for a in existing if isinstance(a, dict)}
+            merged = list(existing)
+            for act in actions:
+                if not isinstance(act, dict):
+                    continue
+                key = str(act.get("label") or act.get("type"))
+                if key not in labels:
+                    merged.append(act)
+                    labels.add(key)
+            result["actions"] = merged
         result["auto_execute"] = False
         return result
 

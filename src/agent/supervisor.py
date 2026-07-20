@@ -5,16 +5,34 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
+from agent.budgets import (
+    AgentBudget,
+    criteria_fingerprint,
+    issues_fingerprint,
+    max_steps_budget,
+    observation_max_chars,
+)
 from agent.flags import agent_supervisor_enabled
+from agent.goal import (
+    confirmation_allows,
+    create_goal,
+    grant_confirmation,
+    infer_goal_from_message,
+    load_goal,
+    mark_plan_step,
+    next_plan_step,
+    reevaluate_goal,
+    set_goal_status,
+)
 from agent.policy import evaluate_tool_call, is_readonly_tool
+from agent.snapshot import build_snapshot, human_blocking_reason
 from agent.tool_registry import tool_manifest
 from agent.tool_runtime import invoke
-from agent.goal import create_goal, goal_summary, infer_goal_from_message, load_goal, reevaluate_goal
-from agent.trace import append_decision, load_decisions, max_steps_default, new_trace_id, save_last_plan
+from agent.trace import append_decision, max_steps_default, new_trace_id, save_last_plan
 from utils import project_root
 
 
-_SUPERVISOR_SYSTEM = """你是标书系统的 Supervisor Agent（短循环，PR-3）。
+_SUPERVISOR_SYSTEM = """你是标书系统的 Supervisor Agent（多步闭环）。
 你只能通过选择已注册 tool 推进目标，不能发明新阶段。
 
 ## 可用 tools（JSON）
@@ -26,16 +44,17 @@ _SUPERVISOR_SYSTEM = """你是标书系统的 Supervisor Agent（短循环，PR-
 - tool: tool 名（必须来自可用列表；若无需 tool 填 ""）
 - args: 对象（无参数用 {{}}）
 - reply: 给用户的中文回复
-- done: 布尔，是否结束本轮循环
+- done: 布尔（仅建议；系统会按 GoalState/预算覆盖）
 - need_confirm: 布尔，是否需要用户确认后再执行变更
 
 ## 规则
-1. 用户问状态/进度/为什么失败 → 优先 query_status 或 diagnose_failure，done=true。
-2. 用户明确要求执行某阶段 → tool=run_stage，args.command=对应 command；若未明确“执行/开始/跑”，need_confirm=true 且不要假设已执行。
+1. 优先推进 plan 中的下一步；已完成且未失效的步骤不要重复。
+2. 用户问状态/进度/为什么失败 → 优先 query_status 或 diagnose_failure。
 3. 禁止编造产物状态；只根据 snapshot 判断。
-4. 不要一次规划多步；每轮只选 0 或 1 个 tool。
-5. 高风险导出（build-docx）默认 need_confirm=true。
-6. 若无法判断，tool=""，done=true，reply 里澄清问题。
+4. 每轮只选 0 或 1 个 tool；系统会在 Goal 未完成时自动继续。
+5. 高风险导出（build_export / build-docx）默认 need_confirm=true。
+6. 若 Goal 已 succeeded，tool="" 且 done=true。
+7. 若缺少人工材料，tool=""，说明缺什么。
 """
 
 
@@ -58,8 +77,61 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
-def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, Any]:
+def _rule_based_decision(
+    message: str,
+    snapshot: dict[str, Any],
+    *,
+    goal: dict[str, Any] | None = None,
+    prefer_plan: bool = True,
+) -> dict[str, Any]:
     text = (message or "").strip().lower()
+    plan_step = None
+    if prefer_plan and goal:
+        try:
+            from agent.goal import next_plan_step as _next
+            from utils import project_root as _pr
+
+            # root is inside snapshot pipeline? use project via goal path later
+            root_hint = None
+            plan_step = None
+        except Exception:
+            plan_step = None
+
+    # If goal has an active plan step, prefer it for multi-step goals
+    if prefer_plan and goal and isinstance(goal.get("plan"), list) and goal.get("plan"):
+        # caller will pass resolved next step via snapshot goal.plan_preview status
+        progress = (snapshot.get("goal") or {}).get("progress") or goal.get("progress") or {}
+        current_id = progress.get("current_step_id") or ""
+        for step in goal.get("plan") or []:
+            if not isinstance(step, dict):
+                continue
+            if current_id and str(step.get("step_id")) == str(current_id):
+                if str(step.get("status") or "pending") in {"pending", "blocked", "running"}:
+                    plan_step = step
+                    break
+            if not current_id and str(step.get("status") or "pending") == "pending":
+                plan_step = step
+                break
+        if plan_step is None:
+            for step in goal.get("plan") or []:
+                if isinstance(step, dict) and str(step.get("status") or "pending") == "pending":
+                    plan_step = step
+                    break
+
+    if plan_step and str(plan_step.get("tool") or "").strip():
+        tool = str(plan_step.get("tool") or "")
+        args = dict(plan_step.get("args") or {})
+        need_confirm = not is_readonly_tool(tool)
+        return {
+            "thought_summary": f"按计划执行：{plan_step.get('label') or plan_step.get('step_id') or tool}",
+            "tool": tool,
+            "args": args,
+            "reply": f"按目标计划执行 {plan_step.get('label') or tool}。",
+            "done": False,
+            "need_confirm": need_confirm,
+            "plan_step_id": plan_step.get("step_id"),
+        }
+
     # diagnose
     if any(k in message for k in ("诊断", "失败", "错误", "为啥挂", "怎么修")):
         return {
@@ -67,7 +139,7 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
             "tool": "diagnose_failure",
             "args": {},
             "reply": "我先汇总当前失败信息。",
-            "done": True,
+            "done": False,
             "need_confirm": False,
         }
     if any(k in message for k in ("合规", "废标", "blocking", "专项合规", "合规检查失败")):
@@ -77,7 +149,7 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
                 "tool": "fix_compliance",
                 "args": {"confirm_execute": False, "sync": True},
                 "reply": "我将根据合规报告生成定向改稿计划（确认后执行）。",
-                "done": True,
+                "done": False,
                 "need_confirm": True,
             }
         return {
@@ -85,26 +157,26 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
             "tool": "analyze_compliance",
             "args": {"sync": True},
             "reply": "我先分析当前合规报告与可改写项。",
-            "done": True,
+            "done": False,
             "need_confirm": False,
         }
 
-    if any(k in message for k in ("覆盖率", "评分点未覆盖", "未覆盖评分", "补齐评分", "覆盖缺口", "评分覆盖")):
-        if any(k in message for k in ("改", "修", "补", "处理", "修复")):
+    if any(k in message for k in ("覆盖率", "评分点未覆盖", "未覆盖评分", "补齐评分", "覆盖缺口", "评分覆盖", "补齐所有可自动")):
+        if any(k in message for k in ("改", "修", "补", "处理", "修复", "补齐")):
             return {
-                "thought_summary": "用户要求按覆盖缺口改稿，先给出 fix_coverage 计划",
-                "tool": "fix_coverage",
-                "args": {"max_chapters": 5, "confirm_execute": False},
-                "reply": "我将分析评分覆盖缺口并给出定向改稿计划（确认后可执行）。",
-                "done": True,
-                "need_confirm": True,
+                "thought_summary": "用户要求按覆盖缺口改稿，先分析再修复",
+                "tool": "analyze_coverage",
+                "args": {"rebuild": True, "max_chapters": 5},
+                "reply": "我先分析评分覆盖缺口，再规划定向改稿。",
+                "done": False,
+                "need_confirm": False,
             }
         return {
             "thought_summary": "用户询问评分覆盖，执行只读分析",
             "tool": "analyze_coverage",
             "args": {"rebuild": True, "max_chapters": 5},
             "reply": "我先分析当前评分点覆盖情况。",
-            "done": True,
+            "done": False,
             "need_confirm": False,
         }
 
@@ -114,15 +186,14 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
             "tool": "query_status",
             "args": {"view": "summary"},
             "reply": "我先查看当前流水线进度。",
-            "done": True,
+            "done": False,
             "need_confirm": False,
         }
     # targeted rewrite / write
     if any(k in message for k in ("改第", "重写第", "只写第", "定向改", "改稿")):
-        # crude chapter id extraction: digits / dotted ids
         import re as _re
+
         ids = _re.findall(r"\d+(?:\.\d+)*", message)
-        # filter likely chapter-like tokens
         chapter_ids = [i for i in ids if i][:10]
         tool = "rewrite_chapters" if any(k in message for k in ("改", "重写", "改稿")) else "write_chapters"
         if "只写" in message or "生成第" in message:
@@ -133,7 +204,7 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
             "tool": tool,
             "args": args,
             "reply": f"将对章节 {chapter_ids or '（需你指定 id）'} 执行 {tool}，确认后执行。",
-            "done": True,
+            "done": False,
             "need_confirm": True,
         }
 
@@ -143,13 +214,15 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
             "tool": "build_export",
             "args": {"targets": ["md", "docx", "format"]},
             "reply": "将导出 Markdown/Word（若终稿已失效会先强制重建）。请确认后执行。",
-            "done": True,
+            "done": False,
             "need_confirm": True,
         }
 
     # explicit run next
-    if any(k in message for k in ("继续", "下一步", "执行下一步", "开始跑", "重试")):
-        next_step = snapshot.get("next_step") if isinstance(snapshot.get("next_step"), dict) else None
+    if any(k in message for k in ("继续", "下一步", "执行下一步", "开始跑", "重试", "确认执行", "确认")):
+        next_step = snapshot.get("pipeline", {}).get("next_step") if isinstance(snapshot.get("pipeline"), dict) else None
+        if not next_step:
+            next_step = snapshot.get("next_step") if isinstance(snapshot.get("next_step"), dict) else None
         command = str((next_step or {}).get("command") or "")
         if command:
             return {
@@ -157,14 +230,14 @@ def _rule_based_decision(message: str, snapshot: dict[str, Any]) -> dict[str, An
                 "tool": "run_stage",
                 "args": {"command": command},
                 "reply": f"下一步是 `{command}`。确认后我可以执行。",
-                "done": True,
+                "done": False,
                 "need_confirm": True,
             }
     return {
         "thought_summary": "无明确 tool 意图，仅对话回复",
         "tool": "",
         "args": {},
-        "reply": "我可以帮你查看状态、诊断失败，或在你确认后执行某个流水线阶段。",
+        "reply": "我可以帮你查看状态、诊断失败，或在你确认后执行修复/导出计划。",
         "done": True,
         "need_confirm": False,
     }
@@ -175,12 +248,25 @@ def _llm_decision(
     snapshot: dict[str, Any],
     history: list[dict[str, Any]],
     llm_chat: Callable[..., str] | None,
+    *,
+    budget: AgentBudget | None = None,
 ) -> dict[str, Any]:
     tools = tool_manifest()
-    # shrink tools for prompt: meta + names only for stages
     compact_tools = []
     for item in tools:
-        if item["name"] in {"run_stage", "query_status", "query_artifacts", "diagnose_failure"} or item.get("kind") == "meta":
+        if item["name"] in {
+            "run_stage",
+            "query_status",
+            "query_artifacts",
+            "diagnose_failure",
+            "analyze_coverage",
+            "analyze_compliance",
+            "fix_coverage",
+            "fix_compliance",
+            "build_export",
+            "export_preflight",
+            "list_issues",
+        } or item.get("kind") == "meta":
             compact_tools.append(
                 {
                     "name": item["name"],
@@ -207,6 +293,8 @@ def _llm_decision(
         ensure_ascii=False,
     )
     reasoning = ""
+    if budget is not None:
+        budget.record_llm_call()
     if llm_chat is None:
         from llm_client import chat_with_meta
 
@@ -240,9 +328,52 @@ def _normalize_decision(data: dict[str, Any]) -> dict[str, Any]:
         "tool": tool,
         "args": args,
         "reply": str(data.get("reply") or "").strip(),
-        "done": bool(data.get("done", True)),
+        "done": bool(data.get("done", False)),
         "need_confirm": bool(data.get("need_confirm", False)),
+        "plan_step_id": str(data.get("plan_step_id") or "").strip(),
     }
+
+
+def _terminal_payload(
+    *,
+    terminal_status: str,
+    reply: str,
+    actions: list[dict[str, Any]],
+    steps: list[dict[str, Any]],
+    goal: dict[str, Any] | None,
+    goal_id: str,
+    budget: AgentBudget,
+    reasoning_parts: list[str],
+    recommended_actions: list[str] | None = None,
+) -> dict[str, Any]:
+    payload = {
+        "reply": reply,
+        "actions": actions,
+        "steps": steps,
+        "goal_id": goal_id,
+        "goal": {
+            "status": (goal or {}).get("status") or terminal_status,
+            "all_criteria_ok": (goal or {}).get("all_criteria_ok"),
+            "criteria_results": (goal or {}).get("criteria_results") or [],
+            "blocked_reason": (goal or {}).get("blocked_reason") or "",
+            "plan": (goal or {}).get("plan") or [],
+            "current_plan_index": (goal or {}).get("current_plan_index", 0),
+            "progress": (goal or {}).get("progress") or {},
+            "raw_user_goal": (goal or {}).get("raw_user_goal") or "",
+            "confirmation_scope": (goal or {}).get("confirmation_scope") or {},
+        },
+        "terminal_status": terminal_status,
+        "budget": budget.to_dict(),
+        "recommended_actions": recommended_actions or [],
+        "supervisor": True,
+        "action": "chat",
+        "auto_execute": False,
+        "intent": "supervisor_turn",
+    }
+    thinking = "\n\n".join(part for part in reasoning_parts if part).strip()
+    if thinking:
+        payload["thinking"] = thinking
+    return payload
 
 
 def run_supervisor_turn(
@@ -256,29 +387,34 @@ def run_supervisor_turn(
     auto_execute_readonly: bool = True,
     user_confirmed: bool = False,
     max_steps: int | None = None,
+    confirmed_tools: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run a short supervisor loop (default 1-5 steps). Readonly tools may auto-run.
-
-    Returns a payload compatible with chat orchestrate enrichment:
-    reply, actions, steps, decisions, error?
-    """
+    """Multi-step observe → decide → policy → invoke → reevaluate loop (PR-9)."""
     root = root or project_root()
     history = history or []
     status = status or {}
-    steps_limit = max_steps if max_steps is not None else min(5, max_steps_default())
 
-    # compact snapshot from status if provided; else query_status metrics
-    snapshot: dict[str, Any]
-    if status:
-        from session_orchestrator import _compact_status_snapshot
-
-        snapshot = _compact_status_snapshot(status)
-    else:
-        qs = invoke("query_status", {"view": "summary"}, root=root, actor="supervisor")
-        snapshot = qs.metrics if qs.ok else {}
+    budget = AgentBudget(max_steps=max_steps if max_steps is not None else max_steps_budget())
+    # keep soft upper bound from legacy callers
+    if max_steps is None:
+        try:
+            budget.max_steps = max(budget.max_steps, min(max_steps_default(), budget.max_steps))
+        except Exception:
+            pass
 
     inferred = infer_goal_from_message(message)
     goal = load_goal(root)
+    resume_keywords = any(k in (message or "") for k in ("继续", "恢复", "补料完成", "材料已上传", "确认执行", "确认"))
+    if user_confirmed or confirmed_tools:
+        if goal:
+            try:
+                goal = grant_confirmation(
+                    root,
+                    tools=confirmed_tools or None,
+                    all_mutations=bool(user_confirmed),
+                )
+            except Exception:
+                pass
     if not goal or str(goal.get("status")) in {"succeeded", "failed", "cancelled"}:
         goal = create_goal(
             root,
@@ -286,30 +422,89 @@ def run_supervisor_turn(
             objectives=inferred.get("objectives") or [],
             success_criteria=inferred.get("success_criteria") or [],
             constraints=inferred.get("constraints") or {},
+            plan=inferred.get("plan"),
         )
     else:
-        # refresh evaluation for active goal
         try:
-            goal = reevaluate_goal(root, goal)
+            if resume_keywords and str(goal.get("status")) == "blocked_human":
+                from agent.goal import resume_goal_after_materials
+
+                goal = resume_goal_after_materials(root, note="user_requested_resume")
+            else:
+                goal = reevaluate_goal(root, goal)
         except Exception:
             pass
+
+    if user_confirmed and goal:
+        try:
+            goal = grant_confirmation(root, all_mutations=True)
+        except Exception:
+            pass
+
     goal_id = str(goal.get("goal_id") or new_trace_id())
     steps: list[dict[str, Any]] = []
     final_reply_parts: list[str] = []
     actions: list[dict[str, Any]] = []
     reasoning_parts: list[str] = []
+    terminal_status = "in_progress"
+    last_tool_result_dict: dict[str, Any] | None = None
+    obs_limit = observation_max_chars()
 
-    for step_index in range(1, steps_limit + 1):
+    # seed budget fingerprints
+    try:
+        budget.last_criteria_fp = criteria_fingerprint(goal.get("criteria_results") or [])
+    except Exception:
+        pass
+
+    while budget.allow_next_step():
+        snapshot = build_snapshot(
+            root,
+            status=status,
+            goal=goal,
+            last_tool_result=last_tool_result_dict,
+            budget=budget.to_dict(),
+            for_llm=True,
+        )
+        try:
+            goal = reevaluate_goal(root, goal)
+        except Exception:
+            pass
+
+        if str(goal.get("status")) == "succeeded" or bool(goal.get("all_criteria_ok")):
+            terminal_status = "succeeded"
+            final_reply_parts.append("目标已完成。")
+            break
+
+        block_reason = human_blocking_reason(snapshot, goal)
+        if block_reason and not user_confirmed:
+            # only hard-stop when materials truly missing for non-readonly goals
+            objectives = [str(o.get("type") or "") for o in (goal.get("normalized_objectives") or []) if isinstance(o, dict)]
+            if any(t in objectives for t in ("fix_coverage", "fix_compliance", "export", "full_generate", "fix_chapter")):
+                terminal_status = "blocked_human"
+                set_goal_status(root, "blocked_human", blocked_reason=block_reason, goal=goal)
+                goal = load_goal(root) or goal
+                final_reply_parts.append(f"需要人工处理：{block_reason}")
+                actions.append({"type": "show_step", "command": "build-materials-checklist", "label": "打开材料清单"})
+                actions.append({"type": "upload_materials", "label": "上传缺失材料"})
+                break
+
+        # Prefer plan-driven decision when plan exists
+        plan_driven = bool(goal.get("plan"))
         decision_raw: dict[str, Any]
         error_note = ""
         try:
-            if use_llm:
-                decision_raw = _llm_decision(message, snapshot, history, llm_chat)
+            if use_llm and not plan_driven:
+                decision_raw = _llm_decision(message, snapshot, history, llm_chat, budget=budget)
+            elif use_llm and plan_driven and budget.llm_calls_used < budget.max_llm_calls:
+                # still allow LLM but rule/plan first for reliability
+                decision_raw = _rule_based_decision(message, snapshot, goal=goal, prefer_plan=True)
+                if not decision_raw.get("tool"):
+                    decision_raw = _llm_decision(message, snapshot, history, llm_chat, budget=budget)
             else:
-                decision_raw = _rule_based_decision(message, snapshot)
+                decision_raw = _rule_based_decision(message, snapshot, goal=goal, prefer_plan=True)
         except Exception as exc:  # noqa: BLE001
             error_note = str(exc)
-            decision_raw = _rule_based_decision(message, snapshot)
+            decision_raw = _rule_based_decision(message, snapshot, goal=goal, prefer_plan=True)
             decision_raw["reply"] = (decision_raw.get("reply") or "") + f"（规则兜底：{error_note[:120]}）"
 
         step_reasoning = str(decision_raw.pop("_reasoning", "") or "").strip()
@@ -318,82 +513,141 @@ def run_supervisor_turn(
         decision = _normalize_decision(decision_raw)
         tool = decision["tool"]
         args = dict(decision["args"])
+        plan_step_id = decision.get("plan_step_id") or ""
         observation = ""
         policy_reason = ""
         executed = False
         tool_result = None
+        policy_ask_human = False
 
+        # Resolve next plan step id if missing
+        if not plan_step_id and plan_driven:
+            nxt = next_plan_step(root, goal)
+            if nxt and str(nxt.get("tool") or "") == tool:
+                plan_step_id = str(nxt.get("step_id") or "")
+
+        confirmed_for_tool = confirmation_allows(goal, tool, user_confirmed=user_confirmed)
         if tool:
-            # Prefer stage command alias -> still ok via get_tool
             policy = evaluate_tool_call(
                 tool,
                 args,
                 auto_execute=is_readonly_tool(tool) and auto_execute_readonly,
-                user_confirmed=user_confirmed,
+                user_confirmed=confirmed_for_tool,
             )
             policy_reason = policy.reason
-            if policy.allow and (is_readonly_tool(tool) or user_confirmed):
+            policy_ask_human = bool(policy.ask_human)
+            can_run = policy.allow and (is_readonly_tool(tool) or confirmed_for_tool)
+            if can_run:
+                if plan_step_id:
+                    try:
+                        goal = mark_plan_step(root, plan_step_id, status="running", goal=goal)
+                    except Exception:
+                        pass
                 tool_result = invoke(tool, args, root=root, actor="supervisor")
                 executed = True
-                observation = tool_result.summary_for_llm
-                if tool_result.ok and tool_result.metrics:
-                    # refresh snapshot lightly
-                    if tool == "query_status":
-                        snapshot = {**snapshot, **tool_result.metrics}
+                observation = (tool_result.summary_for_llm or "")[:obs_limit]
+                last_tool_result_dict = {
+                    "tool": tool,
+                    "ok": tool_result.ok,
+                    "summary": observation[:500],
+                    "error": (tool_result.error.code if tool_result.error else ""),
+                }
+                if plan_step_id:
+                    try:
+                        goal = mark_plan_step(
+                            root,
+                            plan_step_id,
+                            status="done" if tool_result.ok else "failed",
+                            error="" if tool_result.ok else observation,
+                            goal=goal,
+                        )
+                    except Exception:
+                        pass
             elif policy.allow and not is_readonly_tool(tool):
-                # mutation allowed by policy but not auto: surface confirm action
                 observation = "待确认后执行"
+                decision["need_confirm"] = True
                 actions.append(
                     {
                         "type": "run_command",
                         "command": str(args.get("command") or tool),
                         "label": f"确认执行 {args.get('command') or tool}",
+                        "tool": tool,
+                        "args": args,
                     }
                 )
             else:
                 observation = f"策略拒绝: {policy.reason}"
                 if policy.ask_human:
                     decision["need_confirm"] = True
-                    if args.get("command"):
-                        actions.append(
-                            {
-                                "type": "run_command",
-                                "command": str(args.get("command")),
-                                "label": f"确认执行 {args.get('command')}",
-                            }
-                        )
+                    actions.append(
+                        {
+                            "type": "run_command",
+                            "command": str(args.get("command") or tool),
+                            "label": f"确认执行 {args.get('command') or tool}",
+                            "tool": tool,
+                            "args": args,
+                        }
+                    )
+                else:
+                    terminal_status = "blocked_policy"
         else:
             policy_reason = "无 tool"
+
+        # Reevaluate after tool
+        try:
+            goal = reevaluate_goal(root, goal)
+        except Exception:
+            pass
+
+        crit_fp = criteria_fingerprint(goal.get("criteria_results") or [])
+        iss_fp = issues_fingerprint(
+            (snapshot.get("issues") or {}).get("open_blocks") or [],
+            (snapshot.get("issues") or {}).get("open_warnings") or [],
+        )
+        budget.record_step(
+            tool=tool,
+            args=args,
+            observation=observation,
+            criteria_fp=crit_fp,
+            issues_fp=iss_fp,
+            executed=executed,
+            ok=bool(tool_result.ok) if tool_result is not None else True,
+        )
 
         record = append_decision(
             root,
             {
                 "goal_id": goal_id,
-                "step_index": step_index,
+                "step_index": budget.steps_used,
                 "thought_summary": decision["thought_summary"],
                 "selected_tool": tool,
                 "tool_args": args,
                 "policy_reason": policy_reason,
-                "observation_summary": (observation or "")[:1000],
+                "observation_summary": (observation or "")[: min(1000, obs_limit)],
                 "executed": executed,
                 "ok": bool(tool_result.ok) if tool_result is not None else True,
                 "message": message[:500],
+                "plan_step_id": plan_step_id,
+                "goal_status": goal.get("status"),
+                "terminal_hint": terminal_status,
+                "user_summary": decision["thought_summary"],
             },
         )
         step_view = {
-            "step": step_index,
+            "step": budget.steps_used,
             "thought_summary": decision["thought_summary"],
             "tool": tool,
             "args": args,
             "executed": executed,
             "observation": (observation or "")[:500],
             "trace_id": record.get("trace_id"),
+            "plan_step_id": plan_step_id,
+            "ok": bool(tool_result.ok) if tool_result is not None else True,
         }
         steps.append(step_view)
 
         reply = decision["reply"]
         if executed and tool_result is not None and tool_result.summary_for_llm:
-            # merge observation into reply for user
             if reply:
                 reply = f"{reply}\n\n{tool_result.summary_for_llm}"
             else:
@@ -401,19 +655,110 @@ def run_supervisor_turn(
         if reply:
             final_reply_parts.append(reply)
 
-        if decision["done"] or not tool or decision["need_confirm"]:
+        # Stop conditions (system-driven, not free model done)
+        if str(goal.get("status")) == "succeeded" or bool(goal.get("all_criteria_ok")):
+            terminal_status = "succeeded"
             break
-        # only continue loop if readonly tool ran and LLM asked not done (rare in PR-3)
-        if not (executed and is_readonly_tool(tool) and not decision["done"]):
+
+        if decision["need_confirm"] or policy_ask_human:
+            terminal_status = "blocked_human" if "材料" in (observation or "") else "awaiting_confirmation"
+            if terminal_status == "awaiting_confirmation":
+                set_goal_status(root, "awaiting_confirmation", goal=goal)
+                goal = load_goal(root) or goal
             break
+
+        if terminal_status == "blocked_policy":
+            set_goal_status(root, "blocked_policy", blocked_reason=policy_reason, goal=goal)
+            goal = load_goal(root) or goal
+            break
+
+        if not tool and decision.get("done"):
+            # no tool and model/rules say done → if goal incomplete, stay in progress
+            if not goal.get("all_criteria_ok"):
+                terminal_status = str(goal.get("status") or "in_progress")
+            else:
+                terminal_status = "succeeded"
+            break
+
+        if not executed and not is_readonly_tool(tool or "x"):
+            # waiting confirm already handled
+            break
+
+        # Continue if goal incomplete and we made a step (readonly or confirmed mutation)
+        if not budget.allow_next_step():
+            terminal_status = "budget_exceeded"
+            set_goal_status(
+                root,
+                "budget_exceeded",
+                blocked_reason=budget.stop_reason or "预算或无进展熔断",
+                goal=goal,
+            )
+            goal = load_goal(root) or goal
+            break
+
+        # After successful step, loop continues for more plan steps / readonly chain
+        if executed and tool_result is not None and not tool_result.ok:
+            # failed tool: allow one more decide unless no progress
+            if budget.no_progress_steps >= budget.max_no_progress_steps:
+                terminal_status = "budget_exceeded"
+                break
+            continue
+
+    if budget.stop_reason == "budget_exceeded" and terminal_status == "in_progress":
+        terminal_status = "budget_exceeded"
+        try:
+            set_goal_status(
+                root,
+                "budget_exceeded",
+                blocked_reason="达到步数/模型调用/无进展上限",
+                goal=goal,
+            )
+            goal = load_goal(root) or goal
+        except Exception:
+            pass
+
+    try:
+        goal = reevaluate_goal(root, goal)
+        if str(goal.get("status")) == "succeeded":
+            terminal_status = "succeeded"
+        goal_id = str(goal.get("goal_id") or goal_id)
+    except Exception:
+        goal = load_goal(root)
 
     reply = "\n".join(part for part in final_reply_parts if part).strip()
     if not reply:
-        reply = "已处理完本轮。"
+        if terminal_status == "succeeded":
+            reply = "目标已完成。"
+        elif terminal_status == "budget_exceeded":
+            reply = "已达预算或无进展上限，已停止自动循环。请查看已完成步骤与建议操作。"
+        elif terminal_status == "blocked_human":
+            reply = f"需要人工处理：{(goal or {}).get('blocked_reason') or '请补充材料或确认风险'}"
+        else:
+            reply = "已处理完本轮。"
 
-    # default actions if empty
+    if terminal_status == "budget_exceeded":
+        reply += (
+            f"\n\n已完成步骤 {budget.steps_used}/{budget.max_steps}；"
+            f"未完成目标请查看 Goal 条件；"
+            f"可恢复入口：继续对话或确认执行剩余计划。"
+        )
+
     if not actions:
-        next_step = snapshot.get("next_step") if isinstance(snapshot.get("next_step"), dict) else None
+        next_step = None
+        if isinstance((goal or {}).get("plan"), list):
+            nxt = next_plan_step(root, goal)
+            if nxt:
+                actions.append(
+                    {
+                        "type": "run_command",
+                        "command": str((nxt.get("args") or {}).get("command") or nxt.get("tool") or ""),
+                        "label": f"继续：{nxt.get('label') or nxt.get('tool')}",
+                        "tool": nxt.get("tool"),
+                        "args": nxt.get("args") or {},
+                    }
+                )
+        pipe = build_snapshot(root, status=status, goal=goal, for_llm=False).get("pipeline") or {}
+        next_step = pipe.get("next_step") if isinstance(pipe, dict) else None
         if next_step and next_step.get("command"):
             actions.append(
                 {
@@ -424,31 +769,27 @@ def run_supervisor_turn(
             )
         actions.append({"type": "auto_run", "label": "一键跑完剩余"})
 
-    try:
-        goal = reevaluate_goal(root)
-        reply = (reply + "\n\n" + goal_summary(goal)).strip()
-        goal_id = str(goal.get("goal_id") or goal_id)
-    except Exception:
-        goal = load_goal(root)
+    recommended = []
+    if terminal_status == "blocked_human":
+        recommended = ["上传缺失材料", "打开材料清单", "材料齐备后发送“继续”"]
+    elif terminal_status == "awaiting_confirmation":
+        recommended = ["确认执行变更类操作"]
+    elif terminal_status == "budget_exceeded":
+        recommended = ["查看决策轨迹", "手动指定下一步", "调整预算后重试"]
+    elif terminal_status == "succeeded":
+        recommended = ["下载 final.docx", "查看风险登记"]
 
-    payload = {
-        "reply": reply,
-        "actions": actions,
-        "steps": steps,
-        "goal_id": goal_id,
-        "goal": {
-            "status": (goal or {}).get("status"),
-            "all_criteria_ok": (goal or {}).get("all_criteria_ok"),
-            "criteria_results": (goal or {}).get("criteria_results") or [],
-        },
-        "supervisor": True,
-        "action": "chat",
-        "auto_execute": False,
-        "intent": "supervisor_turn",
-    }
-    thinking = "\n\n".join(part for part in reasoning_parts if part).strip()
-    if thinking:
-        payload["thinking"] = thinking
+    payload = _terminal_payload(
+        terminal_status=terminal_status,
+        reply=reply,
+        actions=actions,
+        steps=steps,
+        goal=goal,
+        goal_id=goal_id,
+        budget=budget,
+        reasoning_parts=reasoning_parts,
+        recommended_actions=recommended,
+    )
     save_last_plan(root, payload)
     return payload
 
@@ -464,7 +805,6 @@ def plan_with_supervisor(
     if not agent_supervisor_enabled():
         return None
     root = project_root()
-    # Prefer rule-based first for reliability in tests; still try LLM when available
     use_llm = True
     try:
         result = run_supervisor_turn(
@@ -476,13 +816,11 @@ def plan_with_supervisor(
             use_llm=use_llm,
             auto_execute_readonly=True,
             user_confirmed=False,
-            max_steps=3,
+            max_steps=None,
         )
     except Exception:
         return None
 
-    # Map to legacy plan shape so resolve_execution keeps working.
-    # Readonly already executed inside supervisor; do not auto trigger mutate.
     plan = {
         "intent": result.get("intent") or "supervisor",
         "action": "chat",
@@ -494,9 +832,11 @@ def plan_with_supervisor(
         "supervisor_steps": result.get("steps") or [],
         "goal_id": result.get("goal_id"),
         "goal": result.get("goal") or {},
+        "terminal_status": result.get("terminal_status"),
+        "budget": result.get("budget") or {},
+        "recommended_actions": result.get("recommended_actions") or [],
         "supervisor": True,
     }
     if result.get("thinking"):
         plan["thinking"] = result.get("thinking")
-    # If last step suggested run_stage with need confirm, keep as chat + button
     return plan

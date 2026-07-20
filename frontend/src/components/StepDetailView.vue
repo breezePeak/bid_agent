@@ -15,7 +15,18 @@
     <div class="sdv-body" v-else>
       <div v-if="error" class="sdv-error" style="padding:12px 0">{{ error }}</div>
       <template v-if="!error || hasLoadedOnce">
-      <div class="sdv-section" v-if="!isManualReview && stageIssues.length">
+      <!-- Materials checklist step -->
+      <template v-if="isMaterials">
+        <div class="sdv-section">
+          <div class="sdv-banner warn">
+            <div class="sdv-banner-title">材料 / 资格清单</div>
+            <div class="sdv-banner-help">缺材料可标「待补」写作留白；补齐后标「已齐」并点补料回填。</div>
+          </div>
+          <MaterialsChecklistPanel :run-id="runId" />
+        </div>
+      </template>
+
+      <div class="sdv-section" v-else-if="!isManualReview && stageIssues.length">
         <h4>阻断/待处理问题（{{ stageIssues.length }}）</h4>
         <div class="sdv-actions-row" style="margin-bottom:8px">
           <button class="btn btn-sm" :disabled="!!repairBusy" @click="batchPreview">批量预览修复</button>
@@ -47,7 +58,7 @@
         </div>
       </div>
       <!-- Manual review -->
-      <template v-if="isManualReview">
+      <template v-else-if="isManualReview">
         <div class="sdv-banner" :class="{ blocking: (summary?.total_pending || 0) > 0 }">
           <div class="sdv-banner-title">人工复核</div>
           <div class="sdv-banner-stats">
@@ -91,14 +102,24 @@
               <button class="btn btn-sm btn-primary" :disabled="!!busyId" @click="submitMr(item, 'accepted')">接受/确认</button>
               <button class="btn btn-sm" :disabled="!!busyId" @click="submitMr(item, 'resolved')">已处理</button>
               <button class="btn btn-sm" :disabled="!!busyId" @click="submitMr(item, 'dismissed')">忽略</button>
+              <button
+                v-if="chapterIdOf(item)"
+                class="btn btn-sm"
+                @click="emit('open-chapter', chapterIdOf(item))"
+              >查看章节</button>
             </div>
           </div>
           <div v-if="!mrItems.length" class="sdv-empty">当前分类暂无待处理项</div>
         </div>
         <div class="sdv-section" v-if="(summary?.latest_replay_requests || []).length">
           <h4>最近重跑建议</h4>
-          <div v-for="(r, i) in summary.latest_replay_requests" :key="i" class="sdv-line">
-            {{ r.category }} / {{ r.item_id }} → {{ r.recommended_stage }}
+          <div v-for="(r, i) in summary.latest_replay_requests" :key="i" class="sdv-replay-row">
+            <span class="sdv-line">{{ r.category }} / {{ r.item_id }} → {{ r.recommended_stage }}</span>
+            <button
+              v-if="stageToCommand(r.recommended_stage)"
+              class="btn btn-sm btn-primary"
+              @click="emit('rerun-stage', stageToCommand(r.recommended_stage))"
+            >从该阶段重跑</button>
           </div>
         </div>
       </template>
@@ -376,12 +397,13 @@ import {
   fetchManualReviewItems,
   updateManualReview,
 } from '../api'
+import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 
 const props = defineProps({
   runId: { type: String, required: true },
   command: { type: String, required: true },
 })
-defineEmits(['close'])
+const emit = defineEmits(['close', 'open-chapter', 'rerun-stage'])
 
 const loading = ref(false)
 const error = ref('')
@@ -413,11 +435,40 @@ const mrCategories = [
 
 const isManualReview = computed(() => String(props.command || '').startsWith('manual-review'))
 const isCompliance = computed(() => props.command === 'compliance-check' || props.command === 'compliance')
+const isMaterials = computed(() => {
+  const c = String(props.command || '')
+  return c === 'build-materials-checklist' || c === 'materials-checklist' || c === 'materials'
+})
 const workflowCommand = computed(() => {
   const c = String(props.command || '')
   if (c.startsWith('manual-review')) return ''
   return c
 })
+
+function chapterIdOf(item) {
+  if (!item || typeof item !== 'object') return ''
+  return String(item.chapter_id || item.target_chapter_id || item.heading_id || '').trim()
+}
+
+function stageToCommand(stageId) {
+  const s = String(stageId || '').trim()
+  if (!s) return ''
+  // stage_id uses underscore; workflow commands use hyphen
+  const map = {
+    select_contexts: 'select-context-all',
+    plan_chapter_jobs: 'plan-jobs',
+    write_chapters: 'write-all',
+    review_fix_chapters: 'review-fix-all',
+    global_review: 'global-review',
+    compliance_check: 'compliance-check',
+    build_materials_checklist: 'build-materials-checklist',
+    generate_outline: 'generate-outline',
+    extract_facts: 'extract-facts',
+  }
+  if (map[s]) return map[s]
+  if (s.includes('-')) return s
+  return s.replace(/_/g, '-')
+}
 const counts = computed(() => compliance.value?.counts || {})
 const filters = [
   { key: 'fail', label: '失败' },
@@ -751,7 +802,15 @@ async function refresh() {
   openId.value = null
   actionMsg.value = ''
   try {
-    if (isManualReview.value) {
+    if (isMaterials.value) {
+      title.value = '材料资格清单'
+      subtitle.value = 'build-materials-checklist'
+      detail.value = {}
+      compliance.value = null
+      summary.value = null
+      mrItems.value = []
+      hasLoadedOnce.value = true
+    } else if (isManualReview.value) {
       await loadManualReview()
       hasLoadedOnce.value = true
     } else if (isCompliance.value) {

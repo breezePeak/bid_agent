@@ -76,6 +76,6 @@ def save_last_plan(root: Path | None, plan: dict[str, Any]) -> Path:
 
 def max_steps_default() -> int:
     try:
-        return max(1, int(os.environ.get("AGENT_MAX_STEPS", "5")))
+        return max(1, int(os.environ.get("AGENT_MAX_STEPS", "12")))
     except ValueError:
-        return 5
+        return 12

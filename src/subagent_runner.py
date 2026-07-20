@@ -123,7 +123,7 @@ def run_per_chapter(
 ) -> dict[str, Any]:
     root = root or project_root()
     selected = _resolve_chapter_ids(root, chapter_ids)
-    effective_workers = max(1, min(workers, 5))
+    effective_workers = max(1, min(workers, 10))
     role = _label_to_role(label)
     print(
         f"[启动] 并发执行 {len(selected)} 个章节 {label}, "

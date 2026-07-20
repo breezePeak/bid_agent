@@ -66,17 +66,20 @@
                 @click="handleAction(act, msg)"
               >{{ act.label }}</button>
             </div>
-            <div v-if="(msg.goal && (msg.goal.status || msg.goal.all_criteria_ok !== undefined)) || msg.goal_id" class="chat-goal-badge">
+            <div
+              v-if="msg.goal_id || (msg.goal && (msg.goal.goal_id || msg.goal.status))"
+              class="chat-goal-badge chat-goal-link"
+              title="在右侧目标面板查看详情"
+              @click="emit('focus-rail', 'goal')"
+            >
               <span class="chat-goal-label">目标</span>
-              <span class="chat-goal-status" :class="'goal-' + (msg.goal.status || 'pending')">{{ msg.goal.status || 'pending' }}</span>
+              <span class="chat-goal-status" :class="'goal-' + ((msg.goal && msg.goal.status) || 'pending')">{{ (msg.goal && msg.goal.status) || 'pending' }}</span>
               <span v-if="msg.goal_id || (msg.goal && msg.goal.goal_id)" class="chat-goal-id">#{{ msg.goal_id || msg.goal.goal_id }}</span>
-              <span v-if="msg.goal.all_criteria_ok === true" class="chat-goal-ok">criteria OK</span>
-              <span v-else-if="msg.goal.all_criteria_ok === false" class="chat-goal-bad">criteria pending</span>
             </div>
             <div v-if="msg.supervisor_steps && msg.supervisor_steps.length" class="chat-supervisor-steps" :class="{ collapsed: !msg.stepsExpanded }">
               <div class="chat-supervisor-header" @click="msg.stepsExpanded = !msg.stepsExpanded">
                 <span class="chat-supervisor-arrow">{{ msg.stepsExpanded ? '▼' : '▶' }}</span>
-                <span>Agent 决策轨迹</span>
+                <span>决策过程</span>
                 <span class="chat-supervisor-count">{{ msg.supervisor_steps.length }} 步</span>
               </div>
               <div v-if="msg.stepsExpanded" class="chat-supervisor-body">
@@ -191,7 +194,7 @@
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import PlanList from './PlanList.vue'
 import UploadTile from './UploadTile.vue'
-import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight, fetchCurrentRepairJob } from '../api'
+import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight, fetchCurrentRepairJob, fetchMaterialsChecklist } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -215,7 +218,7 @@ function formatLog(content) {
   return html
 }
 
-const emit = defineEmits(['preview', 'open-doc-editor', 'rewrite-done'])
+const emit = defineEmits(['preview', 'open-doc-editor', 'rewrite-done', 'pipeline-log', 'focus-rail', 'materials-alert'])
 
 function coreWorkflowSteps(workflow = []) {
   return (Array.isArray(workflow) ? workflow : []).filter(step => step && step.kind !== 'utility' && step.command)
@@ -297,6 +300,8 @@ const recoveryState = ref(null)
 const agentActivity = ref(null)
 const complianceSummary = ref(null)
 const issuesSummary = ref(null)
+const materialsDeferred = ref(0)
+let lastMaterialsNotifyKey = ''
 const interactionBusy = computed(() => sending.value || repairExecuting.value)
 const ACTIVE_REPAIR_STATUSES = new Set(['running', 'revalidating'])
 const TERMINAL_REPAIR_STATUSES = new Set(['completed', 'partial', 'failed'])
@@ -396,6 +401,8 @@ const quickBtns = computed(() => {
     if (complianceSummary.value) {
       btns.splice(2, 0, { label: complianceSummary.value.blocking ? '合规阻断详情' : '查看专项合规', type: 'show_step', command: 'compliance-check' })
     }
+    btns.push({ label: '材料清单', type: 'show_step', command: 'build-materials-checklist' })
+    btns.push({ label: '流水线日志', type: 'show_step', command: 'logs' })
     return btns
   }
   const stepStatus = (cmd) => planSteps.value.find(s => s.command === cmd)?.status
@@ -409,6 +416,7 @@ const quickBtns = computed(() => {
   const btns = [
     { label: '当前状态', action: 'chat' },
     { label: '评分覆盖', action: 'chat', text: '当前评分覆盖率如何' },
+    { label: '材料清单', type: 'show_step', command: 'build-materials-checklist' },
   ]
   const nextPending = planSteps.value.find(s => s.status !== 'done')
   if (nextPending) {
@@ -585,6 +593,10 @@ function updateFromStatus(data) {
       if (activeStageLog.value && activeStageLog.value.stageLabel === s.label) collapseActiveStageLog()
       const dur = s.durationLabel || ''
       addMessage('system', `✓ ${s.label} 完成${dur ? '（用时 ' + dur + '）' : ''}`, [], { kind: 'stage_duration' })
+      // 材料清单阶段完成后立刻检查待补项
+      if (s.command === 'build-materials-checklist') {
+        nextTick(() => maybeNotifyMaterialsGap({ force: true }))
+      }
     }
     prevStatusMap[s.command] = s.status
   })
@@ -625,6 +637,54 @@ function updateFromStatus(data) {
     const detail = data.pipeline?.error || data.pipeline?.message || ''
     addMessage('assistant', `后端流水线已${pipelineStatus === 'paused' ? '暂停' : '停止'}${detail ? '：' + detail : ''}`)
   }
+  // 状态轮询时同步材料待补提醒（去重）
+  void maybeNotifyMaterialsGap()
+}
+
+function applyMaterialsStatus(payload = {}) {
+  const n = Number(payload.deferred || 0) || 0
+  materialsDeferred.value = n
+  emit('materials-alert', { deferred: n, total: Number(payload.total || 0) || 0, exists: !!payload.exists })
+}
+
+async function maybeNotifyMaterialsGap({ force = false } = {}) {
+  try {
+    const { data } = await fetchMaterialsChecklist()
+    if (!data?.ok || !data.exists) return
+    const summary = data.summary || data.checklist?.summary || {}
+    const deferred = Number(summary.deferred || 0) || 0
+    const items = Array.isArray(data.items) ? data.items : []
+    applyMaterialsStatus({ deferred, total: summary.total || 0, exists: true })
+    if (deferred <= 0) {
+      lastMaterialsNotifyKey = ''
+      return
+    }
+    const key = `${props.runId}:${deferred}`
+    if (!force && key === lastMaterialsNotifyKey) return
+    lastMaterialsNotifyKey = key
+    const samples = items
+      .filter(i => (i.response_status || 'deferred') === 'deferred')
+      .slice(0, 5)
+      .map(i => `· ${i.item_id || ''} ${String(i.requirement || '').slice(0, 48)}`.trim())
+    const more = deferred > samples.length ? `\n…另有 ${deferred - samples.length} 条` : ''
+    addMessage(
+      'assistant',
+      `检测到 ${deferred} 条材料待补充。请在右侧「材料」页处理，或上传公司资料后重建清单。\n\n${samples.join('\n')}${more}`,
+      [
+        { type: 'show_step', command: 'build-materials-checklist', label: '打开材料清单' },
+        { type: 'show_step', command: 'logs', label: '查看日志' },
+      ],
+      { persist: false },
+    )
+    emit('focus-rail', 'materials')
+  } catch (e) { /* ignore */ }
+}
+
+/** 供父组件推送材料角标状态；聊天提醒只在 maybeNotifyMaterialsGap 里发，避免双通道刷屏 */
+function notifyMaterialsStatus(payload) {
+  applyMaterialsStatus(payload || {})
+  const deferred = Number(payload?.deferred || 0) || 0
+  if (deferred <= 0) lastMaterialsNotifyKey = ''
 }
 
 // ---- auto run ----
@@ -689,7 +749,8 @@ async function runCommand(cmd) {
 }
 
 // ---- SSE ----
-// 把有价值的实时日志按阶段聚合成一个可折叠块，写入聊天并入库；不再单独显示日志面板。
+// 详细日志分流到右侧「日志」；聊天仅保留失败/门禁等强信号。
+const CHAT_LOG_RE = /(失败|错误|质量门禁|阻断|✗|Exception|Traceback|启动失败)/i
 const VALUABLE_LOG_RE = /(失败|错误|重试|质量门禁|SubAgent|warn|启动|完成|执行|章节|并发|生成|写作|审核|改稿|进度|LLM|开始|成功|跳过|警告|✗)/i
 let lastLogLine = ''
 
@@ -703,8 +764,6 @@ function collapseActiveStageLog() {
   const m = activeStageLog.value
   if (!m) return
   m.collapsed = true
-  // 整块日志作为一条消息入库
-  saveChatMessage('system', m.content, { kind: 'stage_log', actions: [] }).catch(() => {})
   activeStageLog.value = null
   activeLogBodyEl = null
 }
@@ -714,9 +773,10 @@ function pushValuableLog(line, kind = 'log') {
   if (!text || text === lastLogLine) return
   lastLogLine = text
   const label = currentStageLabel()
+  emit('pipeline-log', { line: text, stage: label, kind })
+  if (!CHAT_LOG_RE.test(text)) return
   let m = activeStageLog.value
   if (!m || m.stageLabel !== label) {
-    // 进入新阶段 → 先折叠上一块
     if (m) collapseActiveStageLog()
     m = { role: 'system', kind: 'stage_log', content: text, stageLabel: label, collapsed: true, logCount: 1, thinking: '', thinkingExpanded: false, created_at: '', actions: [] }
     messages.value.push(m)
@@ -842,9 +902,9 @@ async function doChat(text, { action = null } = {}) {
   scrollBottom()
 
   const thinkLines = [
-    '正在理解你的意图，并查询当前工作区状态…',
-    '正在调用编排器 / 可选 Supervisor 决策…',
-    '正在汇总结果，请稍候…',
+    '正在理解你的意图，并查看当前工作区…',
+    '正在分析并决定下一步…',
+    '正在整理回复，请稍候…',
   ]
   let thinkStep = 0
   const thinkTimer = setInterval(() => {
@@ -868,7 +928,7 @@ async function doChat(text, { action = null } = {}) {
     if (body.ok === false) {
       if (messages.value[msgIndex]) {
         messages.value[msgIndex].content = body.message || '无法获取响应'
-        messages.value[msgIndex].thinking = (messages.value[msgIndex].thinking || '') + '\n请求结束：编排器返回失败。'
+        messages.value[msgIndex].thinking = (messages.value[msgIndex].thinking || '') + '\n请求结束：未能完成回复。'
         messages.value[msgIndex].thinkingExpanded = false
       }
       sending.value = false
@@ -903,27 +963,35 @@ async function doChat(text, { action = null } = {}) {
           return `#${n} ${tool}（${flag}）\n${thought}${obs ? '\n→ ' + obs : ''}`
         }).join('\n\n')
       } else if (body.supervisor) {
-        thinkingDone = 'Supervisor 已处理，但本轮无逐步 tool 轨迹。'
+        thinkingDone = '本轮已完成决策（无逐步工具轨迹）。'
       } else {
-        thinkingDone = '编排器已返回结果（经典模式）。'
+        thinkingDone = '本轮已完成决策。'
       }
     }
-    if (body.orchestrator_note) {
-      thinkingDone = (thinkingDone ? thinkingDone + '\n' : '') + `备注：${body.orchestrator_note}`
+    const execNote = String(body.execution_note || body.orchestrator_note || '').trim()
+    if (execNote) {
+      thinkingDone = (thinkingDone ? thinkingDone + '\n' : '') + execNote
+    }
+
+    // 执行结果并入同一条助手回复，避免“另一个系统”另起消息
+    let displayReply = String(reply || '').trim()
+    if (execNote && !displayReply.includes(execNote) && /失败|错误|无法|未开启/.test(execNote)) {
+      displayReply = displayReply ? `${displayReply}\n\n${execNote}` : execNote
     }
 
     if (messages.value[msgIndex]) {
       const msg = messages.value[msgIndex]
-      msg.content = reply
+      msg.content = displayReply
       msg.actions = actions
       msg.thinking = thinkingDone
       msg.thinkingExpanded = false
       msg.supervisor_steps = supervisor_steps
-      msg.stepsExpanded = supervisor_steps.length > 0
+      // 轨迹已进思考过程时默认折叠，减少“双脑”感
+      msg.stepsExpanded = false
       msg.goal = goal
       msg.goal_id = goal_id
     } else {
-      addMessage('assistant', reply, actions, { persist: false, thinking: thinkingDone, supervisor_steps, goal, goal_id, stepsExpanded: true })
+      addMessage('assistant', displayReply, actions, { persist: false, thinking: thinkingDone, supervisor_steps, goal, goal_id, stepsExpanded: false })
     }
 
     if (body.repair_job) applyRepairJob(body.repair_job)
@@ -935,9 +1003,6 @@ async function doChat(text, { action = null } = {}) {
       nextTick(() => { if (!autoExecuting.value) startAutoRun(body.triggered_command) })
     } else if (body.triggered_command || body.triggered_rewrite) {
       watchLiveRun()
-    }
-    if (body.orchestrator_note) {
-      addMessage('system', `[编排器] ${body.orchestrator_note}`, [], { persist: false })
     }
   } catch (e) {
     clearInterval(thinkTimer)
@@ -1161,7 +1226,7 @@ function notifyRewriteDiscarded() {
   addMessage('system', '改写已放弃（来自文档预览）。')
 }
 
-defineExpose({ addInputText, notifyRewriteApplied, notifyRewriteDiscarded })
+defineExpose({ addInputText, notifyRewriteApplied, notifyRewriteDiscarded, startAutoRun, notifyMaterialsStatus, maybeNotifyMaterialsGap })
 
 async function loadChatHistory() {
   try {

@@ -124,6 +124,38 @@
         <div id="workflow-list" class="flow-line"></div>
       </section>
 
+      <section class="insight-band agent-workbench-band" aria-labelledby="agent-wb-title">
+        <div class="section-head compact">
+          <div>
+            <h2 id="agent-wb-title">Agent 工作台</h2>
+            <p>目标、计划、决策轨迹与人工补料入口（与 GoalState / RepairJob 同步）。</p>
+          </div>
+          <div class="toolbar">
+            <button onclick="loadAgentWorkbench(true)">刷新工作台</button>
+            <button onclick="resumeAgentGoal()">恢复目标</button>
+          </div>
+        </div>
+        <div class="insight-grid agent-wb-grid">
+          <article class="insight-card">
+            <h3>目标</h3>
+            <div id="agent-goal-card" class="insight-content">加载中…</div>
+          </article>
+          <article class="insight-card">
+            <h3>计划</h3>
+            <div id="agent-plan-card" class="insight-content">加载中…</div>
+          </article>
+          <article class="insight-card">
+            <h3>决策轨迹</h3>
+            <div id="agent-decisions-card" class="insight-content">加载中…</div>
+            <label class="debug-toggle"><input type="checkbox" id="agent-debug-trace" onchange="renderAgentDecisions()"> 调试模式</label>
+          </article>
+          <article class="insight-card">
+            <h3>人工处理 / 材料</h3>
+            <div id="agent-human-card" class="insight-content">加载中…</div>
+          </article>
+        </div>
+      </section>
+
       <section class="insight-band" aria-labelledby="insight-title">
         <div class="section-head compact">
           <div>
@@ -256,6 +288,6 @@
   <span id="running-task"></span>
 </div>
 
-<script src="/static/app.js?v=20260707-2"></script>
+<script src="/static/app.js?v=20260717-agent"></script>
 </body>
 </html>

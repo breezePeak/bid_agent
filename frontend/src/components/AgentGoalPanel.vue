@@ -1,40 +1,42 @@
 ﻿<template>
   <div class="agent-goal-panel">
-    <div class="agp-header">
-      <span class="agp-title">Agent 目标</span>
-      <span class="agp-poll" :class="{ on: polling }">{{ polling ? 'live' : 'idle' }}</span>
-    </div>
-
-    <div v-if="error" class="agp-empty">{{ error }}</div>
-    <div v-else-if="!goal" class="agp-empty">
-      暂无活动目标。<br />
-      <span class="agp-hint">启用 AGENT_SUPERVISOR_ENABLED 并在对话中下达目标后显示。</span>
-    </div>
-    <div v-else class="agp-body">
-      <div class="agp-row">
-        <span class="agp-status" :class="'st-' + (goal.status || 'pending')">{{ goal.status || 'pending' }}</span>
-        <span class="agp-id">#{{ goal.goal_id }}</span>
+    <div class="agp-goal-block">
+      <div class="agp-header">
+        <span class="agp-title">Agent 目标</span>
+        <span class="agp-poll" :class="{ on: polling }">{{ polling ? 'live' : 'idle' }}</span>
       </div>
-      <div class="agp-goal-text">{{ goal.raw_user_goal || summary }}</div>
-      <div class="agp-summary">{{ summary }}</div>
 
-      <div v-if="criteria.length" class="agp-criteria">
-        <div class="agp-section-label">成功准则</div>
-        <div v-for="(c, i) in criteria" :key="i" class="agp-criterion" :class="{ ok: c.ok, bad: !c.ok }">
-          <span class="dot"></span>
-          <span class="check">{{ c.check }}</span>
-          <span class="detail">{{ c.detail }}</span>
+      <div v-if="error" class="agp-empty">{{ error }}</div>
+      <div v-else-if="!goal" class="agp-empty compact">
+        暂无活动目标
+        <span class="agp-hint"> · 对话下达目标后显示</span>
+      </div>
+      <div v-else class="agp-body">
+        <div class="agp-row">
+          <span class="agp-status" :class="'st-' + (goal.status || 'pending')">{{ goal.status || 'pending' }}</span>
+          <span class="agp-id">#{{ goal.goal_id }}</span>
         </div>
-      </div>
+        <div class="agp-goal-text">{{ goal.raw_user_goal || summary }}</div>
+        <div class="agp-summary">{{ summary }}</div>
 
-      <div v-if="decisions.length" class="agp-decisions">
-        <div class="agp-section-label">最近决策</div>
-        <div v-for="(d, i) in decisions" :key="i" class="agp-decision">
-          <div class="agp-d-top">
-            <span class="tool">{{ d.selected_tool || d.tool || '-' }}</span>
-            <span class="flag" :class="d.executed ? 'exec' : 'plan'">{{ d.executed ? 'exec' : 'plan' }}</span>
+        <div v-if="criteria.length" class="agp-criteria">
+          <div class="agp-section-label">成功准则</div>
+          <div v-for="(c, i) in criteria" :key="i" class="agp-criterion" :class="{ ok: c.ok, bad: !c.ok }">
+            <span class="dot"></span>
+            <span class="check">{{ c.check }}</span>
+            <span class="detail">{{ c.detail }}</span>
           </div>
-          <div v-if="d.thought_summary" class="agp-d-thought">{{ d.thought_summary }}</div>
+        </div>
+
+        <div v-if="decisions.length" class="agp-decisions">
+          <div class="agp-section-label">最近决策</div>
+          <div v-for="(d, i) in decisions" :key="i" class="agp-decision">
+            <div class="agp-d-top">
+              <span class="tool">{{ d.selected_tool || d.tool || '-' }}</span>
+              <span class="flag" :class="d.executed ? 'exec' : 'plan'">{{ d.executed ? 'exec' : 'plan' }}</span>
+            </div>
+            <div v-if="d.thought_summary" class="agp-d-thought">{{ d.thought_summary }}</div>
+          </div>
         </div>
       </div>
     </div>
@@ -105,4 +107,6 @@ watch(() => props.enabled, (v) => { v ? start() : stop() })
 
 onMounted(start)
 onBeforeUnmount(stop)
+
+defineExpose({ refresh })
 </script>

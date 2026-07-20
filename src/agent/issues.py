@@ -331,8 +331,51 @@ def load_issue_metrics(root: Path | None = None, *, tail: int = 200) -> dict[str
 
 
 def accept_risk_enabled() -> bool:
-    flag = str(os.environ.get("ISSUE_ACCEPT_RISK_ENABLED", "1")).strip().lower()
+    # PR-12: default OFF
+    flag = str(os.environ.get("ISSUE_ACCEPT_RISK_ENABLED", "0")).strip().lower()
     return flag not in {"0", "false", "no", "off", ""}
+
+
+_FATAL_CODES = {
+    "FATAL",
+    "DISQUALIFY",
+    "废标",
+    "BID_REJECTION",
+}
+
+_QUALIFICATION_CODES = {
+    "QUALIFICATION_MISSING",
+    "MISSING_CERTIFICATE",
+    "MANDATORY_DOC_MISSING",
+    "MATERIAL_GAP",
+    "NEED_EVIDENCE",
+}
+
+
+def classify_issue_risk(issue: dict[str, Any]) -> str:
+    """Return risk class: fatal | qualification | critical | major | minor."""
+    code = str(issue.get("code") or "").upper()
+    risk = str(issue.get("risk_class") or "").lower()
+    sev = str(issue.get("severity") or "").lower()
+    title = str(issue.get("title") or "") + str(issue.get("detail") or "")
+    if risk in {"fatal", "qualification", "critical", "major", "minor"}:
+        return risk
+    if code in _FATAL_CODES or "废标" in title or "fatal" in title.lower():
+        return "fatal"
+    if code in _QUALIFICATION_CODES or "资格" in title or "证书" in title:
+        return "qualification"
+    if sev == "block" and (code.startswith("CRITICAL") or "critical" in title.lower()):
+        return "critical"
+    if sev == "block":
+        return "major"
+    if sev == "warn":
+        return "major"
+    return "minor"
+
+
+def _effective_reason_chars(reason: str) -> str:
+    # strip whitespace for min length
+    return "".join(ch for ch in (reason or "") if not ch.isspace())
 
 
 def accept_issue_risk(
@@ -341,8 +384,10 @@ def accept_issue_risk(
     *,
     reason: str = "",
     actor: str = "user",
+    is_admin: bool = False,
+    confirm_critical: bool = False,
 ) -> dict[str, Any]:
-    """Mark a block issue as accepted risk (does not delete evidence)."""
+    """Mark a block issue as accepted risk (does not delete evidence). PR-12 tightened."""
     if not accept_risk_enabled():
         return {
             "ok": False,
@@ -350,6 +395,12 @@ def accept_issue_risk(
         }
     root = root or project_root()
     reason = str(reason or "").strip()
+    if len(_effective_reason_chars(reason)) < 8:
+        return {
+            "ok": False,
+            "message": "接受风险必须填写原因（至少 8 个有效字符）。",
+            "code": "reason_too_short",
+        }
 
     with _lock:
         issues = load_open_issues(root)
@@ -360,13 +411,58 @@ def accept_issue_risk(
                 break
         if found is None:
             return {"ok": False, "message": f"未找到问题: {issue_id}"}
-        if str(found.get("severity")) != "block":
-            return {"ok": False, "message": "仅阻断级（block）问题支持接受风险。"}
+
+        risk_class = classify_issue_risk(found)
+        found["risk_class"] = risk_class
+
+        if risk_class == "fatal":
+            return {
+                "ok": False,
+                "message": "fatal 废标项禁止通过接受风险关闭。",
+                "code": "fatal_forbidden",
+                "risk_class": risk_class,
+            }
+        if risk_class == "qualification":
+            return {
+                "ok": False,
+                "message": "资格材料缺失不可直接接受风险，请补料或标记 deferred。",
+                "code": "qualification_deferred_only",
+                "risk_class": risk_class,
+            }
+        if risk_class == "critical":
+            if not is_admin:
+                return {
+                    "ok": False,
+                    "message": "critical 合规冲突仅管理员可接受风险。",
+                    "code": "admin_required",
+                    "risk_class": risk_class,
+                }
+            if not confirm_critical:
+                return {
+                    "ok": False,
+                    "message": "critical 问题需要二次确认（confirm_critical=true）。",
+                    "code": "confirm_critical_required",
+                    "risk_class": risk_class,
+                }
+
+        if str(found.get("severity")) not in {"block", "warn"}:
+            return {"ok": False, "message": "仅 block/warn 问题支持接受风险。"}
+
+        # Preserve original evidence; never delete
+        evidence = dict(found.get("evidence") or {})
+        evidence.setdefault("pre_accept_snapshot", {
+            "status": found.get("status"),
+            "severity": found.get("severity"),
+            "detail": str(found.get("detail") or "")[:500],
+        })
+
         found["status"] = "accepted"
         found["updated_at"] = _now()
         found["accepted_at"] = _now()
         found["accepted_by"] = actor
         found["accept_reason"] = reason[:500]
+        found["evidence"] = evidence
+        found["risk_class"] = risk_class
         append_issue_log(root, found)
         save_open_issues(root, issues)
         try:
@@ -379,12 +475,57 @@ def accept_issue_risk(
             )
         except Exception:
             pass
+        try:
+            write_risk_register(root)
+        except Exception:
+            pass
         return {
             "ok": True,
             "issue": found,
-            "message": "已接受风险，该问题不再阻断流水线（仍保留记录）。",
+            "message": "已接受风险，该问题不再阻断流水线（仍保留记录与证据）。",
             "can_proceed": can_proceed(root).get("can_proceed"),
+            "risk_class": risk_class,
+            "all_passed": False,  # accepted risk means never "全部通过"
         }
+
+
+def list_accepted_risks(root: Path | None = None) -> list[dict[str, Any]]:
+    return [i for i in load_open_issues(root) if str(i.get("status")) == "accepted"]
+
+
+def write_risk_register(root: Path | None = None) -> Path | None:
+    """Optional outputs/risk_register.md for audit."""
+    root = root or project_root()
+    accepted = list_accepted_risks(root)
+    out = root / "outputs" / "risk_register.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "# 风险接受登记册",
+        "",
+        f"生成时间: {_now()}",
+        "",
+        f"已接受风险数: {len(accepted)}",
+        "",
+    ]
+    if not accepted:
+        lines.append("（当前无已接受风险）")
+    else:
+        lines.append("| ID | 代码 | 风险类 | 标题 | 原因 | 操作人 | 时间 |")
+        lines.append("|---|---|---|---|---|---|---|")
+        for item in accepted:
+            lines.append(
+                "| {id} | {code} | {rc} | {title} | {reason} | {actor} | {at} |".format(
+                    id=str(item.get("id") or ""),
+                    code=str(item.get("code") or ""),
+                    rc=str(item.get("risk_class") or classify_issue_risk(item)),
+                    title=str(item.get("title") or "").replace("|", "/")[:60],
+                    reason=str(item.get("accept_reason") or "").replace("|", "/")[:80],
+                    actor=str(item.get("accepted_by") or ""),
+                    at=str(item.get("accepted_at") or "")[:19],
+                )
+            )
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out
 
 
 def batch_issue_ids_open_blocks(root: Path | None = None) -> list[str]:
@@ -392,7 +533,7 @@ def batch_issue_ids_open_blocks(root: Path | None = None) -> list[str]:
 
 
 def export_preflight(root: Path | None = None) -> dict[str, Any]:
-    """Pre-export checklist: all open blocks must be zero; surface key report flags."""
+    """Pre-export checklist: open blocks zero; always surface accepted risks (PR-12)."""
     root = root or project_root()
     # refresh from latest reports
     try:
@@ -405,6 +546,7 @@ def export_preflight(root: Path | None = None) -> dict[str, Any]:
 
     summary = issues_summary(root)
     blocks = open_block_issues(root)
+    accepted = list_accepted_risks(root)
     checks: list[dict[str, Any]] = []
 
     gr_path = root / "workspace" / "global_review.json"
@@ -413,8 +555,6 @@ def export_preflight(root: Path | None = None) -> dict[str, Any]:
             gr = json.loads(gr_path.read_text(encoding="utf-8"))
         except Exception:
             gr = {}
-        gr_block = bool(isinstance(gr, dict) and (gr.get("blocking") or open_block_issues(root)))
-        # more precise: global stage blocks
         gr_blocks = [b for b in blocks if str(b.get("stage_id")) == "global_review"]
         checks.append(
             {
@@ -457,6 +597,17 @@ def export_preflight(root: Path | None = None) -> dict[str, Any]:
         }
     )
 
+    # Accepted risks: never block export by themselves, but never claim "全部通过"
+    checks.append(
+        {
+            "id": "accepted_risks",
+            "label": "已接受风险披露",
+            "ok": True,
+            "detail": "无" if not accepted else f"存在 {len(accepted)} 条已接受风险（终稿不得显示全部通过）",
+            "count": len(accepted),
+        }
+    )
+
     md = root / "outputs" / "final.md"
     checks.append(
         {
@@ -467,15 +618,51 @@ def export_preflight(root: Path | None = None) -> dict[str, Any]:
         }
     )
 
-    can_export = all(bool(c.get("ok")) for c in checks)
+    gate_ok = all(bool(c.get("ok")) for c in checks if c.get("id") != "accepted_risks")
+    can_export = gate_ok  # accepted risks do not block formal export after gates pass
+    all_passed = can_export and len(accepted) == 0
+    try:
+        write_risk_register(root)
+    except Exception:
+        pass
+
+    if can_export and accepted:
+        message = f"可以出正式稿，但存在 {len(accepted)} 条已接受风险，不得标注“全部通过”"
+    elif can_export:
+        message = "可以出正式稿"
+    else:
+        message = "出稿前检查未通过，请先处理阻断项"
+
     return {
         "ok": True,
         "can_export": can_export,
+        "all_passed": all_passed,
+        "has_accepted_risks": len(accepted) > 0,
+        "accepted_risks": [
+            {
+                "id": a.get("id"),
+                "code": a.get("code"),
+                "title": a.get("title"),
+                "risk_class": a.get("risk_class") or classify_issue_risk(a),
+                "accept_reason": a.get("accept_reason"),
+                "accepted_by": a.get("accepted_by"),
+                "accepted_at": a.get("accepted_at"),
+            }
+            for a in accepted[:50]
+        ],
         "checks": checks,
         "issues_summary": summary,
         "block_issues": [
-            {"id": b.get("id"), "code": b.get("code"), "title": b.get("title"), "stage_id": b.get("stage_id")}
+            {
+                "id": b.get("id"),
+                "code": b.get("code"),
+                "title": b.get("title"),
+                "stage_id": b.get("stage_id"),
+                "risk_class": b.get("risk_class") or classify_issue_risk(b),
+            }
             for b in blocks[:20]
         ],
-        "message": "可以出正式稿" if can_export else "出稿前检查未通过，请先处理阻断项",
+        "draft_allowed": True,  # draft.docx may carry unresolved risks
+        "final_requires_gates": True,
+        "message": message,
     }

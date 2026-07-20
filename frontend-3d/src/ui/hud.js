@@ -16,7 +16,18 @@ function el(html) {
   return t.content.firstElementChild
 }
 
-export function createHud(root, { onAction, onStageClick, onAgentClick }) {
+function shortRunName(run) {
+  if (!run) return ''
+  const raw = run.project_label || run.id || ''
+  // runs often look like 20260325_xxx_项目名
+  const parts = String(raw).split('_')
+  if (parts.length >= 3 && /^\d{8}/.test(parts[0])) {
+    return parts.slice(2).join('_') || raw
+  }
+  return raw
+}
+
+export function createHud(root, { onAction, onStageClick, onAgentClick, onSelectRun }) {
   root.innerHTML = ''
 
   root.append(el('<div class="vignette"></div>'), el('<div class="scanline"></div>'))
@@ -24,8 +35,20 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
   const top = el(`
     <div class="hud-top">
       <div class="brand">
-        <div class="brand-title">Bid Command Bridge</div>
-        <div class="brand-sub">标书全流程 3D 指挥舱 · Agent 实时态势</div>
+        <div class="brand-title">标书指挥舱</div>
+        <div class="brand-sub">Bid Command · 全流程 3D 态势</div>
+      </div>
+      <div class="top-center interactive">
+        <div class="workspace-picker">
+          <span class="ws-label">工作区</span>
+          <select id="workspace-select" title="选择工作空间">
+            <option value="">加载中…</option>
+          </select>
+        </div>
+        <div class="mode-toggle">
+          <button type="button" class="mode-btn live" data-act="live">实时</button>
+          <button type="button" class="mode-btn demo" data-act="demo">演示</button>
+        </div>
       </div>
       <div class="top-metrics" id="top-metrics"></div>
     </div>
@@ -35,7 +58,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
     <div class="hud-left">
       <div class="panel" style="flex:1.4">
         <div class="panel-header">
-          <h3>Pipeline Stages</h3>
+          <h3>流水线阶段</h3>
           <span class="hint" id="stage-progress-hint">0/0</span>
         </div>
         <div class="panel-body">
@@ -45,7 +68,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
         </div>
       </div>
       <div class="panel" style="flex:0.55">
-        <div class="panel-header"><h3>Goal</h3></div>
+        <div class="panel-header"><h3>目标 Goal</h3></div>
         <div class="panel-body">
           <div class="goal-box" id="goal-box">暂无活动目标</div>
           <div class="stat-row"><span>工作区产物</span><b id="ws-stats">—</b></div>
@@ -60,7 +83,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
     <div class="hud-right">
       <div class="panel" style="flex:1.2">
         <div class="panel-header">
-          <h3>Agent Fleet</h3>
+          <h3>Agent 舰队</h3>
           <span class="hint" id="agent-summary">待命</span>
         </div>
         <div class="panel-body">
@@ -68,7 +91,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
         </div>
       </div>
       <div class="panel" style="flex:0.7">
-        <div class="panel-header"><h3>Event Stream</h3></div>
+        <div class="panel-header"><h3>事件流</h3></div>
         <div class="panel-body">
           <div class="event-list" id="event-list"></div>
         </div>
@@ -83,29 +106,33 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
         <div class="text" id="bottom-text">等待连接后端或启动演示模式</div>
       </div>
       <div class="legend">
-        <span><i style="background:#22d3ee"></i>完成</span>
-        <span><i style="background:#fbbf24"></i>执行</span>
-        <span><i style="background:#60a5fa"></i>就绪</span>
-        <span><i style="background:#f87171"></i>失败</span>
+        <span><i style="background:#2ee6d6;color:#2ee6d6"></i>完成</span>
+        <span><i style="background:#ffc857;color:#ffc857"></i>执行</span>
+        <span><i style="background:#6ba8ff;color:#6ba8ff"></i>就绪</span>
+        <span><i style="background:#ff7b8a;color:#ff7b8a"></i>失败</span>
       </div>
       <div class="controls">
         <button class="btn" data-act="overview">总览</button>
         <button class="btn" data-act="active">聚焦当前</button>
         <button class="btn" data-act="agents">Agent 区</button>
         <button class="btn" data-act="orbit">自动环绕</button>
-        <button class="btn primary" data-act="demo">演示模式</button>
-        <button class="btn" data-act="live">实时连接</button>
+        <button class="btn" data-act="refresh-runs">刷新列表</button>
       </div>
     </div>
   `)
 
   root.append(top, left, right, bottom)
 
-  bottom.querySelectorAll('[data-act]').forEach((btn) => {
+  const wsSelect = document.getElementById('workspace-select')
+  wsSelect.addEventListener('change', () => {
+    const id = wsSelect.value
+    if (id) onSelectRun?.(id)
+  })
+
+  root.querySelectorAll('[data-act]').forEach((btn) => {
     btn.addEventListener('click', () => onAction?.(btn.dataset.act, btn))
   })
 
-  // Event delegation — avoid rebinding on every render
   const stageList = document.getElementById('stage-list')
   stageList.addEventListener('click', (e) => {
     const row = e.target.closest('.stage-row')
@@ -120,9 +147,42 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
   })
 
   let lastRenderSig = ''
+  let lastRunsSig = ''
+
+  function setRuns(runs, activeId, { offline = false, switching = false } = {}) {
+    const list = Array.isArray(runs) ? runs : []
+    const sig = `${offline}|${switching}|${activeId || ''}|${list.map((r) => r.id).join(',')}`
+    if (sig === lastRunsSig) return
+    lastRunsSig = sig
+
+    if (offline) {
+      wsSelect.disabled = true
+      wsSelect.innerHTML = `<option value="">后端未连接</option>`
+      return
+    }
+
+    if (!list.length) {
+      wsSelect.disabled = true
+      wsSelect.innerHTML = `<option value="">暂无工作空间</option>`
+      return
+    }
+
+    wsSelect.disabled = switching
+    const current = wsSelect.value
+    const prefer = activeId || current || list[0]?.id || ''
+    wsSelect.innerHTML = list
+      .map((r) => {
+        const name = shortRunName(r)
+        const pct = r.progress?.percent != null ? Math.round(r.progress.percent) : null
+        const label = pct != null ? `${name} · ${pct}%` : name
+        return `<option value="${r.id}"${r.id === prefer ? ' selected' : ''}>${label}</option>`
+      })
+      .join('')
+    if (prefer) wsSelect.value = prefer
+  }
 
   function render(snap, extras = {}) {
-    // Skip identical HUD paint (demo can tick faster than needed)
+    const runs = extras.runs || []
     const sig = [
       snap.progress,
       snap.doneCount,
@@ -130,6 +190,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
       snap.demo,
       snap.connected,
       snap.currentTask,
+      snap.runId,
       snap.runState?.message,
       snap.activity?.phase_label,
       (snap.agents || []).map((a) => a.id + a.status).join(','),
@@ -137,9 +198,24 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
       extras.activeButtons?.orbit,
       extras.activeButtons?.demo,
       extras.activeButtons?.live,
+      extras.switchingWorkspace,
+      runs.map((r) => r.id).join(','),
     ].join('|')
     if (sig === lastRenderSig) return
     lastRenderSig = sig
+
+    setRuns(runs, extras.activeRunId || snap.runId, {
+      offline: !snap.connected && !snap.demo && !runs.length,
+      switching: Boolean(extras.switchingWorkspace),
+    })
+    // demo mode still allows picker if we have runs from last live load
+    if (snap.demo && !runs.length) {
+      setRuns([], '', { offline: false })
+      wsSelect.disabled = true
+      wsSelect.innerHTML = `<option value="">演示模式 · 无真实工作区</option>`
+    } else if (snap.demo && runs.length) {
+      wsSelect.disabled = false
+    }
 
     const liveClass = snap.demo ? 'live-pill demo' : snap.running ? 'live-pill on' : 'live-pill'
     const liveText = snap.demo ? 'DEMO' : snap.connected ? (snap.running ? 'LIVE' : 'IDLE') : 'OFFLINE'
@@ -150,7 +226,6 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
       <div class="metric"><div class="label">Agent 工作</div><div class="value green">${snap.activity?.summary?.running || 0}</div></div>
       <div class="metric"><div class="label">排队</div><div class="value">${snap.activity?.summary?.queued || 0}</div></div>
       <div class="metric"><div class="label">失败</div><div class="value red">${snap.activity?.summary?.failed || 0}</div></div>
-      <div class="metric"><div class="label">Run</div><div class="value pink" style="font-size:12px">${snap.runName || snap.runId || '—'}</div></div>
     `
 
     document.getElementById('phase-bar').innerHTML = (snap.phases || PHASES)
@@ -232,15 +307,29 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
           ? 'STANDBY'
           : 'OFFLINE / DEMO READY'
     document.getElementById('bottom-title').textContent = title
+    const runHint = snap.runName || snap.runId
     document.getElementById('bottom-text').textContent =
       snap.runState?.message ||
       (snap.currentTask ? `当前任务：${snap.currentTask}` : '') ||
-      (snap.connected ? '后端已连接，等待流水线启动' : '后端未连接 — 点击「演示模式」预览全流程')
+      (snap.demo
+        ? '演示模式运行中 — 可切换「实时」并选择工作区'
+        : snap.connected
+          ? runHint
+            ? `工作区：${runHint} · 等待流水线活动`
+            : '已连接 — 请选择工作区'
+          : '后端未连接 — 可使用演示模式预览')
 
-    bottom.querySelectorAll('[data-act]').forEach((btn) => {
-      btn.classList.toggle('active', Boolean(extras.activeButtons?.[btn.dataset.act]))
+    root.querySelectorAll('[data-act]').forEach((btn) => {
+      const act = btn.dataset.act
+      if (act === 'live' || act === 'demo') {
+        btn.classList.toggle('active', Boolean(extras.activeButtons?.[act]))
+        btn.classList.toggle('live', act === 'live')
+        btn.classList.toggle('demo', act === 'demo')
+      } else {
+        btn.classList.toggle('active', Boolean(extras.activeButtons?.[act]))
+      }
     })
   }
 
-  return { render, root }
+  return { render, root, setRuns }
 }

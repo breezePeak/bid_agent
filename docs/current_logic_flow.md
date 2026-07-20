@@ -667,3 +667,89 @@ python -m compileall src tests
 - `src/quality_gates.py`
 - 前端 `StepDetailView` 问题修复按钮；计划区质量门禁阻断条
 
+## 12. Agent 闭环强化（PR-9 ~ PR-14，2026-07-17）
+
+系统在确定性流水线之外，提供受约束的 Supervisor 多步闭环：
+
+### 12.1 多步循环（PR-9）
+
+```text
+observe(snapshot) → reevaluate GoalState → decide(tool)
+→ policy → invoke → reevaluate → continue / terminal
+```
+
+实现：
+
+- `src/agent/supervisor.py`：`run_supervisor_turn` 真正的 while-budget 循环
+- `src/agent/snapshot.py`：统一快照（pipeline / goal / artifacts / issues / materials / budget）
+- `src/agent/budgets.py`：步数、LLM 调用、同 tool 连击、无进展熔断
+- `src/graph/supervisor_graph.py`：LangGraph 版可继续多步（readonly / 已确认变更）
+
+终止状态：
+
+- `succeeded` / `blocked_human` / `blocked_policy` / `budget_exceeded` / `failed` / `awaiting_confirmation`
+
+### 12.2 GoalState 2.0（PR-10）
+
+`workspace/agent/goal_state.json` 增加：
+
+- `plan` / `current_plan_index` / `confirmation_scope` / `progress`
+- 条件步骤 `run_if`、依赖 `depends_on`、attempts
+- `resume_goal_after_materials` 补料恢复
+
+目标可驱动计划执行；覆盖率未达标时不能提前 `succeeded`。
+
+### 12.3 章节子图闭环（PR-11）
+
+`src/graph/chapter_subgraph.py`：
+
+```text
+write → self-check → (need_rewrite → rewrite → self-check)* → save
+```
+
+最终章节状态：`passed` / `deferred_material` / `stuck` / `failed`。
+
+### 12.4 风险门禁（PR-12）
+
+- `ISSUE_ACCEPT_RISK_ENABLED` **默认 0**
+- 接受风险原因 ≥ 8 有效字符
+- fatal / 资格材料禁止直接 accept
+- critical 需管理员 + 二次确认
+- `export_preflight` 披露 accepted risks；`all_passed=false` 当存在接受风险
+- 可选 `outputs/risk_register.md`
+
+### 12.5 材料恢复（PR-13）
+
+- 材料生命周期：`missing → requested → uploaded → verified → injected → resolved`
+- `POST /api/materials-checklist/upload` 标记上传并生成最小恢复计划
+- 局部失效 + 局部回填，不全量重跑
+- Goal 从 `blocked_human` 恢复
+
+### 12.6 Agent 工作台（PR-14）
+
+Web：
+
+- 目标卡 / 计划卡 / 决策轨迹 / 人工补料卡
+- API：`/api/agent/goal`、`/api/agent/snapshot`、`/api/agent/decisions`、`/api/agent/goal/resume`
+
+### 12.7 配置
+
+```text
+AGENT_MAX_STEPS=12
+AGENT_MAX_LLM_CALLS=20
+AGENT_MAX_SAME_TOOL_STREAK=2
+AGENT_MAX_NO_PROGRESS_STEPS=2
+AGENT_MAX_REPAIR_ROUNDS=2
+AGENT_SNAPSHOT_MAX_CHARS=12000
+ISSUE_ACCEPT_RISK_ENABLED=0
+```
+
+### 12.8 相关测试
+
+- `tests/test_supervisor_multistep.py`
+- `tests/test_goal_plan.py` / `test_goal_resume.py`
+- `tests/test_supervisor_budget.py` / `test_no_progress_detection.py`
+- `tests/test_chapter_subgraph_loop.py` / `test_chapter_stuck_detection.py`
+- `tests/test_accept_risk_policy.py`
+- `tests/test_material_resume.py`
+- `tests/test_snapshot_contract.py`

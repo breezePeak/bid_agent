@@ -29,14 +29,14 @@ CHAPTER_WRITER = SubagentSpec(
     label="章节写作子 Agent",
     description=(
         "章节写作子 agent 蓝图（注册表只存 1 种类型）。运行时由 subagent_runner.run_write_all / "
-        "run_rewrite_all 为每个章节任务实例化一个实例，经 ThreadPoolExecutor 并发执行（上限 5），"
-        "每个实例各自 invoke chapter_subgraph（选上下文→写作→自检）。"
+        "run_rewrite_all 将章节任务投入固定规模 worker 池，经 ThreadPoolExecutor 并发执行（上限 10），"
+        "每个 worker 依次领取章节并 invoke chapter_subgraph（选上下文→写作→自检）。"
         "write 模式对应初写（write-all），rewrite 模式带审核反馈改稿（复用同一蓝图的文件上下文，"
         "即 continue 模式）。"
     ),
     command="write-all",
     instantiation="per-chapter",
-    concurrency=5,
+    concurrency=10,
     modes=("write", "rewrite"),
     worker_module="agents.chapter_writer_agent",
 )
@@ -45,13 +45,13 @@ CHAPTER_REVIEWER = SubagentSpec(
     name="chapter_reviewer",
     label="章节审核子 Agent",
     description=(
-        "章节审核子 agent 蓝图。每章一个并发实例（上限 5），fresh——与写作子 agent 不同实例，"
+        "章节审核子 agent 蓝图。固定 worker 池并发审核（上限 10），fresh——与写作子 agent 不同实例，"
         "避免写作偏见。worker 为 review_chapter，只读，产出 workspace/reviews/*_review.json。"
         "对应并发调度 subagent_runner.run_review_all。"
     ),
     command="review-fix-all",
     instantiation="per-chapter",
-    concurrency=5,
+    concurrency=10,
     modes=("review",),
     worker_module="agents.chapter_review_agent",
 )

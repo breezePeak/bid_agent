@@ -58,3 +58,9 @@ class ChapterState(TypedDict, total=False):
     output_path: str
     self_check_path: str
     error: str
+    # PR-11 loop fields
+    rewrite_round: int
+    max_rewrite_rounds: int
+    chapter_status: str  # pending|need_rewrite|passed|deferred_material|stuck|failed|rewritten
+    problem_fingerprints: list[str]
+    last_problem_signature: str

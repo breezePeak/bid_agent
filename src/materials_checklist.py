@@ -178,6 +178,29 @@ def _placeholder_language(item: dict[str, Any]) -> str:
     )
 
 
+def _lifecycle_from_response(response_status: str, evidence_status: str) -> str:
+    """PR-13 lifecycle: missing→requested→uploaded→verified→injected→resolved (+ waived/rejected/n/a)."""
+    rs = stringify(response_status).lower()
+    es = stringify(evidence_status).lower()
+    if rs == "waived":
+        return "waived"
+    if rs == "rejected":
+        return "rejected"
+    if rs == "not_applicable":
+        return "not_applicable"
+    if rs == "ready" and es == "satisfied":
+        return "resolved"
+    if rs == "ready":
+        return "uploaded"
+    if rs == "deferred":
+        return "requested" if es in {"missing", "weak", ""} else "missing"
+    if es == "missing":
+        return "missing"
+    if es == "weak":
+        return "requested"
+    return "missing"
+
+
 def _make_item(
     *,
     item_id: str,
@@ -198,6 +221,7 @@ def _make_item(
         "requirement_source": requirement_source,
         "evidence_status": evidence_status,
         "response_status": response_status,
+        "lifecycle_status": _lifecycle_from_response(response_status, evidence_status),
         "severity": severity,
         "company_evidence": company_evidence,
         "suggested_attachment": _suggested_attachment(requirement, category),
@@ -207,6 +231,7 @@ def _make_item(
         "check_id_compat": check_id_compat or item_id,
         "confidence": confidence,
         "reason": "",
+        "affected_chapters": [],
     }
     if evidence_status == "missing":
         item["reason"] = "公司资料中未匹配到对应证据，写作阶段应留白待补"
@@ -220,8 +245,33 @@ def _make_item(
 
 def _apply_override(item: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     status = stringify(override.get("response_status") or override.get("status")).lower()
-    if status in {"ready", "deferred", "waived"}:
-        item["response_status"] = status
+    if status in {"ready", "deferred", "waived", "rejected", "not_applicable"}:
+        item["response_status"] = status if status in {"ready", "deferred", "waived"} else item.get("response_status")
+        if status in {"waived", "rejected", "not_applicable"}:
+            item["response_status"] = "waived" if status == "waived" else item.get("response_status") or "deferred"
+            item["lifecycle_status"] = status
+    lifecycle = stringify(override.get("lifecycle_status")).lower()
+    if lifecycle in {
+        "missing",
+        "requested",
+        "uploaded",
+        "verified",
+        "injected",
+        "resolved",
+        "waived",
+        "rejected",
+        "not_applicable",
+    }:
+        item["lifecycle_status"] = lifecycle
+        if lifecycle in {"uploaded", "verified", "injected", "resolved"}:
+            item["response_status"] = "ready"
+        elif lifecycle in {"missing", "requested"}:
+            item["response_status"] = "deferred"
+    elif not item.get("lifecycle_status"):
+        item["lifecycle_status"] = _lifecycle_from_response(
+            stringify(item.get("response_status")),
+            stringify(item.get("evidence_status")),
+        )
     note = stringify(override.get("reason") or override.get("note") or override.get("operator_note"))
     if note:
         item["reason"] = note
@@ -229,6 +279,8 @@ def _apply_override(item: dict[str, Any], override: dict[str, Any]) -> dict[str,
     if stringify(override.get("suggested_attachment")):
         item["suggested_attachment"] = stringify(override.get("suggested_attachment"))
         item["suggested_placeholder_language"] = _placeholder_language(item)
+    if stringify(override.get("uploaded_path")):
+        item["uploaded_path"] = stringify(override.get("uploaded_path"))
     item["user_override"] = True
     return item
 
@@ -617,8 +669,29 @@ def update_item_response(
     status = stringify(response_status).lower()
     if not item_id:
         return {"ok": False, "message": "缺少 item_id"}
+    lifecycle_aliases = {
+        "missing",
+        "requested",
+        "uploaded",
+        "verified",
+        "injected",
+        "resolved",
+        "rejected",
+        "not_applicable",
+    }
+    if status in lifecycle_aliases:
+        # allow lifecycle verbs as response updates
+        lifecycle = status
+        if status in {"uploaded", "verified", "injected", "resolved"}:
+            status = "ready"
+        elif status in {"rejected", "not_applicable"}:
+            status = "waived" if status == "not_applicable" else "deferred"
+        else:
+            status = "deferred"
+    else:
+        lifecycle = ""
     if status not in {"ready", "deferred", "waived"}:
-        return {"ok": False, "message": "response_status 必须是 ready/deferred/waived"}
+        return {"ok": False, "message": "response_status 必须是 ready/deferred/waived 或 lifecycle 状态"}
 
     data = load_materials_checklist(root)
     known = {stringify(i.get("item_id")) for i in data.get("items", []) if isinstance(i, dict)}
@@ -629,6 +702,14 @@ def update_item_response(
     row = dict(overrides.get(item_id) or {})
     row["item_id"] = item_id
     row["response_status"] = status
+    if lifecycle:
+        row["lifecycle_status"] = lifecycle
+    elif status == "ready":
+        row["lifecycle_status"] = "uploaded"
+    elif status == "waived":
+        row["lifecycle_status"] = "waived"
+    else:
+        row["lifecycle_status"] = "requested"
     if reason is not None and str(reason).strip():
         row["reason"] = str(reason).strip()[:500]
     if suggested_attachment is not None and str(suggested_attachment).strip():
@@ -644,6 +725,7 @@ def update_item_response(
         "ok": True,
         "item_id": item_id,
         "response_status": status,
+        "lifecycle_status": row.get("lifecycle_status"),
         "override": row,
         "checklist": checklist,
         "message": f"已将 {item_id} 标记为 {status}",
@@ -815,13 +897,267 @@ def refill_material_gaps(
         except Exception as exc:
             failed.append({"chapter_id": cid, "error": str(exc)})
 
+    # invalidate only affected artifacts
+    if rewritten:
+        try:
+            from agent.invalidation import mark_invalidated
+
+            mark_invalidated(
+                root,
+                reason="material_refill",
+                chapter_ids=rewritten,
+                source_stage="write_chapters",
+            )
+        except Exception:
+            pass
+
+    # mark lifecycle injected/resolved for ready items that no longer appear as gaps
+    try:
+        remaining_gaps = chapters_with_material_gaps(root)
+        data = load_materials_checklist(root)
+        items = data.get("items") if isinstance(data.get("items"), list) else []
+        gap_item_ids = {gid for ids in remaining_gaps.values() for gid in ids}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if stringify(item.get("response_status")) != "ready":
+                continue
+            iid = stringify(item.get("item_id"))
+            if iid and iid not in gap_item_ids:
+                item["lifecycle_status"] = "resolved"
+            else:
+                item["lifecycle_status"] = "injected"
+        data["items"] = items
+        data["summary"] = _summarize(items)
+        write_json(checklist_path(root), data)
+    except Exception:
+        pass
+
+    # resume goal if blocked on materials
+    try:
+        from agent.goal import load_goal, resume_goal_after_materials
+
+        goal = load_goal(root)
+        if goal and str(goal.get("status")) == "blocked_human":
+            resume_goal_after_materials(root, note="material_refill")
+    except Exception:
+        pass
+
     return {
         "ok": not failed,
         "rewritten": rewritten,
         "failed": failed,
         "plans": plans,
+        "recovery_plan": {
+            "chapter_ids": rewritten,
+            "invalidate": ["reviews", "summaries", "coverage", "export"],
+            "full_rerun": False,
+        },
         "message": (
             f"材料回填完成：成功 {len(rewritten)} 章"
             + (f"，失败 {len(failed)} 章" if failed else "")
         ),
     }
+
+
+def mark_material_uploaded(
+    root: Path | None,
+    item_id: str,
+    *,
+    uploaded_path: str = "",
+    note: str = "",
+    rebuild: bool = True,
+) -> dict[str, Any]:
+    """Mark one material item as uploaded and return affected chapters + recovery plan."""
+    root = root or project_root()
+    item_id = stringify(item_id)
+    if not item_id:
+        return {"ok": False, "message": "缺少 item_id"}
+
+    result = update_item_response(
+        root,
+        item_id,
+        response_status="ready",
+        reason=note or "材料已上传",
+        rebuild=rebuild,
+    )
+    if not result.get("ok"):
+        return result
+
+    # attach lifecycle + path
+    overrides = _load_overrides(root)
+    row = dict(overrides.get(item_id) or {})
+    row["item_id"] = item_id
+    row["response_status"] = "ready"
+    row["lifecycle_status"] = "uploaded"
+    if uploaded_path:
+        row["uploaded_path"] = str(uploaded_path)[:500]
+    if note:
+        row["reason"] = str(note)[:500]
+    overrides[item_id] = row
+    save_override_rows(root, [{"item_id": k, **v} for k, v in overrides.items()])
+    if rebuild:
+        build_materials_checklist(root)
+
+    affected = affected_chapters_for_items(root, [item_id])
+    recovery = build_material_recovery_plan(root, item_ids=[item_id], chapter_ids=affected)
+    try:
+        from agent.goal import load_goal, resume_goal_after_materials
+
+        goal = load_goal(root)
+        if goal and str(goal.get("status")) == "blocked_human":
+            resume_goal_after_materials(root, note=f"material_uploaded:{item_id}")
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "item_id": item_id,
+        "lifecycle_status": "uploaded",
+        "affected_chapters": affected,
+        "recovery_plan": recovery,
+        "message": f"材料 {item_id} 已标记上传，影响章节 {affected or '待识别'}",
+    }
+
+
+def affected_chapters_for_items(root: Path | None, item_ids: list[str]) -> list[str]:
+    root = root or project_root()
+    wanted = {str(x) for x in item_ids if str(x).strip()}
+    if not wanted:
+        return []
+    chapters: list[str] = []
+    # from MATERIAL_GAP in chapter text
+    for cid, gaps in chapters_with_material_gaps(root).items():
+        if any(g in wanted for g in gaps):
+            chapters.append(cid)
+    # from checklist hints + jobs
+    data = load_materials_checklist(root)
+    hint_tokens: list[str] = []
+    for item in data.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        if stringify(item.get("item_id")) not in wanted:
+            continue
+        for h in item.get("target_chapter_hints") or []:
+            if stringify(h):
+                hint_tokens.append(stringify(h))
+    jobs_dir = root / "workspace" / "jobs"
+    if jobs_dir.exists() and hint_tokens:
+        for path in sorted(jobs_dir.glob("*.json")):
+            try:
+                job = read_json(path)
+            except Exception:
+                continue
+            blob = " ".join(
+                [
+                    stringify(job.get("chapter_id")),
+                    stringify(job.get("chapter_title")),
+                    stringify(job.get("description")),
+                ]
+            )
+            if any(tok in blob for tok in hint_tokens):
+                cid = stringify(job.get("chapter_id")) or path.stem
+                if cid not in chapters:
+                    chapters.append(cid)
+    return chapters[:50]
+
+
+def build_material_recovery_plan(
+    root: Path | None,
+    *,
+    item_ids: list[str] | None = None,
+    chapter_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    """Minimal recovery plan after materials update — never full pipeline rerun."""
+    root = root or project_root()
+    chapters = list(chapter_ids or [])
+    if not chapters and item_ids:
+        chapters = affected_chapters_for_items(root, item_ids)
+    steps = [
+        {"step_id": "rebuild_checklist", "tool": "run_stage", "args": {"command": "build-materials-checklist"}},
+    ]
+    if chapters:
+        steps.append(
+            {
+                "step_id": "rewrite_affected",
+                "tool": "rewrite_chapters",
+                "args": {"chapter_ids": chapters[:20]},
+                "depends_on": ["rebuild_checklist"],
+            }
+        )
+        steps.append(
+            {
+                "step_id": "review_affected",
+                "tool": "review_chapters",
+                "args": {"chapter_ids": chapters[:20]},
+                "depends_on": ["rewrite_affected"],
+            }
+        )
+        steps.append(
+            {
+                "step_id": "recheck_coverage",
+                "tool": "analyze_coverage",
+                "args": {"rebuild": True, "max_chapters": 5},
+                "depends_on": ["review_affected"],
+            }
+        )
+    return {
+        "full_rerun": False,
+        "chapter_ids": chapters,
+        "item_ids": list(item_ids or []),
+        "steps": steps,
+        "invalidate": [
+            "workspace/reviews",
+            "workspace/summaries",
+            "workspace/score_coverage_matrix.json",
+            "outputs/final.md",
+            "outputs/final.docx",
+        ],
+    }
+
+
+def revalidate_issues_after_materials(root: Path | None = None) -> dict[str, Any]:
+    """Re-sync issues after materials filled; close NEED_EVIDENCE when resolved."""
+    root = root or project_root()
+    try:
+        from agent.issues import load_open_issues, save_open_issues
+        from agent.root_cause import sync_issues_from_review_fix
+
+        # re-collect evidence status from reviews
+        need_evidence: list[str] = []
+        stuck: list[str] = []
+        need_rewrite: list[str] = []
+        reviews_dir = root / "workspace" / "reviews"
+        if reviews_dir.exists():
+            for rf in reviews_dir.glob("*_review.json"):
+                try:
+                    review = read_json(rf)
+                except Exception:
+                    continue
+                if not isinstance(review, dict):
+                    continue
+                cid = stringify(review.get("chapter_id")) or rf.stem.replace("_review", "")
+                status = stringify(review.get("rewrite_status"))
+                if status == "stuck" or review.get("stuck"):
+                    stuck.append(cid)
+                elif status == "need_evidence" or (
+                    review.get("need_evidence") and not review.get("has_writing_fixes", True)
+                ):
+                    need_evidence.append(cid)
+                elif review.get("need_rewrite"):
+                    need_rewrite.append(cid)
+        sync_issues_from_review_fix(
+            root,
+            need_rewrite_ids=need_rewrite,
+            need_evidence_ids=need_evidence,
+            stuck_ids=stuck,
+        )
+        return {
+            "ok": True,
+            "need_evidence": need_evidence,
+            "stuck": stuck,
+            "need_rewrite": need_rewrite,
+            "open_count": len(load_open_issues(root)),
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}

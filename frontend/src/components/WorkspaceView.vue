@@ -13,6 +13,9 @@
         @preview="openPreview"
         @open-doc-editor="openDoc"
         @rewrite-done="onRewriteDone"
+        @pipeline-log="onPipelineLog"
+        @focus-rail="onFocusRail"
+        @materials-alert="onMaterialsAlert"
       />
     </div>
 
@@ -46,13 +49,22 @@
         :run-id="runId"
         :command="detailCommand"
         @close="mode = 'chat'"
+        @open-chapter="openChapter"
+        @rerun-stage="rerunStage"
       />
     </div>
 
-    <!-- right: goal + files only (chat mode) -->
+    <!-- right: office / issues / materials / logs / files -->
     <div v-if="mode === 'chat'" class="wl-files">
-      <AgentGoalPanel :run-id="runId" />
-      <FileExplorer :run-id="runId" @preview-file="previewFile" />
+      <IssuesPanel
+        ref="issuesPanelRef"
+        :run-id="runId"
+        :focus="railFocus"
+        :pipeline-logs="pipelineLogs"
+        @preview-file="previewFile"
+        @open-chapter="openChapter"
+        @materials-status="onMaterialsStatus"
+      />
     </div>
   </div>
 </template>
@@ -61,9 +73,8 @@
 import { ref, watch } from 'vue'
 import ChatPanel from './ChatPanel.vue'
 import DocEditor from './DocEditor.vue'
-import FileExplorer from './FileExplorer.vue'
-import AgentGoalPanel from './AgentGoalPanel.vue'
 import StepDetailView from './StepDetailView.vue'
+import IssuesPanel from './IssuesPanel.vue'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -75,8 +86,11 @@ const detailCommand = ref('')
 const previewFileName = ref('')
 const chatPanelRef = ref(null)
 const docEditorRef = ref(null)
+const issuesPanelRef = ref(null)
 const chatWidth = ref(Math.round((window.innerWidth - 260) * 0.4))
 const docPageCount = ref(0)
+const railFocus = ref('')
+const pipelineLogs = ref([])
 
 function openDoc() {
   mode.value = 'doc'
@@ -88,15 +102,85 @@ function openPreview(cmd) {
     mode.value = 'chat'
     return
   }
-  // Word preview path
   if (c === 'build-docx' || c === 'final-docx' || c === 'doc-editor') {
     mode.value = 'doc'
     return
   }
-  // manual-review / compliance / any workflow step -> detail pane
-  // (manual-review is NOT a workflow command; StepDetailView handles it via dedicated APIs)
+  if (
+    c === 'build-materials-checklist' ||
+    c === 'materials-checklist' ||
+    c === 'materials'
+  ) {
+    mode.value = 'chat'
+    railFocus.value = 'materials'
+    issuesPanelRef.value?.showMaterials?.()
+    return
+  }
+  if (c === 'compliance-check' || c === 'compliance' || c === 'issues') {
+    mode.value = 'chat'
+    railFocus.value = 'issues'
+    issuesPanelRef.value?.showIssues?.()
+    return
+  }
+  if (c === 'logs' || c === 'pipeline-logs') {
+    mode.value = 'chat'
+    railFocus.value = 'logs'
+    issuesPanelRef.value?.showLogs?.()
+    return
+  }
   detailCommand.value = c
   mode.value = 'detail'
+}
+
+function onFocusRail(key) {
+  mode.value = 'chat'
+  railFocus.value = key || ''
+  if (key === 'materials') issuesPanelRef.value?.showMaterials?.()
+  else if (key === 'logs') issuesPanelRef.value?.showLogs?.()
+  else if (key === 'issues') issuesPanelRef.value?.showIssues?.()
+  else if (key === 'goal' || key === 'office' || key === 'agent') issuesPanelRef.value?.showOffice?.()
+}
+
+function onPipelineLog(payload) {
+  const line = typeof payload === 'string' ? payload : (payload?.line || '')
+  const stage = typeof payload === 'object' ? (payload.stage || '') : ''
+  if (!line) return
+  pipelineLogs.value = [
+    ...pipelineLogs.value.slice(-400),
+    { line, stage, at: new Date().toISOString() },
+  ]
+}
+
+function onMaterialsAlert() {
+  // ChatPanel already notified; ensure rail shows materials badge
+  issuesPanelRef.value?.refreshMaterialsBadge?.()
+}
+
+function onMaterialsStatus(payload) {
+  // Keep chat badge/notify in sync when IssuesPanel polls materials
+  chatPanelRef.value?.notifyMaterialsStatus?.(payload)
+}
+
+async function openChapter(chapterId) {
+  const cid = String(chapterId || '').trim()
+  if (!cid) return
+  mode.value = 'doc'
+  await new Promise((r) => setTimeout(r, 80))
+  if (docEditorRef.value?.scrollToChapter) {
+    docEditorRef.value.scrollToChapter(cid)
+  } else if (docEditorRef.value?.loadDoc) {
+    await docEditorRef.value.loadDoc()
+    docEditorRef.value.scrollToChapter?.(cid)
+  }
+}
+
+function rerunStage(command) {
+  const cmd = String(command || '').trim()
+  if (!cmd) return
+  mode.value = 'chat'
+  if (chatPanelRef.value?.startAutoRun) {
+    chatPanelRef.value.startAutoRun(cmd)
+  }
 }
 
 function previewFile(path) {
@@ -107,6 +191,7 @@ function downloadMd() { window.open('/api/download/final-md', '_blank') }
 
 function onRewriteDone() {
   setTimeout(() => { if (docEditorRef.value?.loadDoc) docEditorRef.value.loadDoc() }, 800)
+  issuesPanelRef.value?.refreshGoal?.()
 }
 function onDocRewriteApplied() {
   if (chatPanelRef.value?.notifyRewriteApplied) chatPanelRef.value.notifyRewriteApplied()
@@ -149,5 +234,10 @@ function onSplitterUp() {
   document.body.style.userSelect = ''
 }
 
-watch(() => props.runId, () => { mode.value = 'chat'; detailCommand.value = '' })
+watch(() => props.runId, () => {
+  mode.value = 'chat'
+  detailCommand.value = ''
+  railFocus.value = ''
+  pipelineLogs.value = []
+})
 </script>

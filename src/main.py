@@ -530,19 +530,19 @@ def build_parser() -> argparse.ArgumentParser:
     write_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
 
     write_all_parser = subparsers.add_parser("write-all", help="生成所有章节（支持并发）")
-    write_all_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2，最大 5")
+    write_all_parser.add_argument("--workers", type=int, default=10, help="章节写作 worker 数，默认 10，最大 10")
     write_all_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
 
     review_chapter_parser = subparsers.add_parser("review-chapter", help="审核单个章节")
     review_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     review_all_parser = subparsers.add_parser("review-all", help="并发审核所有章节")
-    review_all_parser.add_argument("--workers", type=int, default=2, help="章节审核 worker 数，默认 2，最大 5")
+    review_all_parser.add_argument("--workers", type=int, default=10, help="章节审核 worker 数，默认 10，最大 10")
 
     rewrite_chapter_parser = subparsers.add_parser("rewrite-chapter", help="根据审核意见重写单个章节")
     rewrite_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     subparsers.add_parser("rewrite-all", help="重写所有 need_rewrite=true 的章节")
     review_fix_all_parser = subparsers.add_parser("review-fix-all", help="审核所有章节并自动改稿（最多 2 轮，并发）")
-    review_fix_all_parser.add_argument("--workers", type=int, default=2, help="审核/改稿 worker 数，默认 2，最大 5")
+    review_fix_all_parser.add_argument("--workers", type=int, default=10, help="审核/改稿 worker 数，默认 10，最大 10")
 
     summarize_chapter_parser = subparsers.add_parser("summarize-chapter", help="为单个章节生成结构化摘要")
     summarize_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
@@ -562,12 +562,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check-format", help="检查最终 Markdown/Word 格式")
 
     run_parser = subparsers.add_parser("run", help="按完整流水线运行（CLI 模式）")
-    run_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2，最大 5")
+    run_parser.add_argument("--workers", type=int, default=10, help="章节写作 worker 数，默认 10，最大 10")
     run_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
     run_parser.add_argument("--project-type", default="", help=project_type_help)
 
     graph_run_parser = subparsers.add_parser("graph-run", help="按 LangGraph 主图运行完整流程")
-    graph_run_parser.add_argument("--workers", type=int, default=2, help="章节写作 worker 数，默认 2")
+    graph_run_parser.add_argument("--workers", type=int, default=10, help="章节写作 worker 数，默认 10，最大 10")
     graph_run_parser.add_argument("--resume", action="store_true", help="从 workspace/run_state.json 和已有产物断点续跑")
     graph_run_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
     graph_run_parser.add_argument("--project-type", default="", help=project_type_help)

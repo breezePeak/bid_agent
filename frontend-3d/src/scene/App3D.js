@@ -35,7 +35,7 @@ export class App3D {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false)
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.NoToneMapping // cheaper than ACES
-    this.renderer.setClearColor(0x03060f, 1)
+    this.renderer.setClearColor(0x0b1220, 1)
 
     this.labelRenderer = new CSS2DRenderer()
     this.labelRenderer.setSize(window.innerWidth, window.innerHeight)

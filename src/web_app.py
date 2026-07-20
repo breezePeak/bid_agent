@@ -1803,12 +1803,36 @@ def api_status() -> dict[str, Any]:
         except Exception:
             compliance_summary = {"exists": True, "ok": False, "blocking": False, "error": "read_failed"}
 
+    materials_summary: dict[str, Any] = {
+        "exists": False,
+        "total": 0,
+        "deferred": 0,
+        "ready": 0,
+        "waived": 0,
+    }
+    try:
+        from materials_checklist import load_materials_checklist
+
+        checklist = load_materials_checklist(root)
+        summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
+        materials_path = root / "workspace" / "materials_checklist.json"
+        materials_summary = {
+            "exists": materials_path.exists(),
+            "total": int(summary.get("total") or 0),
+            "deferred": int(summary.get("deferred") or 0),
+            "ready": int(summary.get("ready") or 0),
+            "waived": int(summary.get("waived") or 0),
+        }
+    except Exception:
+        pass
+
     return {
         **status,
         "workflow": workflow,
         "next_step": next_step,
         "blocked_step": blocked_step,
         "compliance_summary": compliance_summary,
+        "materials_summary": materials_summary,
     }
 
 
@@ -2421,13 +2445,20 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
         actions = resolved.get("actions", []) if isinstance(resolved.get("actions"), list) else []
         reply = str(resolved.get("reply") or "").strip()
 
+        execution_notes: list[str] = []
         if trigger_command:
             trigger_result = _trigger_command_inline(trigger_command)
             if trigger_result.get("ok"):
                 label = WORKFLOW_COMMAND_LABELS.get(trigger_command, trigger_command)
-                reply = f"{reply}\n已为你启动「{label}」。".strip()
+                note = f"已启动「{label}」。"
+                execution_notes.append(note)
+                if note not in reply:
+                    reply = f"{reply}\n\n{note}".strip() if reply else note
             else:
-                reply = f"{reply}\n（启动失败：{trigger_result.get('message', '')}）".strip()
+                note = f"启动失败：{trigger_result.get('message', '')}"
+                execution_notes.append(note)
+                if note not in reply:
+                    reply = f"{reply}\n\n{note}".strip() if reply else note
                 actions = [item for item in actions if item.get("command") != trigger_command]
 
         if trigger_rewrite_targets:
@@ -2438,9 +2469,15 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     for item in trigger_rewrite_targets
                     if item.get("chapter_id")
                 )
-                reply = f"{reply}\n已派发写作子 Agent 定向改稿：{ids}。".strip()
+                note = f"已开始定向改稿：{ids}。"
+                execution_notes.append(note)
+                if note not in reply:
+                    reply = f"{reply}\n\n{note}".strip() if reply else note
             else:
-                reply = f"{reply}\n（定向改稿失败：{rewrite_result.get('message', '')}）".strip()
+                note = f"定向改稿失败：{rewrite_result.get('message', '')}"
+                execution_notes.append(note)
+                if note not in reply:
+                    reply = f"{reply}\n\n{note}".strip() if reply else note
 
         if trigger_auto_run:
             actions = [item for item in actions if item.get("type") != "auto_run"]
@@ -2448,7 +2485,8 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
 
         repair_prompt, repair_actions = _persistent_minimal_repair_prompt(root)
         if repair_prompt and not has_pending:
-            reply = f"{reply}\n\n{repair_prompt}".strip()
+            if repair_prompt not in reply:
+                reply = f"{reply}\n\n{repair_prompt}".strip() if reply else repair_prompt
             actions = [*actions, *repair_actions]
 
         thinking = str(
@@ -2470,7 +2508,11 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             "repair_job": response_repair_job or None,
         }
         if plan_result.get("error"):
+            # 仅作决策过程备注，不再单独弹「编排器」系统消息
+            extra["execution_note"] = str(plan_result.get("error"))
             extra["orchestrator_note"] = plan_result.get("error")
+        elif execution_notes:
+            extra["execution_note"] = "；".join(execution_notes)
         if plan_result.get("supervisor") or plan_result.get("supervisor_steps"):
             extra["supervisor"] = True
             extra["supervisor_steps"] = plan_result.get("supervisor_steps") or []
@@ -2621,10 +2663,19 @@ async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse
         body = {}
     reason = str(body.get("reason") or "").strip()
     actor = str(body.get("actor") or "web_user").strip() or "web_user"
+    is_admin = bool(body.get("is_admin") or body.get("admin"))
+    confirm_critical = bool(body.get("confirm_critical") or body.get("confirm"))
     try:
         from agent.issues import accept_issue_risk
 
-        result = accept_issue_risk(root, issue_id, reason=reason, actor=actor)
+        result = accept_issue_risk(
+            root,
+            issue_id,
+            reason=reason,
+            actor=actor,
+            is_admin=is_admin,
+            confirm_critical=confirm_critical,
+        )
         code = 200 if result.get("ok") else 400
         return JSONResponse(result, status_code=code)
     except Exception as exc:
@@ -2776,10 +2827,10 @@ def api_agent_activity() -> JSONResponse:
 
 @app.get("/api/agent/goal")
 def api_agent_goal() -> JSONResponse:
-    """Current GoalState for active workspace (PR-7/8)."""
+    """Current GoalState for active workspace (PR-7/8/10)."""
     root = _active_root()
     try:
-        from agent.goal import goal_summary, load_goal, reevaluate_goal
+        from agent.goal import goal_summary, load_goal, next_plan_step, reevaluate_goal
 
         goal = load_goal(root)
         if goal:
@@ -2787,15 +2838,64 @@ def api_agent_goal() -> JSONResponse:
                 goal = reevaluate_goal(root, goal)
             except Exception:
                 pass
+        nxt = next_plan_step(root, goal) if goal else None
         return JSONResponse(
             {
                 "ok": True,
                 "goal": goal,
                 "summary": goal_summary(goal) if goal else "无活动目标",
+                "next_plan_step": nxt,
             }
         )
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/agent/snapshot")
+def api_agent_snapshot() -> JSONResponse:
+    root = _active_root()
+    try:
+        from agent.snapshot import build_snapshot
+
+        snap = build_snapshot(root, for_llm=False)
+        return JSONResponse({"ok": True, "snapshot": snap})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/agent/goal/resume")
+async def api_agent_goal_resume(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    note = str((body or {}).get("note") or "web_resume")
+    try:
+        from agent.goal import resume_goal_after_materials
+
+        goal = resume_goal_after_materials(root, note=note)
+        return JSONResponse({"ok": True, "goal": goal, "message": "目标已恢复为 in_progress"})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+
+
+@app.post("/api/agent/goal/confirm")
+async def api_agent_goal_confirm(request: Request) -> JSONResponse:
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    tools = body.get("tools") if isinstance(body, dict) else None
+    all_mutations = bool((body or {}).get("all_mutations", True))
+    try:
+        from agent.goal import grant_confirmation, load_goal
+
+        goal = grant_confirmation(root, tools=tools if isinstance(tools, list) else None, all_mutations=all_mutations)
+        return JSONResponse({"ok": True, "goal": goal or load_goal(root)})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
 
 
 @app.get("/api/agent/decisions")
@@ -2960,7 +3060,7 @@ async def api_materials_checklist_refill(request: Request) -> JSONResponse:
     except Exception:
         body = {}
     try:
-        from materials_checklist import refill_material_gaps
+        from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
 
         chapter_ids = body.get("chapter_ids") if isinstance(body, dict) else None
         if chapter_ids is not None and not isinstance(chapter_ids, list):
@@ -2971,8 +3071,36 @@ async def api_materials_checklist_refill(request: Request) -> JSONResponse:
             replan_jobs=bool(body.get("replan_jobs", True)) if isinstance(body, dict) else True,
             max_chapters=int(body.get("max_chapters", 20) or 20) if isinstance(body, dict) else 20,
         )
+        try:
+            result["revalidate"] = revalidate_issues_after_materials(root)
+        except Exception:
+            pass
         status = 200 if result.get("ok") else 400
         return JSONResponse(result, status_code=status)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/materials-checklist/upload")
+async def api_materials_checklist_upload(request: Request) -> JSONResponse:
+    """Mark material uploaded / verified and build minimal recovery plan (PR-13)."""
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
+    try:
+        from materials_checklist import mark_material_uploaded
+
+        result = mark_material_uploaded(
+            root,
+            str(body.get("item_id") or ""),
+            uploaded_path=str(body.get("uploaded_path") or body.get("path") or ""),
+            note=str(body.get("note") or body.get("reason") or ""),
+            rebuild=bool(body.get("rebuild", True)),
+        )
+        code = 200 if result.get("ok") else 400
+        return JSONResponse(result, status_code=code)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
@@ -3738,8 +3866,8 @@ COMMANDS: dict[str, list[str]] = {
     "generate-outline": [],
     "plan-jobs": [],
     "select-context-all": [],
-    "write-all": ["--workers", "2"],
-    "review-fix-all": [],
+    "write-all": ["--workers", "10"],
+    "review-fix-all": ["--workers", "10"],
     "build-source-trace": [],
     "build-score-coverage": [],
     "estimate-score": [],
@@ -3753,8 +3881,8 @@ COMMANDS: dict[str, list[str]] = {
     "build-docx": [],
     "check-format": [],
     "validate": [],
-    "run": ["--workers", "2"],
-    "graph-run": ["--workers", "2"],
+    "run": ["--workers", "10"],
+    "graph-run": ["--workers", "10"],
 }
 
 AUTO_RECOVERY_MAX_ATTEMPTS = 2

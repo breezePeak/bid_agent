@@ -696,24 +696,13 @@ def _execute_build_export(
         targets = ["md", "docx", "format"]
 
     force = bool(args.get("force", False))
-    call_args = {"targets": targets, "force": force, "dry_run": dry_run, "skip_if_gate_fail": bool(args.get("skip_if_gate_fail", False))}
-
-    if not dry_run:
-        try:
-            from agent.issues import export_preflight
-
-            pre = export_preflight(root)
-            if not pre.get("can_export"):
-                return _fail(
-                    "build_export",
-                    {"targets": targets, "force": force},
-                    started,
-                    code="gate_blocked",
-                    message=str(pre.get("message") or "出稿前检查未通过"),
-                    suggested_tools=["list_issues", "export_preflight", "repair_issue"],
-                )
-        except Exception:
-            pass
+    call_args = {
+        "targets": targets,
+        "force": force,
+        "dry_run": dry_run,
+        "skip_if_gate_fail": bool(args.get("skip_if_gate_fail", False)),
+        "as_draft": bool(args.get("as_draft", False)),
+    }
 
     from agent.invalidation import clear_stale_if_rebuilt, is_stale, load_stale
 
@@ -723,6 +712,19 @@ def _execute_build_export(
     need_md = "md" in targets
     need_docx = "docx" in targets
     need_format = "format" in targets
+
+    # requires chapters for md/docx first (clearer errors than gate)
+    chapters = root / "workspace" / "chapters"
+    if (need_md or need_docx) and not dry_run:
+        if not chapters.exists() or not any(chapters.glob("*.md")):
+            return _fail(
+                "build_export",
+                call_args,
+                started,
+                code="missing_requires",
+                message="缺少 workspace/chapters/*.md，无法导出",
+                suggested_tools=["write_chapters", "run_stage"],
+            )
 
     md_stale = is_stale(root, "outputs/final.md") or force
     docx_stale = is_stale(root, "outputs/final.docx") or force
@@ -766,8 +768,28 @@ def _execute_build_export(
             metrics={"dry_run": True, "stages": ordered, "stale_count": len(stale_items)},
         )
 
+    # formal export gate (final.docx); draft may skip
+    skip_gate = bool(args.get("skip_if_gate_fail", False)) or bool(args.get("as_draft", False))
+    if not skip_gate and (need_md or need_docx):
+        try:
+            from agent.issues import export_preflight
+
+            pre = export_preflight(root)
+            if not pre.get("can_export"):
+                # If reviews never ran, still allow rebuild path when only open_blocks fail soft
+                # but missing reports block formal final — surface gate_blocked
+                return _fail(
+                    "build_export",
+                    {"targets": targets, "force": force},
+                    started,
+                    code="gate_blocked",
+                    message=str(pre.get("message") or "出稿前检查未通过"),
+                    suggested_tools=["list_issues", "export_preflight", "repair_issue"],
+                )
+        except Exception:
+            pass
+
     # compliance blocking gate (hard policy for formal export)
-    skip_gate = bool(args.get("skip_if_gate_fail", False))
     compliance_path = root / "workspace" / "compliance_report.json"
     if (need_md or need_docx) and compliance_path.exists() and not skip_gate:
         try:
@@ -789,19 +811,6 @@ def _execute_build_export(
                 )
         except Exception:
             pass
-
-    # requires chapters for md
-    chapters = root / "workspace" / "chapters"
-    if need_md or need_docx:
-        if not chapters.exists() or not any(chapters.glob("*.md")):
-            return _fail(
-                "build_export",
-                call_args,
-                started,
-                code="missing_requires",
-                message="缺少 workspace/chapters/*.md，无法导出",
-                suggested_tools=["write_chapters", "run_stage"],
-            )
 
     ran: list[str] = []
     for stage_id in ordered:

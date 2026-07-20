@@ -45,9 +45,8 @@ class AcceptRiskTests(unittest.TestCase):
             )
             upsert_issues(root, [iss])
             self.assertTrue(open_block_issues(root))
-            env = {k: v for k, v in os.environ.items() if k != "ISSUE_ACCEPT_RISK_ENABLED"}
-            with mock.patch.dict(os.environ, env, clear=True):
-                result = accept_issue_risk(root, iss["id"], reason="")
+            with mock.patch.dict(os.environ, {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
+                result = accept_issue_risk(root, iss["id"], reason="足够长的接受风险原因说明")
             self.assertTrue(result["ok"], result)
             self.assertFalse(open_block_issues(root))
             self.assertTrue(can_proceed(root)["can_proceed"])

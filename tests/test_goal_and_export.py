@@ -158,6 +158,13 @@ class BuildExportTests(unittest.TestCase):
                     summary_for_llm=f"fake {stage_id}",
                 )
 
+            # formal export preflight needs non-blocking review artifacts
+            (root / "workspace" / "global_review.json").write_text(
+                '{"blocking": false}', encoding="utf-8"
+            )
+            (root / "workspace" / "compliance_report.json").write_text(
+                '{"blocking": false, "summary": {"blocking": false}}', encoding="utf-8"
+            )
             with mock.patch("agent.tool_runtime._execute_stage", side_effect=fake_stage):
                 result = invoke("build_export", {"targets": ["md", "docx", "format"]}, root=root)
             self.assertTrue(result.ok, result.summary_for_llm)

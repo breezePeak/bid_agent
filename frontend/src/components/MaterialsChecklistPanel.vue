@@ -5,19 +5,25 @@
         <strong>材料清单</strong>
         <button class="btn btn-sm" :disabled="loading" @click="refresh">刷新</button>
       </div>
-      <div v-if="exists" class="mcp-banner" :class="{ warn: (summary.deferred || 0) > 0 }">
+      <div v-if="exists" class="mcp-banner" :class="{ warn: (summary.deferred || 0) > 0, alert: (summary.deferred || 0) > 0 }">
         <div class="mcp-banner-kicker">
-          {{ (summary.deferred || 0) > 0 ? '有待补材料 · 写作将留白占位' : '清单已就绪' }}
+          <template v-if="(summary.deferred || 0) > 0">
+            <span class="mcp-alert-pill">待补 {{ summary.deferred }}</span>
+            有材料需补充 · 写作将留白占位
+          </template>
+          <template v-else>清单已就绪</template>
         </div>
         <div class="mcp-banner-stats">
           共 {{ summary.total || 0 }}
-          · 待补 {{ summary.deferred || 0 }}
+          · <em :class="{ bad: (summary.deferred || 0) > 0 }">待补 {{ summary.deferred || 0 }}</em>
           · 已齐 {{ summary.ready || 0 }}
           · 放弃 {{ summary.waived || 0 }}
         </div>
       </div>
       <div v-else class="mcp-empty">{{ emptyMsg }}</div>
       <div class="mcp-actions" v-if="exists">
+        <button class="btn btn-sm" :disabled="busy" @click="triggerCompanyUpload">上传公司资料</button>
+        <input ref="companyInput" type="file" multiple accept=".pdf,.doc,.docx,.md,.txt,.zip" style="display:none" @change="onCompanyFiles" />
         <button class="btn btn-sm" :disabled="busy" @click="doRebuild">重建清单</button>
         <button
           class="btn btn-sm btn-primary"
@@ -25,6 +31,9 @@
           :title="refillPlans.length ? `将回填 ${refillPlans.length} 章` : '暂无已 ready 且正文仍有占位的章节'"
           @click="doRefill"
         >补料回填{{ refillPlans.length ? ` (${refillPlans.length})` : '' }}</button>
+      </div>
+      <div v-if="(summary.deferred || 0) > 0" class="mcp-hint">
+        提示：补传公司资料后点「重建清单」→ 将对应项标为「已齐」→ 再点「补料回填」。
       </div>
       <div v-if="msg" class="mcp-msg">{{ msg }}</div>
     </div>
@@ -104,6 +113,7 @@ const refillPlans = ref([])
 const filter = ref('deferred')
 const notes = ref({})
 const msg = ref('')
+const companyInput = ref(null)
 const emptyMsg = ref('暂无材料清单。跑完「材料资格清单」阶段后会显示。')
 
 const filters = [
@@ -139,12 +149,22 @@ function notePlaceholder(st) {
   return '可选：暂不能提供的原因（写入正文留白）'
 }
 
+const emit = defineEmits(['status'])
+
 function applyPayload(data) {
   exists.value = !!data.exists
   summary.value = data.summary || data.checklist?.summary || {}
   items.value = data.items || data.checklist?.items || []
   refillPlans.value = data.refill_plans || []
   if (!data.exists) emptyMsg.value = data.message || emptyMsg.value
+  emit('status', {
+    exists: exists.value,
+    deferred: Number(summary.value.deferred || 0) || 0,
+    total: Number(summary.value.total || 0) || 0,
+    ready: Number(summary.value.ready || 0) || 0,
+    waived: Number(summary.value.waived || 0) || 0,
+    items: items.value,
+  })
 }
 
 async function refresh() {
@@ -190,6 +210,33 @@ async function saveNote(item) {
   const reason = (notes.value[item.item_id] ?? '').trim()
   if (reason === (item.reason || '')) return
   await setStatus(item, item.response_status || 'deferred')
+}
+
+function triggerCompanyUpload() {
+  companyInput.value?.click?.()
+}
+
+async function onCompanyFiles(e) {
+  const files = Array.from(e?.target?.files || [])
+  if (!files.length) return
+  busy.value = true
+  msg.value = `上传 ${files.length} 个公司资料…`
+  try {
+    for (const file of files) {
+      const fd = new FormData()
+      fd.append('file', file)
+      const r = await fetch(`/api/upload?category=company`, { method: 'POST', body: fd }).then((x) => x.json())
+      if (!r?.ok) throw new Error(r?.message || `上传失败: ${file.name}`)
+    }
+    msg.value = '上传完成，正在重建清单…'
+    await doRebuild()
+    msg.value = '公司资料已更新。请将对应项标为「已齐」，再点补料回填。'
+  } catch (err) {
+    msg.value = err.message || '上传失败'
+  } finally {
+    busy.value = false
+    if (e?.target) e.target.value = ''
+  }
 }
 
 async function doRebuild() {
