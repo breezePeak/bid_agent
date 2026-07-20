@@ -9,3 +9,5 @@ sources/
 inputs/
 frontend/node_modules/
 frontend/dist/
+frontend-3d/node_modules/
+frontend-3d/dist/
