@@ -112,6 +112,7 @@ import FileExplorer from './FileExplorer.vue'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
 import { fetchComplianceReport, fetchMaterialsChecklist } from '../api'
+import { useWorkspaceRuntime } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -127,8 +128,17 @@ const selected = ref(null)
 const materialsRef = ref(null)
 const goalPanelRef = ref(null)
 const localLogs = ref([])
-const deferredCount = ref(0)
+const deferredCountLocal = ref(0)
 const materialsExists = ref(false)
+
+// Single status bus: materials deferred badge follows /api/status
+const { materialsDeferred } = useWorkspaceRuntime({
+  runId: computed(() => props.runId),
+})
+const deferredCount = computed(() => {
+  const fromBus = Number(materialsDeferred.value || 0) || 0
+  return fromBus || deferredCountLocal.value || 0
+})
 const report = ref({ exists: false, blocking: false, items: [], counts: {}, max_severity: '' })
 const emptyMsg = ref('暂无合规报告。跑完 compliance-check 后会显示失败/警告明细。')
 let materialsTimer = null
@@ -165,7 +175,7 @@ function clearLogs() {
 
 function publishMaterialsStatus(payload) {
   const n = Number(payload?.deferred || 0) || 0
-  deferredCount.value = n
+  deferredCountLocal.value = n
   materialsExists.value = !!payload?.exists
   emit('materials-status', {
     exists: !!payload?.exists,

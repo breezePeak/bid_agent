@@ -101,6 +101,12 @@
       <!-- valuable logs are written into chat as system messages (persisted) -->
     </div>
 
+    <div v-if="productMode || !statusConsistent" class="chat-runtime-bar" :class="{ bad: !statusConsistent }">
+      <span class="chat-runtime-mode">{{ productModeLabel || productMode || '状态' }}</span>
+      <span v-if="!statusConsistent" class="chat-runtime-warn">live 状态不一致 · 以右侧办公室为准</span>
+      <span v-else-if="goalLiveStatus" class="chat-runtime-goal">Goal: {{ goalLiveStatus }}</span>
+    </div>
+
     <section
       v-if="repairJob || repairExecuting"
       class="chat-repair-card"
@@ -202,6 +208,7 @@ import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } 
 import PlanList from './PlanList.vue'
 import UploadTile from './UploadTile.vue'
 import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight, fetchCurrentRepairJob, fetchMaterialsChecklist } from '../api'
+import { pushStatusSnapshot, forceRuntimeRefresh } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -308,6 +315,10 @@ const agentActivity = ref(null)
 const complianceSummary = ref(null)
 const issuesSummary = ref(null)
 const materialsDeferred = ref(0)
+const productMode = ref('')
+const productModeLabel = ref('')
+const statusConsistent = ref(true)
+const goalLiveStatus = ref('')
 let lastMaterialsNotifyKey = ''
 const interactionBusy = computed(() => sending.value || repairExecuting.value)
 const ACTIVE_REPAIR_STATUSES = new Set(['running', 'revalidating'])
@@ -586,12 +597,19 @@ async function beginRepairTracking(jobId = '', initialJob = null) {
 
 async function loadStatus() {
   try {
-    const data = await fetch('/api/status').then(r => r.json())
-    updateFromStatus(data)
+    // Prefer shared runtime bus so office / goal / repair stay in lockstep
+    const data = await forceRuntimeRefresh()
+    if (data) updateFromStatus(data)
+    else {
+      const raw = await fetch('/api/status').then(r => r.json())
+      updateFromStatus(raw)
+    }
   } catch (e) { /* */ }
 }
 function updateFromStatus(data) {
   if (!data || typeof data !== 'object') return
+  // Publish to shared bus for GoalPanel / Workbench
+  try { pushStatusSnapshot(data) } catch (_) { /* */ }
   if (data.repair_job) applyRepairJob(data.repair_job)
   const hasActiveRepairJob = ACTIVE_REPAIR_STATUSES.has(String(data.repair_job?.status || repairJob.value?.status || ''))
   const repairTaskRunning = hasActiveRepairJob || (!!data.running && isRepairTaskName(data.current_task))
@@ -625,6 +643,10 @@ function updateFromStatus(data) {
     prevStatusMap[s.command] = s.status
   })
   if (data.agent_activity) agentActivity.value = data.agent_activity
+  productMode.value = data.product_mode || data.runtime?.product_mode || ''
+  productModeLabel.value = data.product_mode_label || data.runtime?.product_mode_label || ''
+  statusConsistent.value = data.consistent !== false && data.runtime?.consistent !== false
+  goalLiveStatus.value = String(data.goal?.status || data.goal_full?.status || data.runtime?.stores?.goal?.status || '')
   if (data.sources) {
     if (data.sources.tender?.length) files.tender = data.sources.tender.map(f => f.name || f)
     if (data.sources.company?.length) files.company = data.sources.company.map(f => f.name || f)

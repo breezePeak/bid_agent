@@ -66,72 +66,70 @@
         </div>
       </div>
     </div>
-    <AgentWorkbench class="agp-workbench" :run-id="runId" />
+    <AgentWorkbench class="agp-workbench" :run-id="runId" :activity="activity" />
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import AgentWorkbench from './AgentWorkbench.vue'
-import { fetchAgentGoal, fetchAgentDecisions, fetchRuntimeStatus } from '../api'
+import { fetchAgentDecisions } from '../api'
+import { useWorkspaceRuntime } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
   runId: { type: String, required: true },
   enabled: { type: Boolean, default: true },
-  intervalMs: { type: Number, default: 3000 },
+  intervalMs: { type: Number, default: 2000 },
 })
 
-const goal = ref(null)
-const summary = ref('')
+const {
+  goal: sharedGoal,
+  activity,
+  productMode,
+  productModeLabel,
+  consistent,
+  consistencyWarnings,
+  refresh: refreshRuntime,
+} = useWorkspaceRuntime({ runId: computed(() => props.runId), intervalMs: props.intervalMs })
+
 const decisions = ref([])
-const criteria = ref([])
-const planSteps = ref([])
-const blockedReason = ref('')
-const runtimeBlock = ref('')
-const isTerminal = ref(false)
-const productMode = ref('')
-const productModeLabel = ref('')
-const consistent = ref(true)
-const consistencyWarnings = ref([])
 const error = ref('')
 const polling = ref(false)
-let timer = null
+let decisionTimer = null
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'budget_exceeded', 'blocked_policy'])
 
-async function refresh() {
+const goal = computed(() => {
+  const g = sharedGoal.value
+  if (!g) return null
+  // prefer goal_full shape when present on status
+  return g
+})
+const summary = computed(() => goal.value?.summary || '')
+const criteria = computed(() =>
+  Array.isArray(goal.value?.criteria_results) ? goal.value.criteria_results : []
+)
+const planSteps = computed(() => (Array.isArray(goal.value?.plan) ? goal.value.plan : []))
+const blockedReason = computed(() => goal.value?.blocked_reason || '')
+const runtimeBlock = computed(() => goal.value?.progress?.runtime_block || '')
+const isTerminal = computed(() => TERMINAL.has(String(goal.value?.status || '')))
+
+async function refreshDecisions() {
   if (!props.enabled) return
   try {
-    const [gResp, dResp, rResp] = await Promise.all([
-      fetchAgentGoal(),
-      fetchAgentDecisions(8),
-      fetchRuntimeStatus(false).catch(() => null),
-    ])
-    const gBody = gResp?.data || {}
+    const dResp = await fetchAgentDecisions(8)
     const dBody = dResp?.data || {}
-    const rBody = rResp?.data || {}
-    if (gBody.ok === false) {
-      error.value = gBody.message || 'goal api error'
-      return
-    }
-    error.value = ''
-    goal.value = gBody.goal || null
-    summary.value = gBody.summary || ''
-    criteria.value = Array.isArray(goal.value?.criteria_results) ? goal.value.criteria_results : []
-    planSteps.value = Array.isArray(goal.value?.plan) ? goal.value.plan : []
-    blockedReason.value = goal.value?.blocked_reason || ''
-    runtimeBlock.value = goal.value?.progress?.runtime_block || ''
-    isTerminal.value = TERMINAL.has(String(goal.value?.status || ''))
     decisions.value = Array.isArray(dBody.decisions) ? dBody.decisions.slice().reverse() : []
-    // Prefer unified runtime aggregator for mode + warnings
-    productMode.value = rBody.product_mode || gBody.product_mode || ''
-    productModeLabel.value = rBody.product_mode_label || gBody.product_mode_label || ''
-    consistent.value = rBody.consistent !== false && gBody.consistent !== false
-    const warns = rBody.warnings || gBody.consistency_warnings || []
-    consistencyWarnings.value = Array.isArray(warns) ? warns.slice(0, 5) : []
+    error.value = ''
   } catch (e) {
-    error.value = e?.message || '轮询失败'
+    error.value = e?.message || '决策加载失败'
   }
+}
+
+async function refresh() {
+  if (!props.enabled) return
+  polling.value = true
+  await Promise.all([refreshRuntime(), refreshDecisions()])
 }
 
 function start() {
@@ -139,14 +137,15 @@ function start() {
   if (!props.enabled) return
   polling.value = true
   refresh()
-  timer = setInterval(refresh, props.intervalMs)
+  // decisions are not in /api/status; light secondary poll only
+  decisionTimer = setInterval(refreshDecisions, Math.max(props.intervalMs, 3000))
 }
 
 function stop() {
   polling.value = false
-  if (timer) {
-    clearInterval(timer)
-    timer = null
+  if (decisionTimer) {
+    clearInterval(decisionTimer)
+    decisionTimer = null
   }
 }
 

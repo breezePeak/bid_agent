@@ -1835,12 +1835,14 @@ def api_status() -> dict[str, Any]:
     except Exception as exc:
         runtime = {"ok": False, "message": str(exc), "warnings": [], "consistent": True}
 
-    goal_view: dict[str, Any] = {}
+    goal_view: dict[str, Any] | None = None
+    goal_full: dict[str, Any] | None = None
     try:
         from agent.goal import load_goal, goal_summary
 
         g = load_goal(root)
         if g:
+            goal_full = g
             goal_view = {
                 "goal_id": g.get("goal_id"),
                 "status": g.get("status"),
@@ -1848,6 +1850,9 @@ def api_status() -> dict[str, Any]:
                 "blocked_reason": g.get("blocked_reason") or "",
                 "raw_user_goal": str(g.get("raw_user_goal") or "")[:200],
                 "summary": goal_summary(g),
+                "plan": g.get("plan") or [],
+                "criteria_results": g.get("criteria_results") or [],
+                "progress": g.get("progress") or {},
             }
     except Exception:
         pass
@@ -1859,7 +1864,8 @@ def api_status() -> dict[str, Any]:
         "blocked_step": blocked_step,
         "compliance_summary": compliance_summary,
         "materials_summary": materials_summary,
-        "goal": goal_view or None,
+        "goal": goal_view,
+        "goal_full": goal_full,
         "runtime": runtime,
         "consistency_warnings": list(runtime.get("warnings") or []),
         "product_mode": runtime.get("product_mode") or "",

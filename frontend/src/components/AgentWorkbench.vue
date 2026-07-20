@@ -195,14 +195,21 @@ const ROLE_TEAMS = [
 const props = defineProps({
   runId: { type: String, required: true },
   active: { type: Boolean, default: false },
-  intervalMs: { type: Number, default: 1500 },
+  intervalMs: { type: Number, default: 2000 },
+  /** Prefer parent-injected activity from useWorkspaceRuntime (single status bus). */
   activity: { type: Object, default: null },
 })
 
 const local = ref({ status: 'idle', agents: [], summary: {}, phase_label: '' })
 let timer = null
 
-const data = computed(() => (props.activity && Array.isArray(props.activity.agents) ? props.activity : local.value))
+const data = computed(() => {
+  // Single truth: parent activity from /api/status first; local poll only as fallback
+  if (props.activity && (Array.isArray(props.activity.agents) || props.activity.summary)) {
+    return props.activity
+  }
+  return local.value
+})
 const agents = computed(() => (Array.isArray(data.value.agents) ? data.value.agents : []))
 const summary = computed(() => data.value.summary || {})
 const phaseLabel = computed(() => data.value.phase_label || data.value.phase || '')
@@ -310,6 +317,8 @@ function pct(n) {
 }
 
 async function refresh() {
+  // Fallback only when parent does not inject activity from the shared status bus
+  if (props.activity && (Array.isArray(props.activity.agents) || props.activity.summary)) return
   try {
     const resp = await fetchAgentActivity()
     const body = resp && resp.data ? resp.data : {}
@@ -319,6 +328,10 @@ async function refresh() {
 
 function start() {
   stop()
+  if (props.activity && (Array.isArray(props.activity.agents) || props.activity.summary)) {
+    local.value = props.activity
+    return
+  }
   refresh()
   timer = setInterval(refresh, props.intervalMs)
 }
@@ -328,7 +341,7 @@ function stop() {
 
 watch(() => props.runId, () => start())
 watch(() => props.active, (v) => { if (v) start() })
-watch(() => props.activity, (v) => { if (v) local.value = v }, { deep: true })
+watch(() => props.activity, (v) => { if (v) { local.value = v; stop() } }, { deep: true })
 
 onMounted(start)
 onBeforeUnmount(stop)
