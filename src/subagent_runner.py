@@ -162,6 +162,34 @@ def run_per_chapter(
                 else:
                     completed.append(result_id)
 
+        # One extra pass for failed chapters (still writing/review/rewrite — not a different team)
+        if failed and role == "chapter_writer":
+            retry_ids = [str(item.get("chapter_id") or "") for item in failed if item.get("chapter_id")]
+            if retry_ids:
+                print(f"[救火重试] 写作失败章节二次写作（仍属写作组，不是改稿组）: {retry_ids}")
+                retry_failed: list[dict[str, Any]] = []
+                with ThreadPoolExecutor(max_workers=min(effective_workers, max(1, len(retry_ids)))) as executor:
+                    futures = {
+                        executor.submit(_run_with_retry, worker, cid, root, max(0, max_retries), role): cid
+                        for cid in retry_ids
+                    }
+                    for future in as_completed(futures):
+                        chapter_id = futures[future]
+                        try:
+                            result_id, error, attempts = future.result()
+                        except Exception as exc:
+                            error = str(exc)
+                            result_id = chapter_id
+                            attempts = max(1, max_retries + 1)
+                        if error:
+                            print(f"[失败] 重试章节 {result_id}: {error}")
+                            retry_failed.append(
+                                {"chapter_id": result_id, "error": error, "attempts": attempts}
+                            )
+                        else:
+                            completed.append(result_id)
+                failed = retry_failed
+
     print(f"[完成] {label} 成功 {len(completed)} 个, 失败 {len(failed)} 个")
     if failed:
         print(f"[详情] 失败章节: {[f['chapter_id'] for f in failed]}")
@@ -180,7 +208,8 @@ def run_per_chapter(
         raise RuntimeError(
             "章节写作质量门禁阻断：存在失败章节 "
             + str([f.get("chapter_id") for f in failed])
-            + "，请定向重试后再继续。"
+            + "。说明：救火台=写作执行失败，需重试写作；"
+            "改稿组仅在审核阶段 need_rewrite 时才会出现。"
         )
     if failed and role in {"chapter_reviewer", "chapter_rewriter"}:
         try:

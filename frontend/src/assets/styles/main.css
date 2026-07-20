@@ -3000,6 +3000,15 @@ body {
 .ch-chip.fail { border-color: #fca5a5; color: #b91c1c; background: #fef2f2; }
 .ch-more { font-size: 10px; color: #94a3b8; align-self: center; padding: 0 2px; }
 .board-empty { font-size: 11px; color: #94a3b8; padding: 4px 0; }
+.board-hint {
+  margin-top: 6px;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #9a3412;
+  background: rgba(254, 226, 226, 0.55);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
 
 /* color themes for mini people */
 .c-indigo .head, .c-indigo .body { --skin: #a5b4fc; --cloth: #4f46e5; }

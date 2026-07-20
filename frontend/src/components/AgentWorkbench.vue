@@ -164,12 +164,15 @@
         <div class="board-col fail" v-if="stats.failed">
           <div class="board-h">
             <span class="room-tag fail">救火台</span>
-            <strong>失败</strong>
+            <strong>执行失败</strong>
             <em>{{ stats.failed }} 章</em>
           </div>
           <div class="chip-list">
             <span v-for="c in failedPreview" :key="'f' + c" class="ch-chip fail">{{ c }}</span>
             <span v-if="stats.failed > failedPreview.length" class="ch-more">+{{ stats.failed - failedPreview.length }}</span>
+          </div>
+          <div class="board-hint">
+            {{ failHint }}
           </div>
         </div>
       </div>
@@ -308,6 +311,21 @@ const donePreview = computed(() =>
 const failedPreview = computed(() =>
   tasks.value.filter((a) => a.status === 'failed').map((a) => a.chapter_id).filter(Boolean).slice(0, PREVIEW_N)
 )
+
+const failHint = computed(() => {
+  const failed = tasks.value.filter((a) => a.status === 'failed')
+  const roles = new Set(failed.map((a) => a.role || 'chapter_writer'))
+  if (roles.has('chapter_writer') && roles.size === 1) {
+    return '当前是写作执行失败，不是审核后的改稿。系统会自动二次写作；仍失败需重试写作阶段。改稿组只在审核 need_rewrite 后出现。'
+  }
+  if (roles.has('chapter_reviewer')) {
+    return '审核阶段失败。通过后若 need_rewrite，才会派发改稿组。'
+  }
+  if (roles.has('chapter_rewriter')) {
+    return '改稿组执行失败，可重试改稿或检查审核意见。'
+  }
+  return '执行失败章节。写作失败≠改稿任务；改稿组只处理审核要求改写的章节。'
+})
 
 function pct(n) {
   const t = stats.value.total || 0
