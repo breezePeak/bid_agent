@@ -142,12 +142,6 @@ export function fetchAgentActivity() {
   return api.get('/agent/activity')
 }
 
-/** Retry fire-desk write failures (not rewrite team) */
-export function retryFailedWrites(chapterIds = null) {
-  const body = chapterIds && chapterIds.length ? { chapter_ids: chapterIds } : {}
-  return api.post('/agent/retry-failed-writes', body, { timeout: 900000 })
-}
-
 export function fetchAgentGoal() {
   return api.get('/agent/goal')
 }

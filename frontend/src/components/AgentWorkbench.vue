@@ -161,24 +161,15 @@
           </div>
           <div v-else class="board-empty">还没有交稿</div>
         </div>
-        <div class="board-col fail" v-if="stats.failed">
+        <!-- 写作失败由后端自动重试，不单独展示「救火台」；仅审核/改稿失败时轻提示 -->
+        <div class="board-col fail" v-if="nonWriteFailedPreview.length">
           <div class="board-h">
-            <span class="room-tag fail">救火台</span>
-            <strong>执行失败</strong>
-            <em>{{ stats.failed }} 章</em>
+            <span class="room-tag fail">异常</span>
+            <strong>审核/改稿失败</strong>
+            <em>{{ nonWriteFailedPreview.length }} 章</em>
           </div>
           <div class="chip-list">
-            <span v-for="c in failedPreview" :key="'f' + c" class="ch-chip fail">{{ c }}</span>
-            <span v-if="stats.failed > failedPreview.length" class="ch-more">+{{ stats.failed - failedPreview.length }}</span>
-          </div>
-          <div class="board-hint">
-            {{ failHint }}
-          </div>
-          <div class="board-actions" v-if="canRetryWrites">
-            <button class="btn btn-sm btn-primary" :disabled="retrying" @click="retryFailedWrites">
-              {{ retrying ? '重试写作中…' : '重试失败写作' }}
-            </button>
-            <span v-if="retryMsg" class="board-retry-msg">{{ retryMsg }}</span>
+            <span v-for="c in nonWriteFailedPreview" :key="'f' + c" class="ch-chip fail">{{ c }}</span>
           </div>
         </div>
       </div>
@@ -188,7 +179,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { fetchAgentActivity, retryFailedWrites as apiRetryFailedWrites } from '../api'
+import { fetchAgentActivity } from '../api'
 
 const POOL_SIZE = 10
 /** Board chips scroll inside columns; keep a moderate preview count */
@@ -314,50 +305,14 @@ const queuedPreview = computed(() =>
 const donePreview = computed(() =>
   tasks.value.filter((a) => a.status === 'done').map((a) => a.chapter_id).filter(Boolean).slice(-PREVIEW_N).reverse()
 )
-const failedPreview = computed(() =>
-  tasks.value.filter((a) => a.status === 'failed').map((a) => a.chapter_id).filter(Boolean).slice(0, PREVIEW_N)
+// Hide writer failures from the board — backend auto-retries them.
+const nonWriteFailedPreview = computed(() =>
+  tasks.value
+    .filter((a) => a.status === 'failed' && (a.role || '') !== 'chapter_writer')
+    .map((a) => a.chapter_id)
+    .filter(Boolean)
+    .slice(0, PREVIEW_N)
 )
-
-const failHint = computed(() => {
-  const failed = tasks.value.filter((a) => a.status === 'failed')
-  const roles = new Set(failed.map((a) => a.role || 'chapter_writer'))
-  if (roles.has('chapter_writer') && roles.size === 1) {
-    return '当前是写作执行失败，不是审核后的改稿。点「重试失败写作」由写作组再写；改稿组只在审核 need_rewrite 后出现。'
-  }
-  if (roles.has('chapter_reviewer')) {
-    return '审核阶段失败。通过后若 need_rewrite，才会派发改稿组。'
-  }
-  if (roles.has('chapter_rewriter')) {
-    return '改稿组执行失败，可重试改稿或检查审核意见。'
-  }
-  return '执行失败章节。写作失败≠改稿任务；改稿组只处理审核要求改写的章节。'
-})
-
-const canRetryWrites = computed(() =>
-  tasks.value.some((a) => a.status === 'failed' && (a.role || 'chapter_writer') === 'chapter_writer')
-)
-const retrying = ref(false)
-const retryMsg = ref('')
-
-async function retryFailedWrites() {
-  if (retrying.value) return
-  retrying.value = true
-  retryMsg.value = ''
-  try {
-    const ids = tasks.value
-      .filter((a) => a.status === 'failed' && (a.role || 'chapter_writer') === 'chapter_writer')
-      .map((a) => a.chapter_id)
-      .filter(Boolean)
-    const resp = await apiRetryFailedWrites(ids)
-    const body = resp?.data || {}
-    retryMsg.value = body.message || (body.ok ? '重试完成' : '重试失败')
-    await refresh()
-  } catch (e) {
-    retryMsg.value = e?.message || '重试请求失败'
-  } finally {
-    retrying.value = false
-  }
-}
 
 function pct(n) {
   const t = stats.value.total || 0

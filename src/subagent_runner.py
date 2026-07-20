@@ -114,6 +114,21 @@ def _label_to_role(label: str) -> str:
     return "chapter_writer"
 
 
+def _writer_batch_retries() -> int:
+    """How many extra full-batch retries after the first write pass fails."""
+    try:
+        from concurrency import _env_int  # type: ignore
+
+        return max(0, min(20, int(_env_int("BID_AGENT_WRITE_BATCH_RETRIES", 5))))
+    except Exception:
+        import os
+
+        try:
+            return max(0, min(20, int(os.environ.get("BID_AGENT_WRITE_BATCH_RETRIES", "5"))))
+        except (TypeError, ValueError):
+            return 5
+
+
 def run_per_chapter(
     worker: Callable[[str, Path], None],
     root: Path | None = None,
@@ -128,11 +143,15 @@ def run_per_chapter(
     role = _label_to_role(label)
     completed: list[str] = []
     failed: list[dict[str, Any]] = []
+    # Writing: keep retrying failed chapters automatically (no "fire desk" handoff).
+    batch_retries = _writer_batch_retries() if role == "chapter_writer" else 0
+    pending = list(selected)
 
     with chapter_workers_scope(requested) as effective_workers:
         print(
             f"[启动] 并发执行 {len(selected)} 个章节 {label}, "
             f"workers={effective_workers}, max_retries={max(0, max_retries)}"
+            + (f", batch_retries={batch_retries}" if batch_retries else "")
         )
         begin_phase(
             root,
@@ -142,53 +161,47 @@ def run_per_chapter(
             chapter_ids=selected,
         )
 
-        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-            futures = {
-                executor.submit(_run_with_retry, worker, cid, root, max_retries, role): cid
-                for cid in selected
-            }
-            for future in as_completed(futures):
-                chapter_id = futures[future]
-                try:
-                    result_id, error, attempts = future.result()
-                except Exception as exc:
-                    error = str(exc)
-                    result_id = chapter_id
-                    attempts = max(1, max_retries + 1)
+        batch_round = 0
+        while pending:
+            batch_round += 1
+            round_failed: list[dict[str, Any]] = []
+            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                futures = {
+                    executor.submit(_run_with_retry, worker, cid, root, max_retries, role): cid
+                    for cid in pending
+                }
+                for future in as_completed(futures):
+                    chapter_id = futures[future]
+                    try:
+                        result_id, error, attempts = future.result()
+                    except Exception as exc:
+                        error = str(exc)
+                        result_id = chapter_id
+                        attempts = max(1, max_retries + 1)
 
-                if error:
-                    print(f"[失败] 章节 {result_id}: {error}")
-                    failed.append({"chapter_id": result_id, "error": error, "attempts": attempts})
-                else:
-                    completed.append(result_id)
+                    if error:
+                        print(f"[失败] 章节 {result_id}: {error}")
+                        round_failed.append(
+                            {"chapter_id": result_id, "error": error, "attempts": attempts}
+                        )
+                    else:
+                        completed.append(result_id)
 
-        # One extra pass for failed chapters (still writing/review/rewrite — not a different team)
-        if failed and role == "chapter_writer":
-            retry_ids = [str(item.get("chapter_id") or "") for item in failed if item.get("chapter_id")]
-            if retry_ids:
-                print(f"[救火重试] 写作失败章节二次写作（仍属写作组，不是改稿组）: {retry_ids}")
-                retry_failed: list[dict[str, Any]] = []
-                with ThreadPoolExecutor(max_workers=min(effective_workers, max(1, len(retry_ids)))) as executor:
-                    futures = {
-                        executor.submit(_run_with_retry, worker, cid, root, max(0, max_retries), role): cid
-                        for cid in retry_ids
-                    }
-                    for future in as_completed(futures):
-                        chapter_id = futures[future]
-                        try:
-                            result_id, error, attempts = future.result()
-                        except Exception as exc:
-                            error = str(exc)
-                            result_id = chapter_id
-                            attempts = max(1, max_retries + 1)
-                        if error:
-                            print(f"[失败] 重试章节 {result_id}: {error}")
-                            retry_failed.append(
-                                {"chapter_id": result_id, "error": error, "attempts": attempts}
-                            )
-                        else:
-                            completed.append(result_id)
-                failed = retry_failed
+            if not round_failed:
+                failed = []
+                break
+
+            failed = round_failed
+            if role != "chapter_writer" or batch_round > batch_retries:
+                break
+
+            pending = [str(item.get("chapter_id") or "") for item in failed if item.get("chapter_id")]
+            if not pending:
+                break
+            print(
+                f"[自动重试] 第 {batch_round}/{batch_retries} 批：写作失败章节继续写 "
+                f"({len(pending)} 章) → {pending}"
+            )
 
     print(f"[完成] {label} 成功 {len(completed)} 个, 失败 {len(failed)} 个")
     if failed:
@@ -206,10 +219,10 @@ def run_per_chapter(
         except Exception as exc:
             print(f"[警告] 同步写作失败 Issue 失败: {exc}")
         raise RuntimeError(
-            "章节写作质量门禁阻断：存在失败章节 "
+            "章节写作仍失败（已自动重试）："
             + str([f.get("chapter_id") for f in failed])
-            + "。说明：救火台=写作执行失败，需重试写作；"
-            "改稿组仅在审核阶段 need_rewrite 时才会出现。"
+            + f"。已重试批次上限 batch_retries={batch_retries}；"
+            "可增大 BID_AGENT_WRITE_BATCH_RETRIES 或检查模型/材料后重跑 write-all。"
         )
     if failed and role in {"chapter_reviewer", "chapter_rewriter"}:
         try:
