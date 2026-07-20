@@ -507,10 +507,14 @@ def run_supervisor_turn(
         except Exception:
             pass
 
-        if str(goal.get("status")) == "succeeded" or bool(goal.get("all_criteria_ok")):
+        if str(goal.get("status")) == "succeeded" and bool(goal.get("all_criteria_ok")):
             terminal_status = "succeeded"
             final_reply_parts.append("目标已完成。")
             break
+        # criteria alone are not enough while workers/plan/repair still live
+        if bool(goal.get("all_criteria_ok")) and str(goal.get("status")) != "succeeded":
+            # reevaluate may leave in_progress with runtime_block
+            pass
 
         block_reason = human_blocking_reason(snapshot, goal)
         if block_reason and not user_confirmed:
@@ -693,7 +697,7 @@ def run_supervisor_turn(
             final_reply_parts.append(reply)
 
         # Stop conditions (system-driven, not free model done)
-        if str(goal.get("status")) == "succeeded" or bool(goal.get("all_criteria_ok")):
+        if str(goal.get("status")) == "succeeded" and bool(goal.get("all_criteria_ok")):
             terminal_status = "succeeded"
             break
 

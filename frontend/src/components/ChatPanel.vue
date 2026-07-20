@@ -129,12 +129,19 @@
       <div v-if="repairJob && repairJob.resume_command" class="chat-repair-resume">
         后续节点：{{ stepLabel(repairJob.resume_command) }} · {{ repairJob.resume_attempted ? '已尝试恢复' : '等待恢复' }}
       </div>
+      <div v-if="repairInterrupted" class="chat-repair-hint">
+        与上方聊天历史中的「目标已完成」可能不是同一时刻状态：修复任务在服务重启后被标记中断，请重新发起修复或继续流水线。
+      </div>
       <div v-if="repairResultText || repairResultItems.length" class="chat-repair-result">
         <strong>修复结果</strong>
         <div v-if="repairResultText">{{ repairResultText }}</div>
         <ul v-if="repairResultItems.length">
           <li v-for="(item, ri) in repairResultItems" :key="item.issue_id || item.id || ri">{{ repairResultItemText(item, ri) }}</li>
         </ul>
+      </div>
+      <div v-if="repairInterrupted || repairStatus === 'failed'" class="chat-repair-actions">
+        <button class="btn btn-sm btn-primary" :disabled="interactionBusy" @click="retryMinimalRepair">重新发起最小修复</button>
+        <button class="btn btn-sm" :disabled="interactionBusy" @click="dismissRepairCard">收起</button>
       </div>
     </section>
 
@@ -318,6 +325,11 @@ const repairStatusText = computed(() => ({
   partial: '部分完成',
   failed: '失败',
 }[repairStatus.value] || repairStatus.value || '准备中'))
+const repairInterrupted = computed(() => {
+  const phase = String(repairJob.value?.phase || '').trim()
+  const msg = String(repairJob.value?.message || '')
+  return phase === 'interrupted' || msg.includes('服务重启中断')
+})
 const repairPhaseText = computed(() => {
   const phase = String(repairJob.value?.phase || '').trim()
   const labels = {
@@ -490,6 +502,18 @@ function isRepairTaskName(value) {
 function stopRepairPolling() {
   if (repairTimer) clearInterval(repairTimer)
   repairTimer = null
+}
+
+function dismissRepairCard() {
+  stopRepairPolling()
+  repairJob.value = null
+  repairExecuting.value = false
+  activeRepairJobId = ''
+}
+
+function retryMinimalRepair() {
+  dismissRepairCard()
+  send('继续修复')
 }
 
 function applyRepairJob(job) {

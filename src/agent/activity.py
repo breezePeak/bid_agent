@@ -185,6 +185,66 @@ def end_phase(root: Path | None, *, status: str = "done", message: str = "") -> 
         return data
 
 
+def has_active_workers(root: Path | None = None) -> bool:
+    """True when chapter workers are mid-phase (excludes coordinator)."""
+    data = load_activity(root)
+    if str(data.get("status") or "") == "running":
+        agents = data.get("agents") if isinstance(data.get("agents"), list) else []
+        for a in agents:
+            if not isinstance(a, dict):
+                continue
+            if a.get("is_coordinator") or str(a.get("role")) == "coordinator":
+                continue
+            if str(a.get("status") or "") in {"running", "queued"}:
+                return True
+        # phase marked running but no workers → treat as inactive
+    agents = data.get("agents") if isinstance(data.get("agents"), list) else []
+    for a in agents:
+        if not isinstance(a, dict):
+            continue
+        if a.get("is_coordinator") or str(a.get("role")) == "coordinator":
+            continue
+        if str(a.get("status") or "") in {"running", "queued"}:
+            return True
+    return False
+
+
+def reconcile_interrupted_activity(root: Path | None = None) -> dict[str, Any]:
+    """Close ghost running/queued seats after process restart (mirror repair reconcile)."""
+    root = root or project_root()
+    with _lock:
+        data = load_activity(root)
+        agents = data.get("agents") if isinstance(data.get("agents"), list) else []
+        changed = False
+        for a in agents:
+            if not isinstance(a, dict):
+                continue
+            if a.get("is_coordinator") or str(a.get("role")) == "coordinator":
+                continue
+            st = str(a.get("status") or "")
+            if st == "running":
+                a["status"] = "failed"
+                a["message"] = "服务重启中断，章节任务未完成"
+                a["ended_at"] = _now()
+                a["interrupted_by_restart"] = True
+                changed = True
+            elif st == "queued":
+                a["status"] = "skipped"
+                a["message"] = "服务重启后未继续领取"
+                a["ended_at"] = _now()
+                a["interrupted_by_restart"] = True
+                changed = True
+        if changed or str(data.get("status") or "") == "running":
+            data["status"] = "interrupted"
+            data["message"] = "服务重启已清理在岗/排队工位；重新执行阶段后恢复"
+            data["phase"] = str(data.get("phase") or "")
+            # clear phase_label so coordinator does not look mid-write
+            if str(data.get("phase_label") or ""):
+                data["phase_label"] = ""
+            _save(root, data)
+        return data
+
+
 def _materials_deferred_count(root: Path) -> int:
     try:
         from materials_checklist import load_materials_checklist

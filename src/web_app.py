@@ -5675,11 +5675,19 @@ def _startup_reconcile() -> None:
         reconcile_interrupted_repair(ACTIVE_RUN_ROOT or ROOT)
     except Exception as exc:
         _append_log(f"[警告] 修复任务恢复检查失败: {exc}")
+    try:
+        from agent.activity import reconcile_interrupted_activity
+
+        act = reconcile_interrupted_activity(ACTIVE_RUN_ROOT or ROOT)
+        if str(act.get("status") or "") == "interrupted":
+            _append_log("[系统] 已清理重启后残留的在岗/排队工位状态")
+    except Exception as exc:
+        _append_log(f"[警告] 工位活动恢复检查失败: {exc}")
 
     # PR-A3: GoalState ↔ PipelineState consistency check
     if ACTIVE_RUN_ROOT is not None:
         try:
-            from agent.goal import load_goal, reevaluate_goal
+            from agent.goal import load_goal, reevaluate_goal, set_goal_status
 
             goal = load_goal(ACTIVE_RUN_ROOT)
             if goal:
@@ -5697,8 +5705,15 @@ def _startup_reconcile() -> None:
                     f"[系统] Goal/Pipeline 一致性: goal={g_status} pipeline={pipe_status or 'n/a'} "
                     f"goal_id={goal.get('goal_id')}"
                 )
-                if g_status == "succeeded" and pipe_status in {"error", "running", "recovering"}:
-                    _append_log("[警告] Goal 已成功但 Pipeline 状态未对齐，请检查 run_state")
+                # demote false success when pipeline still busy/error after restart
+                if g_status == "succeeded" and pipe_status in {"error", "running", "recovering", "paused"}:
+                    set_goal_status(
+                        ACTIVE_RUN_ROOT,
+                        "in_progress",
+                        blocked_reason=f"与流水线状态不一致: pipeline={pipe_status}",
+                        goal=goal,
+                    )
+                    _append_log("[系统] Goal 已从 succeeded 回退为 in_progress（流水线未对齐）")
                 if g_status == "blocked_human" and pipe_status == "ok":
                     _append_log("[警告] Goal 人工阻断但 Pipeline 显示 ok，以 Goal/材料清单为准")
         except Exception as exc:

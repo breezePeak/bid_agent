@@ -8,16 +8,18 @@
 
       <div v-if="error" class="agp-empty">{{ error }}</div>
       <div v-else-if="!goal" class="agp-empty compact">
-        暂无活动目标
+        暂无目标记录
         <span class="agp-hint"> · 对话下达目标后显示</span>
       </div>
       <div v-else class="agp-body">
         <div class="agp-row">
           <span class="agp-status" :class="'st-' + (goal.status || 'pending')">{{ goal.status || 'pending' }}</span>
           <span class="agp-id">#{{ goal.goal_id }}</span>
+          <span v-if="isTerminal" class="agp-terminal-hint">最近目标</span>
         </div>
         <div class="agp-goal-text">{{ goal.raw_user_goal || summary }}</div>
         <div class="agp-summary">{{ summary }}</div>
+        <div v-if="runtimeBlock" class="agp-runtime-block">运行中：{{ runtimeBlock }}</div>
 
         <div v-if="planSteps.length" class="agp-plan">
           <div class="agp-section-label">计划步骤</div>
@@ -74,9 +76,13 @@ const decisions = ref([])
 const criteria = ref([])
 const planSteps = ref([])
 const blockedReason = ref('')
+const runtimeBlock = ref('')
+const isTerminal = ref(false)
 const error = ref('')
 const polling = ref(false)
 let timer = null
+
+const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'budget_exceeded', 'blocked_policy'])
 
 async function refresh() {
   if (!props.enabled) return
@@ -97,6 +103,8 @@ async function refresh() {
     criteria.value = Array.isArray(goal.value?.criteria_results) ? goal.value.criteria_results : []
     planSteps.value = Array.isArray(goal.value?.plan) ? goal.value.plan : []
     blockedReason.value = goal.value?.blocked_reason || ''
+    runtimeBlock.value = goal.value?.progress?.runtime_block || ''
+    isTerminal.value = TERMINAL.has(String(goal.value?.status || ''))
     decisions.value = Array.isArray(dBody.decisions) ? dBody.decisions.slice().reverse() : []
   } catch (e) {
     error.value = e?.message || '轮询失败'

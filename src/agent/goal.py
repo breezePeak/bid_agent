@@ -377,6 +377,61 @@ def goal_succeeded(goal: dict[str, Any] | None) -> bool:
     return str(goal.get("status")) == "succeeded" or bool(goal.get("all_criteria_ok"))
 
 
+def plan_has_open_steps(goal: dict[str, Any] | None) -> bool:
+    if not goal or not isinstance(goal.get("plan"), list):
+        return False
+    for step in goal.get("plan") or []:
+        if not isinstance(step, dict):
+            continue
+        st = str(step.get("status") or "pending")
+        if st in {"pending", "running", "blocked"}:
+            return True
+    return False
+
+
+def runtime_blocks_success(root: Path | None, goal: dict[str, Any] | None = None) -> str:
+    """Extra gates so criteria-ok alone cannot declare success while work is live.
+
+    Plan open steps are NOT a hard block: criteria are the success definition;
+    plan is only an execution guide (artifacts may already satisfy criteria).
+    """
+    root = root or project_root()
+    # active chapter workers
+    try:
+        from agent.activity import has_active_workers
+
+        if has_active_workers(root):
+            return "章节工位仍有在岗/排队任务"
+    except Exception:
+        pass
+    # active repair job
+    try:
+        from agent.repair_jobs import ACTIVE_REPAIR_STATUSES, load_repair_job
+
+        job = load_repair_job(root)
+        if str(job.get("status") or "") in ACTIVE_REPAIR_STATUSES:
+            return f"最小修复任务进行中（{job.get('status')}）"
+    except Exception:
+        pass
+    # hard materials for actionable goals
+    if goal:
+        objectives = [
+            str(o.get("type") or "")
+            for o in (goal.get("normalized_objectives") or [])
+            if isinstance(o, dict)
+        ]
+        actionable = any(
+            t in objectives
+            for t in ("fix_coverage", "fix_compliance", "export", "full_generate", "fix_chapter")
+        )
+        constraints = goal.get("constraints") if isinstance(goal.get("constraints"), dict) else {}
+        if actionable and constraints.get("block_on_missing_materials", True):
+            reason = detect_human_block(root, goal)
+            if reason:
+                return reason
+    return ""
+
+
 def set_goal_status(
     root: Path | None,
     status: str,
@@ -502,21 +557,31 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
     if isinstance(goal.get("plan"), list) and goal.get("plan"):
         goal = refresh_plan_statuses(root, goal)
 
+    runtime_block = runtime_blocks_success(root, goal)
+
     if status in {"cancelled", "failed", "budget_exceeded", "blocked_policy"}:
         pass
-    elif all_ok:
+    elif all_ok and not runtime_block:
         status = "succeeded"
         goal["blocked_reason"] = ""
+    elif all_ok and runtime_block:
+        # criteria satisfied but pipeline/office/repair still live → not done yet
+        if "材料" in runtime_block or "缺少" in runtime_block:
+            status = "blocked_human"
+            goal["blocked_reason"] = runtime_block
+        else:
+            status = "in_progress"
+            goal["blocked_reason"] = runtime_block
     elif status == "awaiting_confirmation":
         pass
     elif status == "blocked_human":
-        # auto-clear if blocking condition gone
-        reason = detect_human_block(root, goal)
-        if not reason:
+        # auto-clear if materials/fatal block is gone
+        mat = detect_human_block(root, goal)
+        if not mat:
             status = "in_progress"
-            goal["blocked_reason"] = ""
+            goal["blocked_reason"] = runtime_block if runtime_block else ""
         else:
-            goal["blocked_reason"] = reason
+            goal["blocked_reason"] = mat
     else:
         objectives = [
             str(o.get("type") or "")
@@ -538,10 +603,18 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
                 status = "in_progress"
         else:
             status = "in_progress"
+            if runtime_block:
+                goal["blocked_reason"] = runtime_block
 
     goal["status"] = status
     goal["criteria_results"] = results
-    goal["all_criteria_ok"] = all_ok
+    # expose whether raw criteria passed vs fully done
+    goal["all_criteria_ok"] = bool(all_ok and not runtime_block)
+    goal["criteria_ok_raw"] = all_ok
+    if runtime_block and status != "succeeded":
+        progress = dict(goal.get("progress") or {})
+        progress["runtime_block"] = runtime_block
+        goal["progress"] = progress
     # progress criteria ratio
     if results:
         ok_n = sum(1 for r in results if r.get("ok"))
