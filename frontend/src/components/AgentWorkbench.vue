@@ -258,12 +258,11 @@ const roleTeams = computed(() => {
     if (!byRole[r]) byRole[r] = []
     byRole[r].push(a)
   }
-  // Always show writing pool; show other roles only when they have work
-  const rolesToShow = new Set(['chapter_writer', activeRole.value])
+  // Always show fixed office teams (writer / reviewer / rewriter / global).
+  // Idle seats stay visible so users can see the full org layout during write-only phases.
+  const rolesToShow = new Set(ROLE_TEAMS.map((t) => t.role))
   for (const r of Object.keys(byRole)) {
-    if (byRole[r].some((a) => a.status === 'running' || a.status === 'queued' || a.status === 'failed')) {
-      rolesToShow.add(r)
-    }
+    rolesToShow.add(r)
   }
 
   return ROLE_TEAMS
