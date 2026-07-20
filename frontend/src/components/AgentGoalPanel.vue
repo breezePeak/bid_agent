@@ -43,6 +43,17 @@
           <div class="agp-block-text">{{ blockedReason }}</div>
         </div>
 
+        <div v-if="productMode" class="agp-mode-row">
+          <span class="agp-mode" :class="'mode-' + productMode">{{ productModeLabel || productMode }}</span>
+          <span v-if="!consistent" class="agp-inconsistent">状态不一致</span>
+        </div>
+        <div v-if="consistencyWarnings.length" class="agp-warnings">
+          <div class="agp-section-label">一致性告警</div>
+          <div v-for="(w, i) in consistencyWarnings" :key="i" class="agp-warn" :class="w.severity">
+            {{ w.message }}
+          </div>
+        </div>
+
         <div v-if="decisions.length" class="agp-decisions">
           <div class="agp-section-label">最近决策 / 选择原因</div>
           <div v-for="(d, i) in decisions" :key="i" class="agp-decision">
@@ -62,7 +73,7 @@
 <script setup>
 import { ref, onMounted, onBeforeUnmount, watch } from 'vue'
 import AgentWorkbench from './AgentWorkbench.vue'
-import { fetchAgentGoal, fetchAgentDecisions } from '../api'
+import { fetchAgentGoal, fetchAgentDecisions, fetchRuntimeStatus } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -78,6 +89,10 @@ const planSteps = ref([])
 const blockedReason = ref('')
 const runtimeBlock = ref('')
 const isTerminal = ref(false)
+const productMode = ref('')
+const productModeLabel = ref('')
+const consistent = ref(true)
+const consistencyWarnings = ref([])
 const error = ref('')
 const polling = ref(false)
 let timer = null
@@ -87,12 +102,14 @@ const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'budget_exceeded',
 async function refresh() {
   if (!props.enabled) return
   try {
-    const [gResp, dResp] = await Promise.all([
+    const [gResp, dResp, rResp] = await Promise.all([
       fetchAgentGoal(),
       fetchAgentDecisions(8),
+      fetchRuntimeStatus(false).catch(() => null),
     ])
     const gBody = gResp?.data || {}
     const dBody = dResp?.data || {}
+    const rBody = rResp?.data || {}
     if (gBody.ok === false) {
       error.value = gBody.message || 'goal api error'
       return
@@ -106,6 +123,12 @@ async function refresh() {
     runtimeBlock.value = goal.value?.progress?.runtime_block || ''
     isTerminal.value = TERMINAL.has(String(goal.value?.status || ''))
     decisions.value = Array.isArray(dBody.decisions) ? dBody.decisions.slice().reverse() : []
+    // Prefer unified runtime aggregator for mode + warnings
+    productMode.value = rBody.product_mode || gBody.product_mode || ''
+    productModeLabel.value = rBody.product_mode_label || gBody.product_mode_label || ''
+    consistent.value = rBody.consistent !== false && gBody.consistent !== false
+    const warns = rBody.warnings || gBody.consistency_warnings || []
+    consistencyWarnings.value = Array.isArray(warns) ? warns.slice(0, 5) : []
   } catch (e) {
     error.value = e?.message || '轮询失败'
   }

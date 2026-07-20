@@ -1826,6 +1826,32 @@ def api_status() -> dict[str, Any]:
     except Exception:
         pass
 
+    # Unified runtime view (single aggregator for goal/activity/repair/pipeline)
+    runtime: dict[str, Any] = {}
+    try:
+        from agent.runtime_status import build_runtime_status
+
+        runtime = build_runtime_status(root, reevaluate_goal=False)
+    except Exception as exc:
+        runtime = {"ok": False, "message": str(exc), "warnings": [], "consistent": True}
+
+    goal_view: dict[str, Any] = {}
+    try:
+        from agent.goal import load_goal, goal_summary
+
+        g = load_goal(root)
+        if g:
+            goal_view = {
+                "goal_id": g.get("goal_id"),
+                "status": g.get("status"),
+                "all_criteria_ok": g.get("all_criteria_ok"),
+                "blocked_reason": g.get("blocked_reason") or "",
+                "raw_user_goal": str(g.get("raw_user_goal") or "")[:200],
+                "summary": goal_summary(g),
+            }
+    except Exception:
+        pass
+
     return {
         **status,
         "workflow": workflow,
@@ -1833,6 +1859,12 @@ def api_status() -> dict[str, Any]:
         "blocked_step": blocked_step,
         "compliance_summary": compliance_summary,
         "materials_summary": materials_summary,
+        "goal": goal_view or None,
+        "runtime": runtime,
+        "consistency_warnings": list(runtime.get("warnings") or []),
+        "product_mode": runtime.get("product_mode") or "",
+        "product_mode_label": runtime.get("product_mode_label") or "",
+        "consistent": bool(runtime.get("consistent", True)),
     }
 
 
@@ -2925,27 +2957,53 @@ def api_agent_activity() -> JSONResponse:
 
 
 @app.get("/api/agent/goal")
-def api_agent_goal() -> JSONResponse:
-    """Current GoalState for active workspace (PR-7/8/10)."""
+def api_agent_goal(reevaluate: bool = False) -> JSONResponse:
+    """Current GoalState for active workspace.
+
+    Default is read-only (no reevaluate on poll) to avoid status flip-flops.
+    Pass ?reevaluate=1 after tools/material upload if a fresh check is needed.
+    """
     root = _active_root()
     try:
         from agent.goal import goal_summary, load_goal, next_plan_step, reevaluate_goal
+        from agent.runtime_status import build_runtime_status
 
         goal = load_goal(root)
-        if goal:
+        if goal and reevaluate:
             try:
                 goal = reevaluate_goal(root, goal)
             except Exception:
                 pass
         nxt = next_plan_step(root, goal) if goal else None
+        runtime = build_runtime_status(root, reevaluate_goal=False)
         return JSONResponse(
             {
                 "ok": True,
                 "goal": goal,
                 "summary": goal_summary(goal) if goal else "无活动目标",
                 "next_plan_step": nxt,
+                "product_mode": runtime.get("product_mode"),
+                "product_mode_label": runtime.get("product_mode_label"),
+                "consistent": runtime.get("consistent"),
+                "consistency_warnings": runtime.get("warnings") or [],
             }
         )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/runtime")
+def api_runtime_status(heal: bool = False) -> JSONResponse:
+    """Unified live runtime status (goal + activity + repair + pipeline + materials)."""
+    root = _active_root()
+    try:
+        from agent.runtime_status import build_runtime_status, soft_heal_inconsistencies
+
+        if heal:
+            payload = soft_heal_inconsistencies(root)
+        else:
+            payload = build_runtime_status(root, reevaluate_goal=False)
+        return JSONResponse(payload)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
@@ -5684,40 +5742,23 @@ def _startup_reconcile() -> None:
     except Exception as exc:
         _append_log(f"[警告] 工位活动恢复检查失败: {exc}")
 
-    # PR-A3: GoalState ↔ PipelineState consistency check
+    # Unified soft-heal + consistency log (replaces ad-hoc goal/pipeline only check)
     if ACTIVE_RUN_ROOT is not None:
         try:
-            from agent.goal import load_goal, reevaluate_goal, set_goal_status
+            from agent.runtime_status import soft_heal_inconsistencies
 
-            goal = load_goal(ACTIVE_RUN_ROOT)
-            if goal:
-                goal = reevaluate_goal(ACTIVE_RUN_ROOT, goal)
-                run_state_path = ACTIVE_RUN_ROOT / "workspace" / "run_state.json"
-                pipe_status = ""
-                if run_state_path.exists():
-                    try:
-                        pipe = json.loads(run_state_path.read_text(encoding="utf-8"))
-                        pipe_status = str(pipe.get("status") or "")
-                    except Exception:
-                        pipe_status = ""
-                g_status = str(goal.get("status") or "")
-                _append_log(
-                    f"[系统] Goal/Pipeline 一致性: goal={g_status} pipeline={pipe_status or 'n/a'} "
-                    f"goal_id={goal.get('goal_id')}"
-                )
-                # demote false success when pipeline still busy/error after restart
-                if g_status == "succeeded" and pipe_status in {"error", "running", "recovering", "paused"}:
-                    set_goal_status(
-                        ACTIVE_RUN_ROOT,
-                        "in_progress",
-                        blocked_reason=f"与流水线状态不一致: pipeline={pipe_status}",
-                        goal=goal,
-                    )
-                    _append_log("[系统] Goal 已从 succeeded 回退为 in_progress（流水线未对齐）")
-                if g_status == "blocked_human" and pipe_status == "ok":
-                    _append_log("[警告] Goal 人工阻断但 Pipeline 显示 ok，以 Goal/材料清单为准")
+            runtime = soft_heal_inconsistencies(ACTIVE_RUN_ROOT)
+            mode = runtime.get("product_mode") or "?"
+            warnings = runtime.get("warnings") or []
+            heals = runtime.get("heal_actions") or []
+            _append_log(
+                f"[系统] Runtime 状态: mode={mode} consistent={runtime.get('consistent')} "
+                f"warnings={len(warnings)} heals={heals or 'none'}"
+            )
+            for w in warnings[:5]:
+                _append_log(f"[一致性] {w.get('severity')}:{w.get('code')} {w.get('message')}")
         except Exception as exc:
-            _append_log(f"[警告] Goal/Pipeline 一致性检查失败: {exc}")
+            _append_log(f"[警告] Runtime 一致性检查失败: {exc}")
 
     if ACTIVE_RUN_ROOT is None:
         return
