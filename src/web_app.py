@@ -39,6 +39,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from chat_store import clear_messages, close_chat_store, load_messages, save_message
 from agent.repair_jobs import (
     RUNNING_REPAIR_STATUSES,
+    TERMINAL_REPAIR_STATUSES,
     claim_repair_job,
     create_confirmation,
     decline_repair_job,
@@ -2041,6 +2042,13 @@ def _minimal_repair_intent(message: str, *, has_pending: bool) -> str:
         return "confirm"
     if normalized in {"修复", "修复吧"}:
         return "confirm" if has_pending else "start"
+    # Restart / resume synonyms after interrupt or failed job (must not fall through to Supervisor)
+    if re.search(
+        r"(?:继续修复|重新修复|重新发起|再修一次|重试修复|再自动修复|重启修复|"
+        r"重新发起最小修复|重新自动修复|再次修复|继续自动修复)",
+        normalized,
+    ):
+        return "start"
     if re.search(
         r"(?:自动修复|最小修复|修复啊|修一下|开始修复|立即修复|赶紧修复|一键修复|"
         r"帮我.{0,8}修复|执行.{0,6}修复|修复这些|处理.{0,8}阻断)",
@@ -2060,8 +2068,12 @@ def _repair_result_count(result: dict[str, Any], key: str, count_key: str) -> in
         return 0
 
 
-def _trigger_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
-    """Claim exactly one repair slot and run the persisted job in the background."""
+def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool = True) -> dict[str, Any]:
+    """Claim exactly one repair slot and run the persisted job in the background.
+
+    If confirmation is stale (previous job failed/interrupted), optionally remint
+    a new confirmation and claim it so "继续修复" always works.
+    """
     global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
     with _REPAIR_START_LOCK:
         current = load_repair_job(root)
@@ -2073,7 +2085,27 @@ def _trigger_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
             return {"ok": False, "busy": True, "job": current, "message": "当前已有任务正在运行，修复确认已保留，请稍后重试"}
         claimed = claim_repair_job(root, confirmation_id)
         if not claimed.get("ok"):
-            return {"ok": False, "job": current, "message": claimed.get("message", "无法确认修复任务")}
+            # Stale terminal job or invalid confirmation → remint and claim once
+            if allow_remint and (
+                claimed.get("stale")
+                or str(current.get("status") or "") in TERMINAL_REPAIR_STATUSES
+                or "失效" in str(claimed.get("message") or "")
+            ):
+                fresh = _ensure_minimal_repair_confirmation(root)
+                fresh_id = str(fresh.get("confirmation_id") or "")
+                if not fresh_id:
+                    return {
+                        "ok": False,
+                        "job": fresh or current,
+                        "message": "当前没有可自动修复的阻断问题",
+                    }
+                claimed = claim_repair_job(root, fresh_id)
+            if not claimed.get("ok"):
+                return {
+                    "ok": False,
+                    "job": claimed.get("job") or current,
+                    "message": claimed.get("message", "无法确认修复任务"),
+                }
         job = claimed.get("job") if isinstance(claimed.get("job"), dict) else {}
         if claimed.get("duplicate"):
             return {"ok": True, "duplicate": True, "job": job, "message": job.get("message", "已处理该修复确认")}
@@ -2408,12 +2440,26 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             )
 
         current_job = load_repair_job(root)
-        has_pending = str(current_job.get("status") or "") == "awaiting_confirmation"
+        job_status = str(current_job.get("status") or "")
+        has_pending = job_status == "awaiting_confirmation"
+        terminal_repair = job_status in {"completed", "partial", "failed"}
+        interrupted_repair = (
+            terminal_repair
+            and (
+                str(current_job.get("phase") or "") == "interrupted"
+                or "服务重启中断" in str(current_job.get("message") or "")
+            )
+        )
         intent = _minimal_repair_intent(message, has_pending=has_pending)
         if action_type == "confirm_minimal_repair":
             intent = "confirm"
         elif action_type == "decline_minimal_repair":
             intent = "decline"
+        elif action_type == "restart_minimal_repair":
+            intent = "start"
+        # Failed/interrupted jobs: "confirm" with old confirmation_id cannot resume — force restart
+        if intent == "confirm" and (terminal_repair or interrupted_repair):
+            intent = "start"
 
         if intent == "decline" and has_pending:
             confirmation_id = str(action.get("confirmation_id") or current_job.get("confirmation_id") or "")
@@ -2428,27 +2474,40 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             )
 
         if intent in {"confirm", "start"}:
-            if intent == "start" or not current_job:
+            # Always mint a fresh confirmation when starting, or when previous job is terminal/interrupted
+            if intent == "start" or not current_job or terminal_repair or interrupted_repair:
                 current_job = _ensure_minimal_repair_confirmation(root)
                 has_pending = str(current_job.get("status") or "") == "awaiting_confirmation"
             confirmation_id = str(action.get("confirmation_id") or current_job.get("confirmation_id") or "")
+            # Never claim with a stale confirmation_id from a failed job
+            if intent == "start" or terminal_repair or interrupted_repair:
+                confirmation_id = str(current_job.get("confirmation_id") or "")
             if not current_job or not confirmation_id:
                 return _chat_response(
                     root,
                     run_id,
-                    "当前没有可自动修复的阻断问题。",
+                    "当前没有可自动修复的阻断问题（质量问题单为空或均已关闭）。"
+                    "若仍有材料缺口，请先到「材料」页补料；其它阻断请在「问题」页查看。",
                     actions=[],
                     intent="minimal_repair",
                     triggered_repair=False,
                     repair_job=current_job or None,
                 )
-            result = _trigger_repair_job(root, confirmation_id)
+            result = _trigger_repair_job(root, confirmation_id, allow_remint=True)
             job = result.get("job") if isinstance(result.get("job"), dict) else load_repair_job(root)
-            triggered = bool(result.get("ok"))
+            triggered = bool(result.get("ok")) and str(job.get("status") or "") in {
+                "running",
+                "revalidating",
+            }
+            msg = str(result.get("message") or "已提交最小修复任务")
+            if triggered:
+                msg = f"已重新发起最小修复（{int(job.get('total_count') or 0)} 项），正在后台执行…"
+            elif result.get("busy"):
+                msg = str(result.get("message") or "当前有任务在运行，请稍后再试")
             return _chat_response(
                 root,
                 run_id,
-                str(result.get("message") or "已提交最小修复任务"),
+                msg,
                 actions=_repair_retry_actions(job) if not triggered else [],
                 intent="minimal_repair",
                 triggered_repair=triggered,

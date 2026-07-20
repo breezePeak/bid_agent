@@ -104,15 +104,25 @@ class RepairJobPersistenceTests(unittest.TestCase):
             )
             claim_repair_job(root, job["confirmation_id"])
             update_repair_job(root, job["job_id"], status="completed", phase="complete")
-            duplicate = claim_repair_job(root, job["confirmation_id"])
-            self.assertTrue(duplicate["ok"])
-            self.assertTrue(duplicate["duplicate"])
-            self.assertEqual(duplicate["job"]["job_id"], job["job_id"])
+            # Terminal jobs must NOT claim as silent duplicate — force remint path
+            stale = claim_repair_job(root, job["confirmation_id"])
+            self.assertFalse(stale.get("ok"))
+            self.assertTrue(stale.get("stale") or "结束" in str(stale.get("message") or "") or "中断" in str(stale.get("message") or ""))
 
 
 class RepairIntentTests(unittest.TestCase):
     def test_repair_synonyms_are_deterministic(self) -> None:
-        for text in ("自动修复", "最小修复", "修复啊", "帮我修复这些阻断", "处理这些阻断问题"):
+        for text in (
+            "自动修复",
+            "最小修复",
+            "修复啊",
+            "帮我修复这些阻断",
+            "处理这些阻断问题",
+            "继续修复",
+            "重新发起最小修复",
+            "重新修复",
+            "重试修复",
+        ):
             with self.subTest(text=text):
                 self.assertEqual(web_app._minimal_repair_intent(text, has_pending=False), "start")
 
@@ -213,13 +223,18 @@ class RepairWorkerTests(unittest.TestCase):
                                         self.assertLess(time.monotonic(), deadline)
                                         time.sleep(0.01)
                                         current = load_repair_job(root)
+                                    # Wait for worker to clear global RUNNING flag
+                                    while web_app.RUNNING and time.monotonic() < deadline:
+                                        time.sleep(0.01)
 
-                                    duplicate = web_app._trigger_repair_job(root, job["confirmation_id"])
+                                    # Old confirmation is stale after terminal status
+                                    stale = claim_repair_job(root, job["confirmation_id"])
+                                    self.assertFalse(stale.get("ok"))
+                                    self.assertTrue(stale.get("stale"))
 
             self.assertEqual(current["status"], "partial")
             self.assertEqual(current["remaining_count"], 1)
             self.assertTrue(current["resume_attempted"])
-            self.assertTrue(duplicate["duplicate"])
             self.assertEqual(resume.call_count, 1)
             self.assertEqual(resume.call_args.kwargs["start_command"], "build-md")
 

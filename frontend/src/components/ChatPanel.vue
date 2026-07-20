@@ -523,8 +523,11 @@ function dismissRepairCard() {
 }
 
 function retryMinimalRepair() {
+  // Must use a phrase mapped to repair intent "start" (not Supervisor goal loop)
   dismissRepairCard()
-  send('继续修复')
+  send('重新发起最小修复', {
+    action: { type: 'restart_minimal_repair' },
+  })
 }
 
 function applyRepairJob(job) {

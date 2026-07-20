@@ -112,10 +112,13 @@ def create_confirmation(
                     "auto_count": int(auto_count),
                     "manual_count": int(manual_count),
                     "resume_command": str(resume_command or current.get("resume_command") or ""),
+                    "remaining_count": int(total_count),
+                    "message": f"发现 {int(total_count)} 个阻断问题，等待确认最小修复",
                 }
             )
             return _write_job(root, current)
 
+        # Terminal / interrupted / declined → always mint a brand-new job_id + confirmation_id
         now = _now()
         job = {
             "job_id": f"repair-{uuid.uuid4().hex[:12]}",
@@ -140,12 +143,17 @@ def create_confirmation(
             "started_at": "",
             "finished_at": "",
             "result": {},
+            "restarted_from": str(current.get("job_id") or "") if status in TERMINAL_REPAIR_STATUSES else "",
         }
         return _write_job(root, job)
 
 
 def claim_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
-    """Atomically claim a confirmed job; duplicate confirmation is idempotent."""
+    """Atomically claim a confirmed job; duplicate confirmation is idempotent.
+
+    Terminal jobs (failed/interrupted/completed) cannot be claimed — callers must
+    create a fresh confirmation via create_confirmation first.
+    """
     with _job_lock(root):
         job = load_repair_job(root)
         if not job:
@@ -154,7 +162,14 @@ def claim_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
         if status in RUNNING_REPAIR_STATUSES:
             return {"ok": True, "duplicate": True, "job": job}
         if status in TERMINAL_REPAIR_STATUSES:
-            return {"ok": True, "duplicate": True, "job": job}
+            # Not a silent success — force caller to mint a new job
+            return {
+                "ok": False,
+                "stale": True,
+                "duplicate": False,
+                "job": job,
+                "message": "上一轮修复已结束或中断，请重新发起最小修复",
+            }
         expected = str(job.get("confirmation_id") or "")
         if not confirmation_id or confirmation_id != expected:
             return {"ok": False, "message": "修复确认已失效，请重新确认"}
@@ -164,8 +179,10 @@ def claim_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
             {
                 "status": "running",
                 "phase": "analyzing",
-                "started_at": job.get("started_at") or _now(),
+                "started_at": _now(),
                 "finished_at": "",
+                "failed_count": 0,
+                "progress_percent": 5,
                 "message": "正在分析阻断问题并合并根因动作",
             }
         )
