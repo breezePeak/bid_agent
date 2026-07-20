@@ -174,6 +174,12 @@
           <div class="board-hint">
             {{ failHint }}
           </div>
+          <div class="board-actions" v-if="canRetryWrites">
+            <button class="btn btn-sm btn-primary" :disabled="retrying" @click="retryFailedWrites">
+              {{ retrying ? '重试写作中…' : '重试失败写作' }}
+            </button>
+            <span v-if="retryMsg" class="board-retry-msg">{{ retryMsg }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -182,7 +188,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { fetchAgentActivity } from '../api'
+import { fetchAgentActivity, retryFailedWrites as apiRetryFailedWrites } from '../api'
 
 const POOL_SIZE = 10
 /** Board chips scroll inside columns; keep a moderate preview count */
@@ -316,7 +322,7 @@ const failHint = computed(() => {
   const failed = tasks.value.filter((a) => a.status === 'failed')
   const roles = new Set(failed.map((a) => a.role || 'chapter_writer'))
   if (roles.has('chapter_writer') && roles.size === 1) {
-    return '当前是写作执行失败，不是审核后的改稿。系统会自动二次写作；仍失败需重试写作阶段。改稿组只在审核 need_rewrite 后出现。'
+    return '当前是写作执行失败，不是审核后的改稿。点「重试失败写作」由写作组再写；改稿组只在审核 need_rewrite 后出现。'
   }
   if (roles.has('chapter_reviewer')) {
     return '审核阶段失败。通过后若 need_rewrite，才会派发改稿组。'
@@ -326,6 +332,32 @@ const failHint = computed(() => {
   }
   return '执行失败章节。写作失败≠改稿任务；改稿组只处理审核要求改写的章节。'
 })
+
+const canRetryWrites = computed(() =>
+  tasks.value.some((a) => a.status === 'failed' && (a.role || 'chapter_writer') === 'chapter_writer')
+)
+const retrying = ref(false)
+const retryMsg = ref('')
+
+async function retryFailedWrites() {
+  if (retrying.value) return
+  retrying.value = true
+  retryMsg.value = ''
+  try {
+    const ids = tasks.value
+      .filter((a) => a.status === 'failed' && (a.role || 'chapter_writer') === 'chapter_writer')
+      .map((a) => a.chapter_id)
+      .filter(Boolean)
+    const resp = await apiRetryFailedWrites(ids)
+    const body = resp?.data || {}
+    retryMsg.value = body.message || (body.ok ? '重试完成' : '重试失败')
+    await refresh()
+  } catch (e) {
+    retryMsg.value = e?.message || '重试请求失败'
+  } finally {
+    retrying.value = false
+  }
+}
 
 function pct(n) {
   const t = stats.value.total || 0

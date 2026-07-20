@@ -185,6 +185,25 @@ def end_phase(root: Path | None, *, status: str = "done", message: str = "") -> 
         return data
 
 
+def failed_chapter_ids(root: Path | None = None, *, role: str = "chapter_writer") -> list[str]:
+    """Chapter ids currently marked failed for a role (for fire-desk retry)."""
+    data = load_activity(root)
+    out: list[str] = []
+    for a in data.get("agents") or []:
+        if not isinstance(a, dict):
+            continue
+        if a.get("is_coordinator") or str(a.get("role")) == "coordinator":
+            continue
+        if role and str(a.get("role") or "") != role:
+            continue
+        if str(a.get("status") or "") != "failed":
+            continue
+        cid = str(a.get("chapter_id") or "").strip()
+        if cid and cid not in out:
+            out.append(cid)
+    return out
+
+
 def has_active_workers(root: Path | None = None) -> bool:
     """True when chapter workers are mid-phase (excludes coordinator)."""
     data = load_activity(root)

@@ -3008,6 +3008,61 @@ def api_compliance_report() -> JSONResponse:
     )
 
 
+@app.post("/api/agent/retry-failed-writes")
+async def api_retry_failed_writes(request: Request) -> JSONResponse:
+    """Retry chapters currently on the fire desk (writing execution failures).
+
+    This is NOT rewrite-team work. Rewrite only happens after review need_rewrite.
+    """
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    chapter_ids = body.get("chapter_ids")
+    if not isinstance(chapter_ids, list):
+        chapter_ids = None
+    try:
+        from agent.activity import failed_chapter_ids
+        from concurrency import workers_default
+        from subagent_runner import run_write_all
+
+        if SUPERVISOR.is_running(root) or RUNNING:
+            return JSONResponse(
+                {"ok": False, "message": "当前已有任务在运行，请稍后再试"},
+                status_code=409,
+            )
+        ids = [str(x) for x in (chapter_ids or failed_chapter_ids(root, role="chapter_writer")) if str(x).strip()]
+        if not ids:
+            return JSONResponse({"ok": False, "message": "救火台没有可重试的写作失败章节"})
+        # Run in-thread so UI can poll activity; short batches only
+        result = await run_in_threadpool(
+            run_write_all,
+            root,
+            workers=workers_default(),
+            chapter_ids=ids,
+            max_retries=1,
+        )
+        failed = result.get("failed") or []
+        completed = result.get("completed") or []
+        return JSONResponse(
+            {
+                "ok": not failed,
+                "chapter_ids": ids,
+                "completed": completed,
+                "failed": failed,
+                "message": (
+                    f"救火重试完成：成功 {len(completed)}，失败 {len(failed)}。"
+                    "仍失败的不是改稿任务，需检查模型/材料后再写。"
+                ),
+            }
+        )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
 @app.get("/api/agent/activity")
 def api_agent_activity() -> JSONResponse:
     """Current sub-agent workbench snapshot for UI cards."""
