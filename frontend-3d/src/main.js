@@ -35,11 +35,11 @@ const demo = createDemoController(store)
 let mode = 'auto'
 let pollTimer = null
 let runsTimer = null
-let orbitOn = true
+let orbitOn = false
 let runs = []
 let activeRunId = ''
 let switchingWorkspace = false
-const buttonState = { orbit: true, demo: false, live: false }
+const buttonState = { orbit: false, demo: false, live: false }
 
 let pendingSnap = null
 let hudScheduled = false
@@ -64,16 +64,39 @@ function scheduleUi() {
   })
 }
 
+const VIEW_ACTIONS = {
+  overview: () => app.focusOverview(),
+  front: () => app.focusFront(),
+  hall: () => app.focusHall(),
+  furnace: () => app.focusFurnace(),
+  side: () => app.focusSide(),
+  top: () => app.focusTop(),
+  back: () => app.focusBack(),
+  active: () => app.focusActive(),
+  agents: () => app.focusAgents(),
+  'zoom-in': () => app.zoomBy(0.78),
+  'zoom-out': () => app.zoomBy(1.28),
+}
+
 const hud = createHud(hudRoot, {
   onAction(act) {
-    if (act === 'overview') app.focusOverview()
-    if (act === 'active') app.focusActive()
-    if (act === 'agents') app.focusAgents()
+    if (VIEW_ACTIONS[act]) {
+      // 切视角时暂停自动环游，避免抢控制
+      if (act !== 'orbit') {
+        orbitOn = false
+        app.autoOrbit = false
+        buttonState.orbit = false
+      }
+      VIEW_ACTIONS[act]()
+      scheduleUi()
+      return
+    }
     if (act === 'orbit') {
       orbitOn = !orbitOn
       app.autoOrbit = orbitOn
       buttonState.orbit = orbitOn
       scheduleUi()
+      return
     }
     if (act === 'demo') startDemo()
     if (act === 'live') startLive()
@@ -149,15 +172,16 @@ async function loadRuns({ force = false } = {}) {
 }
 
 async function handleSelectRun(runId) {
-  if (!runId || runId === activeRunId) {
-    if (mode !== 'live') startLive()
-    return
-  }
+  if (!runId) return
+  // Selecting a workspace always switches to live realtime view
+  if (runId === activeRunId && mode === 'live') return
   switchingWorkspace = true
   scheduleUi()
   try {
-    await selectRun(runId)
-    activeRunId = runId
+    if (runId !== activeRunId) {
+      await selectRun(runId)
+      activeRunId = runId
+    }
     if (mode !== 'live') startLive()
     else await pollOnce()
     await loadRuns()
@@ -232,9 +256,70 @@ async function bootstrap() {
   })
 
   window.addEventListener('keydown', (e) => {
-    if (e.key === '1') app.focusOverview()
-    if (e.key === '2') app.focusActive()
-    if (e.key === '3') app.focusAgents()
+    const tag = (e.target && e.target.tagName) || ''
+    if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
+
+    const stopOrbit = () => {
+      orbitOn = false
+      app.autoOrbit = false
+      buttonState.orbit = false
+    }
+
+    if (e.key === '1') {
+      stopOrbit()
+      app.focusOverview()
+      scheduleUi()
+    }
+    if (e.key === '2') {
+      stopOrbit()
+      app.focusActive()
+      scheduleUi()
+    }
+    if (e.key === '3') {
+      stopOrbit()
+      app.focusAgents()
+      scheduleUi()
+    }
+    if (e.key === '4') {
+      stopOrbit()
+      app.focusHall()
+      scheduleUi()
+    }
+    if (e.key === '5') {
+      stopOrbit()
+      app.focusFurnace()
+      scheduleUi()
+    }
+    if (e.key === '6') {
+      stopOrbit()
+      app.focusSide()
+      scheduleUi()
+    }
+    if (e.key === '7') {
+      stopOrbit()
+      app.focusTop()
+      scheduleUi()
+    }
+    if (e.key === '8') {
+      stopOrbit()
+      app.focusBack()
+      scheduleUi()
+    }
+    if (e.key === '9') {
+      stopOrbit()
+      app.focusFront()
+      scheduleUi()
+    }
+    if (e.key === '=' || e.key === '+') {
+      stopOrbit()
+      app.zoomBy(0.78)
+      scheduleUi()
+    }
+    if (e.key === '-' || e.key === '_') {
+      stopOrbit()
+      app.zoomBy(1.28)
+      scheduleUi()
+    }
     if (e.key === 'd' || e.key === 'D') startDemo()
     if (e.key === 'l' || e.key === 'L') startLive()
     if (e.key === ' ') {

@@ -1,9 +1,6 @@
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 
-/**
- * Minimal CSS2D labels — NO backdrop-filter (major freeze source on many GPUs).
- * Only create labels when needed; stages mostly rely on HUD list.
- */
+/** 宇宙唐风标签 */
 
 let stylesInjected = false
 function ensureStyles() {
@@ -15,38 +12,43 @@ function ensureStyles() {
     .css2d-label { pointer-events: none; user-select: none; will-change: transform; }
     .css2d-card {
       display: flex; align-items: center; gap: 5px;
-      padding: 3px 7px; border-radius: 6px;
-      background: rgba(2, 6, 23, 0.88);
-      border: 1px solid rgba(148, 163, 184, 0.3);
-      font-family: 'Noto Sans SC', system-ui, sans-serif;
-      font-size: 11px; color: #e2e8f0;
+      padding: 5px 9px; border-radius: 4px;
+      background: rgba(10, 14, 32, 0.92);
+      border: 1px solid rgba(160, 140, 255, 0.4);
+      box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+      font-family: 'Noto Serif SC', 'Songti SC', serif;
+      font-size: 12px; font-weight: 600; color: #e8ecf8;
       white-space: nowrap;
     }
-    .css2d-idx { font-family: Orbitron, monospace; font-size: 10px; color: #64748b; }
-    .css2d-name { font-weight: 500; max-width: 100px; overflow: hidden; text-overflow: ellipsis; }
+    .css2d-idx { font-size: 11px; color: #7a84a0; letter-spacing: 0.06em; font-weight: 700; }
+    .css2d-name { font-weight: 700; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
     .css2d-state {
-      font-size: 9px; padding: 1px 5px; border-radius: 999px;
-      border: 1px solid #64748b; color: #64748b;
+      font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 2px;
+      border: 1px solid #7a84a0; color: #7a84a0;
     }
-    .css2d-card.is-done { border-color: rgba(34,211,238,.5); }
-    .css2d-card.is-done .css2d-state { color: #22d3ee; border-color: #22d3ee; }
-    .css2d-card.is-running { border-color: rgba(251,191,36,.6); }
-    .css2d-card.is-running .css2d-state { color: #fbbf24; border-color: #fbbf24; }
-    .css2d-card.is-ready .css2d-state { color: #60a5fa; border-color: #60a5fa; }
-    .css2d-card.is-error .css2d-state, .css2d-card.is-failed .css2d-state { color: #f87171; border-color: #f87171; }
-    .css2d-card.is-pending { opacity: 0.5; }
+    .css2d-card.is-done { border-color: rgba(74,208,160,.55); }
+    .css2d-card.is-done .css2d-state { color: #6ae8b8; border-color: #4ad0a0; }
+    .css2d-card.is-running { border-color: rgba(255,138,64,.65); }
+    .css2d-card.is-running .css2d-state { color: #ff8a40; border-color: #ff8a40; }
+    .css2d-card.is-ready .css2d-state { color: #e0b84a; border-color: #e0b84a; }
+    .css2d-card.is-error .css2d-state, .css2d-card.is-failed .css2d-state { color: #ff6068; border-color: #ff6068; }
+    .css2d-card.is-pending { opacity: 0.8; }
     .css2d-agent {
       display: flex; align-items: center; gap: 3px;
-      padding: 2px 6px; border-radius: 999px;
-      background: rgba(15,23,42,.9); border: 1px solid rgba(167,139,250,.4);
-      font-size: 10px; color: #e2e8f0; white-space: nowrap;
+      padding: 3px 8px; border-radius: 4px;
+      background: rgba(10, 14, 32, 0.92);
+      border: 1px solid rgba(224,184,74,.45);
+      box-shadow: 0 3px 10px rgba(0,0,0,0.3);
+      font-family: 'Noto Serif SC', serif;
+      font-size: 11px; font-weight: 600; color: #e8ecf8; white-space: nowrap;
     }
     .css2d-boss {
-      padding: 5px 10px; border-radius: 8px;
-      background: rgba(49, 46, 129, 0.85);
-      border: 1px solid rgba(129,140,248,.5);
-      font-family: Orbitron, 'Noto Sans SC', sans-serif;
-      font-size: 11px; letter-spacing: .06em; color: #c7d2fe;
+      padding: 6px 12px; border-radius: 4px;
+      background: rgba(40, 20, 16, 0.94);
+      border: 1px solid rgba(224,80,64,.5);
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      font-family: 'Noto Serif SC', serif;
+      font-size: 13px; letter-spacing: .12em; color: #e0b84a; font-weight: 700;
     }
   `
   document.head.appendChild(style)
@@ -60,13 +62,12 @@ export function createStageLabel(stage, index) {
     <div class="css2d-card is-pending">
       <span class="css2d-idx">${String(index + 1).padStart(2, '0')}</span>
       <span class="css2d-name">${stage.label}</span>
-      <span class="css2d-state" data-state>等待</span>
+      <span class="css2d-state" data-state>静候</span>
     </div>
   `
-  // Hidden by default — only show for active / nearby stages (perf)
   el.style.display = 'none'
   const obj = new CSS2DObject(el)
-  obj.position.set(0, 1.45, 0)
+  obj.position.set(0, 1.0, 0)
   obj.userData = { el, stageId: stage.id }
   return obj
 }
@@ -83,8 +84,8 @@ export function createAgentLabel(agent) {
   el.className = 'css2d-label agent-label'
   el.innerHTML = `
     <div class="css2d-agent">
-      <span class="css2d-emoji">${agent.emoji || '🤖'}</span>
-      <span class="css2d-aname">${agent.chapter_id ? `章 ${agent.chapter_id}` : agent.label || agent.role}</span>
+      <span class="css2d-emoji">${agent.emoji || '☯'}</span>
+      <span class="css2d-aname">${agent.chapter_id ? `丹章 ${agent.chapter_id}` : agent.label || agent.role}</span>
     </div>
   `
   const obj = new CSS2DObject(el)
@@ -93,12 +94,12 @@ export function createAgentLabel(agent) {
   return obj
 }
 
-export function createBossLabel(text = '主 Agent · 统筹中枢') {
+export function createBossLabel(text = '掌炉真人 · 殿内控炉') {
   ensureStyles()
   const el = document.createElement('div')
   el.className = 'css2d-label boss-label'
   el.innerHTML = `<div class="css2d-boss">${text}</div>`
   const obj = new CSS2DObject(el)
-  obj.position.set(0, 2.2, 0)
+  obj.position.set(0, 2.0, 0)
   return obj
 }

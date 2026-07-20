@@ -2,53 +2,73 @@ import * as THREE from 'three'
 import { roleMeta, agentStatusColor } from '../config/stages.js'
 import { createAgentLabel, createBossLabel } from './labels.js'
 
-// Shared geometries
 const bodyGeo = new THREE.CapsuleGeometry(0.16, 0.34, 4, 8)
-const bossBodyGeo = new THREE.CapsuleGeometry(0.26, 0.5, 4, 8)
+const bossBodyGeo = new THREE.CapsuleGeometry(0.28, 0.55, 4, 8)
 const headGeo = new THREE.SphereGeometry(0.14, 10, 10)
-const bossHeadGeo = new THREE.SphereGeometry(0.2, 10, 10)
+const bossHeadGeo = new THREE.SphereGeometry(0.22, 10, 10)
 const ringGeo = new THREE.TorusGeometry(0.36, 0.025, 6, 20)
-const bossRingGeo = new THREE.TorusGeometry(0.52, 0.025, 6, 20)
-const deskGeo = new THREE.BoxGeometry(0.65, 0.07, 0.36)
-const screenGeo = new THREE.BoxGeometry(0.32, 0.2, 0.02)
+const bossRingGeo = new THREE.TorusGeometry(0.55, 0.03, 6, 20)
 const hitGeo = new THREE.SphereGeometry(0.55, 8, 8)
 
 function makeAgentMesh(colorHex, isBoss = false) {
   const g = new THREE.Group()
   const color = new THREE.Color(colorHex)
 
+  // 道袍：朱 / 金
+  const robeColor = isBoss ? 0xb82820 : 0x8a5030
   const body = new THREE.Mesh(
     isBoss ? bossBodyGeo : bodyGeo,
     new THREE.MeshStandardMaterial({
-      color: 0x0f172a,
-      metalness: 0.5,
-      roughness: 0.4,
+      color: robeColor,
+      metalness: 0.25,
+      roughness: 0.5,
       emissive: color,
-      emissiveIntensity: 0.4,
+      emissiveIntensity: isBoss ? 0.45 : 0.32,
     }),
   )
-  body.position.y = isBoss ? 0.7 : 0.5
+  body.position.y = isBoss ? 0.72 : 0.5
   g.add(body)
+
+  // 衣摆
+  const skirt = new THREE.Mesh(
+    new THREE.CylinderGeometry(isBoss ? 0.32 : 0.2, isBoss ? 0.38 : 0.24, 0.35, 8),
+    new THREE.MeshStandardMaterial({
+      color: isBoss ? 0x8a1810 : 0x6a3820,
+      roughness: 0.55,
+      metalness: 0.15,
+      emissive: color,
+      emissiveIntensity: 0.15,
+    }),
+  )
+  skirt.position.y = isBoss ? 0.28 : 0.22
+  g.add(skirt)
 
   const head = new THREE.Mesh(
     isBoss ? bossHeadGeo : headGeo,
     new THREE.MeshStandardMaterial({
-      color: 0xe2e8f0,
-      metalness: 0.25,
-      roughness: 0.45,
+      color: 0xffe8c8,
+      metalness: 0.08,
+      roughness: 0.5,
       emissive: color,
-      emissiveIntensity: 0.2,
+      emissiveIntensity: 0.15,
     }),
   )
-  head.position.y = isBoss ? 1.25 : 0.9
+  head.position.y = isBoss ? 1.3 : 0.9
   g.add(head)
 
-  const visor = new THREE.Mesh(
-    new THREE.BoxGeometry(isBoss ? 0.26 : 0.16, isBoss ? 0.07 : 0.045, 0.05),
-    new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.9 }),
+  // 道冠
+  const crown = new THREE.Mesh(
+    new THREE.CylinderGeometry(isBoss ? 0.12 : 0.08, isBoss ? 0.16 : 0.11, isBoss ? 0.18 : 0.12, 8),
+    new THREE.MeshStandardMaterial({
+      color: isBoss ? 0xe8c050 : 0xd4a840,
+      metalness: 0.6,
+      roughness: 0.35,
+      emissive: 0x6a4010,
+      emissiveIntensity: 0.25,
+    }),
   )
-  visor.position.set(0, isBoss ? 1.26 : 0.91, isBoss ? 0.16 : 0.11)
-  g.add(visor)
+  crown.position.y = isBoss ? 1.52 : 1.05
+  g.add(crown)
 
   const ring = new THREE.Mesh(
     isBoss ? bossRingGeo : ringGeo,
@@ -63,84 +83,75 @@ function makeAgentMesh(colorHex, isBoss = false) {
   ring.position.y = 0.04
   g.add(ring)
 
-  // NO PointLight per agent — that was freezing the page
-
-  if (!isBoss) {
-    const desk = new THREE.Mesh(deskGeo, new THREE.MeshBasicMaterial({ color: 0x1e293b }))
-    desk.position.set(0.32, 0.4, 0)
-    g.add(desk)
-    const screen = new THREE.Mesh(
-      screenGeo,
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.85 }),
-    )
-    screen.position.set(0.32, 0.62, -0.07)
-    g.add(screen)
-  }
-
   g.userData = { body, head, ring, color, light: null }
   return g
 }
 
-export function createAgentField(scene) {
+/**
+ * 掌炉真人殿内控炉；
+ * running → 升殿入阁；
+ * queued → 红毯两侧列队（如朝臣）；
+ * done → 远端歇息
+ */
+export function createAgentField(scene, layout = {}) {
   const root = new THREE.Group()
   root.name = 'agentField'
   scene.add(root)
 
+  const bossStand = layout.bossStand || new THREE.Vector3(0, 0.98, 2.6)
+  const workSlots = layout.workSlots || [
+    new THREE.Vector3(-2.6, 0.98, -0.2),
+    new THREE.Vector3(2.6, 0.98, -0.2),
+    new THREE.Vector3(-2.0, 0.98, 1.6),
+    new THREE.Vector3(2.0, 0.98, 1.6),
+  ]
+  const queueSlots = layout.queueSlots || []
+  const loungeSlots = layout.loungeSlots || []
+  const queueOrigin = layout.queueOrigin || new THREE.Vector3(0, 0.12, 20)
+
+  // 掌炉真人 — 殿内金台
   const bossPad = new THREE.Group()
-  bossPad.position.set(0, 0, 5.5)
+  bossPad.position.copy(bossStand)
   bossPad.add(
     new THREE.Mesh(
-      new THREE.CylinderGeometry(1.5, 1.7, 0.18, 20),
+      new THREE.CylinderGeometry(0.95, 1.05, 0.14, 18),
       new THREE.MeshStandardMaterial({
-        color: 0x111827,
-        metalness: 0.7,
-        roughness: 0.4,
-        emissive: 0x4f46e5,
-        emissiveIntensity: 0.2,
+        color: 0xe8c050,
+        metalness: 0.55,
+        roughness: 0.35,
+        emissive: 0x8b3a18,
+        emissiveIntensity: 0.28,
       }),
     ),
   )
-  const boss = makeAgentMesh('#818cf8', true)
+  const boss = makeAgentMesh('#e0b44a', true)
   boss.position.y = 0.08
   bossPad.add(boss)
-  const bossLabel = createBossLabel('主 Agent · 统筹中枢')
+  const bossLabel = createBossLabel('掌炉真人 · 殿内控炉')
   bossPad.add(bossLabel)
   root.add(bossPad)
 
-  const bayMat = new THREE.MeshBasicMaterial({ color: 0x0b1220, transparent: true, opacity: 0.9 })
-  const bayLeft = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.1, 3), bayMat)
-  bayLeft.position.set(-6.2, 0.05, 6.2)
-  root.add(bayLeft)
-  const bayRight = new THREE.Mesh(new THREE.BoxGeometry(6.5, 0.1, 3), bayMat)
-  bayRight.position.set(6.2, 0.05, 6.2)
-  root.add(bayRight)
-
-  const queueMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(9, 0.06, 1.0),
-    new THREE.MeshBasicMaterial({ color: 0x0f172a }),
-  )
-  queueMesh.position.set(0, 0.03, 9.2)
-  root.add(queueMesh)
-  const loungeMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(7.5, 0.06, 1.2),
-    new THREE.MeshBasicMaterial({ color: 0x0f172a }),
-  )
-  loungeMesh.position.set(0, 0.03, 11.1)
-  root.add(loungeMesh)
-
   const agentMeshes = new Map()
-  const MAX_VISIBLE_AGENTS = 12
+  const MAX_VISIBLE_AGENTS = 16
 
   function slotPosition(status, index) {
-    if (status === 'running') {
-      const side = index % 2 === 0 ? -1 : 1
-      const row = Math.floor(index / 2) % 4
-      return new THREE.Vector3(side * (4.0 + (row % 2) * 1.3), 0.08, 5.3 + Math.floor(row / 2) * 1.0)
+    if (status === 'running' || status === 'failed') {
+      return (workSlots[index % workSlots.length] || workSlots[0]).clone()
     }
     if (status === 'queued') {
-      return new THREE.Vector3(-3.6 + (index % 7) * 1.1, 0.08, 9.2)
+      if (queueSlots.length) {
+        return queueSlots[index % queueSlots.length].clone()
+      }
+      // fallback：红毯两侧
+      const side = index % 2 === 0 ? -1 : 1
+      const row = Math.floor(index / 2)
+      return new THREE.Vector3(side * 1.85, 0.12, 10 + row * 1.35)
     }
-    return new THREE.Vector3(-2.8 + (index % 6) * 1.05, 0.08, 11.1)
+    // done / idle
+    if (loungeSlots.length) {
+      return loungeSlots[index % loungeSlots.length].clone()
+    }
+    return new THREE.Vector3(-4 + (index % 6) * 1.2, 0.12, 22)
   }
 
   function ensureAgent(agent) {
@@ -162,6 +173,9 @@ export function createAgentField(scene) {
     hit.userData = { pickType: 'agent', agentId: agent.id }
     mesh.add(hit)
 
+    mesh.position.copy(queueOrigin)
+    // 面朝大殿（-Z 方向）
+    mesh.rotation.y = Math.PI
     root.add(mesh)
     entry = {
       id: agent.id,
@@ -170,7 +184,7 @@ export function createAgentField(scene) {
       label,
       status: agent.status,
       role: agent.role,
-      target: new THREE.Vector3(),
+      target: queueOrigin.clone(),
       color,
     }
     agentMeshes.set(agent.id, entry)
@@ -183,7 +197,6 @@ export function createAgentField(scene) {
         root.remove(entry.group)
         entry.group.traverse((obj) => {
           if (obj.isMesh && obj.material) {
-            // geometries are shared; only dispose instance materials
             if (Array.isArray(obj.material)) obj.material.forEach((m) => m.dispose?.())
             else obj.material.dispose?.()
           }
@@ -201,8 +214,8 @@ export function createAgentField(scene) {
     bossLabel,
     applyAgents(agents, activity = {}) {
       const list = Array.isArray(agents) ? agents : []
-      // Stable signature to skip redundant work
-      const sig = list.map((a) => `${a.id}:${a.status}:${a.message || ''}`).join('|') +
+      const sig =
+        list.map((a) => `${a.id}:${a.status}:${a.message || ''}`).join('|') +
         `:${activity.phase_label || ''}:${activity.status || ''}`
       if (sig === lastSig) return
       lastSig = sig
@@ -212,18 +225,18 @@ export function createAgentField(scene) {
 
       const bossEl = bossLabel.element
       if (bossEl) {
-        const msg = coordinator?.message || activity.phase_label || '主 Agent · 统筹中枢'
+        const msg = coordinator?.message || activity.phase_label || '掌炉真人 · 殿内控炉'
         const node = bossEl.querySelector('.css2d-boss')
         if (node) node.textContent = msg
       }
       boss.userData.ring.material.opacity =
-        !activity.status || activity.status === 'running' || coordinator?.status === 'running' ? 0.8 : 0.4
+        !activity.status || activity.status === 'running' || coordinator?.status === 'running' ? 0.85 : 0.45
 
-      // Cap visible agents for performance
+      // 排队优先展示，形成朝臣列队感
       const prioritized = [
+        ...subs.filter((a) => a.status === 'queued'),
         ...subs.filter((a) => a.status === 'running'),
         ...subs.filter((a) => a.status === 'failed'),
-        ...subs.filter((a) => a.status === 'queued'),
         ...subs.filter((a) => a.status === 'done' || a.status === 'skipped'),
       ].slice(0, MAX_VISIBLE_AGENTS)
 
@@ -243,13 +256,23 @@ export function createAgentField(scene) {
           entry.target.copy(slotPosition(status, idx))
           const sc = agentStatusColor(status)
           entry.mesh.userData.ring.material.color.set(sc)
-          entry.mesh.userData.body.material.emissiveIntensity = status === 'running' ? 0.7 : 0.3
+          entry.mesh.userData.body.material.emissiveIntensity = status === 'running' ? 0.7 : 0.28
+
+          // 朝向：排队面朝大殿，阁内面朝丹炉
+          if (status === 'running' || status === 'failed') {
+            entry.group.rotation.y = 0
+          } else {
+            entry.group.rotation.y = Math.PI
+          }
+
           const nameEl = entry.label.userData.el?.querySelector('.css2d-aname')
           if (nameEl) {
             const meta = roleMeta(agent.role)
+            const where =
+              status === 'running' || status === 'failed' ? '升殿' : status === 'queued' ? '列队' : '退朝'
             nameEl.textContent = agent.chapter_id
-              ? `${meta.label.replace(' Agent', '')} · ${agent.chapter_id}`
-              : meta.label
+              ? `${meta.label} · ${agent.chapter_id}`
+              : `${meta.label} · ${where}`
           }
         })
       }
@@ -258,7 +281,7 @@ export function createAgentField(scene) {
     update(t) {
       boss.position.y = 0.08 + Math.sin(t * 1.8) * 0.03
       for (const entry of agentMeshes.values()) {
-        entry.group.position.lerp(entry.target, 0.1)
+        entry.group.position.lerp(entry.target, 0.07)
         if (entry.status === 'running') {
           entry.group.position.y = entry.target.y + Math.sin(t * 5 + entry.id.length) * 0.04
           entry.mesh.userData.ring.scale.setScalar(1 + Math.sin(t * 4) * 0.06)

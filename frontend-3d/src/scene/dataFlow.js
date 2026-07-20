@@ -12,7 +12,7 @@ export function createDataFlow(scene, curve) {
   const speeds = new Float32Array(count)
   const offsets = new Float32Array(count)
 
-  const palette = [new THREE.Color(0x22d3ee), new THREE.Color(0xa78bfa), new THREE.Color(0xf472b6)]
+  const palette = [new THREE.Color(0xc43c2c), new THREE.Color(0xd4a017), new THREE.Color(0xff8a40)]
 
   for (let i = 0; i < count; i++) {
     offsets[i] = Math.random()

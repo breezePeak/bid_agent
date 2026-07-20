@@ -6,38 +6,38 @@
 export const PHASES = [
   {
     id: 'prepare',
-    label: '准备',
-    color: '#38bdf8',
+    label: '采药',
+    color: '#5fa88a',
     description: '初始化与资料导入',
   },
   {
     id: 'analyze',
-    label: '解析',
-    color: '#a78bfa',
+    label: '辨材',
+    color: '#c49b4e',
     description: '评分、事实与材料',
   },
   {
     id: 'plan',
-    label: '规划',
-    color: '#34d399',
+    label: '立鼎',
+    color: '#7ec9a8',
     description: '大纲、任务与上下文',
   },
   {
     id: 'write',
-    label: '写作',
-    color: '#fbbf24',
+    label: '炼丹',
+    color: '#d44a32',
     description: '章节并发生成',
   },
   {
     id: 'quality',
-    label: '质检',
-    color: '#f472b6',
+    label: '点化',
+    color: '#e0b44a',
     description: '审核、覆盖与合规',
   },
   {
     id: 'deliver',
-    label: '交付',
-    color: '#22d3ee',
+    label: '出炉',
+    color: '#ff8a3d',
     description: '成稿与格式检查',
   },
 ]
@@ -69,59 +69,59 @@ export const STAGE_DEFS = [
 export const PHASE_BY_ID = Object.fromEntries(PHASES.map((p) => [p.id, p]))
 
 export const AGENT_ROLE_META = {
-  coordinator: { label: '主 Agent', color: '#818cf8', emoji: '🧭', tier: 'boss' },
-  chapter_writer: { label: '写作 Agent', color: '#60a5fa', emoji: '✍️', tier: 'worker' },
-  chapter_reviewer: { label: '审核 Agent', color: '#c084fc', emoji: '🔍', tier: 'worker' },
-  chapter_rewriter: { label: '改稿 Agent', color: '#fb923c', emoji: '📝', tier: 'worker' },
-  global_reviewer: { label: '全文审核', color: '#2dd4bf', emoji: '📋', tier: 'specialist' },
-  pipeline: { label: '流水线', color: '#94a3b8', emoji: '⚙️', tier: 'system' },
-  outline_generator: { label: '大纲 Agent', color: '#34d399', emoji: '◈', tier: 'specialist' },
-  chapter_context_selector: { label: '上下文 Agent', color: '#a3e635', emoji: '◎', tier: 'worker' },
-  tender_requirement_extractor: { label: '需求抽取', color: '#a78bfa', emoji: '✦', tier: 'specialist' },
-  company_facts_extractor: { label: '事实抽取', color: '#e879f9', emoji: '✦', tier: 'specialist' },
-  score_requirement_extractor: { label: '评分抽取', color: '#fbbf24', emoji: '★', tier: 'specialist' },
-  score_point_parser: { label: '评分点解析', color: '#f59e0b', emoji: '★', tier: 'specialist' },
-  chapter_summarizer: { label: '摘要 Agent', color: '#67e8f9', emoji: '≡', tier: 'worker' },
-  tender_block_classifier: { label: '文档分类', color: '#38bdf8', emoji: '⇪', tier: 'specialist' },
+  coordinator: { label: '掌炉真人', color: '#e0b44a', emoji: '☯', tier: 'boss' },
+  chapter_writer: { label: '炼丹弟子', color: '#d44a32', emoji: '🔥', tier: 'worker' },
+  chapter_reviewer: { label: '验丹长老', color: '#5fa88a', emoji: '👁', tier: 'worker' },
+  chapter_rewriter: { label: '改火道人', color: '#ff8a3d', emoji: '✎', tier: 'worker' },
+  global_reviewer: { label: '总坛真人', color: '#c49b4e', emoji: '📜', tier: 'specialist' },
+  pipeline: { label: '丹道周天', color: '#9a8568', emoji: '◎', tier: 'system' },
+  outline_generator: { label: '立鼎师', color: '#7ec9a8', emoji: '◈', tier: 'specialist' },
+  chapter_context_selector: { label: '采药童子', color: '#8b9e6b', emoji: '🌿', tier: 'worker' },
+  tender_requirement_extractor: { label: '辨材道人', color: '#c49b4e', emoji: '✦', tier: 'specialist' },
+  company_facts_extractor: { label: '察事实者', color: '#d48a50', emoji: '✦', tier: 'specialist' },
+  score_requirement_extractor: { label: '评品真人', color: '#e0b44a', emoji: '★', tier: 'specialist' },
+  score_point_parser: { label: '析分道友', color: '#d4a040', emoji: '★', tier: 'specialist' },
+  chapter_summarizer: { label: '录丹史', color: '#a89878', emoji: '≡', tier: 'worker' },
+  tender_block_classifier: { label: '分拣药童', color: '#8b7355', emoji: '⇪', tier: 'specialist' },
 }
 
 export function roleMeta(role) {
-  return AGENT_ROLE_META[role] || { label: role || 'Agent', color: '#94a3b8', emoji: '🤖', tier: 'worker' }
+  return AGENT_ROLE_META[role] || { label: role || '道友', color: '#9a8568', emoji: '☯', tier: 'worker' }
 }
 
 export function stateColor(state) {
   switch (state) {
     case 'done':
-      return '#22d3ee'
+      return '#5fa88a'
     case 'running':
-      return '#fbbf24'
+      return '#ff8a3d'
     case 'ready':
-      return '#60a5fa'
+      return '#e0b44a'
     case 'error':
     case 'failed':
-      return '#f87171'
+      return '#e05555'
     case 'blocked':
-      return '#fb923c'
+      return '#d48a50'
     case 'queued':
-      return '#94a3b8'
+      return '#9a8568'
     default:
-      return '#475569'
+      return '#5a4a38'
   }
 }
 
 export function agentStatusColor(status) {
   switch (status) {
     case 'running':
-      return '#fbbf24'
+      return '#ff8a3d'
     case 'done':
-      return '#34d399'
+      return '#5fa88a'
     case 'failed':
-      return '#f87171'
+      return '#e05555'
     case 'queued':
-      return '#64748b'
+      return '#9a8568'
     case 'skipped':
-      return '#475569'
+      return '#5a4a38'
     default:
-      return '#64748b'
+      return '#9a8568'
   }
 }

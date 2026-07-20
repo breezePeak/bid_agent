@@ -72,38 +72,59 @@ export function createDemoController(store) {
       {
         id: 'coordinator:main',
         role: 'coordinator',
-        label: '主 Agent',
-        emoji: '🧭',
-        color: 'indigo',
+        label: '掌炉真人',
+        emoji: '☯',
+        color: 'gold',
         chapter_id: '',
         status: 'running',
-        message: running ? `调度 · ${phaseLabel}` : '值班统筹 · 等待用户指令',
+        message: running ? `掌炉 · ${phaseLabel}` : '静守炉前 · 候令',
         is_coordinator: true,
       },
     ]
+
+    // 始终保留若干列队道众，形成红毯朝班
+    const queueRoles = [
+      { role: 'chapter_writer', label: '炼丹弟子' },
+      { role: 'chapter_reviewer', label: '验丹长老' },
+      { role: 'chapter_rewriter', label: '改火道人' },
+      { role: 'outline_generator', label: '立鼎师' },
+      { role: 'chapter_context_selector', label: '采药童子' },
+      { role: 'tender_requirement_extractor', label: '辨材道人' },
+    ]
+    for (let q = 0; q < 6; q++) {
+      const rr = queueRoles[q % queueRoles.length]
+      agents.push({
+        id: `queue:${rr.role}:${q}`,
+        role: rr.role,
+        label: rr.label,
+        emoji: '☯',
+        chapter_id: '',
+        status: 'queued',
+        message: '丹墀列队 · 候传',
+      })
+    }
 
     if (isWrite || isSelect) {
       for (let c = 1; c <= chapterCount; c++) {
         const cid = String(c).padStart(2, '0')
         const slot = (tick + c) % 10
         let status = 'queued'
-        let message = '排队中'
-        if (slot < 4) {
+        let message = '丹墀列队'
+        if (slot < 3) {
           status = 'running'
-          message = isWrite ? `撰写第 ${cid} 章…` : `筛选上下文 ${cid}`
-        } else if (slot < 7) {
+          message = isWrite ? `阁内炼制第 ${cid} 章…` : `阁内选药 ${cid}`
+        } else if (slot < 6) {
           status = 'done'
-          message = '完成'
+          message = '退朝歇息'
         } else if (slot === 9 && c === chapterCount) {
           status = 'failed'
-          message = '超时重试中'
+          message = '炸炉 · 重炼'
         }
         agents.push({
           id: `${isWrite ? 'chapter_writer' : 'chapter_context_selector'}:${cid}`,
           role: isWrite ? 'chapter_writer' : 'chapter_context_selector',
-          label: isWrite ? '写作 Agent' : '上下文 Agent',
-          emoji: isWrite ? '✍️' : '◎',
-          color: isWrite ? 'blue' : 'green',
+          label: isWrite ? '炼丹弟子' : '采药童子',
+          emoji: isWrite ? '🔥' : '🌿',
           chapter_id: cid,
           status,
           message,
@@ -117,13 +138,13 @@ export function createDemoController(store) {
         const role = slot < 3 ? 'chapter_reviewer' : slot < 5 ? 'chapter_rewriter' : 'chapter_reviewer'
         const meta = ROLE_POOL.find((r) => r.role === role) || ROLE_POOL[0]
         let status = 'queued'
-        let message = '排队中'
+        let message = '丹墀列队'
         if (slot < 3) {
           status = 'running'
-          message = role === 'chapter_rewriter' ? `改稿 ${cid}` : `审核 ${cid}`
+          message = role === 'chapter_rewriter' ? `阁内改火 ${cid}` : `阁内验丹 ${cid}`
         } else if (slot < 7) {
           status = 'done'
-          message = '通过'
+          message = '退朝'
         }
         agents.push({
           id: `${role}:${cid}`,
@@ -140,23 +161,23 @@ export function createDemoController(store) {
       agents.push({
         id: 'global_reviewer:all',
         role: 'global_reviewer',
-        label: '全文审核',
-        emoji: '📋',
+        label: '总坛真人',
+        emoji: '📜',
         color: 'teal',
         chapter_id: 'ALL',
         status: 'running',
-        message: '全文一致性扫描…',
+        message: '殿内通览全文…',
       })
     } else if (running && current?.agents?.length) {
       agents.push({
         id: `${current.agents[0]}:01`,
         role: current.agents[0],
         label: current.agents[0],
-        emoji: '🤖',
+        emoji: '☯',
         color: 'slate',
         chapter_id: '01',
         status: 'running',
-        message: `${current.label} 处理中`,
+        message: `${current.label} · 升殿办差`,
       })
     }
 

@@ -12,7 +12,7 @@ export class App3D {
     this.clock = new THREE.Clock()
     this.raycaster = new THREE.Raycaster()
     this.pointer = new THREE.Vector2()
-    this.autoOrbit = true
+    this.autoOrbit = false
     this.focusMode = 'overview'
     this.onPick = null
     this._userDriving = false
@@ -35,7 +35,7 @@ export class App3D {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false)
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
     this.renderer.toneMapping = THREE.NoToneMapping // cheaper than ACES
-    this.renderer.setClearColor(0x0b1220, 1)
+    this.renderer.setClearColor(0x060818, 1)
 
     this.labelRenderer = new CSS2DRenderer()
     this.labelRenderer.setSize(window.innerWidth, window.innerHeight)
@@ -47,21 +47,39 @@ export class App3D {
     canvas.parentElement.appendChild(labelEl)
 
     this.scene = new THREE.Scene()
-    this.camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.2, 120)
-    this.camera.position.set(0, 14, 22)
+    this.camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 0.3, 220)
+    // 长廊尽头仰视大殿
+    this.camera.position.set(0, 8, 48)
 
     this.controls = new OrbitControls(this.camera, canvas)
     this.controls.enableDamping = true
     this.controls.dampingFactor = 0.08
-    this.controls.minDistance = 6
-    this.controls.maxDistance = 40
-    this.controls.maxPolarAngle = Math.PI * 0.48
-    this.controls.target.set(0, 1.5, 2)
+    // 任意缩放
+    this.controls.enableZoom = true
+    this.controls.zoomSpeed = 1.35
+    this.controls.minDistance = 1.2
+    this.controls.maxDistance = 160
+    // 360° 环绕 + 近全俯仰
+    this.controls.minPolarAngle = 0.02
+    this.controls.maxPolarAngle = Math.PI - 0.02
+    this.controls.enablePan = true
+    this.controls.panSpeed = 1.1
+    this.controls.rotateSpeed = 0.85
+    this.controls.screenSpacePanning = true
+    this.controls.target.set(0, 4, 2)
     this.controls.update()
 
     this.env = createEnvironment(this.scene)
     this.stageTrack = createStageTrack(this.scene)
-    this.agentField = createAgentField(this.scene)
+    const pav = this.env.pavilion
+    this.agentField = createAgentField(this.scene, {
+      bossStand: pav.bossStand,
+      workSlots: pav.workSlots,
+      queueOrigin: pav.queueOrigin,
+      doorPos: pav.doorPos,
+      queueSlots: pav.queueSlots,
+      loungeSlots: pav.loungeSlots,
+    })
     this.dataFlow = createDataFlow(this.scene, this.stageTrack.curve)
 
     this._rebuildPickables()
@@ -75,11 +93,13 @@ export class App3D {
 
     this.controls.addEventListener('start', () => {
       this._userDriving = true
+      // 用户拖拽/滚轮时暂停自动环游，避免抢控制
+      this._camAnim = null
     })
     this.controls.addEventListener('end', () => {
       window.setTimeout(() => {
         this._userDriving = false
-      }, 2000)
+      }, 2500)
     })
 
     this._raf = 0
@@ -146,9 +166,41 @@ export class App3D {
     this._lastSnap = snap
   }
 
+  /** 视角预设：自由缩放/旋转始终可用，预设只负责切机位 */
   focusOverview() {
     this.focusMode = 'overview'
-    this._animateCamera(new THREE.Vector3(0, 14, 22), new THREE.Vector3(0, 1.5, 2))
+    this._animateCamera(new THREE.Vector3(0, 8, 48), new THREE.Vector3(0, 4, 2))
+  }
+
+  focusFront() {
+    this.focusMode = 'front'
+    // 廊中红毯视角
+    this._animateCamera(new THREE.Vector3(0, 3.5, 36), new THREE.Vector3(0, 3.5, 0))
+  }
+
+  focusHall() {
+    this.focusMode = 'hall'
+    this._animateCamera(new THREE.Vector3(0, 4.2, 10), new THREE.Vector3(0, 3, -6))
+  }
+
+  focusFurnace() {
+    this.focusMode = 'furnace'
+    this._animateCamera(new THREE.Vector3(3.5, 3.8, 0), new THREE.Vector3(0, 2.8, -6))
+  }
+
+  focusSide() {
+    this.focusMode = 'side'
+    this._animateCamera(new THREE.Vector3(28, 10, 16), new THREE.Vector3(0, 3, 8))
+  }
+
+  focusTop() {
+    this.focusMode = 'top'
+    this._animateCamera(new THREE.Vector3(0, 55, 12), new THREE.Vector3(0, 0, 8))
+  }
+
+  focusBack() {
+    this.focusMode = 'back'
+    this._animateCamera(new THREE.Vector3(0, 12, -32), new THREE.Vector3(0, 4, -4))
   }
 
   focusActive() {
@@ -161,29 +213,43 @@ export class App3D {
       return
     }
     const pos = this.stageTrack.getPosition(active.index)
-    this._animateCamera(pos.clone().add(new THREE.Vector3(0, 6, 8)), pos.clone().add(new THREE.Vector3(0, 0.5, 0)))
+    this._animateCamera(pos.clone().add(new THREE.Vector3(0, 6, 10)), pos.clone().add(new THREE.Vector3(0, 0.5, 0)))
   }
 
   focusAgents() {
     this.focusMode = 'agents'
-    this._animateCamera(new THREE.Vector3(0, 8, 18), new THREE.Vector3(0, 0.5, 7))
+    // 俯瞰长廊列队
+    this._animateCamera(new THREE.Vector3(0, 16, 40), new THREE.Vector3(0, 1, 18))
   }
 
   focusStage(index) {
     const pos = this.stageTrack.getPosition(index)
     if (!pos) return
     this.focusMode = 'stage'
-    this._animateCamera(pos.clone().add(new THREE.Vector3(2, 5, 7)), pos.clone().add(new THREE.Vector3(0, 0.4, 0)))
+    this._animateCamera(pos.clone().add(new THREE.Vector3(2, 5, 8)), pos.clone().add(new THREE.Vector3(0, 0.4, 0)))
+  }
+
+  zoomBy(factor) {
+    // 相对当前距离缩放
+    const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target)
+    const dist = dir.length()
+    const next = Math.min(160, Math.max(1.2, dist * factor))
+    dir.setLength(next)
+    this.camera.position.copy(this.controls.target).add(dir)
+    this.controls.update()
+    this._userDriving = true
+    this.autoOrbit = false
   }
 
   _animateCamera(position, target) {
+    this._userDriving = true
     this._camAnim = {
       fromPos: this.camera.position.clone(),
       toPos: position.clone(),
       fromTarget: this.controls.target.clone(),
       toTarget: target.clone(),
       t: 0,
-      dur: 0.9,
+      dur: 0.85,
     }
   }
 
@@ -239,12 +305,13 @@ export class App3D {
       this.controls.target.lerpVectors(this._camAnim.fromTarget, this._camAnim.toTarget, e)
       if (k >= 1) this._camAnim = null
     } else if (this.autoOrbit && !this._userDriving && this.focusMode === 'overview') {
-      const r = 22
-      const ang = t * 0.06
-      this.camera.position.x = Math.sin(ang) * r * 0.5
-      this.camera.position.z = Math.cos(ang) * r
-      this.camera.position.y = 12 + Math.sin(t * 0.25) * 0.4
-      this.controls.target.set(0, 1.5, 2)
+      // 环殿廊 360° 公转
+      const r = 42
+      const ang = t * 0.04
+      this.camera.position.x = Math.sin(ang) * r
+      this.camera.position.z = Math.cos(ang) * r + 8
+      this.camera.position.y = 9 + Math.sin(t * 0.2) * 1.0
+      this.controls.target.set(0, 4, 2)
     }
 
     this.controls.update()
