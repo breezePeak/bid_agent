@@ -307,7 +307,11 @@ def plan(
     llm_chat=None,
     review_context: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    # PR-3: optional Supervisor short-loop (flag default off)
+    """Chat plan entry (PR-A2/A3).
+
+    When Supervisor is enabled (default), goal execution is delegated to the
+    unified kernel. Legacy orchestrator remains emergency / non-goal fallback.
+    """
     try:
         from agent.flags import agent_supervisor_enabled
         from agent.supervisor import plan_with_supervisor
@@ -321,6 +325,7 @@ def plan(
                 review_context=review_context,
             )
             if supervised:
+                supervised["mode"] = "agent"
                 return supervised
     except Exception:
         # fall through to legacy orchestrator
@@ -362,6 +367,7 @@ def plan(
     plan = _normalize_plan(plan_json, message)
     if reasoning:
         plan["thinking"] = reasoning
+    plan["mode"] = "legacy"
     return plan
 
 

@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from agent.tool_registry import get_tool, stage_to_tool_spec
 from agent.types import ToolError, ToolResult, ToolSpec
+from concurrency import clamp_workers
 from pipeline_registry import (
     STAGE_SPECS,
     artifact_exists,
@@ -147,7 +148,7 @@ def _execute_stage(
     stage_id: str,
     *,
     force: bool = False,
-    workers: int = 1,
+    workers: int | None = None,
     max_retries: int = 0,
     dry_run: bool = False,
     actor: str = "pipeline",
@@ -250,9 +251,8 @@ def _execute_stage(
 
     try:
         func = _resolve_stage_callable(stage.runner)
-        extra: dict[str, Any] = {}
-        if workers != 1:
-            extra["workers"] = workers
+        effective_workers = clamp_workers(workers)
+        extra: dict[str, Any] = {"workers": effective_workers}
         if max_retries:
             extra["max_retries"] = max_retries
         # Special-case main.init_project which lives in main module
@@ -266,13 +266,13 @@ def _execute_stage(
 
             run_write_all(
                 root,
-                workers=max(1, int(workers or 1)),
+                workers=effective_workers,
                 max_retries=int(max_retries or 0),
             )
         elif stage.id == "review_fix_chapters":
             from chapter_rewriter import review_fix_all
 
-            review_fix_all(root, workers=max(1, int(workers or 1)))
+            review_fix_all(root, workers=effective_workers)
         else:
             _call_with_supported_kwargs(func, root, extra)
     except Exception as exc:  # noqa: BLE001 - surface to ToolResult
@@ -564,7 +564,7 @@ def _execute_chapter_tool(
     except ValueError as exc:
         return _fail(tool_name, args, started, code="invalid_args", message=str(exc))
 
-    workers = int(args.get("workers", 2) or 2)
+    workers = clamp_workers(args.get("workers"))
     max_retries = int(args.get("max_retries", 0) or 0)
     call_args = {
         "chapter_ids": chapter_ids,
@@ -1016,7 +1016,7 @@ def _fix_coverage(root: Path, args: dict[str, Any], *, dry_run: bool = False) ->
     max_chapters = int(args.get("max_chapters", 5) or 5)
     confirm_execute = bool(args.get("confirm_execute", False))
     rebuild_matrix = bool(args.get("rebuild_matrix", True))
-    workers = int(args.get("workers", 2) or 2)
+    workers = clamp_workers(args.get("workers"))
     max_rounds = max(1, min(int(args.get("max_rounds", 1) or 1), 3))
     call_args = {
         "max_chapters": max_chapters,
@@ -1274,7 +1274,7 @@ def _fix_compliance(root: Path, args: dict[str, Any], *, dry_run: bool = False) 
     confirm_execute = bool(args.get("confirm_execute", False))
     rerun_check = bool(args.get("rerun_check", False))
     max_chapters = max(1, int(args.get("max_chapters", 8) or 8))
-    workers = int(args.get("workers", 2) or 2)
+    workers = clamp_workers(args.get("workers"))
     sync = bool(args.get("sync", True))
     call_args = {
         "confirm_execute": confirm_execute,
@@ -1492,7 +1492,7 @@ def invoke(
             root,
             stage.id,
             force=bool(args.get("force", False)),
-            workers=int(args.get("workers", 1) or 1),
+            workers=clamp_workers(args.get("workers")),
             max_retries=int(args.get("max_retries", 0) or 0),
             dry_run=dry_run,
             actor=actor,
@@ -1602,7 +1602,7 @@ def invoke(
             root,
             spec.stage_id,
             force=bool(stage_args.get("force", False)),
-            workers=int(stage_args.get("workers", 1) or 1),
+            workers=clamp_workers(stage_args.get("workers")),
             max_retries=int(stage_args.get("max_retries", 0) or 0),
             dry_run=dry_run,
             actor=actor,

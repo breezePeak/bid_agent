@@ -72,15 +72,18 @@ def build_bid_graph():
 
 def run_bid_graph(
     root: Path | None = None,
-    workers: int = 1,
+    workers: int | None = None,
     resume: bool = False,
     max_retries: int = 0,
 ) -> BidState:
+    from concurrency import clamp_workers
+
     root = root or project_root()
     graph = build_bid_graph()
+    effective_workers = clamp_workers(workers)
     initial_state: BidState = {
         "root_dir": str(root),
-        "workers": workers,
+        "workers": effective_workers,
         "max_retries": max(0, int(max_retries)),
         "resume": resume,
         "completed_chapters": [],
@@ -92,7 +95,7 @@ def run_bid_graph(
         previous_state = previous.get("state", {}) if isinstance(previous.get("state"), dict) else {}
         initial_state.update(previous_state)
         initial_state["root_dir"] = str(root)
-        initial_state["workers"] = workers
+        initial_state["workers"] = effective_workers
         initial_state["max_retries"] = max(0, int(max_retries))
         initial_state["resume"] = True
 

@@ -19,6 +19,14 @@
         <div class="agp-goal-text">{{ goal.raw_user_goal || summary }}</div>
         <div class="agp-summary">{{ summary }}</div>
 
+        <div v-if="planSteps.length" class="agp-plan">
+          <div class="agp-section-label">计划步骤</div>
+          <div v-for="(s, i) in planSteps" :key="i" class="agp-plan-step" :class="'ps-' + (s.status || 'pending')">
+            <span class="ps-status">{{ s.status || 'pending' }}</span>
+            <span class="ps-label">{{ s.label || s.tool || s.step_id }}</span>
+          </div>
+        </div>
+
         <div v-if="criteria.length" class="agp-criteria">
           <div class="agp-section-label">成功准则</div>
           <div v-for="(c, i) in criteria" :key="i" class="agp-criterion" :class="{ ok: c.ok, bad: !c.ok }">
@@ -28,8 +36,13 @@
           </div>
         </div>
 
+        <div v-if="blockedReason" class="agp-block">
+          <div class="agp-section-label">阻断原因</div>
+          <div class="agp-block-text">{{ blockedReason }}</div>
+        </div>
+
         <div v-if="decisions.length" class="agp-decisions">
-          <div class="agp-section-label">最近决策</div>
+          <div class="agp-section-label">最近决策 / 选择原因</div>
           <div v-for="(d, i) in decisions" :key="i" class="agp-decision">
             <div class="agp-d-top">
               <span class="tool">{{ d.selected_tool || d.tool || '-' }}</span>
@@ -59,6 +72,8 @@ const goal = ref(null)
 const summary = ref('')
 const decisions = ref([])
 const criteria = ref([])
+const planSteps = ref([])
+const blockedReason = ref('')
 const error = ref('')
 const polling = ref(false)
 let timer = null
@@ -80,6 +95,8 @@ async function refresh() {
     goal.value = gBody.goal || null
     summary.value = gBody.summary || ''
     criteria.value = Array.isArray(goal.value?.criteria_results) ? goal.value.criteria_results : []
+    planSteps.value = Array.isArray(goal.value?.plan) ? goal.value.plan : []
+    blockedReason.value = goal.value?.blocked_reason || ''
     decisions.value = Array.isArray(dBody.decisions) ? dBody.decisions.slice().reverse() : []
   } catch (e) {
     error.value = e?.message || '轮询失败'

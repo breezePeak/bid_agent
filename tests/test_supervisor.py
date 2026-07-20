@@ -37,10 +37,11 @@ class SupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_tool_index()
 
-    def test_flag_default_off(self) -> None:
+    def test_flag_default_on(self) -> None:
+        """PR-A3: Supervisor is the default product entry."""
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop("AGENT_SUPERVISOR_ENABLED", None)
-            self.assertFalse(agent_supervisor_enabled())
+            self.assertTrue(agent_supervisor_enabled())
 
     def test_rule_based_status_query(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

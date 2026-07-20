@@ -749,7 +749,10 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
     wants_status = any(k in text for k in ("状态", "进度", "诊断", "失败"))
     wants_coverage = any(k in text for k in ("覆盖率", "评分点", "未覆盖", "补齐评分", "覆盖缺口", "补齐所有可自动", "补齐评分点"))
     wants_compliance = any(k in text for k in ("合规", "废标", "blocking"))
-    no_price = any(k in text for k in ("不要改报价", "禁止修改报价", "不改价格", "跳过报价"))
+    no_price = any(
+        k in text
+        for k in ("不要改报价", "不要修改报价", "禁止修改报价", "不改价格", "不修改报价", "跳过报价")
+    )
     tech_only = any(k in text for k in ("只处理技术", "仅技术方案", "只改技术"))
 
     if no_price:

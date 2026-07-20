@@ -284,7 +284,7 @@ def rewrite_all(root: Path | None = None) -> list[Path]:
     return paths
 
 
-def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int = 2) -> None:
+def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int | None = None) -> None:
     root = root or project_root()
     from subagent_runner import run_review_all, run_rewrite_all
     from stage_validation import chapter_ids as valid_chapter_ids, review_ids as valid_review_ids

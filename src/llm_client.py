@@ -11,6 +11,7 @@ from typing import Any
 
 import certifi
 
+from concurrency import llm_slot, note_rate_limit_429
 from config import Settings, get_settings
 from runtime_context import record_llm_call
 from utils import project_root, strip_code_fences
@@ -315,16 +316,20 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
             else _openai_chat_endpoint(settings.base_url)
         )
         try:
-            if provider == "anthropic":
-                cleaned, reasoning = _anthropic_request(settings, messages, temperature)
-            else:
-                cleaned, reasoning = _openai_request(settings, messages, temperature)
+            with llm_slot():
+                if provider == "anthropic":
+                    cleaned, reasoning = _anthropic_request(settings, messages, temperature)
+                else:
+                    cleaned, reasoning = _openai_request(settings, messages, temperature)
             record_llm_call(messages, cleaned, settings.model, temperature)
             return {"content": cleaned, "reasoning": str(reasoning or "").strip()}
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             last_error = exc
             should_retry = exc.code not in {400, 401, 403}
+            if exc.code == 429:
+                note_rate_limit_429()
+                should_retry = True
             hint = _build_http_error_hint(endpoint, exc.code, error_body, provider)
             print(
                 f"[LLM] 第 {attempt}/{settings.max_retries} 次请求失败: "
@@ -348,6 +353,9 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
 
         if attempt < initial_settings.max_retries:
             delay = _retry_delay(attempt, settings.retry_initial_delay, settings.retry_max_delay)
+            # 429 storms: longer backoff on top of exponential retry
+            if isinstance(last_error, urllib.error.HTTPError) and last_error.code == 429:
+                delay = max(delay, min(settings.retry_max_delay, delay * 2))
             print(f"[LLM] {delay:.1f} 秒后重试...", file=sys.stderr)
             time.sleep(delay)
 
@@ -393,22 +401,23 @@ def chat_stream_chunks(messages: list[dict], temperature: float = 0.2):
         ),
     }
     request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
-    with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line or line.startswith(":"):
-                continue
-            if not line.startswith("data:"):
-                continue
-            data = line.removeprefix("data:").strip()
-            if data == "[DONE]":
-                break
-            try:
-                event_data = json.loads(data)
-            except json.JSONDecodeError:
-                continue
-            reasoning, content = _extract_stream_delta(event_data)
-            if reasoning:
-                yield ("reasoning", reasoning)
-            if content:
-                yield ("content", content)
+    with llm_slot():
+        with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
+            for raw_line in response:
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line or line.startswith(":"):
+                    continue
+                if not line.startswith("data:"):
+                    continue
+                data = line.removeprefix("data:").strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    event_data = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                reasoning, content = _extract_stream_delta(event_data)
+                if reasoning:
+                    yield ("reasoning", reasoning)
+                if content:
+                    yield ("content", content)

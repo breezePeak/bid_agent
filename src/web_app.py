@@ -2271,7 +2271,9 @@ def _trigger_rewrite_targets_inline(targets: list[dict[str, Any]]) -> dict[str, 
             _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
             from subagent_runner import run_rewrite_all
 
-            result = run_rewrite_all(root, workers=2, chapter_ids=chapters)
+            from concurrency import workers_default
+
+            result = run_rewrite_all(root, workers=workers_default(), chapter_ids=chapters)
             failed = result.get("failed", [])
             state_status = "ok" if not failed else "error"
             state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
@@ -2559,6 +2561,103 @@ def api_issue_metrics() -> JSONResponse:
                 "metrics": load_issue_metrics(root),
             }
         )
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/concurrency")
+def api_concurrency_metrics() -> JSONResponse:
+    """Process-wide worker / LLM concurrency telemetry (PR-A0)."""
+    try:
+        from concurrency import concurrency_snapshot
+
+        return JSONResponse({"ok": True, "concurrency": concurrency_snapshot()})
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.get("/api/agent/flags")
+def api_agent_flags() -> JSONResponse:
+    """Expose runtime Agent mode for UI badge (PR-A3)."""
+    try:
+        from api.agent import agent_mode_payload
+
+        return JSONResponse(agent_mode_payload())
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/materials-checklist/verify")
+async def api_materials_verify(request: Request) -> JSONResponse:
+    """Run authenticity verification on an uploaded material (PR-A5)."""
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    item_id = str((body or {}).get("item_id") or "").strip()
+    uploaded_path = str((body or {}).get("uploaded_path") or "").strip()
+    note = str((body or {}).get("note") or "").strip()
+    if not item_id:
+        return JSONResponse({"ok": False, "message": "缺少 item_id"}, status_code=400)
+    try:
+        from agent.material_verifier import verify_material
+        from materials_checklist import mark_material_uploaded
+
+        if uploaded_path:
+            # re-mark with verify path
+            result = mark_material_uploaded(
+                root,
+                item_id,
+                uploaded_path=uploaded_path,
+                note=note,
+                auto_verify=True,
+            )
+        else:
+            result = verify_material(root, item_id, uploaded_path=uploaded_path, note=note)
+        return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+
+
+@app.post("/api/materials-checklist/confirm-verify")
+async def api_materials_confirm_verify(request: Request) -> JSONResponse:
+    """Human confirm/reject material verification (PR-A5)."""
+    root = _active_root()
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    item_id = str((body or {}).get("item_id") or "").strip()
+    accept = bool((body or {}).get("accept", True))
+    operator = str((body or {}).get("operator") or "operator").strip()
+    reason = str((body or {}).get("reason") or "").strip()
+    if not item_id:
+        return JSONResponse({"ok": False, "message": "缺少 item_id"}, status_code=400)
+    try:
+        from agent.material_verifier import human_confirm_verification
+        from materials_checklist import update_item_response
+
+        result = human_confirm_verification(
+            root, item_id, operator=operator, accept=accept, reason=reason
+        )
+        if result.get("ok") and accept:
+            update_item_response(
+                root,
+                item_id,
+                response_status="ready",
+                reason=reason or f"人工确认验证通过 by {operator}",
+                rebuild=True,
+            )
+            try:
+                from agent.goal import load_goal, resume_goal_after_materials
+
+                goal = load_goal(root)
+                if goal and str(goal.get("status")) == "blocked_human":
+                    resume_goal_after_materials(root, note=f"material_human_verified:{item_id}")
+            except Exception:
+                pass
+        return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
@@ -3866,8 +3965,8 @@ COMMANDS: dict[str, list[str]] = {
     "generate-outline": [],
     "plan-jobs": [],
     "select-context-all": [],
-    "write-all": ["--workers", "10"],
-    "review-fix-all": ["--workers", "10"],
+    "write-all": [],
+    "review-fix-all": [],
     "build-source-trace": [],
     "build-score-coverage": [],
     "estimate-score": [],
@@ -3881,8 +3980,8 @@ COMMANDS: dict[str, list[str]] = {
     "build-docx": [],
     "check-format": [],
     "validate": [],
-    "run": ["--workers", "10"],
-    "graph-run": ["--workers", "10"],
+    "run": [],
+    "graph-run": [],
 }
 
 AUTO_RECOVERY_MAX_ATTEMPTS = 2
@@ -5548,8 +5647,7 @@ def api_clean_workspace() -> JSONResponse:
 # ---------------------------------------------------------------
 
 
-@app.on_event("startup")
-def reconcile_interrupted_pipeline() -> None:
+def _startup_reconcile() -> None:
     # 启动时把“使用中”的大模型刷进进程环境，避免仅写了 models.json/.env 但进程仍用旧环境变量
     try:
         store = _read_models_store()
@@ -5564,11 +5662,48 @@ def reconcile_interrupted_pipeline() -> None:
     except Exception as exc:
         _append_log(f"[警告] 加载大模型配置失败: {exc}")
 
+    try:
+        from agent.flags import agent_supervisor_enabled
+
+        mode = "Agent 模式" if agent_supervisor_enabled() else "流水线模式"
+        _append_log(f"[系统] 运行模式: {mode} (AGENT_SUPERVISOR_ENABLED)")
+    except Exception as exc:
+        _append_log(f"[警告] 读取 Agent 开关失败: {exc}")
+
     _load_active_run_from_disk()
     try:
         reconcile_interrupted_repair(ACTIVE_RUN_ROOT or ROOT)
     except Exception as exc:
         _append_log(f"[警告] 修复任务恢复检查失败: {exc}")
+
+    # PR-A3: GoalState ↔ PipelineState consistency check
+    if ACTIVE_RUN_ROOT is not None:
+        try:
+            from agent.goal import load_goal, reevaluate_goal
+
+            goal = load_goal(ACTIVE_RUN_ROOT)
+            if goal:
+                goal = reevaluate_goal(ACTIVE_RUN_ROOT, goal)
+                run_state_path = ACTIVE_RUN_ROOT / "workspace" / "run_state.json"
+                pipe_status = ""
+                if run_state_path.exists():
+                    try:
+                        pipe = json.loads(run_state_path.read_text(encoding="utf-8"))
+                        pipe_status = str(pipe.get("status") or "")
+                    except Exception:
+                        pipe_status = ""
+                g_status = str(goal.get("status") or "")
+                _append_log(
+                    f"[系统] Goal/Pipeline 一致性: goal={g_status} pipeline={pipe_status or 'n/a'} "
+                    f"goal_id={goal.get('goal_id')}"
+                )
+                if g_status == "succeeded" and pipe_status in {"error", "running", "recovering"}:
+                    _append_log("[警告] Goal 已成功但 Pipeline 状态未对齐，请检查 run_state")
+                if g_status == "blocked_human" and pipe_status == "ok":
+                    _append_log("[警告] Goal 人工阻断但 Pipeline 显示 ok，以 Goal/材料清单为准")
+        except Exception as exc:
+            _append_log(f"[警告] Goal/Pipeline 一致性检查失败: {exc}")
+
     if ACTIVE_RUN_ROOT is None:
         return
     try:
@@ -5578,6 +5713,12 @@ def reconcile_interrupted_pipeline() -> None:
         _resumed = False
     if _resumed:
         _append_log(f"[自动恢复] 已接管工作空间流水线: {ACTIVE_RUN_ID}")
+
+
+@app.on_event("startup")
+def reconcile_interrupted_pipeline() -> None:
+    """Startup reconcile (Goal/Pipeline consistency, model load, interrupted jobs)."""
+    _startup_reconcile()
 
 
 @app.get("/{full_path:path}")

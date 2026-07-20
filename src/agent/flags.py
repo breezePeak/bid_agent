@@ -13,8 +13,11 @@ def _parse_bool(value: str | None, default: bool) -> bool:
 
 
 def agent_supervisor_enabled() -> bool:
-    """When false (default), chat/pipeline stay on legacy behavior."""
-    return _parse_bool(os.environ.get("AGENT_SUPERVISOR_ENABLED"), default=False)
+    """When true (PR-A3 default), Web/CLI chat uses Supervisor as product entry.
+
+    Set AGENT_SUPERVISOR_ENABLED=false for emergency rollback to legacy orchestrator.
+    """
+    return _parse_bool(os.environ.get("AGENT_SUPERVISOR_ENABLED"), default=True)
 
 
 def agent_use_tool_runtime() -> bool:

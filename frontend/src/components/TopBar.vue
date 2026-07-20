@@ -7,6 +7,7 @@
         </svg>
       </button>
       <h1>标书 Agent 控制台</h1>
+      <span class="mode-badge" :class="modeClass" :title="modeHint">{{ modeLabel }}</span>
       <span v-if="activeRun" class="topbar-run-name">
         / {{ extractName(activeRun.id) }}
       </span>
@@ -23,11 +24,35 @@
 </template>
 
 <script setup>
+import { ref, computed, onMounted } from 'vue'
+import { fetchAgentFlags } from '../api'
+
 defineProps({
   activeRun: { type: Object, default: null },
 })
 
 defineEmits(['create', 'toggleSidebar', 'settings'])
+
+const mode = ref('agent')
+const modeLabel = ref('Agent 模式')
+const modeHint = ref('Supervisor 默认入口；AGENT_SUPERVISOR_ENABLED=false 可紧急回退')
+
+const modeClass = computed(() => (mode.value === 'agent' ? 'mode-agent' : 'mode-legacy'))
+
+async function loadMode() {
+  try {
+    const resp = await fetchAgentFlags()
+    const body = resp?.data || {}
+    if (body.ok !== false) {
+      mode.value = body.mode || (body.supervisor_enabled ? 'agent' : 'legacy')
+      modeLabel.value = body.mode_label || (mode.value === 'agent' ? 'Agent 模式' : '流水线模式')
+    }
+  } catch {
+    /* keep default */
+  }
+}
+
+onMounted(loadMode)
 
 function extractName(id) {
   if (!id) return ''
@@ -35,3 +60,27 @@ function extractName(id) {
   return match ? match[1].replace(/_/g, ' ') : id
 }
 </script>
+
+<style scoped>
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+.mode-agent {
+  color: #0b6e4f;
+  background: rgba(11, 110, 79, 0.12);
+  border-color: rgba(11, 110, 79, 0.25);
+}
+.mode-legacy {
+  color: #8a5a00;
+  background: rgba(196, 140, 0, 0.12);
+  border-color: rgba(196, 140, 0, 0.3);
+}
+</style>

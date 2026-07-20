@@ -334,6 +334,33 @@ def _normalize_decision(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def normalize_decision(raw: dict[str, Any]) -> dict[str, Any]:
+    """Public wrapper for adapters (PR-A2)."""
+    return _normalize_decision(raw)
+
+
+def decide_next_step(
+    message: str,
+    snapshot: dict[str, Any],
+    *,
+    goal: dict[str, Any] | None = None,
+    prefer_plan: bool = True,
+    use_llm: bool = False,
+    history: list[dict[str, Any]] | None = None,
+    llm_chat: Callable[..., str] | None = None,
+    budget: AgentBudget | None = None,
+) -> dict[str, Any]:
+    """Public single-step decision for adapters/tests. Prefer run_supervisor_turn for full loops."""
+    if use_llm:
+        try:
+            raw = _llm_decision(message, snapshot, history or [], llm_chat, budget=budget)
+        except Exception:
+            raw = _rule_based_decision(message, snapshot, goal=goal, prefer_plan=prefer_plan)
+    else:
+        raw = _rule_based_decision(message, snapshot, goal=goal, prefer_plan=prefer_plan)
+    return _normalize_decision(raw)
+
+
 def _terminal_payload(
     *,
     terminal_status: str,
@@ -402,7 +429,17 @@ def run_supervisor_turn(
         except Exception:
             pass
 
-    inferred = infer_goal_from_message(message)
+    try:
+        from agent.goal_compiler import compile_goal_from_message
+
+        inferred = compile_goal_from_message(
+            message,
+            root=root,
+            llm_chat=llm_chat,
+            use_llm=use_llm,
+        )
+    except Exception:
+        inferred = infer_goal_from_message(message)
     goal = load_goal(root)
     resume_keywords = any(k in (message or "") for k in ("继续", "恢复", "补料完成", "材料已上传", "确认执行", "确认"))
     if user_confirmed or confirmed_tools:

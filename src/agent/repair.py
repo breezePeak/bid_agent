@@ -364,6 +364,12 @@ def _positive_int(value: Any, default: int) -> int:
         return default
 
 
+def _clamp_workers_param(value: Any) -> int:
+    from concurrency import clamp_workers
+
+    return clamp_workers(value)
+
+
 def _emit_progress(
     callback: ProgressCallback | None,
     phase: str,
@@ -421,7 +427,7 @@ def _execute_action(root: Path, action: dict[str, Any]) -> dict[str, Any]:
             return {**base, "ok": False, "message": "缺少 chapter_ids"}
         args = {
             "chapter_ids": chapter_ids,
-            "workers": _positive_int(params.get("workers"), 2),
+            "workers": _clamp_workers_param(params.get("workers")),
         }
     elif action_type == "fix_coverage":
         tool = "fix_coverage"
@@ -432,7 +438,7 @@ def _execute_action(root: Path, action: dict[str, Any]) -> dict[str, Any]:
             "max_rounds": _positive_int(params.get("max_rounds"), 3),
         }
         if params.get("workers") is not None:
-            args["workers"] = _positive_int(params.get("workers"), 2)
+            args["workers"] = _clamp_workers_param(params.get("workers"))
     elif action_type == "fix_compliance":
         tool = "fix_compliance"
         args = {
@@ -443,7 +449,7 @@ def _execute_action(root: Path, action: dict[str, Any]) -> dict[str, Any]:
             "rerun_check": False,
         }
         if params.get("workers") is not None:
-            args["workers"] = _positive_int(params.get("workers"), 2)
+            args["workers"] = _clamp_workers_param(params.get("workers"))
     elif action_type == "rerun_stage":
         tool = "run_stage"
         command = str(params.get("command") or "").strip()

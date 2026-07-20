@@ -479,12 +479,14 @@ def select_contexts_node(state) -> dict:
 
 
 def write_chapters_node(state) -> dict:
+    from concurrency import clamp_workers
+
     root = _root(state)
-    workers = int(state.get("workers") or 2)
+    workers = clamp_workers(state.get("workers"))
     max_retries = max(0, int(state.get("max_retries") or 0))
     print(f"{_stage_progress('write_chapters')}... workers={workers}")
     _start_stage(state, "write_chapters", "章节写作")
-    effective_workers = max(1, min(workers, 10))
+    effective_workers = workers
     jobs = _state_jobs(state, root)
     expected_chapter_ids = _chapter_ids_from_jobs(jobs)
     existing_chapter_ids = sorted(chapter_ids(root))
@@ -565,7 +567,9 @@ def review_fix_chapters_node(state) -> dict:
             _persist_state(state, update, stage="review_fix_chapters", status="ok", message="resume: 复用审核结果")
             return update
     try:
-        review_fix_all(root, workers=max(1, int(state.get("workers", 1))))
+        from concurrency import clamp_workers
+
+        review_fix_all(root, workers=clamp_workers(state.get("workers")))
         update = {
             "chapter_jobs": jobs,
             "reviews_dir": str(root / "workspace" / "reviews"),

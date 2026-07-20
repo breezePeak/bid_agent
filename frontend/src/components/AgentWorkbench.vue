@@ -234,10 +234,7 @@ const stats = computed(() => {
   }
 })
 
-const poolSize = computed(() => {
-  const n = Math.max(stats.value.running, Number(data.value.workers || 0), 1)
-  return Math.min(POOL_SIZE, Math.max(n, Math.min(POOL_SIZE, stats.value.running + Math.min(2, stats.value.queued))))
-})
+const poolSize = computed(() => POOL_SIZE)
 
 const activeRole = computed(() => {
   const running = tasks.value.find((a) => a.status === 'running')
@@ -253,18 +250,23 @@ const roleTeams = computed(() => {
     if (!byRole[r]) byRole[r] = []
     byRole[r].push(a)
   }
-  const rolesPresent = new Set(Object.keys(byRole))
-  if (!rolesPresent.size) rolesPresent.add(activeRole.value)
+  // Always show writing pool; show other roles only when they have work
+  const rolesToShow = new Set(['chapter_writer', activeRole.value])
+  for (const r of Object.keys(byRole)) {
+    if (byRole[r].some((a) => a.status === 'running' || a.status === 'queued' || a.status === 'failed')) {
+      rolesToShow.add(r)
+    }
+  }
 
   return ROLE_TEAMS
-    .filter((t) => rolesPresent.has(t.role) || t.role === activeRole.value)
+    .filter((t) => rolesToShow.has(t.role))
     .map((t) => {
       const list = byRole[t.role] || []
       const running = list.filter((a) => a.status === 'running')
       const queued = list.filter((a) => a.status === 'queued').length
       const done = list.filter((a) => a.status === 'done').length
       const failed = list.filter((a) => a.status === 'failed').length
-      const seatCount = t.single ? 1 : Math.max(running.length, Math.min(POOL_SIZE, poolSize.value || POOL_SIZE))
+      const seatCount = t.single ? 1 : POOL_SIZE
       const seats = Array.from({ length: seatCount }, (_, i) => {
         const job = running[i]
         return {

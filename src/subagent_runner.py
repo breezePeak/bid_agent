@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable
 
+from concurrency import chapter_workers_scope, clamp_workers, workers_default
 from graph.chapter_subgraph import build_chapter_subgraph
 from utils import project_root
 
@@ -116,49 +117,50 @@ def _label_to_role(label: str) -> str:
 def run_per_chapter(
     worker: Callable[[str, Path], None],
     root: Path | None = None,
-    workers: int = 2,
+    workers: int | None = None,
     chapter_ids: list[str] | None = None,
     max_retries: int = 0,
     label: str = "SubAgent",
 ) -> dict[str, Any]:
     root = root or project_root()
     selected = _resolve_chapter_ids(root, chapter_ids)
-    effective_workers = max(1, min(workers, 10))
+    requested = workers_default() if workers is None else workers
     role = _label_to_role(label)
-    print(
-        f"[启动] 并发执行 {len(selected)} 个章节 {label}, "
-        f"workers={effective_workers}, max_retries={max(0, max_retries)}"
-    )
-    begin_phase(
-        root,
-        phase=role,
-        phase_label=label,
-        role=role,
-        chapter_ids=selected,
-    )
-
     completed: list[str] = []
     failed: list[dict[str, Any]] = []
 
-    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-        futures = {
-            executor.submit(_run_with_retry, worker, cid, root, max_retries, role): cid
-            for cid in selected
-        }
-        for future in as_completed(futures):
-            chapter_id = futures[future]
-            try:
-                result_id, error, attempts = future.result()
-            except Exception as exc:
-                error = str(exc)
-                result_id = chapter_id
-                attempts = max(1, max_retries + 1)
+    with chapter_workers_scope(requested) as effective_workers:
+        print(
+            f"[启动] 并发执行 {len(selected)} 个章节 {label}, "
+            f"workers={effective_workers}, max_retries={max(0, max_retries)}"
+        )
+        begin_phase(
+            root,
+            phase=role,
+            phase_label=label,
+            role=role,
+            chapter_ids=selected,
+        )
 
-            if error:
-                print(f"[失败] 章节 {result_id}: {error}")
-                failed.append({"chapter_id": result_id, "error": error, "attempts": attempts})
-            else:
-                completed.append(result_id)
+        with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+            futures = {
+                executor.submit(_run_with_retry, worker, cid, root, max_retries, role): cid
+                for cid in selected
+            }
+            for future in as_completed(futures):
+                chapter_id = futures[future]
+                try:
+                    result_id, error, attempts = future.result()
+                except Exception as exc:
+                    error = str(exc)
+                    result_id = chapter_id
+                    attempts = max(1, max_retries + 1)
+
+                if error:
+                    print(f"[失败] 章节 {result_id}: {error}")
+                    failed.append({"chapter_id": result_id, "error": error, "attempts": attempts})
+                else:
+                    completed.append(result_id)
 
     print(f"[完成] {label} 成功 {len(completed)} 个, 失败 {len(failed)} 个")
     if failed:
@@ -202,34 +204,49 @@ def run_write_chapter(
 
 def run_write_all(
     root: Path | None = None,
-    workers: int = 2,
+    workers: int | None = None,
     chapter_ids: list[str] | None = None,
     max_retries: int = 0,
 ) -> dict[str, Any]:
     return run_per_chapter(
-        _write_worker, root, workers, chapter_ids, max_retries, label="写作 SubAgent"
+        _write_worker,
+        root,
+        clamp_workers(workers) if workers is not None else None,
+        chapter_ids,
+        max_retries,
+        label="写作 SubAgent",
     )
 
 
 def run_review_all(
     root: Path | None = None,
-    workers: int = 2,
+    workers: int | None = None,
     chapter_ids: list[str] | None = None,
     max_retries: int = 0,
 ) -> dict[str, Any]:
     return run_per_chapter(
-        _review_worker, root, workers, chapter_ids, max_retries, label="审核 SubAgent"
+        _review_worker,
+        root,
+        clamp_workers(workers) if workers is not None else None,
+        chapter_ids,
+        max_retries,
+        label="审核 SubAgent",
     )
 
 
 def run_rewrite_all(
     root: Path | None = None,
-    workers: int = 2,
+    workers: int | None = None,
     chapter_ids: list[str] | None = None,
     max_retries: int = 0,
 ) -> dict[str, Any]:
     return run_per_chapter(
-        _rewrite_worker, root, workers, chapter_ids, max_retries, label="改稿 SubAgent"
+        _rewrite_worker,
+        root,
+        clamp_workers(workers) if workers is not None else None,
+        chapter_ids,
+        max_retries,
+        label="改稿 SubAgent",
     )
 
 

@@ -3,10 +3,15 @@ models.json
 __pycache__/
 *.pyc
 .pytest_cache/
+.ruff_cache/
+.pytest-tmp/
+.pytest-tmp-full/
 workspace/
 outputs/
 sources/
 inputs/
+# Runtime workspaces / customer data (keep fixtures only under tests/)
+runs/
 frontend/node_modules/
 frontend/dist/
 frontend-3d/node_modules/

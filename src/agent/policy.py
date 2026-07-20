@@ -82,6 +82,16 @@ def evaluate_tool_call(
     if name in {"write_chapters", "review_chapters", "rewrite_chapters"} and not user_confirmed and not auto_execute:
         return PolicyDecision(False, "章节变更需要确认", ask_human=True)
 
+    # PR-A4: forbid price chapter mutations when constraint flag present on args
+    if args.get("forbid_price_chapters") or args.get("forbid_price_changes"):
+        chapter_ids = args.get("chapter_ids") or []
+        exclude = [str(x) for x in (args.get("exclude_sections") or [])]
+        price_tokens = ("报价", "价格", "price", "商务报价")
+        for cid in chapter_ids:
+            blob = str(cid)
+            if any(t in blob for t in price_tokens) or any(t in blob for t in exclude):
+                return PolicyDecision(False, "约束禁止修改报价相关章节", ask_human=False)
+
     return PolicyDecision(True, "策略通过")
 
 

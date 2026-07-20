@@ -54,9 +54,17 @@ class MaterialResumeTests(unittest.TestCase):
                 success_criteria=[{"check": "artifact_exists", "path": "outputs/final.docx"}],
             )
             set_goal_status(root, "blocked_human", blocked_reason="缺证书")
+            # PR-A5: upload alone does not resume; needs verified lifecycle
             result = mark_material_uploaded(root, "mat_cert_1", note="已上传证书", rebuild=False)
             self.assertTrue(result.get("ok"), result)
+            self.assertEqual(result.get("lifecycle_status"), "uploaded")
             self.assertIn("01", result.get("affected_chapters") or [])
+            goal = load_goal(root)
+            self.assertEqual(goal.get("status"), "blocked_human")
+            # simulate verification pass → resume
+            from agent.goal import resume_goal_after_materials
+
+            resume_goal_after_materials(root, note="material_verified:mat_cert_1")
             goal = load_goal(root)
             self.assertEqual(goal.get("status"), "in_progress")
             plan = build_material_recovery_plan(root, item_ids=["mat_cert_1"])

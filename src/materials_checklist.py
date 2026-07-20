@@ -967,8 +967,12 @@ def mark_material_uploaded(
     uploaded_path: str = "",
     note: str = "",
     rebuild: bool = True,
+    auto_verify: bool = True,
 ) -> dict[str, Any]:
-    """Mark one material item as uploaded and return affected chapters + recovery plan."""
+    """Mark material as uploaded; optionally run authenticity verify (PR-A5).
+
+    uploaded ≠ verified. Only verified (or human-confirmed) may close qualification gaps.
+    """
     root = root or project_root()
     item_id = stringify(item_id)
     if not item_id:
@@ -984,7 +988,7 @@ def mark_material_uploaded(
     if not result.get("ok"):
         return result
 
-    # attach lifecycle + path
+    # attach lifecycle + path — start as uploaded only
     overrides = _load_overrides(root)
     row = dict(overrides.get(item_id) or {})
     row["item_id"] = item_id
@@ -996,27 +1000,65 @@ def mark_material_uploaded(
         row["reason"] = str(note)[:500]
     overrides[item_id] = row
     save_override_rows(root, [{"item_id": k, **v} for k, v in overrides.items()])
+
+    verification: dict[str, Any] = {}
+    lifecycle = "uploaded"
+    if auto_verify and uploaded_path:
+        try:
+            from agent.material_verifier import verify_material
+
+            verification = verify_material(
+                root,
+                item_id,
+                uploaded_path=uploaded_path,
+                note=note,
+            )
+            lifecycle = str(verification.get("lifecycle_status") or "uploaded")
+            # never auto-resolve from keyword alone
+            if lifecycle == "verified":
+                row["lifecycle_status"] = "verified"
+                row["verification_confidence"] = verification.get("confidence")
+                row["verified_at"] = verification.get("message")
+            elif lifecycle == "rejected":
+                row["lifecycle_status"] = "rejected"
+                row["response_status"] = "missing"
+                row["reason"] = str(verification.get("message") or "材料验证未通过")[:500]
+            else:
+                row["lifecycle_status"] = "uploaded"
+                row["needs_human_verify"] = bool(verification.get("needs_human", True))
+            overrides[item_id] = row
+            save_override_rows(root, [{"item_id": k, **v} for k, v in overrides.items()])
+        except Exception as exc:
+            verification = {"ok": False, "message": f"verify_error: {exc}", "lifecycle_status": "uploaded"}
+
     if rebuild:
         build_materials_checklist(root)
 
     affected = affected_chapters_for_items(root, [item_id])
     recovery = build_material_recovery_plan(root, item_ids=[item_id], chapter_ids=affected)
-    try:
-        from agent.goal import load_goal, resume_goal_after_materials
 
-        goal = load_goal(root)
-        if goal and str(goal.get("status")) == "blocked_human":
-            resume_goal_after_materials(root, note=f"material_uploaded:{item_id}")
-    except Exception:
-        pass
+    # Only resume goal when verified (not merely uploaded)
+    if lifecycle == "verified":
+        try:
+            from agent.goal import load_goal, resume_goal_after_materials
+
+            goal = load_goal(root)
+            if goal and str(goal.get("status")) == "blocked_human":
+                resume_goal_after_materials(root, note=f"material_verified:{item_id}")
+        except Exception:
+            pass
 
     return {
         "ok": True,
         "item_id": item_id,
-        "lifecycle_status": "uploaded",
+        "lifecycle_status": lifecycle,
+        "verification": verification,
         "affected_chapters": affected,
         "recovery_plan": recovery,
-        "message": f"材料 {item_id} 已标记上传，影响章节 {affected or '待识别'}",
+        "message": (
+            f"材料 {item_id} 状态={lifecycle}，影响章节 {affected or '待识别'}"
+            + ("" if lifecycle == "verified" else "（uploaded 不等于 verified，需验证通过后才关闭缺口）")
+        ),
     }
 
 

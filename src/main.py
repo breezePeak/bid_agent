@@ -24,6 +24,7 @@ from source_trace import build_source_trace_index
 from score_parser import parse_score
 from template_analyzer import analyze_template
 from template_evidence import build_template_evidence
+from concurrency import clamp_workers, workers_default, workers_max
 from utils import ensure_dirs, ensure_file, project_root, read_json
 from project_validator import validate_project
 
@@ -417,7 +418,7 @@ def _run_select_context(root: Path, chapter_id: str) -> None:
     select_context_for_job(job, root)
 
 
-def _run_write_all(root: Path, workers: int = 1, max_retries: int = 0) -> None:
+def _run_write_all(root: Path, workers: int | None = None, max_retries: int = 0) -> None:
     from stage_validation import context_ids, missing_ids_for_stage
     from subagent_runner import run_write_all as concurrent_write_all
 
@@ -446,8 +447,9 @@ def _run_write_all(root: Path, workers: int = 1, max_retries: int = 0) -> None:
         raise RuntimeError("；".join(messages))
 
 
-def run_pipeline(root: Path | None = None, workers: int = 1, max_retries: int = 0) -> None:
+def run_pipeline(root: Path | None = None, workers: int | None = None, max_retries: int = 0) -> None:
     root = root or project_root()
+    workers = clamp_workers(workers)
     core_specs = workflow_stage_specs()
     total = len(core_specs)
     stage_runners = {
@@ -483,14 +485,14 @@ def run_pipeline(root: Path | None = None, workers: int = 1, max_retries: int = 
 
 def run_graph_pipeline(
     root: Path | None = None,
-    workers: int = 1,
+    workers: int | None = None,
     resume: bool = False,
     max_retries: int = 0,
 ) -> None:
     from graph.bid_graph import run_bid_graph
 
     root = root or project_root()
-    run_bid_graph(root, workers=workers, resume=resume, max_retries=max_retries)
+    run_bid_graph(root, workers=clamp_workers(workers), resume=resume, max_retries=max_retries)
 
 
 def set_project_profile(root: Path | None = None, project_type: str | None = None) -> None:
@@ -530,19 +532,34 @@ def build_parser() -> argparse.ArgumentParser:
     write_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
 
     write_all_parser = subparsers.add_parser("write-all", help="生成所有章节（支持并发）")
-    write_all_parser.add_argument("--workers", type=int, default=10, help="章节写作 worker 数，默认 10，最大 10")
+    write_all_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"章节写作 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
+    )
     write_all_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
 
     review_chapter_parser = subparsers.add_parser("review-chapter", help="审核单个章节")
     review_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     review_all_parser = subparsers.add_parser("review-all", help="并发审核所有章节")
-    review_all_parser.add_argument("--workers", type=int, default=10, help="章节审核 worker 数，默认 10，最大 10")
+    review_all_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"章节审核 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
+    )
 
     rewrite_chapter_parser = subparsers.add_parser("rewrite-chapter", help="根据审核意见重写单个章节")
     rewrite_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
     subparsers.add_parser("rewrite-all", help="重写所有 need_rewrite=true 的章节")
     review_fix_all_parser = subparsers.add_parser("review-fix-all", help="审核所有章节并自动改稿（最多 2 轮，并发）")
-    review_fix_all_parser.add_argument("--workers", type=int, default=10, help="审核/改稿 worker 数，默认 10，最大 10")
+    review_fix_all_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"审核/改稿 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
+    )
 
     summarize_chapter_parser = subparsers.add_parser("summarize-chapter", help="为单个章节生成结构化摘要")
     summarize_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
@@ -562,12 +579,22 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check-format", help="检查最终 Markdown/Word 格式")
 
     run_parser = subparsers.add_parser("run", help="按完整流水线运行（CLI 模式）")
-    run_parser.add_argument("--workers", type=int, default=10, help="章节写作 worker 数，默认 10，最大 10")
+    run_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"章节写作 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
+    )
     run_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
     run_parser.add_argument("--project-type", default="", help=project_type_help)
 
     graph_run_parser = subparsers.add_parser("graph-run", help="按 LangGraph 主图运行完整流程")
-    graph_run_parser.add_argument("--workers", type=int, default=10, help="章节写作 worker 数，默认 10，最大 10")
+    graph_run_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"章节写作 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
+    )
     graph_run_parser.add_argument("--resume", action="store_true", help="从 workspace/run_state.json 和已有产物断点续跑")
     graph_run_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
     graph_run_parser.add_argument("--project-type", default="", help=project_type_help)
@@ -635,7 +662,7 @@ def main() -> int:
         print(f"[执行] 生成章节 {args.chapter}...")
         write_chapter(args.chapter, root)
     elif args.command == "write-all":
-        _run_write_all(root, workers=args.workers, max_retries=args.max_retries)
+        _run_write_all(root, workers=clamp_workers(args.workers), max_retries=args.max_retries)
     elif args.command == "review-chapter":
         print(f"[执行] 审核章节 {args.chapter}...")
         review_chapter(args.chapter, root)
@@ -643,7 +670,7 @@ def main() -> int:
         print("[执行] 审核所有章节（并发子 agent）...")
         from subagent_runner import run_review_all
 
-        run_review_all(root, workers=args.workers)
+        run_review_all(root, workers=clamp_workers(args.workers))
     elif args.command == "rewrite-chapter":
         print(f"[执行] 根据审核意见重写章节 {args.chapter}...")
         rewrite_chapter(args.chapter, root)
@@ -652,7 +679,7 @@ def main() -> int:
         rewrite_all(root)
     elif args.command == "review-fix-all":
         print("[执行] 审核并自动改稿（并发子 agent）...")
-        review_fix_all(root, workers=args.workers)
+        review_fix_all(root, workers=clamp_workers(args.workers))
     elif args.command == "summarize-chapter":
         print(f"[执行] 生成章节 {args.chapter} 摘要...")
         summarize_chapter(args.chapter, root)

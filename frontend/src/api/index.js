@@ -154,6 +154,14 @@ export function fetchAgentTools() {
   return api.get('/agent/tools')
 }
 
+export function fetchAgentFlags() {
+  return api.get('/agent/flags')
+}
+
+export function fetchConcurrencyMetrics() {
+  return api.get('/concurrency')
+}
+
 export function invokeAgentTool(name, args = {}, { dryRun = false } = {}) {
   return api.post('/agent/tools/invoke', { name, args, dry_run: dryRun }, { timeout: 300000 })
 }
