@@ -258,11 +258,16 @@ const roleTeams = computed(() => {
     if (!byRole[r]) byRole[r] = []
     byRole[r].push(a)
   }
-  // Always show fixed office teams (writer / reviewer / rewriter / global).
-  // Idle seats stay visible so users can see the full org layout during write-only phases.
-  const rolesToShow = new Set(ROLE_TEAMS.map((t) => t.role))
+  // Only show teams that currently have work. Fully idle pools stay hidden.
+  const rolesToShow = new Set()
   for (const r of Object.keys(byRole)) {
-    rolesToShow.add(r)
+    if (byRole[r].some((a) => a.status === 'running' || a.status === 'queued' || a.status === 'failed')) {
+      rolesToShow.add(r)
+    }
+  }
+  // Fallback: if nothing active yet but phase has a role, show that pool once agents appear
+  if (!rolesToShow.size && activeRole.value && (byRole[activeRole.value] || []).length) {
+    rolesToShow.add(activeRole.value)
   }
 
   return ROLE_TEAMS
@@ -273,20 +278,15 @@ const roleTeams = computed(() => {
       const queued = list.filter((a) => a.status === 'queued').length
       const done = list.filter((a) => a.status === 'done').length
       const failed = list.filter((a) => a.status === 'failed').length
-      const seatCount = t.single ? 1 : POOL_SIZE
-      const seats = Array.from({ length: seatCount }, (_, i) => {
-        const job = running[i]
-        return {
-          id: `${t.role}-seat-${i}`,
-          no: i + 1,
-          busy: !!job,
-          chapter: job?.chapter_id || '',
-          message: job?.message || '',
-          title: job
-            ? `${t.label} #${i + 1} · 章 ${job.chapter_id} · ${job.message || '执行中'}`
-            : `${t.label} #${i + 1} · 空闲`,
-        }
-      })
+      // Only render busy seats; empty idle desks are omitted
+      const seats = running.map((job, i) => ({
+        id: `${t.role}-seat-${i}`,
+        no: i + 1,
+        busy: true,
+        chapter: job?.chapter_id || '',
+        message: job?.message || '',
+        title: `${t.label} #${i + 1} · 章 ${job.chapter_id} · ${job.message || '执行中'}`,
+      }))
       return {
         ...t,
         running,
