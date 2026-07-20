@@ -182,7 +182,8 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { fetchAgentActivity } from '../api'
 
 const POOL_SIZE = 10
-const PREVIEW_N = 12
+/** Board chips scroll inside columns; keep a moderate preview count */
+const PREVIEW_N = 24
 
 const ROLE_TEAMS = [
   { role: 'chapter_writer', label: '写作组', emoji: '✍️', color: 'blue' },
