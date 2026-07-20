@@ -116,17 +116,12 @@ def _label_to_role(label: str) -> str:
 
 def _writer_batch_retries() -> int:
     """How many extra full-batch retries after the first write pass fails."""
+    import os
+
     try:
-        from concurrency import _env_int  # type: ignore
-
-        return max(0, min(20, int(_env_int("BID_AGENT_WRITE_BATCH_RETRIES", 5))))
-    except Exception:
-        import os
-
-        try:
-            return max(0, min(20, int(os.environ.get("BID_AGENT_WRITE_BATCH_RETRIES", "5"))))
-        except (TypeError, ValueError):
-            return 5
+        return max(0, min(20, int(os.environ.get("BID_AGENT_WRITE_BATCH_RETRIES", "5"))))
+    except (TypeError, ValueError):
+        return 5
 
 
 def run_per_chapter(
