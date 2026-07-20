@@ -18,6 +18,7 @@ export class App3D {
     this.onPick = null
     this._userDriving = false
     this._camAnim = null
+    this._camTour = null
     this._lastSnap = null
     this._pickables = []
 
@@ -83,10 +84,13 @@ export class App3D {
     canvas.addEventListener(
       'pointerdown',
       () => {
+        // 环游刚启动的保护窗内，忽略误触打断
+        if (this._tourLockUntil && performance.now() < this._tourLockUntil) return
         this.controls.enabled = true
         this.autoOrbit = false
         this._userDriving = true
         this._camAnim = null
+        this._camTour = null
       },
       { capture: true },
     )
@@ -122,10 +126,12 @@ export class App3D {
     canvas.addEventListener('click', this._onClick)
 
     this.controls.addEventListener('start', () => {
+      if (this._tourLockUntil && performance.now() < this._tourLockUntil) return
       this._userDriving = true
       this.autoOrbit = false
       this.controls.enabled = true
       this._camAnim = null
+      this._camTour = null
     })
     this.controls.addEventListener('end', () => {
       this.controls.enabled = true
@@ -188,30 +194,24 @@ export class App3D {
     this.agentField.applyAgents(snap.agents || [], snap.activity || {})
     this.dataFlow.setProgress(snap.progress || 0)
 
-    // 波纹中心：丹房地面中心（略抬高，保证看得见涟漪）
-    if (this.env.pedestal) {
-      const p = this.env.pedestal.getWorldPosition(new THREE.Vector3())
-      this.danFx.setOrigin(new THREE.Vector3(p.x, Math.max(0.5, p.y + 0.15), p.z))
-    } else if (this.env.pavilion?.hallCenter) {
-      const p = this.env.pavilion.hallCenter
-      this.danFx.setOrigin(new THREE.Vector3(p.x, 0.55, p.z))
-    }
-
-    // 丹炉世界坐标（炉口偏上，波纹明显从炉中冒出）
+    // 丹炉世界坐标：origin 用炉身中部（波纹中心）；flyFrom 用炉口
     let furnaceMouth = null
     if (this.env.pedestal) {
-      furnaceMouth = this.env.pedestal.getWorldPosition(new THREE.Vector3())
+      const p = this.env.pedestal.getWorldPosition(new THREE.Vector3())
+      // 炉身中部，便于地面涟漪 + 炉口升高波同用
+      this.danFx.setOrigin(new THREE.Vector3(p.x, Math.max(1.4, p.y + 1.6), p.z))
+      furnaceMouth = p.clone()
       furnaceMouth.y += 2.5
-      this.danFx.setOrigin(furnaceMouth.clone())
     } else if (this.env.pavilion?.hallCenter) {
       const p = this.env.pavilion.hallCenter
+      this.danFx.setOrigin(new THREE.Vector3(p.x, Math.max(1.4, p.y + 1.5), p.z))
       furnaceMouth = new THREE.Vector3(p.x, p.y + 2.2, p.z)
-      this.danFx.setOrigin(furnaceMouth.clone())
     }
 
     for (const d of newlyDone) {
       if (this._completedIds.has(d.id)) continue
       this._completedIds.add(d.id)
+      console.info('[3d] stage done → spirit wave', d.id, d.label)
       this.danFx.launch({
         target: d.position,
         label: d.label,
@@ -332,6 +332,7 @@ export class App3D {
     this.autoOrbit = false
     this._userDriving = true
     this._camAnim = null
+    this._camTour = null
     this.controls.enabled = true
     const dir = new THREE.Vector3().subVectors(this.camera.position, this.controls.target)
     const dist = Math.max(0.001, dir.length())
@@ -341,8 +342,194 @@ export class App3D {
     this.controls.update()
   }
 
+  /**
+   * 环游：走廊深处 → 御道前行 → 入殿看丹炉 → 升空飞出 → 环视工序节点 → 总览回环
+   */
+  startCameraTour() {
+    this.autoOrbit = true
+    this._userDriving = false
+    this._camAnim = null
+    this.focusMode = 'tour'
+    // 环游期间关掉手动控制，避免 OrbitControls 抢写相机
+    this.controls.enabled = false
+    // 约 400ms 内防止按钮抬起/冒泡把环游立刻打断
+    this._tourLockUntil = performance.now() + 400
+    const waypoints = this._buildTourWaypoints()
+    if (!waypoints.length) {
+      console.warn('[3d] camera tour: empty waypoints')
+      return
+    }
+    // 从当前机位平滑飞到走廊起点，再沿航线前进
+    const start = waypoints[0]
+    this._camTour = {
+      waypoints,
+      index: 0,
+      t: 0,
+      fromPos: this.camera.position.clone(),
+      fromTarget: this.controls.target.clone(),
+      loop: true,
+      startedAt: performance.now(),
+    }
+    console.info('[3d] camera tour start', waypoints.length, 'legs', {
+      from: this.camera.position.toArray().map((n) => +n.toFixed(1)),
+      first: start.pos.toArray().map((n) => +n.toFixed(1)),
+    })
+  }
+
+  stopCameraTour() {
+    this.autoOrbit = false
+    this._camTour = null
+    this._tourLockUntil = 0
+    this.controls.enabled = true
+  }
+
+  _buildTourWaypoints() {
+    const hall =
+      this.env.pavilion?.hallCenter?.clone?.() || new THREE.Vector3(0, 1.5, -10)
+    const door = this.env.pavilion?.doorPos?.clone?.() || new THREE.Vector3(0, 2, -4)
+    const queue =
+      this.env.pavilion?.queueOrigin?.clone?.() || new THREE.Vector3(0, 0.4, 48)
+    let furnace = hall.clone().add(new THREE.Vector3(0, 2.2, 0))
+    if (this.env.pedestal) {
+      furnace = this.env.pedestal.getWorldPosition(new THREE.Vector3())
+      furnace.y += 2.2
+    }
+
+    const midZ = (queue.z + door.z) * 0.55
+    const approachZ = door.z + 10
+    const nodes = this.stageTrack?.nodes || []
+    const path = []
+
+    // 1 走廊尽头仰视大殿
+    path.push({
+      pos: new THREE.Vector3(0.6, 3.0, Math.max(queue.z - 1, door.z + 28)),
+      target: door.clone().add(new THREE.Vector3(0, 2.5, 0)),
+      dur: 2.5,
+    })
+    // 2 沿御道缓慢前行
+    path.push({
+      pos: new THREE.Vector3(-0.4, 3.4, midZ),
+      target: furnace.clone().add(new THREE.Vector3(0, 1, 0)),
+      dur: 6.0,
+    })
+    // 3 接近殿门
+    path.push({
+      pos: new THREE.Vector3(0, 3.8, approachZ),
+      target: furnace.clone().add(new THREE.Vector3(0, 0.8, 0)),
+      dur: 4.5,
+    })
+    // 4 跨过门槛入殿
+    path.push({
+      pos: new THREE.Vector3(0.2, 4.0, door.z + 1.2),
+      target: furnace.clone().add(new THREE.Vector3(0, 0.4, 0)),
+      dur: 3.2,
+    })
+    // 5 殿内环视丹炉
+    path.push({
+      pos: new THREE.Vector3(4.2, 4.4, hall.z + 5),
+      target: furnace.clone(),
+      dur: 3.0,
+    })
+    path.push({
+      pos: new THREE.Vector3(-3.6, 4.6, hall.z + 3.5),
+      target: furnace.clone().add(new THREE.Vector3(0, 0.5, 0)),
+      dur: 2.8,
+    })
+    // 6 抬升飞出大殿
+    path.push({
+      pos: new THREE.Vector3(2, 11, hall.z + 14),
+      target: furnace.clone().add(new THREE.Vector3(0, 5, 0)),
+      dur: 3.5,
+    })
+    path.push({
+      pos: new THREE.Vector3(12, 20, 16),
+      target: new THREE.Vector3(0, 14, -6),
+      dur: 3.8,
+    })
+
+    // 7 依次环视工序节点（采样，避免过长）
+    const n = nodes.length
+    const step = n <= 8 ? 1 : Math.max(1, Math.floor(n / 10))
+    for (let i = 0; i < n; i += step) {
+      const npos = nodes[i].position
+      const ang = (i / Math.max(1, n - 1)) * Math.PI * 1.35 - Math.PI * 0.2
+      const dist = 9
+      path.push({
+        pos: new THREE.Vector3(
+          npos.x + Math.sin(ang) * dist,
+          npos.y + 4.5,
+          npos.z + Math.cos(ang) * dist + 2,
+        ),
+        target: npos.clone().add(new THREE.Vector3(0, 0.2, 0)),
+        dur: 2.2,
+      })
+    }
+
+    // 8 高空总览，衔接下一段回环
+    path.push({
+      pos: new THREE.Vector3(-18, 22, 36),
+      target: new THREE.Vector3(0, 6, -4),
+      dur: 3.5,
+    })
+    path.push({
+      pos: new THREE.Vector3(0, 16, 50),
+      target: new THREE.Vector3(0, 5, -4),
+      dur: 3.2,
+    })
+
+    return path
+  }
+
+  _tickCameraTour(dt) {
+    const tour = this._camTour
+    if (!tour || !tour.waypoints?.length) return false
+
+    // 用真实时间推进，避免 clock delta 异常导致停滞
+    const now = performance.now()
+    if (tour._lastNow == null) tour._lastNow = now
+    let step = (now - tour._lastNow) / 1000
+    tour._lastNow = now
+    if (!(step > 0) || step > 0.1) step = Math.min(0.05, Math.max(dt || 0.016, 0.008))
+
+    if (tour.index >= tour.waypoints.length) {
+      if (tour.loop) {
+        tour.waypoints = this._buildTourWaypoints()
+        tour.index = 0
+        tour.t = 0
+        tour.fromPos = this.camera.position.clone()
+        tour.fromTarget = this.controls.target.clone()
+        if (tour.waypoints[0]) tour.waypoints[0].dur = 5.0
+      } else {
+        this.stopCameraTour()
+        return false
+      }
+    }
+
+    const wp = tour.waypoints[tour.index]
+    if (!wp?.pos || !wp?.target) return false
+    const dur = Math.max(0.2, wp.dur || 2)
+    tour.t += step
+    const k = Math.min(1, tour.t / dur)
+    const e = k * k * (3 - 2 * k)
+
+    this.camera.position.lerpVectors(tour.fromPos, wp.pos, e)
+    this.controls.target.lerpVectors(tour.fromTarget, wp.target, e)
+    this.camera.lookAt(this.controls.target)
+
+    if (k >= 1) {
+      this.camera.position.copy(wp.pos)
+      this.controls.target.copy(wp.target)
+      tour.fromPos = wp.pos.clone()
+      tour.fromTarget = wp.target.clone()
+      tour.index += 1
+      tour.t = 0
+    }
+    return true
+  }
+
   _animateCamera(position, target) {
     this.autoOrbit = false
+    this._camTour = null
     this._userDriving = true
     // 动画中仍保持 enabled，只是 tick 里不调用 controls.update
     // 用户随时可拖拽打断（pointerdown 会清空 _camAnim）
@@ -391,8 +578,9 @@ export class App3D {
   }
 
   tick() {
-    const t = this.clock.getElapsedTime()
+    // 必须先 getDelta：getElapsedTime 内部会调用 getDelta，再取会得到 0
     const dt = Math.min(this.clock.getDelta(), 0.05)
+    const t = this.clock.elapsedTime
     const progress = this._lastSnap?.progress || 0
     this._frame += 1
 
@@ -411,7 +599,12 @@ export class App3D {
       this.onFinaleBook?.(c)
     }
 
-    if (this._camAnim) {
+    if (this._camTour && this.autoOrbit) {
+      // 环游优先：不让 OrbitControls / 其它动画覆盖相机
+      this._userDriving = false
+      this.controls.enabled = false
+      this._tickCameraTour(dt)
+    } else if (this._camAnim) {
       this._camAnim.t += dt
       const k = Math.min(1, this._camAnim.t / this._camAnim.dur)
       const e = 1 - (1 - k) ** 3
@@ -423,19 +616,19 @@ export class App3D {
         this.controls.target.copy(this._camAnim.toTarget)
         this._camAnim = null
         this.controls.enabled = true
-        // 同步 OrbitControls 内部状态，否则拖不动
         this.controls.update()
       }
-    } else if (this.autoOrbit && !this._userDriving && this.focusMode === 'overview') {
+    } else if (this.autoOrbit && !this._userDriving) {
+      // 无航线时退化为缓慢环绕
+      this.controls.enabled = false
       const r = 48
       const ang = t * 0.035
       this.camera.position.x = Math.sin(ang) * r
       this.camera.position.z = Math.cos(ang) * r + 12
       this.camera.position.y = 10 + Math.sin(t * 0.2) * 1.0
       this.controls.target.set(0, 4, -2)
-      this.controls.update()
+      this.camera.lookAt(this.controls.target)
     } else {
-      // 始终保持可拖拽
       this.controls.enabled = true
       this.controls.update()
     }

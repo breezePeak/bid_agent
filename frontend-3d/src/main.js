@@ -79,6 +79,7 @@ function scheduleUi() {
 function stopAutoOrbit() {
   orbitOn = false
   app.autoOrbit = false
+  app.stopCameraTour?.()
   buttonState.orbit = false
 }
 
@@ -108,14 +109,23 @@ function handleHudAction(act) {
     }
     if (act === 'orbit') {
       orbitOn = !orbitOn
-      app.autoOrbit = orbitOn
       buttonState.orbit = orbitOn
+      if (orbitOn) {
+        app.startCameraTour?.()
+      } else {
+        app.stopCameraTour?.()
+      }
       scheduleUi()
       return
     }
     if (act === 'demo') startDemo()
     if (act === 'live') startLive()
     if (act === 'refresh-runs') loadRuns({ force: true })
+    if (act === 'wave') {
+      // 强制播放水平灵力波；俯视才能看清圆环扩张
+      app.danFx?.debugPulse?.()
+      app.focusTop?.()
+    }
   } catch (err) {
     console.error('[3d] action failed', act, err)
   }
@@ -145,12 +155,21 @@ function wireViewBar() {
   bar.style.pointerEvents = 'auto'
   bar.style.position = 'absolute'
 
+  // pointerup+click 会各触发一次 → 环游开关被立刻关掉；用防抖保证只处理一次
+  let lastActKey = ''
+  let lastActAt = 0
   const onBarClick = (e) => {
     const btn = e.target.closest?.('[data-act]')
     if (!btn || !bar.contains(btn)) return
     e.preventDefault()
     e.stopPropagation()
     const act = btn.getAttribute('data-act')
+    if (!act) return
+    const now = performance.now()
+    const key = `${act}`
+    if (key === lastActKey && now - lastActAt < 350) return
+    lastActKey = key
+    lastActAt = now
     // 点击反馈
     btn.classList.add('active')
     setTimeout(() => {
@@ -159,11 +178,7 @@ function wireViewBar() {
     }, 180)
     handleHudAction(act)
   }
-  // 用 click + pointerup 双保险
   bar.addEventListener('click', onBarClick, true)
-  bar.addEventListener('pointerup', (e) => {
-    if (e.button === 0) onBarClick(e)
-  }, true)
   bar.addEventListener('pointerdown', (e) => {
     e.stopPropagation()
   }, true)
@@ -409,6 +424,7 @@ async function bootstrap() {
     const stopOrbit = () => {
       orbitOn = false
       app.autoOrbit = false
+      app.stopCameraTour?.()
       buttonState.orbit = false
     }
 
@@ -472,8 +488,9 @@ async function bootstrap() {
     if (e.key === ' ') {
       e.preventDefault()
       orbitOn = !orbitOn
-      app.autoOrbit = orbitOn
       buttonState.orbit = orbitOn
+      if (orbitOn) app.startCameraTour?.()
+      else app.stopCameraTour?.()
       scheduleUi()
     }
   })

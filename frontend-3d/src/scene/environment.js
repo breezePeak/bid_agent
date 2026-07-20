@@ -5,7 +5,8 @@ import { createPavilion } from './pavilion.js'
 export function createEnvironment(scene) {
   // 深空宇宙
   scene.background = new THREE.Color(0x060818)
-  scene.fog = new THREE.FogExp2(0x0a1028, 0.008)
+  // 略降雾密度，避免灵力波扩到远处被雾吞掉
+  scene.fog = new THREE.FogExp2(0x0a1028, 0.0045)
 
   scene.add(new THREE.AmbientLight(0x6a7aaa, 0.55))
   const key = new THREE.DirectionalLight(0xd0e0ff, 0.95)
@@ -323,61 +324,86 @@ export function createEnvironment(scene) {
   )
   scene.add(dust)
 
-  // 流星（周期性划过天幕）
+  // 流星：细线淡扫；lookAt 后 -Z 朝前、拖尾在 +Z
+  // 高度压在镜头 FOV 内（相机约 y=7 仰角有限，过高会飞出画幅）
   const meteors = []
   const METEOR_N = 5
+  const _meteorUp = new THREE.Vector3(0, 1, 0)
+  const _meteorMat = new THREE.Matrix4()
+  const _meteorDir = new THREE.Vector3()
+  const trailLen = 2.8
+
   for (let i = 0; i < METEOR_N; i++) {
     const head = new THREE.Mesh(
-      new THREE.SphereGeometry(0.12, 6, 6),
+      new THREE.SphereGeometry(0.08, 6, 6),
       new THREE.MeshBasicMaterial({
-        color: 0xfff0d0,
+        color: 0xe8eef8,
         transparent: true,
         opacity: 0,
+        depthWrite: false,
       }),
     )
     const trail = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.02, 0.08, 3.5, 5, 1, true),
+      new THREE.CylinderGeometry(0.006, 0.04, trailLen, 5, 1, true),
       new THREE.MeshBasicMaterial({
-        color: 0xc0d8ff,
+        color: 0x9aadc8,
         transparent: true,
         opacity: 0,
         side: THREE.DoubleSide,
         depthWrite: false,
       }),
     )
-    trail.rotation.z = Math.PI / 2
-    trail.position.x = 1.6
+    trail.rotation.x = -Math.PI / 2
+    trail.position.z = trailLen * 0.48
+
     const g = new THREE.Group()
-    g.add(head)
     g.add(trail)
+    g.add(head)
     g.visible = false
+    g.renderOrder = 2
     scene.add(g)
     meteors.push({
       group: g,
       head,
       trail,
-      // 随机相位，错开出现
-      nextT: 2 + i * 3.5 + Math.random() * 4,
+      nextT: 1 + i * 1.2 + Math.random() * 2,
       life: 0,
-      duration: 1.8 + Math.random() * 1.2,
+      duration: 1.4,
       active: false,
       start: new THREE.Vector3(),
       end: new THREE.Vector3(),
     })
   }
 
+  function orientMeteor(group, from, to) {
+    _meteorDir.subVectors(to, from)
+    if (_meteorDir.lengthSq() < 1e-8) return
+    _meteorMat.lookAt(from, to, _meteorUp)
+    group.quaternion.setFromRotationMatrix(_meteorMat)
+  }
+
   function spawnMeteor(m) {
-    const y = 18 + Math.random() * 22
-    const z = -20 + Math.random() * 50
     const fromLeft = Math.random() > 0.5
-    m.start.set(fromLeft ? -55 : 55, y + 4 + Math.random() * 6, z)
-    m.end.set(fromLeft ? 40 : -40, y - 8 - Math.random() * 6, z + (Math.random() - 0.5) * 15)
+    // 落在主视角可见的天幕带：y 14–26、z 靠殿前
+    const y0 = 14 + Math.random() * 12
+    const z0 = 8 + Math.random() * 28
+    const spanX = 48 + Math.random() * 20
+    const dropY = 5 + Math.random() * 6
+    if (fromLeft) {
+      m.start.set(-42, y0 + 2, z0)
+      m.end.set(m.start.x + spanX, y0 - dropY, z0 + (Math.random() - 0.5) * 8)
+    } else {
+      m.start.set(42, y0 + 2, z0)
+      m.end.set(m.start.x - spanX, y0 - dropY, z0 + (Math.random() - 0.5) * 8)
+    }
     m.life = 0
-    m.duration = 1.6 + Math.random() * 1.4
+    m.duration = 1.3 + Math.random() * 0.7
     m.active = true
     m.group.visible = true
     m.group.position.copy(m.start)
-    m.group.lookAt(m.end)
+    orientMeteor(m.group, m.start, m.end)
+    m.head.material.opacity = 0
+    m.trail.material.opacity = 0
   }
 
   let lastMeteorT = 0
@@ -423,14 +449,15 @@ export function createEnvironment(scene) {
           m.group.visible = false
           m.head.material.opacity = 0
           m.trail.material.opacity = 0
-          m.nextT = t + 4 + Math.random() * 8
+          m.nextT = t + 2 + Math.random() * 3
           continue
         }
         const e = k * k * (3 - 2 * k)
         m.group.position.lerpVectors(m.start, m.end, e)
-        const fade = k < 0.15 ? k / 0.15 : k > 0.7 ? (1 - k) / 0.3 : 1
-        m.head.material.opacity = fade * 0.95
-        m.trail.material.opacity = fade * 0.55
+        orientMeteor(m.group, m.start, m.end)
+        const fade = k < 0.15 ? k / 0.15 : k > 0.72 ? (1 - k) / 0.28 : 1
+        m.head.material.opacity = fade * 0.55
+        m.trail.material.opacity = fade * 0.22
       }
     },
   }

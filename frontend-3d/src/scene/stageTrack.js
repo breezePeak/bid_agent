@@ -7,10 +7,14 @@ function hexColor(hex) {
 }
 
 const hexGeo = new THREE.CylinderGeometry(0.72, 0.85, 0.14, 6)
-const coreGeo = new THREE.IcosahedronGeometry(0.32, 0)
+const coreGeo = new THREE.IcosahedronGeometry(0.32, 1)
 const ringGeo = new THREE.TorusGeometry(0.95, 0.03, 6, 24)
 const pulseGeo = new THREE.TorusGeometry(1.15, 0.04, 6, 28)
 const hitGeo = new THREE.SphereGeometry(0.95, 8, 8)
+// 完成丹药：金光
+const GOLD = new THREE.Color(0xffd700)
+const GOLD_HOT = new THREE.Color(0xffe8a0)
+const GOLD_DEEP = new THREE.Color(0xc9a227)
 
 /** 空中漂浮工序节点 · 灵光闪动 */
 export function createStageTrack(scene) {
@@ -19,44 +23,25 @@ export function createStageTrack(scene) {
   scene.add(group)
 
   const n = STAGE_DEFS.length
-  // 工序环绕大殿上空：中间最高、两端回落（拱形层次）
-  const radius = 20
+  // 工序环绕大殿上空：按节点序号逐级升到中间再逐级降（相邻落差均匀）
+  const radius = 22
   const arcStart = -Math.PI * 0.72
   const arcEnd = Math.PI * 0.72
-  // 按阶段给拱形基准：prepare/deliver 低，write 最高
-  const PHASE_ARCH = {
-    prepare: 0.05,
-    analyze: 0.35,
-    plan: 0.7,
-    write: 1.0,
-    quality: 0.55,
-    deliver: 0.12,
-  }
-  const phaseSlot = {}
-  for (const def of STAGE_DEFS) {
-    phaseSlot[def.phase] = (phaseSlot[def.phase] || 0) + 1
-  }
-  const phaseSeen = {}
+  // 大殿脊顶约 y≈19；整体略降，峰高仍越过屋顶
+  const Y_MIN = 11
+  const Y_MAX = 24
   const nodes = []
   const curvePoints = []
-  const yBase = 9.2
-  const yPeak = 7.8
 
   for (let i = 0; i < n; i++) {
-    const def = STAGE_DEFS[i]
     const t = n === 1 ? 0.5 : i / (n - 1)
     const angle = arcStart + (arcEnd - arcStart) * t
-    const slot = phaseSeen[def.phase] || 0
-    phaseSeen[def.phase] = slot + 1
-    const inPhase = phaseSlot[def.phase] || 1
-    // 同阶段内轻微错落
-    const within = inPhase === 1 ? 0 : (slot / (inPhase - 1) - 0.5) * 0.85
-    // 全局 sin 拱 + 阶段权重，中段高、两端低
-    const arch = Math.sin(t * Math.PI)
-    const phaseW = PHASE_ARCH[def.phase] ?? 0.5
-    const y = yBase + yPeak * (0.35 * arch + 0.65 * phaseW) + within
+    // 三角拱：0→中线性升，中→末线性降，相邻高度差近似相等
+    const arch = 1 - Math.abs(2 * t - 1)
+    const y = Y_MIN + (Y_MAX - Y_MIN) * arch
     const x = Math.sin(angle) * radius
-    const z = -Math.cos(angle) * radius * 0.4 - 8
+    // 略抬前，避免中间节点钻到殿后被屋顶挡住
+    const z = -Math.cos(angle) * radius * 0.28 - 4
     curvePoints.push(new THREE.Vector3(x, y, z))
   }
   const curve = new THREE.CatmullRomCurve3(curvePoints, false, 'catmullrom', 0.35)
@@ -103,20 +88,34 @@ export function createStageTrack(scene) {
     cord.position.y = -(pos.y - 1.2) / 2
     node.add(cord)
 
-    // 丹药核心：仅完成后显示
+    // 丹药核心：仅完成后显示（金光材质）
     const core = new THREE.Mesh(
       coreGeo,
       new THREE.MeshStandardMaterial({
-        color: phaseColor,
-        metalness: 0.15,
-        roughness: 0.2,
-        emissive: phaseColor,
-        emissiveIntensity: 0.55,
+        color: GOLD.clone(),
+        metalness: 0.92,
+        roughness: 0.12,
+        emissive: GOLD_HOT.clone(),
+        emissiveIntensity: 0.85,
       }),
     )
     core.position.y = 0.42
     core.visible = false
     node.add(core)
+
+    // 丹药外金晕
+    const goldGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.48, 12, 12),
+      new THREE.MeshBasicMaterial({
+        color: 0xffe08a,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+      }),
+    )
+    goldGlow.position.y = 0.42
+    goldGlow.visible = false
+    node.add(goldGlow)
 
     const halo = new THREE.Mesh(
       ringGeo,
@@ -144,15 +143,15 @@ export function createStageTrack(scene) {
     pulse.position.y = 0.2
     node.add(pulse)
 
-    // 灵光粒子：仅完成后显示
+    // 金光粒子：仅完成后显示
     const sparks = []
-    for (let k = 0; k < 4; k++) {
-      const a = (k / 4) * Math.PI * 2
+    for (let k = 0; k < 6; k++) {
+      const a = (k / 6) * Math.PI * 2
       const spark = new THREE.Mesh(
-        new THREE.SphereGeometry(0.06, 6, 6),
-        new THREE.MeshBasicMaterial({ color: phaseColor, transparent: true, opacity: 0.75 }),
+        new THREE.SphereGeometry(0.05, 6, 6),
+        new THREE.MeshBasicMaterial({ color: 0xffe8a0, transparent: true, opacity: 0.9 }),
       )
-      spark.position.set(Math.cos(a) * 0.7, 0.35, Math.sin(a) * 0.7)
+      spark.position.set(Math.cos(a) * 0.72, 0.4, Math.sin(a) * 0.72)
       spark.visible = false
       node.add(spark)
       sparks.push(spark)
@@ -172,6 +171,7 @@ export function createStageTrack(scene) {
       group: node,
       platform,
       core,
+      goldGlow,
       halo,
       pulse,
       sparks,
@@ -185,18 +185,26 @@ export function createStageTrack(scene) {
   function setNodeState(node, state) {
     const color = hexColor(stateColor(state))
     const phaseCol = node.phaseColor || color
-    node.core.material.color.copy(state === 'done' ? phaseCol : color)
-    node.core.material.emissive.copy(state === 'done' ? phaseCol : color)
-    node.halo.material.color.copy(state === 'done' ? phaseCol : color)
+    if (state === 'done') {
+      node.core.material.color.copy(GOLD)
+      node.core.material.emissive.copy(GOLD_HOT)
+      node.core.material.metalness = 0.95
+      node.core.material.roughness = 0.1
+      node.halo.material.color.copy(GOLD)
+    } else {
+      node.core.material.color.copy(color)
+      node.core.material.emissive.copy(color)
+      node.core.material.metalness = 0.2
+      node.core.material.roughness = 0.35
+      node.halo.material.color.copy(phaseCol)
+    }
 
     const card = node.label.userData.el?.querySelector('.css2d-card')
     const nameEl = node.label.userData.el?.querySelector('.css2d-name')
     const stateEl = node.label.userData.el?.querySelector('[data-state]')
     if (card) card.className = `css2d-card is-${state}`
-    // 默认只显示标号；仅执行中 / 失败 / 阻塞 才显示名称与状态
-    const showDetail =
-      state === 'running' || state === 'error' || state === 'failed' || state === 'blocked'
-    if (nameEl) nameEl.style.display = showDetail ? '' : 'none'
+    // 始终显示工序名：无金丹偏暗、有金丹提亮（样式由 is-done / is-pending 控制）
+    if (nameEl) nameEl.style.display = ''
     if (stateEl) {
       const map = {
         done: '完成',
@@ -208,28 +216,35 @@ export function createStageTrack(scene) {
         pending: '等待',
       }
       stateEl.textContent = map[state] || state
-      stateEl.style.display = showDetail ? '' : 'none'
+      // 仅执行中 / 失败 / 阻塞 显示状态角标
+      const showState =
+        state === 'running' || state === 'error' || state === 'failed' || state === 'blocked'
+      stateEl.style.display = showState ? '' : 'none'
     }
-    if (card) card.classList.toggle('is-compact', !showDetail)
 
-    // 始终显示标号；执行中/异常显示全名
     setStageLabelVisible(node.label, true)
 
     const showDan = state === 'done'
     node.core.visible = showDan
+    if (node.goldGlow) {
+      node.goldGlow.visible = showDan
+      node.goldGlow.material.opacity = showDan ? 0.35 : 0
+    }
     for (const s of node.sparks || []) {
       s.visible = showDan
-      if (showDan) s.material.color.copy(phaseCol)
+      if (showDan) s.material.color.setHex(0xffe8a0)
     }
 
     node.pulse.material.color.set(0xff8a3d)
     if (state === 'done') {
-      // 完成：彩色丹药 + 亮环
-      node.core.material.emissiveIntensity = 1.1
-      node.halo.material.opacity = 0.65
-      node.platform.material.emissiveIntensity = 0.45
-      node.platform.material.emissive.copy(phaseCol)
-      node.pulse.material.opacity = 0
+      // 完成：金丹 + 金环金晕（灵力波只在丹炉，落地后已收）
+      node.core.material.emissiveIntensity = 1.6
+      node.halo.material.opacity = 0.85
+      node.halo.material.color.copy(GOLD)
+      node.platform.material.emissiveIntensity = 0.55
+      node.platform.material.emissive.copy(GOLD_DEEP)
+      node.pulse.material.opacity = 0.25
+      node.pulse.material.color.setHex(0xffd700)
     } else if (state === 'running') {
       // 进行中：无丹药，仅台座脉冲
       node.core.visible = false
@@ -464,8 +479,28 @@ export function createStageTrack(scene) {
           node.group.position.y = baseY + idleFloat + Math.sin(t * 3.5) * 0.08
           node.platform.material.emissiveIntensity = 0.4 + Math.sin(t * 4) * 0.12
         } else if (st === 'done' && node.core.visible) {
+          const idx = node.group.userData.index || 0
+          const shimmer = 0.5 + 0.5 * Math.sin(t * 4.2 + idx * 0.7)
           node.group.position.y = baseY + idleFloat * 0.6
-          node.core.rotation.y = t * 0.4
+          node.core.rotation.y = t * 1.2
+          node.core.rotation.x = Math.sin(t * 1.5 + idx) * 0.15
+          node.core.material.emissiveIntensity = 1.2 + shimmer * 0.9
+          node.core.material.color.lerpColors(GOLD, GOLD_HOT, shimmer * 0.45)
+          node.halo.material.opacity = 0.55 + shimmer * 0.35
+          if (node.goldGlow) {
+            const g = 0.95 + shimmer * 0.2
+            node.goldGlow.scale.setScalar(g)
+            node.goldGlow.material.opacity = 0.22 + shimmer * 0.28
+          }
+          for (let k = 0; k < (node.sparks || []).length; k++) {
+            const s = node.sparks[k]
+            const a = (k / node.sparks.length) * Math.PI * 2 + t * 1.8
+            const r = 0.68 + Math.sin(t * 3 + k) * 0.08
+            s.position.set(Math.cos(a) * r, 0.38 + Math.sin(t * 2.5 + k) * 0.12, Math.sin(a) * r)
+            s.material.opacity = 0.55 + shimmer * 0.4
+          }
+          node.pulse.material.opacity = 0.15 + shimmer * 0.2
+          node.pulse.scale.setScalar(1 + shimmer * 0.12)
         } else {
           node.group.position.y = baseY + idleFloat * 0.4
         }

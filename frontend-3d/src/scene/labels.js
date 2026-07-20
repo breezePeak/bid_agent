@@ -20,26 +20,31 @@ function ensureStyles() {
       font-size: 12px; font-weight: 600; color: #8a8498;
       white-space: nowrap;
     }
-    .css2d-card.is-compact {
-      padding: 3px 7px;
-      gap: 0;
-      background: rgba(10, 14, 32, 0.72);
-      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
-    }
     .css2d-idx { font-size: 11px; color: #5a5868; letter-spacing: 0.06em; font-weight: 700; }
-    .css2d-name { font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; color: #7a7488; }
+    .css2d-name { font-weight: 600; max-width: 120px; overflow: hidden; text-overflow: ellipsis; color: #6a6478; }
     .css2d-state {
       font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 2px;
       border: 1px solid #5a5868; color: #6a6878;
     }
-    /* 默认紧凑标号 */
-    .css2d-card.is-pending, .css2d-card.is-ready, .css2d-card.is-done {
-      opacity: 0.82;
-      border-color: rgba(90, 88, 110, 0.4);
+    /* 无金丹：名字偏暗 */
+    .css2d-card.is-pending, .css2d-card.is-ready {
+      opacity: 0.72;
+      border-color: rgba(90, 88, 110, 0.35);
+      background: rgba(10, 14, 32, 0.78);
     }
-    .css2d-card.is-done .css2d-idx { color: #7ab8a0; }
-    .css2d-card.is-pending .css2d-idx, .css2d-card.is-ready .css2d-idx { color: #6a6478; }
-    /* 进行中：标号 + 名称 + 状态 */
+    .css2d-card.is-pending .css2d-idx, .css2d-card.is-ready .css2d-idx { color: #5a5668; }
+    .css2d-card.is-pending .css2d-name, .css2d-card.is-ready .css2d-name { color: #5a5668; }
+    /* 金丹已成：名字提亮 */
+    .css2d-card.is-done {
+      opacity: 1;
+      border-color: rgba(224, 184, 74, 0.65);
+      background: rgba(28, 22, 10, 0.92);
+      box-shadow: 0 0 12px rgba(224, 184, 74, 0.28);
+      color: #f0e0b0;
+    }
+    .css2d-card.is-done .css2d-idx { color: #e0b84a; }
+    .css2d-card.is-done .css2d-name { color: #ffe8a0; text-shadow: 0 0 8px rgba(255, 200, 80, 0.45); }
+    /* 进行中 */
     .css2d-card.is-running {
       border-color: rgba(255,138,64,.55);
       color: #e8d8c0;
@@ -84,9 +89,9 @@ export function createStageLabel(stage, index) {
   const el = document.createElement('div')
   el.className = 'css2d-label stage-label'
   el.innerHTML = `
-    <div class="css2d-card is-pending is-compact">
+    <div class="css2d-card is-pending">
       <span class="css2d-idx">${String(index + 1).padStart(2, '0')}</span>
-      <span class="css2d-name" style="display:none">${stage.label}</span>
+      <span class="css2d-name">${stage.label}</span>
       <span class="css2d-state" data-state style="display:none">静候</span>
     </div>
   `
