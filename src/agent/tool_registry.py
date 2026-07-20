@@ -165,6 +165,46 @@ def run_stage_tool_spec() -> ToolSpec:
     )
 
 
+def run_pipeline_remaining_tool_spec() -> ToolSpec:
+    return ToolSpec(
+        id="run_pipeline_remaining",
+        name="run_pipeline_remaining",
+        label="续跑剩余流水线",
+        description="从第一个未完成阶段向后运行剩余流水线，遇缺材料/门禁/失败/完成时停止。",
+        kind="meta",
+        command="",
+        stage_id="",
+        requires=(),
+        produces=(),
+        runner="agent.tool_runtime._execute_run_pipeline_remaining",
+        params_schema={
+            "type": "object",
+            "properties": {
+                "start_command": {
+                    "type": "string",
+                    "description": "可选：强制从该 command 开始；空则自动找首个未完成阶段",
+                    "default": "",
+                },
+                "workers": {"type": "integer", "minimum": 1, "default": 4},
+                "max_retries": {"type": "integer", "minimum": 0, "default": 1},
+                "resume": {"type": "boolean", "default": True},
+                "max_stages": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 30,
+                    "description": "本轮最多执行的阶段数，防止失控",
+                },
+            },
+            "additionalProperties": False,
+        },
+        risk_level="high",
+        idempotent=False,
+        side_effects=("write_files", "llm", "dispatch_stage", "concurrency"),
+        human_confirm_required=True,
+        tags=("meta", "pipeline", "mutation"),
+    )
+
+
 
 
 def query_status_tool_spec() -> ToolSpec:
@@ -551,6 +591,7 @@ def _build_tool_index() -> dict[str, ToolSpec]:
     tools: dict[str, ToolSpec] = {}
     for meta in (
         run_stage_tool_spec(),
+        run_pipeline_remaining_tool_spec(),
         query_status_tool_spec(),
         query_artifacts_tool_spec(),
         diagnose_failure_tool_spec(),
@@ -593,6 +634,7 @@ def _build_tool_index() -> dict[str, ToolSpec]:
         explain_issue_tool_spec(),
         repair_issue_tool_spec(),
         export_preflight_tool_spec(),
+        run_pipeline_remaining_tool_spec(),
     ):
         tools[specialized.name] = specialized
         tools[specialized.id] = specialized
@@ -621,6 +663,7 @@ def list_tools(*, include_stage_aliases: bool = False) -> list[ToolSpec]:
     ordered: list[ToolSpec] = []
     for meta in (
         run_stage_tool_spec(),
+        run_pipeline_remaining_tool_spec(),
         query_status_tool_spec(),
         query_artifacts_tool_spec(),
         diagnose_failure_tool_spec(),

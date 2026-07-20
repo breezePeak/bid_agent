@@ -2518,18 +2518,21 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
 
         status = api_status()
         review_context = _load_review_context(root)
-        # Frontend confirm buttons (confirm_tool / run_command with tool) grant mutation scope
+        # Frontend confirm buttons: tool_scope only when tool is present (PR-1)
+        tool_name = str(action.get("tool") or "").strip()
+        confirmed_tools: list[str] = []
+        if tool_name:
+            confirmed_tools.append(tool_name)
         user_confirmed = bool(action.get("user_confirmed")) or action_type in {
             "confirm_tool",
             "confirm_execute",
         }
-        confirmed_tools: list[str] = []
-        tool_name = str(action.get("tool") or "").strip()
-        if tool_name:
-            confirmed_tools.append(tool_name)
-        if user_confirmed and not tool_name and action_type in {"confirm_tool", "confirm_execute", "run_command"}:
-            # Broad confirm when user clicks "确认执行 …" without explicit tool id
-            user_confirmed = True
+        # Without explicit tool, do not grant all_mutations via bare user_confirmed
+        if user_confirmed and not tool_name and action_type in {"confirm_tool", "confirm_execute"}:
+            # only allow all_mutations when label explicitly says so
+            label = str(action.get("label") or message or "")
+            if not any(k in label for k in ("全部剩余", "全部操作", "所有剩余", "确认执行全部")):
+                user_confirmed = False
         try:
             plan_result = await run_in_threadpool(
                 orchestrator_plan,

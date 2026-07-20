@@ -79,6 +79,9 @@ def evaluate_tool_call(
     if name == "build_export" and not user_confirmed:
         return PolicyDecision(False, "导出终稿需要确认", ask_human=True)
 
+    if name == "run_pipeline_remaining" and not user_confirmed and not auto_execute:
+        return PolicyDecision(False, "续跑剩余流水线需要确认", ask_human=True)
+
     if name in {"write_chapters", "review_chapters", "rewrite_chapters"} and not user_confirmed and not auto_execute:
         return PolicyDecision(False, "章节变更需要确认", ask_human=True)
 

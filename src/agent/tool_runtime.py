@@ -349,6 +349,174 @@ def _safe_resolve_under_root(root: Path, relative: str) -> Path:
     return target
 
 
+def _execute_run_pipeline_remaining(root: Path, args: dict[str, Any], *, dry_run: bool = False) -> ToolResult:
+    """Run remaining incomplete pipeline stages from the first unfinished one (PR-2)."""
+    started = _now()
+    from pipeline_registry import workflow_stage_specs, stage_outputs_ready
+
+    start_command = str(args.get("start_command") or "").strip()
+    workers = clamp_workers(args.get("workers") or 4)
+    max_retries = int(args.get("max_retries") or 1)
+    max_stages = int(args.get("max_stages") or 30)
+    resume = bool(args.get("resume", True))
+
+    # Export stages are handled by build_export / export_preflight in goal plan
+    export_ids = {"build_markdown", "build_docx", "check_format"}
+    specs = [
+        s
+        for s in workflow_stage_specs(include_utility=True)
+        if s.id not in export_ids and s.command
+    ]
+
+    start_idx = 0
+    if start_command:
+        for i, s in enumerate(specs):
+            if s.command == start_command or s.id == start_command:
+                start_idx = i
+                break
+    elif resume:
+        start_idx = 0
+        for i, s in enumerate(specs):
+            try:
+                ready = stage_outputs_ready(root, s.id)
+            except Exception:
+                ready = False
+            if not ready:
+                start_idx = i
+                break
+        else:
+            return ToolResult(
+                ok=True,
+                tool="run_pipeline_remaining",
+                args=args,
+                started_at=started,
+                ended_at=_now(),
+                summary_for_llm="流水线核心阶段均已完成，可进行出稿前检查与导出。",
+                metrics={
+                    "status": "complete",
+                    "started_from": "",
+                    "completed_stages": [],
+                    "blocked_reason": "",
+                    "next_command": "export_preflight",
+                },
+            )
+
+    if dry_run:
+        remaining = [s.command for s in specs[start_idx : start_idx + max_stages]]
+        return ToolResult(
+            ok=True,
+            tool="run_pipeline_remaining",
+            args=args,
+            started_at=started,
+            ended_at=_now(),
+            summary_for_llm=f"dry_run: 将从 {remaining[0] if remaining else '无'} 续跑 {len(remaining)} 个阶段",
+            metrics={
+                "status": "paused",
+                "started_from": remaining[0] if remaining else "",
+                "completed_stages": [],
+                "blocked_reason": "",
+                "next_command": remaining[0] if remaining else "",
+                "dry_run": True,
+                "planned": remaining,
+            },
+        )
+
+    completed: list[str] = []
+    started_from = specs[start_idx].command if start_idx < len(specs) else ""
+    blocked_reason = ""
+    status = "complete"
+    next_command = ""
+    last_error = ""
+
+    for s in specs[start_idx : start_idx + max_stages]:
+        # material / human block
+        try:
+            from agent.goal import detect_human_block
+
+            mat = detect_human_block(root, None)
+            if mat:
+                status = "blocked"
+                blocked_reason = mat
+                next_command = s.command
+                break
+        except Exception:
+            pass
+
+        try:
+            from agent.issues import can_proceed
+
+            gate = can_proceed(root, next_command=str(s.command or ""))
+            if not gate.get("can_proceed", True):
+                status = "blocked"
+                blocked_reason = str(gate.get("message") or "质量门禁阻断")
+                next_command = s.command
+                break
+        except Exception:
+            pass
+
+        try:
+            ready = stage_outputs_ready(root, s.id)
+        except Exception:
+            ready = False
+        if ready:
+            completed.append(s.command)
+            continue
+
+        result = _execute_stage(
+            root,
+            s.id,
+            force=False,
+            workers=workers,
+            max_retries=max_retries,
+            dry_run=False,
+            actor="supervisor",
+        )
+        if result.ok or result.skipped:
+            completed.append(s.command)
+            continue
+
+        status = "failed"
+        last_error = (result.error.message if result.error else result.summary_for_llm) or "stage_failed"
+        blocked_reason = last_error
+        next_command = s.command
+        break
+    else:
+        # finished loop without break
+        if start_idx + max_stages < len(specs):
+            status = "paused"
+            next_command = specs[start_idx + max_stages].command
+            blocked_reason = "达到本轮 max_stages 上限"
+        else:
+            status = "complete"
+            next_command = "export_preflight"
+
+    ok = status in {"complete", "paused", "blocked"}
+    summary = (
+        f"续跑状态={status} 起点={started_from} 完成={len(completed)} "
+        f"原因={blocked_reason or '无'} 下一步={next_command or '无'}"
+    )
+    return ToolResult(
+        ok=ok if status != "failed" else False,
+        tool="run_pipeline_remaining",
+        args=args,
+        started_at=started,
+        ended_at=_now(),
+        summary_for_llm=summary[:2000],
+        error=(
+            ToolError(code="runner_failed", message=last_error, retryable=True)
+            if status == "failed"
+            else None
+        ),
+        metrics={
+            "status": status,
+            "started_from": started_from,
+            "completed_stages": completed,
+            "blocked_reason": blocked_reason,
+            "next_command": next_command,
+        },
+    )
+
+
 def _query_status(root: Path, args: dict[str, Any]) -> ToolResult:
     started = _now()
     view = str(args.get("view") or "summary")
@@ -1497,6 +1665,14 @@ def invoke(
             dry_run=dry_run,
             actor=actor,
         )
+
+    if name == "run_pipeline_remaining":
+        spec = get_tool("run_pipeline_remaining")
+        assert spec is not None
+        err = _validate_args(spec, args)
+        if err:
+            return _fail(name, args, started, code="invalid_args", message=err)
+        return _execute_run_pipeline_remaining(root, args, dry_run=dry_run)
 
     spec = get_tool(name)
     if spec is None:

@@ -75,11 +75,29 @@ class AgentFirstAcceptanceTests(unittest.TestCase):
                 )
             self.assertTrue(result.get("supervisor"))
             tools = [s.get("tool") for s in result.get("steps") or []]
-            self.assertTrue(any(t in {"query_status", "run_stage", "export_preflight", "build_export"} for t in tools))
-            self.assertIn(result.get("terminal_status"), {
-                "succeeded", "in_progress", "awaiting_confirmation", "budget_exceeded", "blocked_human",
-            })
+            self.assertTrue(
+                any(
+                    t in {
+                        "query_status",
+                        "run_pipeline_remaining",
+                        "export_preflight",
+                        "build_export",
+                    }
+                    for t in tools
+                )
+            )
+            # Stable Beta: full generate must not treat budget_exceeded as acceptable
+            self.assertIn(
+                result.get("terminal_status"),
+                {
+                    "succeeded",
+                    "in_progress",
+                    "awaiting_confirmation",
+                    "blocked_human",
+                },
+            )
             self.assertNotEqual(result.get("terminal_status"), "waiting_user_click")
+            self.assertNotEqual(result.get("terminal_status"), "budget_exceeded")
 
     # 2. 补齐评分点
     def test_02_fix_coverage_multistep(self) -> None:

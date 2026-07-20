@@ -7,7 +7,7 @@ on:
     branches: [main, master]
 
 jobs:
-  python:
+  static:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +27,24 @@ jobs:
         run: python -m compileall -q src
 
       - name: Ruff check
-        run: ruff check src tests --quiet || true
+        run: ruff check src tests --quiet
+
+  unit:
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
 
       - name: Unit tests (deterministic)
         env:
@@ -38,12 +55,32 @@ jobs:
         run: |
           python -m pytest tests -q --tb=line \
             --ignore=tests/test_live_llm_config.py \
+            --ignore=tests/test_agent_state_machine.py \
+            --ignore=tests/test_agent_first_acceptance.py \
             -k "not live_llm"
 
-      - name: Agent First acceptance
+  agent-state-machine:
+    runs-on: ubuntu-latest
+    needs: static
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Agent state machine acceptance
         env:
           AGENT_SUPERVISOR_ENABLED: "true"
-        run: python -m pytest tests/test_agent_first_acceptance.py tests/test_concurrency.py tests/test_supervisor_multistep.py -q --tb=short
+        run: |
+          python -m pytest tests/test_agent_state_machine.py tests/test_agent_first_acceptance.py tests/test_concurrency.py tests/test_supervisor_multistep.py -q --tb=short
 
       - name: Upload failure logs
         if: failure()
@@ -69,12 +106,6 @@ jobs:
 
       - name: Install & build main frontend
         working-directory: frontend
-        run: |
-          npm ci
-          npm run build
-
-      - name: Install & build 3D frontend
-        working-directory: frontend-3d
         run: |
           npm ci
           npm run build

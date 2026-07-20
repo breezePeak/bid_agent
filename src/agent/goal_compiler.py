@@ -37,9 +37,13 @@ _VALID_CRITERION_CHECKS = frozenset(
         "score_coverage_min",
         "no_open_blocks",
         "chapters_written",
-        "export_preflight_ok",
+        "export_preflight",
+        "export_preflight_ok",  # legacy alias → normalized to export_preflight
     }
 )
+_CRITERION_ALIASES = {
+    "export_preflight_ok": "export_preflight",
+}
 
 
 def _now() -> str:
@@ -89,7 +93,7 @@ _COMPILER_SYSTEM = """你是标书 Goal 编译器。把用户目标编译为结�
     "require_compliance_pass_before_export": true/false,
     "block_on_missing_materials": true/false
   },
-  "success_criteria": [{"check": "score_coverage_min|artifact_exists|no_open_blocks|no_stale|chapters_written|export_preflight_ok", "path": "", "ratio": 0.95, "chapter_ids": []}],
+  "success_criteria": [{"check": "score_coverage_min|artifact_exists|no_open_blocks|no_stale|chapters_written|export_preflight", "path": "", "ratio": 0.95, "chapter_ids": []}],
   "human_confirmation": {"required_for": ["export", "mutations"]}
 }
 只使用上述 objective type 与 criterion check。不要发明 tool 名或代码。
@@ -173,7 +177,8 @@ def validate_goal_draft(draft: dict[str, Any]) -> tuple[bool, str, dict[str, Any
             if not isinstance(item, dict):
                 continue
             check = str(item.get("check") or "").strip()
-            if check not in _VALID_CRITERION_CHECKS:
+            check = _CRITERION_ALIASES.get(check, check)
+            if check not in _VALID_CRITERION_CHECKS and check not in _CRITERION_ALIASES.values():
                 continue
             row = {"check": check}
             if item.get("path"):
@@ -213,6 +218,7 @@ def validate_goal_draft(draft: dict[str, Any]) -> tuple[bool, str, dict[str, Any
         tool = str(step.get("tool") or "")
         if tool and get_tool(tool) is None and tool not in {
             "run_stage",
+            "run_pipeline_remaining",
             "query_status",
             "diagnose_failure",
             "analyze_coverage",
