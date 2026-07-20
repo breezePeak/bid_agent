@@ -104,7 +104,6 @@ body,
   border-radius: 12px;
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(14px);
   box-shadow: var(--glow);
 }
 
@@ -201,7 +200,7 @@ body,
   background: var(--panel);
   border: 1px solid var(--panel-border);
   border-radius: 16px;
-  backdrop-filter: blur(16px);
+  /* no backdrop-filter — expensive and can freeze weak GPUs with many panels */
   box-shadow: var(--glow);
   overflow: hidden;
   display: flex;
@@ -468,8 +467,13 @@ body,
   border-radius: 16px;
   background: var(--panel);
   border: 1px solid var(--panel-border);
-  backdrop-filter: blur(16px);
   box-shadow: var(--glow);
+}
+
+/* Reduce continuous CSS animations load */
+.scanline { opacity: 0.35; }
+@media (prefers-reduced-motion: reduce) {
+  .live-pill.on .dot { animation: none; }
 }
 
 .bottom-msg {

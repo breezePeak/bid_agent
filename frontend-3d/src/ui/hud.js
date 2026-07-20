@@ -19,9 +19,7 @@ function el(html) {
 export function createHud(root, { onAction, onStageClick, onAgentClick }) {
   root.innerHTML = ''
 
-  const vignette = el('<div class="vignette"></div>')
-  const scanline = el('<div class="scanline"></div>')
-  root.append(vignette, scanline)
+  root.append(el('<div class="vignette"></div>'), el('<div class="scanline"></div>'))
 
   const top = el(`
     <div class="hud-top">
@@ -107,12 +105,45 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
     btn.addEventListener('click', () => onAction?.(btn.dataset.act, btn))
   })
 
+  // Event delegation — avoid rebinding on every render
+  const stageList = document.getElementById('stage-list')
+  stageList.addEventListener('click', (e) => {
+    const row = e.target.closest('.stage-row')
+    if (!row) return
+    onStageClick?.(Number(row.dataset.index), row.dataset.id)
+  })
+  const agentGrid = document.getElementById('agent-grid')
+  agentGrid.addEventListener('click', (e) => {
+    const card = e.target.closest('.agent-card')
+    if (!card) return
+    onAgentClick?.(card.dataset.id)
+  })
+
+  let lastRenderSig = ''
+
   function render(snap, extras = {}) {
-    // metrics
-    const metrics = document.getElementById('top-metrics')
+    // Skip identical HUD paint (demo can tick faster than needed)
+    const sig = [
+      snap.progress,
+      snap.doneCount,
+      snap.running,
+      snap.demo,
+      snap.connected,
+      snap.currentTask,
+      snap.runState?.message,
+      snap.activity?.phase_label,
+      (snap.agents || []).map((a) => a.id + a.status).join(','),
+      (snap.stages || []).map((s) => s.state).join(''),
+      extras.activeButtons?.orbit,
+      extras.activeButtons?.demo,
+      extras.activeButtons?.live,
+    ].join('|')
+    if (sig === lastRenderSig) return
+    lastRenderSig = sig
+
     const liveClass = snap.demo ? 'live-pill demo' : snap.running ? 'live-pill on' : 'live-pill'
     const liveText = snap.demo ? 'DEMO' : snap.connected ? (snap.running ? 'LIVE' : 'IDLE') : 'OFFLINE'
-    metrics.innerHTML = `
+    document.getElementById('top-metrics').innerHTML = `
       <div class="${liveClass}"><span class="dot"></span>${liveText}</div>
       <div class="metric"><div class="label">进度</div><div class="value">${Math.round((snap.progress || 0) * 100)}%</div></div>
       <div class="metric"><div class="label">阶段</div><div class="value gold">${snap.doneCount}/${snap.totalCount}</div></div>
@@ -122,84 +153,68 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
       <div class="metric"><div class="label">Run</div><div class="value pink" style="font-size:12px">${snap.runName || snap.runId || '—'}</div></div>
     `
 
-    // phases
-    const phaseBar = document.getElementById('phase-bar')
-    phaseBar.innerHTML = (snap.phases || PHASES).map((p) => {
-      const pct = Math.round((p.progress || 0) * 100)
-      return `<div class="phase-chip" style="border-color:${p.color}55;box-shadow:inset 0 0 12px ${p.color}22">
+    document.getElementById('phase-bar').innerHTML = (snap.phases || PHASES)
+      .map((p) => {
+        const pct = Math.round((p.progress || 0) * 100)
+        return `<div class="phase-chip" style="border-color:${p.color}55">
         <span>${p.label}</span>
         <span class="pct" style="color:${p.color}">${pct}%</span>
       </div>`
-    }).join('')
+      })
+      .join('')
 
     document.getElementById('stage-progress-hint').textContent = `${snap.doneCount}/${snap.totalCount}`
     document.getElementById('progress-fill').style.width = `${Math.round((snap.progress || 0) * 100)}%`
 
-    // stages
-    const list = document.getElementById('stage-list')
-    list.innerHTML = (snap.stages || [])
+    stageList.innerHTML = (snap.stages || [])
       .map((s) => {
         const st = s.state || 'pending'
-        const active = st === 'running' ? ' active' : ''
-        const done = st === 'done' ? ' done' : ''
-        return `<div class="stage-row${active}${done}" data-index="${s.index}" data-id="${s.id}">
+        return `<div class="stage-row${st === 'running' ? ' active' : ''}${st === 'done' ? ' done' : ''}" data-index="${s.index}" data-id="${s.id}">
           <span class="stage-idx">${String(s.index + 1).padStart(2, '0')}</span>
-          <span class="stage-name" title="${s.label}">${s.icon || ''} ${s.label}</span>
+          <span class="stage-name">${s.label}</span>
           <span class="stage-state state-${st}">${STATE_LABEL[st] || st}</span>
         </div>`
       })
       .join('')
-    list.querySelectorAll('.stage-row').forEach((row) => {
-      row.addEventListener('click', () => {
-        onStageClick?.(Number(row.dataset.index), row.dataset.id)
-      })
-    })
 
-    // agents
     const agents = snap.agents || []
-    const grid = document.getElementById('agent-grid')
     const summary = snap.activity?.summary || {}
     document.getElementById('agent-summary').textContent =
       snap.activity?.phase_label ||
       `${summary.running || 0} 工作 · ${summary.queued || 0} 排队 · ${summary.done || 0} 完成`
 
-    if (!agents.length) {
-      grid.innerHTML = `<div class="event-item">当前无子 Agent 活动。主 Agent 值班中。</div>`
-    } else {
-      grid.innerHTML = agents
-        .map((a) => {
-          const st = a.status || 'idle'
-          return `<div class="agent-card ${st}" data-id="${a.id}">
+    agentGrid.innerHTML = agents.length
+      ? agents
+          .slice(0, 16)
+          .map((a) => {
+            const st = a.status || 'idle'
+            return `<div class="agent-card ${st}" data-id="${a.id}">
             <div class="agent-avatar">${a.emoji || '🤖'}</div>
             <div class="agent-meta">
               <div class="role">${a.label || a.role}
                 <span class="status-badge state-${st}">${STATE_LABEL[st] || st}</span>
               </div>
-              <div class="sub">${a.chapter_id ? `章节 ${a.chapter_id}` : a.role}${a.attempt ? ` · 第 ${a.attempt} 次` : ''}</div>
+              <div class="sub">${a.chapter_id ? `章节 ${a.chapter_id}` : a.role}</div>
               <div class="msg">${a.message || '—'}</div>
             </div>
           </div>`
-        })
-        .join('')
-      grid.querySelectorAll('.agent-card').forEach((card) => {
-        card.addEventListener('click', () => onAgentClick?.(card.dataset.id))
-      })
-    }
+          })
+          .join('')
+      : `<div class="event-item">当前无子 Agent 活动。主 Agent 值班中。</div>`
 
-    // events
     const events = snap.events || []
     document.getElementById('event-list').innerHTML = events.length
       ? events
+          .slice(0, 8)
           .map(
             (e) => `<div class="event-item">
-          <div class="ts">${(e.ts || '').replace('T', ' ').slice(0, 19)} · ${e.stage || ''} · ${e.event_type || ''}</div>
+          <div class="ts">${(e.ts || '').replace('T', ' ').slice(0, 19)} · ${e.stage || ''}</div>
           <div>${e.message || ''}</div>
         </div>`,
           )
           .join('')
       : `<div class="event-item">暂无事件</div>`
 
-    // goal & stats
     document.getElementById('goal-box').textContent =
       snap.goalSummary ||
       (snap.goal?.raw_user_goal ? String(snap.goal.raw_user_goal) : '暂无活动目标 — 可在主前端通过对话设定 Goal')
@@ -209,7 +224,6 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
     document.getElementById('mat-stats').textContent = String(snap.materialsDeferred || 0)
     document.getElementById('issue-stats').textContent = String(snap.issuesOpen || 0)
 
-    // bottom
     const title = snap.demo
       ? 'DEMO SIMULATION'
       : snap.running
@@ -218,16 +232,13 @@ export function createHud(root, { onAction, onStageClick, onAgentClick }) {
           ? 'STANDBY'
           : 'OFFLINE / DEMO READY'
     document.getElementById('bottom-title').textContent = title
-    const msg =
+    document.getElementById('bottom-text').textContent =
       snap.runState?.message ||
       (snap.currentTask ? `当前任务：${snap.currentTask}` : '') ||
       (snap.connected ? '后端已连接，等待流水线启动' : '后端未连接 — 点击「演示模式」预览全流程')
-    document.getElementById('bottom-text').textContent = msg
 
-    // button states
     bottom.querySelectorAll('[data-act]').forEach((btn) => {
-      const act = btn.dataset.act
-      btn.classList.toggle('active', Boolean(extras.activeButtons?.[act]))
+      btn.classList.toggle('active', Boolean(extras.activeButtons?.[btn.dataset.act]))
     })
   }
 

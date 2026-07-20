@@ -13,39 +13,48 @@ export class App3D {
     this.raycaster = new THREE.Raycaster()
     this.pointer = new THREE.Vector2()
     this.autoOrbit = true
-    this.focusMode = 'overview' // overview | active | agents
-    this._focusIndex = -1
+    this.focusMode = 'overview'
     this.onPick = null
+    this._userDriving = false
+    this._camAnim = null
+    this._lastSnap = null
+    this._pickables = []
+
+    // Cap pixel ratio hard — 2x DPR destroys FPS on 4K/laptop
+    const dpr = Math.min(window.devicePixelRatio || 1, 1.25)
 
     this.renderer = new THREE.WebGLRenderer({
       canvas,
-      antialias: true,
+      antialias: dpr < 1.2,
       alpha: false,
       powerPreference: 'high-performance',
+      stencil: false,
+      depth: true,
     })
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-    this.renderer.setSize(window.innerWidth, window.innerHeight)
+    this.renderer.setPixelRatio(dpr)
+    this.renderer.setSize(window.innerWidth, window.innerHeight, false)
     this.renderer.outputColorSpace = THREE.SRGBColorSpace
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
-    this.renderer.toneMappingExposure = 1.15
+    this.renderer.toneMapping = THREE.NoToneMapping // cheaper than ACES
+    this.renderer.setClearColor(0x03060f, 1)
 
     this.labelRenderer = new CSS2DRenderer()
     this.labelRenderer.setSize(window.innerWidth, window.innerHeight)
-    this.labelRenderer.domElement.style.position = 'absolute'
-    this.labelRenderer.domElement.style.inset = '0'
-    this.labelRenderer.domElement.style.pointerEvents = 'none'
-    this.labelRenderer.domElement.style.zIndex = '2'
-    canvas.parentElement.appendChild(this.labelRenderer.domElement)
+    const labelEl = this.labelRenderer.domElement
+    labelEl.style.position = 'absolute'
+    labelEl.style.inset = '0'
+    labelEl.style.pointerEvents = 'none'
+    labelEl.style.zIndex = '2'
+    canvas.parentElement.appendChild(labelEl)
 
     this.scene = new THREE.Scene()
-    this.camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.1, 200)
+    this.camera = new THREE.PerspectiveCamera(48, window.innerWidth / window.innerHeight, 0.2, 120)
     this.camera.position.set(0, 14, 22)
 
     this.controls = new OrbitControls(this.camera, canvas)
     this.controls.enableDamping = true
-    this.controls.dampingFactor = 0.06
+    this.controls.dampingFactor = 0.08
     this.controls.minDistance = 6
-    this.controls.maxDistance = 45
+    this.controls.maxDistance = 40
     this.controls.maxPolarAngle = Math.PI * 0.48
     this.controls.target.set(0, 1.5, 2)
     this.controls.update()
@@ -55,6 +64,8 @@ export class App3D {
     this.agentField = createAgentField(this.scene)
     this.dataFlow = createDataFlow(this.scene, this.stageTrack.curve)
 
+    this._rebuildPickables()
+
     this._onResize = () => this.resize()
     this._onPointer = (e) => this.onPointerMove(e)
     this._onClick = (e) => this.onClick(e)
@@ -62,28 +73,37 @@ export class App3D {
     canvas.addEventListener('pointermove', this._onPointer)
     canvas.addEventListener('click', this._onClick)
 
-    // user interaction disables auto orbit briefly
     this.controls.addEventListener('start', () => {
       this._userDriving = true
     })
     this.controls.addEventListener('end', () => {
-      setTimeout(() => {
+      window.setTimeout(() => {
         this._userDriving = false
-      }, 2500)
+      }, 2000)
     })
 
     this._raf = 0
     this._running = false
+    this._frame = 0
+  }
+
+  _rebuildPickables() {
+    this._pickables = this.stageTrack.nodes.map((n) => n.hit)
   }
 
   start() {
     if (this._running) return
     this._running = true
     const loop = () => {
+      if (!this._running) return
       this._raf = requestAnimationFrame(loop)
-      this.tick()
+      try {
+        this.tick()
+      } catch (err) {
+        console.error('[3d] frame error', err)
+      }
     }
-    loop()
+    this._raf = requestAnimationFrame(loop)
   }
 
   stop() {
@@ -106,7 +126,7 @@ export class App3D {
     const h = window.innerHeight
     this.camera.aspect = w / h
     this.camera.updateProjectionMatrix()
-    this.renderer.setSize(w, h)
+    this.renderer.setSize(w, h, false)
     this.labelRenderer.setSize(w, h)
   }
 
@@ -120,7 +140,6 @@ export class App3D {
     if (active) {
       const node = this.stageTrack.getNodeByStageId(active.id)
       if (node) this.dataFlow.setActiveTarget(node.position)
-      this._focusIndex = active.index
     } else {
       this.dataFlow.setActiveTarget(null)
     }
@@ -135,14 +154,14 @@ export class App3D {
   focusActive() {
     this.focusMode = 'active'
     const snap = this._lastSnap
-    const active = snap?.stages?.find((s) => s.state === 'running') || snap?.stages?.find((s) => s.state === 'ready')
+    const active =
+      snap?.stages?.find((s) => s.state === 'running') || snap?.stages?.find((s) => s.state === 'ready')
     if (!active) {
       this.focusOverview()
       return
     }
     const pos = this.stageTrack.getPosition(active.index)
-    const cam = pos.clone().add(new THREE.Vector3(0, 6, 8))
-    this._animateCamera(cam, pos.clone().add(new THREE.Vector3(0, 0.5, 0)))
+    this._animateCamera(pos.clone().add(new THREE.Vector3(0, 6, 8)), pos.clone().add(new THREE.Vector3(0, 0.5, 0)))
   }
 
   focusAgents() {
@@ -154,8 +173,7 @@ export class App3D {
     const pos = this.stageTrack.getPosition(index)
     if (!pos) return
     this.focusMode = 'stage'
-    const cam = pos.clone().add(new THREE.Vector3(2, 5, 7))
-    this._animateCamera(cam, pos.clone().add(new THREE.Vector3(0, 0.4, 0)))
+    this._animateCamera(pos.clone().add(new THREE.Vector3(2, 5, 7)), pos.clone().add(new THREE.Vector3(0, 0.4, 0)))
   }
 
   _animateCamera(position, target) {
@@ -165,7 +183,7 @@ export class App3D {
       fromTarget: this.controls.target.clone(),
       toTarget: target.clone(),
       t: 0,
-      dur: 1.1,
+      dur: 0.9,
     }
   }
 
@@ -177,15 +195,15 @@ export class App3D {
 
   _pick() {
     this.raycaster.setFromCamera(this.pointer, this.camera)
-    const hits = []
-    for (const node of this.stageTrack.nodes) {
-      hits.push(node.hit)
+    // Prefer stage hits; agent hits optional sparse traverse
+    let intersects = this.raycaster.intersectObjects(this._pickables, false)
+    if (!intersects.length) {
+      const agentHits = []
+      this.agentField.root.traverse((obj) => {
+        if (obj.userData?.pickType === 'agent') agentHits.push(obj)
+      })
+      intersects = this.raycaster.intersectObjects(agentHits, false)
     }
-    // agent hits are nested; traverse
-    this.agentField.root.traverse((obj) => {
-      if (obj.userData?.pickType === 'agent') hits.push(obj)
-    })
-    const intersects = this.raycaster.intersectObjects(hits, false)
     if (!intersects.length) return null
     return intersects[0].object.userData
   }
@@ -204,33 +222,36 @@ export class App3D {
 
   tick() {
     const t = this.clock.getElapsedTime()
-    const dt = this.clock.getDelta()
+    const dt = Math.min(this.clock.getDelta(), 0.05)
     const progress = this._lastSnap?.progress || 0
+    this._frame += 1
 
     this.env.update(t, progress)
     this.stageTrack.update(t)
     this.agentField.update(t)
     this.dataFlow.update(t)
 
-    // camera animation
     if (this._camAnim) {
       this._camAnim.t += dt
       const k = Math.min(1, this._camAnim.t / this._camAnim.dur)
-      const e = 1 - Math.pow(1 - k, 3)
+      const e = 1 - (1 - k) ** 3
       this.camera.position.lerpVectors(this._camAnim.fromPos, this._camAnim.toPos, e)
       this.controls.target.lerpVectors(this._camAnim.fromTarget, this._camAnim.toTarget, e)
       if (k >= 1) this._camAnim = null
     } else if (this.autoOrbit && !this._userDriving && this.focusMode === 'overview') {
       const r = 22
-      const ang = t * 0.08
-      this.camera.position.x = Math.sin(ang) * r * 0.55
+      const ang = t * 0.06
+      this.camera.position.x = Math.sin(ang) * r * 0.5
       this.camera.position.z = Math.cos(ang) * r
-      this.camera.position.y = 12 + Math.sin(t * 0.3) * 0.6
+      this.camera.position.y = 12 + Math.sin(t * 0.25) * 0.4
       this.controls.target.set(0, 1.5, 2)
     }
 
     this.controls.update()
     this.renderer.render(this.scene, this.camera)
-    this.labelRenderer.render(this.scene, this.camera)
+    // CSS2D every other frame is enough for labels
+    if (this._frame % 2 === 0) {
+      this.labelRenderer.render(this.scene, this.camera)
+    }
   }
 }
