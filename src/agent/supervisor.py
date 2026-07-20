@@ -609,11 +609,13 @@ def run_supervisor_turn(
                 decision["need_confirm"] = True
                 actions.append(
                     {
+                        # type stays run_command for legacy UI; tool+args signal confirm path
                         "type": "run_command",
                         "command": str(args.get("command") or tool),
                         "label": f"确认执行 {args.get('command') or tool}",
                         "tool": tool,
                         "args": args,
+                        "user_confirmed": True,
                     }
                 )
             else:
@@ -627,6 +629,7 @@ def run_supervisor_turn(
                             "label": f"确认执行 {args.get('command') or tool}",
                             "tool": tool,
                             "args": args,
+                            "user_confirmed": True,
                         }
                     )
                 else:
@@ -841,6 +844,9 @@ def plan_with_supervisor(
     status: dict[str, Any],
     llm_chat=None,
     review_context: list[dict[str, Any]] | None = None,
+    *,
+    user_confirmed: bool = False,
+    confirmed_tools: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """If supervisor flag enabled, return a plan-like dict for session_orchestrator; else None."""
     if not agent_supervisor_enabled():
@@ -856,8 +862,9 @@ def plan_with_supervisor(
             llm_chat=llm_chat,
             use_llm=use_llm,
             auto_execute_readonly=True,
-            user_confirmed=False,
+            user_confirmed=bool(user_confirmed),
             max_steps=None,
+            confirmed_tools=confirmed_tools,
         )
     except Exception:
         return None

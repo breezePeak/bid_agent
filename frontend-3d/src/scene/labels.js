@@ -9,30 +9,55 @@ function ensureStyles() {
   const style = document.createElement('style')
   style.id = 'css2d-label-styles'
   style.textContent = `
-    .css2d-label { pointer-events: none; user-select: none; will-change: transform; }
+    .css2d-label, .css2d-label * { pointer-events: none !important; user-select: none; will-change: transform; }
     .css2d-card {
       display: flex; align-items: center; gap: 5px;
       padding: 5px 9px; border-radius: 4px;
-      background: rgba(10, 14, 32, 0.92);
-      border: 1px solid rgba(160, 140, 255, 0.4);
+      background: rgba(10, 14, 32, 0.9);
+      border: 1px solid rgba(120, 110, 140, 0.35);
       box-shadow: 0 4px 14px rgba(0,0,0,0.35);
       font-family: 'Noto Serif SC', 'Songti SC', serif;
-      font-size: 12px; font-weight: 600; color: #e8ecf8;
+      font-size: 12px; font-weight: 600; color: #8a8498;
       white-space: nowrap;
     }
-    .css2d-idx { font-size: 11px; color: #7a84a0; letter-spacing: 0.06em; font-weight: 700; }
-    .css2d-name { font-weight: 700; max-width: 110px; overflow: hidden; text-overflow: ellipsis; }
+    .css2d-card.is-compact {
+      padding: 3px 7px;
+      gap: 0;
+      background: rgba(10, 14, 32, 0.72);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    }
+    .css2d-idx { font-size: 11px; color: #5a5868; letter-spacing: 0.06em; font-weight: 700; }
+    .css2d-name { font-weight: 600; max-width: 110px; overflow: hidden; text-overflow: ellipsis; color: #7a7488; }
     .css2d-state {
       font-size: 10px; font-weight: 700; padding: 1px 5px; border-radius: 2px;
-      border: 1px solid #7a84a0; color: #7a84a0;
+      border: 1px solid #5a5868; color: #6a6878;
     }
-    .css2d-card.is-done { border-color: rgba(74,208,160,.55); }
-    .css2d-card.is-done .css2d-state { color: #6ae8b8; border-color: #4ad0a0; }
-    .css2d-card.is-running { border-color: rgba(255,138,64,.65); }
+    /* 默认紧凑标号 */
+    .css2d-card.is-pending, .css2d-card.is-ready, .css2d-card.is-done {
+      opacity: 0.82;
+      border-color: rgba(90, 88, 110, 0.4);
+    }
+    .css2d-card.is-done .css2d-idx { color: #7ab8a0; }
+    .css2d-card.is-pending .css2d-idx, .css2d-card.is-ready .css2d-idx { color: #6a6478; }
+    /* 进行中：标号 + 名称 + 状态 */
+    .css2d-card.is-running {
+      border-color: rgba(255,138,64,.55);
+      color: #e8d8c0;
+      opacity: 1;
+      background: rgba(28, 18, 12, 0.94);
+      box-shadow: 0 0 14px rgba(255, 138, 64, 0.28);
+    }
+    .css2d-card.is-running .css2d-idx { color: #ffb070; }
+    .css2d-card.is-running .css2d-name { color: #f0d8b0; }
     .css2d-card.is-running .css2d-state { color: #ff8a40; border-color: #ff8a40; }
-    .css2d-card.is-ready .css2d-state { color: #e0b84a; border-color: #e0b84a; }
-    .css2d-card.is-error .css2d-state, .css2d-card.is-failed .css2d-state { color: #ff6068; border-color: #ff6068; }
-    .css2d-card.is-pending { opacity: 0.8; }
+    .css2d-card.is-error .css2d-state, .css2d-card.is-failed .css2d-state,
+    .css2d-card.is-blocked .css2d-state { color: #ff6068; border-color: #ff6068; }
+    .css2d-card.is-error .css2d-name, .css2d-card.is-failed .css2d-name,
+    .css2d-card.is-blocked .css2d-name { color: #e8a0a8; }
+    .css2d-card.is-error, .css2d-card.is-failed, .css2d-card.is-blocked {
+      opacity: 1;
+      border-color: rgba(224, 85, 85, 0.55);
+    }
     .css2d-agent {
       display: flex; align-items: center; gap: 3px;
       padding: 3px 8px; border-radius: 4px;
@@ -59,13 +84,13 @@ export function createStageLabel(stage, index) {
   const el = document.createElement('div')
   el.className = 'css2d-label stage-label'
   el.innerHTML = `
-    <div class="css2d-card is-pending">
+    <div class="css2d-card is-pending is-compact">
       <span class="css2d-idx">${String(index + 1).padStart(2, '0')}</span>
-      <span class="css2d-name">${stage.label}</span>
-      <span class="css2d-state" data-state>静候</span>
+      <span class="css2d-name" style="display:none">${stage.label}</span>
+      <span class="css2d-state" data-state style="display:none">静候</span>
     </div>
   `
-  el.style.display = 'none'
+  el.style.display = ''
   const obj = new CSS2DObject(el)
   obj.position.set(0, 1.0, 0)
   obj.userData = { el, stageId: stage.id }

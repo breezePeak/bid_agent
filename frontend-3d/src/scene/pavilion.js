@@ -155,20 +155,218 @@ export function createPavilion(scene) {
   const colH = 5.2
   const colY = hallY + colH / 2
 
-  const backWall = new THREE.Mesh(new THREE.BoxGeometry(17, 4.8, 0.35), mat.plaster)
-  backWall.position.set(0, hallY + 2.4, -7.5)
+  // ——— 后墙：多层唐风影壁（真实厚重） ———
+  const wallZ = -7.55
+  // 主墙体
+  const backWall = new THREE.Mesh(new THREE.BoxGeometry(17.2, 5.0, 0.55), mat.plaster)
+  backWall.position.set(0, hallY + 2.5, wallZ)
   root.add(backWall)
-  const mural = new THREE.Mesh(new THREE.BoxGeometry(8, 3.2, 0.12), mat.redDeep)
-  mural.position.set(0, hallY + 2.6, -7.28)
-  root.add(mural)
-  const muralGold = new THREE.Mesh(new THREE.BoxGeometry(7.2, 2.6, 0.1), mat.goldSoft)
-  muralGold.position.set(0, hallY + 2.6, -7.2)
-  root.add(muralGold)
+  // 墙裙（下段朱红）
+  const dado = new THREE.Mesh(new THREE.BoxGeometry(17.0, 1.2, 0.58), mat.redDeep)
+  dado.position.set(0, hallY + 0.7, wallZ + 0.02)
+  root.add(dado)
+  // 金线分隔
+  const dadoLine = new THREE.Mesh(new THREE.BoxGeometry(16.5, 0.08, 0.6), mat.gold)
+  dadoLine.position.set(0, hallY + 1.32, wallZ + 0.04)
+  root.add(dadoLine)
+  // 中心影壁 thrice 框
+  const frameOuter = new THREE.Mesh(new THREE.BoxGeometry(9.2, 3.6, 0.2), mat.woodDark)
+  frameOuter.position.set(0, hallY + 3.0, wallZ + 0.28)
+  root.add(frameOuter)
+  const frameGold = new THREE.Mesh(new THREE.BoxGeometry(8.7, 3.2, 0.18), mat.goldSoft)
+  frameGold.position.set(0, hallY + 3.0, wallZ + 0.36)
+  root.add(frameGold)
+  // 壁画底（青绿山水感）
+  const muralBg = new THREE.Mesh(
+    new THREE.BoxGeometry(8.1, 2.85, 0.12),
+    new THREE.MeshStandardMaterial({
+      color: 0x2a4a58,
+      roughness: 0.7,
+      metalness: 0.08,
+      emissive: 0x0a1820,
+      emissiveIntensity: 0.12,
+    }),
+  )
+  muralBg.position.set(0, hallY + 3.0, wallZ + 0.44)
+  root.add(muralBg)
+  // 山峦层
+  for (let i = 0; i < 5; i++) {
+    const hill = new THREE.Mesh(
+      new THREE.SphereGeometry(1.1 - i * 0.1, 8, 6, 0, Math.PI * 2, 0, Math.PI * 0.55),
+      new THREE.MeshStandardMaterial({
+        color: i % 2 === 0 ? 0x3a6a58 : 0x2a5048,
+        roughness: 0.75,
+        metalness: 0.05,
+        emissive: 0x0a2018,
+        emissiveIntensity: 0.08,
+      }),
+    )
+    hill.position.set(-2.5 + i * 1.3, hallY + 2.15 + (i % 2) * 0.15, wallZ + 0.5)
+    hill.scale.set(1.3, 0.9, 0.4)
+    root.add(hill)
+  }
+  // 云纹
+  for (let i = 0; i < 4; i++) {
+    const cloud = new THREE.Mesh(
+      new THREE.SphereGeometry(0.45, 6, 6),
+      new THREE.MeshStandardMaterial({
+        color: 0xd8e0e8,
+        roughness: 0.6,
+        metalness: 0.05,
+        transparent: true,
+        opacity: 0.55,
+      }),
+    )
+    cloud.position.set(-2.8 + i * 1.8, hallY + 3.7 + (i % 2) * 0.2, wallZ + 0.52)
+    cloud.scale.set(1.6, 0.55, 0.4)
+    root.add(cloud)
+  }
+  // 中心太极 / 丹纹
+  const taiji = new THREE.Mesh(
+    new THREE.CircleGeometry(0.55, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0xe0b84a,
+      metalness: 0.5,
+      roughness: 0.35,
+      emissive: 0x6a4010,
+      emissiveIntensity: 0.35,
+    }),
+  )
+  taiji.position.set(0, hallY + 3.15, wallZ + 0.56)
+  root.add(taiji)
+  const taijiIn = new THREE.Mesh(
+    new THREE.CircleGeometry(0.28, 16),
+    new THREE.MeshStandardMaterial({
+      color: 0x1a1020,
+      roughness: 0.5,
+      metalness: 0.2,
+    }),
+  )
+  taijiIn.position.set(0, hallY + 3.15, wallZ + 0.58)
+  root.add(taijiIn)
+  // 两侧挂轴
+  for (const x of [-5.8, 5.8]) {
+    const scroll = new THREE.Mesh(new THREE.BoxGeometry(1.4, 3.0, 0.08), mat.redDeep)
+    scroll.position.set(x, hallY + 2.9, wallZ + 0.32)
+    root.add(scroll)
+    const scrollGold = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.12, 0.1), mat.gold)
+    scrollGold.position.set(x, hallY + 4.45, wallZ + 0.34)
+    root.add(scrollGold)
+    const scrollBot = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.12, 0.1), mat.gold)
+    scrollBot.position.set(x, hallY + 1.35, wallZ + 0.34)
+    root.add(scrollBot)
+    // 轴心纹
+    const ink = new THREE.Mesh(
+      new THREE.BoxGeometry(0.9, 2.2, 0.06),
+      new THREE.MeshStandardMaterial({ color: 0xf0e6d0, roughness: 0.8 }),
+    )
+    ink.position.set(x, hallY + 2.9, wallZ + 0.38)
+    root.add(ink)
+  }
+  // 墙顶额枋彩画
+  const wallBeam = new THREE.Mesh(new THREE.BoxGeometry(17.0, 0.35, 0.5), mat.woodDark)
+  wallBeam.position.set(0, hallY + 5.1, wallZ + 0.1)
+  root.add(wallBeam)
+  const wallBeamGold = new THREE.Mesh(new THREE.BoxGeometry(17.0, 0.1, 0.52), mat.gold)
+  wallBeamGold.position.set(0, hallY + 5.3, wallZ + 0.12)
+  root.add(wallBeamGold)
+  // 墙角立柱装饰
+  for (const x of [-8.3, 8.3]) {
+    const pilaster = new THREE.Mesh(new THREE.BoxGeometry(0.45, 5.0, 0.5), mat.red)
+    pilaster.position.set(x, hallY + 2.5, wallZ + 0.15)
+    root.add(pilaster)
+    const pilGold = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.12, 0.55), mat.gold)
+    pilGold.position.set(x, hallY + 4.9, wallZ + 0.18)
+    root.add(pilGold)
+  }
 
-  for (const x of [-8.6, 8.6]) {
-    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3.2, 10), mat.plaster)
-    wall.position.set(x, hallY + 1.6, -2.5)
+  // ——— 左右侧墙：格扇 + 窗花 + 挂轴（唐风） ———
+  for (const side of [-1, 1]) {
+    const x = side * 8.7
+    // 主墙板
+    const wall = new THREE.Mesh(new THREE.BoxGeometry(0.35, 4.6, 10.5), mat.plaster)
+    wall.position.set(x, hallY + 2.3, -2.2)
     root.add(wall)
+    // 墙裙
+    const dadoS = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.1, 10.3), mat.redDeep)
+    dadoS.position.set(x + side * 0.02, hallY + 0.65, -2.2)
+    root.add(dadoS)
+    // 金线
+    const lineS = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.07, 10.0), mat.gold)
+    lineS.position.set(x + side * 0.03, hallY + 1.25, -2.2)
+    root.add(lineS)
+    // 三扇窗格
+    for (let w = 0; w < 3; w++) {
+      const wz = -5.5 + w * 3.2
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.4, 2.4), mat.woodDark)
+      frame.position.set(x + side * 0.12, hallY + 2.9, wz)
+      root.add(frame)
+      const goldF = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.15, 2.15), mat.goldSoft)
+      goldF.position.set(x + side * 0.18, hallY + 2.9, wz)
+      root.add(goldF)
+      // 窗纸
+      const paper = new THREE.Mesh(
+        new THREE.BoxGeometry(0.06, 1.9, 1.9),
+        new THREE.MeshStandardMaterial({
+          color: 0xf5ead0,
+          roughness: 0.85,
+          metalness: 0.02,
+          emissive: 0x403020,
+          emissiveIntensity: 0.08,
+          transparent: true,
+          opacity: 0.9,
+        }),
+      )
+      paper.position.set(x + side * 0.22, hallY + 2.9, wz)
+      root.add(paper)
+      // 窗棂十字
+      const barV = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.85, 0.06), mat.woodDark)
+      barV.position.set(x + side * 0.24, hallY + 2.9, wz)
+      root.add(barV)
+      const barH = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 1.85), mat.woodDark)
+      barH.position.set(x + side * 0.24, hallY + 2.9, wz)
+      root.add(barH)
+      // 菱花简化
+      for (let g = 0; g < 4; g++) {
+        const diamond = new THREE.Mesh(
+          new THREE.BoxGeometry(0.04, 0.35, 0.35),
+          mat.woodDark,
+        )
+        diamond.rotation.x = Math.PI / 4
+        const gx = ((g % 2) - 0.5) * 0.7
+        const gy = (Math.floor(g / 2) - 0.5) * 0.7
+        diamond.position.set(x + side * 0.25, hallY + 2.9 + gy, wz + gx)
+        root.add(diamond)
+      }
+    }
+    // 侧挂灯笼
+    for (const wz of [-4.5, 0.5]) {
+      const chain = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 4), mat.goldSoft)
+      chain.position.set(x + side * 0.5, hallY + 4.3, wz)
+      root.add(chain)
+      const lan = new THREE.Mesh(
+        new THREE.SphereGeometry(0.28, 8, 8),
+        new THREE.MeshStandardMaterial({
+          color: 0xff6a40,
+          emissive: 0xff4018,
+          emissiveIntensity: 0.85,
+          roughness: 0.35,
+        }),
+      )
+      lan.scale.set(1, 1.25, 1)
+      lan.position.set(x + side * 0.5, hallY + 3.85, wz)
+      root.add(lan)
+      const light = new THREE.PointLight(0xff8040, 0.4, 6, 2)
+      light.position.set(x + side * 0.5, hallY + 3.85, wz)
+      root.add(light)
+    }
+    // 顶梁
+    const topBeam = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.3, 10.5), mat.woodDark)
+    topBeam.position.set(x, hallY + 4.75, -2.2)
+    root.add(topBeam)
+    const topGold = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.08, 10.5), mat.gold)
+    topGold.position.set(x, hallY + 4.95, -2.2)
+    root.add(topGold)
   }
 
   const colXs = [-7.5, -3.75, 0, 3.75, 7.5]
@@ -192,58 +390,246 @@ export function createPavilion(scene) {
   }
 
   const beamY = hallY + colH + 0.2
-  const beamFront = new THREE.Mesh(new THREE.BoxGeometry(16.5, 0.45, 0.5), mat.woodDark)
+  // 额枋（前檐开敞，仅横梁，无门板遮挡）
+  const beamFront = new THREE.Mesh(new THREE.BoxGeometry(16.5, 0.5, 0.55), mat.woodDark)
   beamFront.position.set(0, beamY, 2.5)
   root.add(beamFront)
-  const beamGold = new THREE.Mesh(new THREE.BoxGeometry(16.6, 0.12, 0.55), mat.gold)
-  beamGold.position.set(0, beamY + 0.28, 2.5)
+  const beamGold = new THREE.Mesh(new THREE.BoxGeometry(16.6, 0.14, 0.6), mat.gold)
+  beamGold.position.set(0, beamY + 0.3, 2.5)
   root.add(beamGold)
-  const beamBack = new THREE.Mesh(new THREE.BoxGeometry(16.5, 0.45, 0.5), mat.woodDark)
+  // 前檐彩画枋
+  const paintFront = new THREE.Mesh(
+    new THREE.BoxGeometry(15.5, 0.28, 0.2),
+    new THREE.MeshStandardMaterial({
+      color: 0x1a6a5a,
+      roughness: 0.5,
+      metalness: 0.12,
+      emissive: 0x0a3028,
+      emissiveIntensity: 0.12,
+    }),
+  )
+  paintFront.position.set(0, beamY - 0.32, 2.72)
+  root.add(paintFront)
+  const beamBack = new THREE.Mesh(new THREE.BoxGeometry(16.5, 0.5, 0.55), mat.woodDark)
   beamBack.position.set(0, beamY, -6.5)
   root.add(beamBack)
   for (const x of [-7.5, 7.5]) {
-    const side = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 9.5), mat.woodDark)
+    const side = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.5, 9.5), mat.woodDark)
     side.position.set(x, beamY, -2)
     root.add(side)
   }
 
-  const plaque = new THREE.Mesh(new THREE.BoxGeometry(4.2, 1.0, 0.15), mat.gold)
-  plaque.position.set(0, beamY + 0.85, 2.85)
+  // 匾额挂于一层前檐梁下
+  const plaque = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.85, 0.14), mat.gold)
+  plaque.position.set(0, beamY + 0.15, 2.95)
   root.add(plaque)
-  const plaqueIn = new THREE.Mesh(new THREE.BoxGeometry(3.7, 0.75, 0.1), mat.redDeep)
-  plaqueIn.position.set(0, beamY + 0.85, 2.95)
+  const plaqueIn = new THREE.Mesh(new THREE.BoxGeometry(3.15, 0.62, 0.1), mat.redDeep)
+  plaqueIn.position.set(0, beamY + 0.15, 3.05)
   root.add(plaqueIn)
 
-  const roofY = beamY + 0.55
-  const roof = new THREE.Mesh(new THREE.BoxGeometry(20, 0.25, 13.5), mat.tile)
-  roof.position.set(0, roofY, -2)
-  root.add(roof)
-  addTangRoofSlopes(root, 0, roofY + 0.1, -2, 20, 13.5, 2.2, mat.tile)
-  const ridge = new THREE.Mesh(new THREE.BoxGeometry(14, 0.35, 0.4), mat.gold)
-  ridge.position.set(0, roofY + 2.35, -2)
-  root.add(ridge)
-  for (const x of [-6.8, 6.8]) {
-    const owl = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.1, 6), mat.gold)
-    owl.position.set(x, roofY + 2.9, -2)
-    root.add(owl)
+  // 一层前檐开敞：仅门槛石
+  const threshold = new THREE.Mesh(new THREE.BoxGeometry(9.5, 0.18, 0.55), mat.stone)
+  threshold.position.set(0, hallY + 0.05, 2.85)
+  root.add(threshold)
+  for (const x of [-4.6, 4.6]) {
+    const stone = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.45, 0.7), mat.stoneDark)
+    stone.position.set(x, hallY + 0.25, 2.9)
+    root.add(stone)
   }
-  const finial = new THREE.Mesh(new THREE.SphereGeometry(0.4, 12, 12), mat.gold)
-  finial.position.set(0, roofY + 2.85, -2)
-  root.add(finial)
 
-  for (const x of [-3.2, 0, 3.2]) {
-    const door = new THREE.Mesh(new THREE.BoxGeometry(2.4, 3.6, 0.15), mat.red)
-    door.position.set(x, hallY + 1.9, 2.7)
-    root.add(door)
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(2.55, 3.75, 0.08), mat.goldSoft)
-    frame.position.set(x, hallY + 1.9, 2.8)
+  // ========== 二层楼阁（真正两层） ==========
+  // 一层平座 / 腰檐
+  const midFloorY = beamY + 0.55
+  const midDeck = new THREE.Mesh(new THREE.BoxGeometry(18.5, 0.35, 12.5), mat.woodDark)
+  midDeck.position.set(0, midFloorY, -2)
+  root.add(midDeck)
+  const midFloor = new THREE.Mesh(new THREE.BoxGeometry(17.5, 0.12, 11.5), mat.wood)
+  midFloor.position.set(0, midFloorY + 0.2, -2)
+  root.add(midFloor)
+  // 平座栏杆
+  for (const side of [-1, 1]) {
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.7, 11.2), mat.red)
+    rail.position.set(side * 8.6, midFloorY + 0.55, -2)
+    root.add(rail)
+    const railTop = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.08, 11.3), mat.goldSoft)
+    railTop.position.set(side * 8.6, midFloorY + 0.95, -2)
+    root.add(railTop)
+  }
+  const railFront = new THREE.Mesh(new THREE.BoxGeometry(17.0, 0.7, 0.12), mat.red)
+  railFront.position.set(0, midFloorY + 0.55, 3.6)
+  root.add(railFront)
+  const railFrontTop = new THREE.Mesh(new THREE.BoxGeometry(17.1, 0.08, 0.16), mat.goldSoft)
+  railFrontTop.position.set(0, midFloorY + 0.95, 3.6)
+  root.add(railFrontTop)
+  // 栏杆望柱
+  for (let i = 0; i < 7; i++) {
+    const px = -7.5 + i * 2.5
+    const post = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.09, 0.85, 6), mat.red)
+    post.position.set(px, midFloorY + 0.55, 3.6)
+    root.add(post)
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 6), mat.goldSoft)
+    ball.position.set(px, midFloorY + 1.05, 3.6)
+    root.add(ball)
+  }
+
+  // 一层腰檐（下层屋檐，托住二层）
+  const lowerW = 21.5
+  const lowerD = 15
+  const lowerH = 1.35
+  const lowerEaveY = midFloorY + 0.15
+  const lowerDeck = new THREE.Mesh(new THREE.BoxGeometry(lowerW, 0.18, lowerD), mat.tile)
+  lowerDeck.position.set(0, lowerEaveY, -2)
+  root.add(lowerDeck)
+  addTangRoofSlopes(root, 0, lowerEaveY + 0.06, -2, lowerW, lowerD, lowerH, mat.tile)
+  addEaveTrim(root, 0, lowerEaveY + 0.04, -2, lowerW, lowerD, mat.goldSoft)
+  // 一层斗拱
+  for (let i = 0; i < 9; i++) {
+    const bx = -8 + i * 2
+    const block = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.32, 0.4), mat.woodDark)
+    block.position.set(bx, lowerEaveY - 0.28, 2.55)
+    root.add(block)
+  }
+
+  // ——— 二层楼身 ———
+  const f2Y = midFloorY + 1.15
+  const f2H = 3.6
+  const f2ColY = f2Y + f2H / 2
+  // 二层后墙
+  const f2Back = new THREE.Mesh(new THREE.BoxGeometry(14.5, f2H, 0.35), mat.plaster)
+  f2Back.position.set(0, f2ColY, -6.3)
+  root.add(f2Back)
+  const f2Dado = new THREE.Mesh(new THREE.BoxGeometry(14.3, 0.9, 0.38), mat.redDeep)
+  f2Dado.position.set(0, f2Y + 0.45, -6.25)
+  root.add(f2Dado)
+  // 二层侧墙
+  for (const side of [-1, 1]) {
+    const w = new THREE.Mesh(new THREE.BoxGeometry(0.3, f2H, 8.5), mat.plaster)
+    w.position.set(side * 7.1, f2ColY, -2.2)
+    root.add(w)
+    const d = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.9, 8.3), mat.redDeep)
+    d.position.set(side * 7.1, f2Y + 0.45, -2.2)
+    root.add(d)
+  }
+  // 二层朱柱
+  const f2Xs = [-5.5, -2.75, 0, 2.75, 5.5]
+  const f2Zs = [-5.2, -2, 1.2]
+  for (const x of f2Xs) {
+    for (const z of f2Zs) {
+      // 前檐中部开敞
+      if (z > 0.5 && Math.abs(x) < 2) continue
+      const r = Math.abs(x) > 4 ? 0.2 : 0.16
+      const col = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.06, f2H, 10), mat.red)
+      col.position.set(x, f2ColY, z)
+      root.add(col)
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(r * 1.4, r * 1.5, 0.15, 8), mat.stone)
+      cap.position.set(x, f2Y + 0.08, z)
+      root.add(cap)
+    }
+  }
+  // 二层额枋
+  const f2BeamY = f2Y + f2H + 0.15
+  const f2BeamF = new THREE.Mesh(new THREE.BoxGeometry(13.5, 0.4, 0.45), mat.woodDark)
+  f2BeamF.position.set(0, f2BeamY, 1.2)
+  root.add(f2BeamF)
+  const f2BeamG = new THREE.Mesh(new THREE.BoxGeometry(13.6, 0.1, 0.5), mat.gold)
+  f2BeamG.position.set(0, f2BeamY + 0.22, 1.2)
+  root.add(f2BeamG)
+  const f2BeamB = new THREE.Mesh(new THREE.BoxGeometry(13.5, 0.4, 0.45), mat.woodDark)
+  f2BeamB.position.set(0, f2BeamY, -5.2)
+  root.add(f2BeamB)
+  for (const x of [-5.5, 5.5]) {
+    const s = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.4, 6.8), mat.woodDark)
+    s.position.set(x, f2BeamY, -2)
+    root.add(s)
+  }
+  // 二层前檐开敞格扇（仅两侧有窗，中间空）
+  for (const x of [-4.0, 4.0]) {
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(2.0, 2.4, 0.12), mat.woodDark)
+    frame.position.set(x, f2Y + 2.0, 1.35)
     root.add(frame)
-    for (let r = 0; r < 4; r++) {
-      for (let c = 0; c < 3; c++) {
-        const stud = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 6), mat.gold)
-        stud.position.set(x - 0.55 + c * 0.55, hallY + 0.9 + r * 0.55, 2.9)
-        root.add(stud)
-      }
+    const paper = new THREE.Mesh(
+      new THREE.BoxGeometry(1.7, 2.05, 0.06),
+      new THREE.MeshStandardMaterial({
+        color: 0xf5ead0,
+        roughness: 0.85,
+        transparent: true,
+        opacity: 0.85,
+        emissive: 0x403020,
+        emissiveIntensity: 0.06,
+      }),
+    )
+    paper.position.set(x, f2Y + 2.0, 1.4)
+    root.add(paper)
+    const barV = new THREE.Mesh(new THREE.BoxGeometry(0.05, 2.0, 0.05), mat.woodDark)
+    barV.position.set(x, f2Y + 2.0, 1.42)
+    root.add(barV)
+    const barH = new THREE.Mesh(new THREE.BoxGeometry(1.65, 0.05, 0.05), mat.woodDark)
+    barH.position.set(x, f2Y + 2.0, 1.42)
+    root.add(barH)
+  }
+  // 二层匾
+  const plaque2 = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.65, 0.12), mat.gold)
+  plaque2.position.set(0, f2BeamY + 0.1, 1.55)
+  root.add(plaque2)
+  const plaque2In = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.45, 0.08), mat.redDeep)
+  plaque2In.position.set(0, f2BeamY + 0.1, 1.62)
+  root.add(plaque2In)
+
+  // ——— 二层庑殿顶 ———
+  const upperY = f2BeamY + 0.55
+  const upperW = 16.5
+  const upperD = 11.5
+  const upperH = 2.9
+  const upperBase = new THREE.Mesh(new THREE.BoxGeometry(upperW + 0.6, 0.3, upperD + 0.6), mat.woodDark)
+  upperBase.position.set(0, upperY - 0.1, -2)
+  root.add(upperBase)
+  const upperDeck = new THREE.Mesh(new THREE.BoxGeometry(upperW, 0.18, upperD), mat.tile)
+  upperDeck.position.set(0, upperY, -2)
+  root.add(upperDeck)
+  addTangRoofSlopes(root, 0, upperY + 0.08, -2, upperW, upperD, upperH, mat.tile)
+  addEaveTrim(root, 0, upperY + 0.04, -2, upperW, upperD, mat.goldSoft)
+  // 二层斗拱
+  for (let i = 0; i < 7; i++) {
+    const bx = -6 + i * 2
+    const block = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.28, 0.35), mat.woodDark)
+    block.position.set(bx, upperY - 0.25, 1.25)
+    root.add(block)
+  }
+
+  // 正脊 + 鸱尾 + 宝顶
+  const ridgeY = upperY + upperH + 0.12
+  const ridge = new THREE.Mesh(new THREE.BoxGeometry(12, 0.42, 0.48), mat.gold)
+  ridge.position.set(0, ridgeY, -2)
+  root.add(ridge)
+  const ridgeTop = new THREE.Mesh(new THREE.BoxGeometry(11.6, 0.1, 0.32), mat.goldSoft)
+  ridgeTop.position.set(0, ridgeY + 0.26, -2)
+  root.add(ridgeTop)
+  for (const x of [-5.7, 5.7]) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.5), mat.gold)
+    b.position.set(x, ridgeY + 0.15, -2)
+    root.add(b)
+    const owl = new THREE.Mesh(new THREE.ConeGeometry(0.38, 1.5, 7), mat.gold)
+    owl.position.set(x, ridgeY + 1.05, -2)
+    owl.rotation.z = x > 0 ? -0.22 : 0.22
+    root.add(owl)
+    const tip = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), mat.goldSoft)
+    tip.position.set(x + (x > 0 ? 0.12 : -0.12), ridgeY + 1.8, -2)
+    root.add(tip)
+  }
+  const finial = new THREE.Mesh(new THREE.SphereGeometry(0.42, 12, 12), mat.gold)
+  finial.position.set(0, ridgeY + 0.6, -2)
+  root.add(finial)
+  const finialTop = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.65, 8), mat.goldSoft)
+  finialTop.position.set(0, ridgeY + 1.1, -2)
+  root.add(finialTop)
+  // 垂脊
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const hip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.16, upperH * 0.9), mat.goldSoft)
+      hip.position.set(sx * (upperW * 0.28), upperY + upperH * 0.42, -2 + sz * (upperD * 0.28))
+      hip.rotation.x = sz * 0.52
+      hip.rotation.z = -sx * 0.32
+      root.add(hip)
     }
   }
 
@@ -604,20 +990,48 @@ function addFlowerBush(root, mat, x, z, pink) {
 function addTangRoofSlopes(root, cx, cy, cz, w, d, h, material) {
   const hw = w / 2
   const hd = d / 2
-  const front = new THREE.Mesh(new THREE.BoxGeometry(w * 0.96, 0.14, Math.hypot(hd, h) * 0.9), material)
-  front.position.set(cx, cy + h * 0.42, cz + hd * 0.45)
+  // 前后坡（更厚、更长出檐）
+  const front = new THREE.Mesh(new THREE.BoxGeometry(w * 0.98, 0.2, Math.hypot(hd, h) * 0.95), material)
+  front.position.set(cx, cy + h * 0.48, cz + hd * 0.48)
   front.rotation.x = -Math.atan2(h, hd)
   root.add(front)
-  const back = new THREE.Mesh(new THREE.BoxGeometry(w * 0.96, 0.14, Math.hypot(hd, h) * 0.9), material)
-  back.position.set(cx, cy + h * 0.42, cz - hd * 0.45)
+  const back = new THREE.Mesh(new THREE.BoxGeometry(w * 0.98, 0.2, Math.hypot(hd, h) * 0.95), material)
+  back.position.set(cx, cy + h * 0.48, cz - hd * 0.48)
   back.rotation.x = Math.atan2(h, hd)
   root.add(back)
-  const left = new THREE.Mesh(new THREE.BoxGeometry(Math.hypot(hw, h) * 0.85, 0.14, d * 0.65), material)
-  left.position.set(cx - hw * 0.4, cy + h * 0.38, cz)
+  // 左右坡
+  const left = new THREE.Mesh(new THREE.BoxGeometry(Math.hypot(hw, h) * 0.92, 0.2, d * 0.72), material)
+  left.position.set(cx - hw * 0.42, cy + h * 0.42, cz)
   left.rotation.z = Math.atan2(h, hw)
   root.add(left)
-  const right = new THREE.Mesh(new THREE.BoxGeometry(Math.hypot(hw, h) * 0.85, 0.14, d * 0.65), material)
-  right.position.set(cx + hw * 0.4, cy + h * 0.38, cz)
+  const right = new THREE.Mesh(new THREE.BoxGeometry(Math.hypot(hw, h) * 0.92, 0.2, d * 0.72), material)
+  right.position.set(cx + hw * 0.42, cy + h * 0.42, cz)
   right.rotation.z = -Math.atan2(h, hw)
+  root.add(right)
+  // 四角翼角微翘（小三角板）
+  for (const sx of [-1, 1]) {
+    for (const sz of [-1, 1]) {
+      const wing = new THREE.Mesh(new THREE.ConeGeometry(0.9, 0.7, 4), material)
+      wing.position.set(cx + sx * hw * 0.92, cy + 0.35, cz + sz * hd * 0.92)
+      wing.rotation.y = Math.PI / 4
+      wing.scale.set(1.2, 0.7, 1.2)
+      root.add(wing)
+    }
+  }
+}
+
+function addEaveTrim(root, cx, cy, cz, w, d, material) {
+  // 四面檐口金线
+  const front = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.1, 0.18), material)
+  front.position.set(cx, cy, cz + d / 2)
+  root.add(front)
+  const back = new THREE.Mesh(new THREE.BoxGeometry(w + 0.3, 0.1, 0.18), material)
+  back.position.set(cx, cy, cz - d / 2)
+  root.add(back)
+  const left = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, d + 0.3), material)
+  left.position.set(cx - w / 2, cy, cz)
+  root.add(left)
+  const right = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.1, d + 0.3), material)
+  right.position.set(cx + w / 2, cy, cz)
   root.add(right)
 }

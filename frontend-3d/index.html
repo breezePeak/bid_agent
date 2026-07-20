@@ -7,7 +7,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Ma+Shan+Zheng&family=Noto+Serif+SC:wght@500;600;700&family=Noto+Sans+SC:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
   </head>
@@ -15,7 +15,39 @@
     <div id="app">
       <canvas id="scene"></canvas>
       <div id="hud"></div>
+      <!-- 视角控制独立于 HUD，避免被 3D 层/遮罩拦截 -->
+      <div id="view-bar" class="view-bar">
+        <div class="view-bar-msg">
+          <div class="title" id="bottom-title">炉火未启</div>
+          <div class="text" id="bottom-text">静候观火，或启演法一窥丹道</div>
+        </div>
+        <div class="view-bar-btns" id="view-controls">
+          <button type="button" class="btn" data-act="overview">总览</button>
+          <button type="button" class="btn" data-act="front">殿前</button>
+          <button type="button" class="btn" data-act="hall">殿内</button>
+          <button type="button" class="btn" data-act="furnace">丹炉</button>
+          <button type="button" class="btn" data-act="agents">列队</button>
+          <button type="button" class="btn" data-act="active">工序</button>
+          <button type="button" class="btn" data-act="side">侧视</button>
+          <button type="button" class="btn" data-act="top">俯视</button>
+          <button type="button" class="btn" data-act="back">殿后</button>
+          <button type="button" class="btn" data-act="zoom-in">放大</button>
+          <button type="button" class="btn" data-act="zoom-out">缩小</button>
+          <button type="button" class="btn" data-act="orbit">环游</button>
+          <button type="button" class="btn" data-act="refresh-runs">刷新</button>
+        </div>
+      </div>
       <div id="tooltip" class="tooltip hidden"></div>
+      <div id="calligraphy" class="calligraphy hidden" aria-hidden="true">
+        <div class="calli-glow"></div>
+        <div class="calli-main" id="calli-main">工序成功</div>
+        <div class="calli-sub" id="calli-sub"></div>
+        <div class="book-title" id="book-title" hidden>标 书</div>
+        <div class="calli-actions interactive" id="calli-actions" hidden>
+          <button type="button" class="calli-btn" id="btn-reforge">重新炼制</button>
+          <button type="button" class="calli-btn ghost" id="btn-dismiss-calli">继续观览</button>
+        </div>
+      </div>
     </div>
     <script type="module" src="/src/main.js"></script>
   </body>

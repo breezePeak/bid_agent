@@ -355,19 +355,16 @@ function persistChatHistory() {
 
 function renderChatAction(action) {
   if (!action || !action.label) return "";
+  const type = escapeHtml(action.type || "");
+  const command = escapeHtml(action.command || action.params?.command || "");
+  const category = escapeHtml(action.category || action.params?.category || "");
+  const tool = escapeHtml(action.tool || "");
+  const prompt = escapeHtml(action.prompt || action.label || "");
   if (action.type === "chat_prompt") {
-    return `<button onclick="sendQuickChat('${escapeHtml(action.prompt || "")}')">${escapeHtml(action.label)}</button>`;
+    return `<button onclick="sendQuickChat('${prompt}')">${escapeHtml(action.label)}</button>`;
   }
-  if (action.type === "run_command") {
-    return `<button onclick="handleChatAction('run_command', '${escapeHtml(action.command || "")}', '')">${escapeHtml(action.label)}</button>`;
-  }
-  if (action.type === "show_step") {
-    return `<button onclick="handleChatAction('show_step', '${escapeHtml(action.command || "")}', '')">${escapeHtml(action.label)}</button>`;
-  }
-  if (action.type === "show_manual_review") {
-    return `<button onclick="handleChatAction('show_manual_review', '', '${escapeHtml(action.category || "")}')">${escapeHtml(action.label)}</button>`;
-  }
-  return "";
+  // Encode tool/command so confirm_tool and run_command both work
+  return `<button onclick="handleChatAction('${type}', '${command}', '${category}', '${tool}', '${prompt}')">${escapeHtml(action.label)}</button>`;
 }
 
 function renderChatMessages() {
@@ -387,12 +384,29 @@ function pushChatMessage(role, text, actions = []) {
   renderChatMessages();
 }
 
-async function handleChatAction(type, command, category) {
+async function handleChatAction(type, command, category, tool = "", prompt = "") {
+  if (type === "confirm_tool" || (type === "run_command" && tool)) {
+    const text = prompt || (command ? `确认执行 ${command}` : "确认执行");
+    chatInput.value = text;
+    // Mark confirmation for orchestrate payload via global flag
+    window.__pendingChatAction = {
+      type: "confirm_tool",
+      tool: tool || "",
+      command: command || "",
+      user_confirmed: true,
+    };
+    await submitChat();
+    return;
+  }
   if (type === "run_command" && command) {
     await runCommand(command);
     return;
   }
-  if (type === "show_step" && command) {
+  if ((type === "show_step" || type === "open_detail" || type === "revalidate_gate" || type === "rerun_stage" || type === "retry_stage") && command) {
+    if (type === "rerun_stage" || type === "retry_stage" || type === "revalidate_gate") {
+      await runCommand(command);
+      return;
+    }
     await showStepDetail(command);
     return;
   }
@@ -400,7 +414,33 @@ async function handleChatAction(type, command, category) {
     if (manualReviewCategory) manualReviewCategory.value = category;
     await loadManualReviewItems(category);
     pushChatMessage("assistant", `已切到人工复核分类：${category}。`);
+    return;
   }
+  if (type === "auto_run") {
+    await resumeAutoRun();
+    return;
+  }
+  if (type === "dispatch_chapters") {
+    await runCommand("write-all");
+    return;
+  }
+  if (type === "dispatch_review") {
+    await runCommand("review-fix-all");
+    return;
+  }
+  if (type === "global_review") {
+    await runCommand("global-review");
+    return;
+  }
+  if (type === "upload_materials" || type === "upload_evidence") {
+    pushChatMessage("assistant", "请在左侧上传公司资料或模板后发送「继续」。");
+    return;
+  }
+  if (type === "chat_prompt" || prompt) {
+    sendQuickChat(prompt || command || "");
+    return;
+  }
+  pushChatMessage("assistant", `未处理的操作：${type || "unknown"}`);
 }
 
 async function submitChat() {
@@ -475,17 +515,36 @@ async function submitChat() {
       pushChatMessage("assistant", "这段内容没有匹配到 final.md 的具体行号，暂时不能自动回写。请改为点击文档中的普通段落，或在 final.md 行里选择对应内容后再提交修改意见。", []);
       return;
     }
-    const response = await fetch("/api/chat", {
+    const pendingAction = window.__pendingChatAction || null;
+    window.__pendingChatAction = null;
+    const payload = { message, selected_command: selectedStepCommand || "" };
+    if (pendingAction && typeof pendingAction === "object") {
+      payload.action = pendingAction;
+    }
+    // Prefer orchestrate so confirm_tool / agent actions actually execute
+    let response = await fetch("/api/chat/orchestrate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, selected_command: selectedStepCommand || "" }),
+      body: JSON.stringify(payload),
     });
+    if (response.status === 404) {
+      response = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    }
     const data = await response.json();
     if (!data.ok) {
-      pushChatMessage("assistant", data.message || "聊天请求失败。");
+      pushChatMessage("assistant", data.message || data.reply || "聊天请求失败。");
       return;
     }
-    pushChatMessage("assistant", data.reply || "", data.actions || []);
+    const reply = data.reply || data.assistant?.content || data.assistant || data.message || "";
+    const actions = data.actions || data.assistant?.actions || [];
+    pushChatMessage("assistant", typeof reply === "string" ? reply : String(reply || ""), actions);
+    if (data.triggered_command || data.triggered_auto_run) {
+      refreshStatus();
+    }
   } catch (error) {
     pushChatMessage("assistant", `聊天请求失败：${error}`);
   } finally {

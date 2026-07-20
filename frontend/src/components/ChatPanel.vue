@@ -282,6 +282,8 @@ const msgContainer = ref(null)
 
 const files = reactive({ tender: [], company: [], template: [] })
 const planSteps = ref([])
+/** Files chosen via paperclip before user picks category (upload_batch). */
+const pendingChatFiles = ref([])
 
 const prevStatusMap = reactive({})
 let messagesLoaded = false
@@ -495,14 +497,15 @@ async function uploadFiles(category, fileList) {
 }
 function openChatFile() { if (chatFileInput.value) chatFileInput.value.click() }
 function onChatFileSelected(e) {
-  if (e.target.files.length) {
-    addMessage('assistant', '请选择文件类别：', [
-      { type: 'upload_batch', category: 'tender', label: '招标文件' },
-      { type: 'upload_batch', category: 'company', label: '公司资料' },
-      { type: 'upload_batch', category: 'template', label: '标书模板' },
-    ])
-  }
+  const list = e.target.files ? Array.from(e.target.files) : []
   e.target.value = ''
+  if (!list.length) return
+  pendingChatFiles.value = list
+  addMessage('assistant', `已选择 ${list.length} 个文件，请选择类别：`, [
+    { type: 'upload_batch', category: 'tender', label: '招标文件' },
+    { type: 'upload_batch', category: 'company', label: '公司资料' },
+    { type: 'upload_batch', category: 'template', label: '标书模板' },
+  ], { persist: false })
 }
 
 // ---- status ----
@@ -1152,14 +1155,36 @@ async function doRewriteBlock(lineNumber, instruction) {
   sending.value = false
 }
 function triggerAndAutoAdvance(cmd, label) {
-  addMessage('system', `${label || ''}：${stepLabel(cmd)}`)
-  runCommand(cmd)
-  if (!autoExecuting.value) startAutoRun(cmd)
+  const command = String(cmd || '').trim()
+  if (!command) {
+    addMessage('system', '缺少可执行命令')
+    return
+  }
+  addMessage('system', `${label || ''}：${stepLabel(command)}`)
+  runCommand(command)
+  if (!autoExecuting.value) startAutoRun(command)
 }
+
+/** Supervisor confirm buttons carry tool/args; re-enter orchestrator with user_confirmed. */
+function confirmSupervisorAction(act) {
+  const tool = String(act.tool || '').trim()
+  const command = String(act.command || act.args?.command || '').trim()
+  const text = act.label || (command ? `确认执行 ${command}` : '确认执行')
+  send(text, {
+    action: {
+      type: 'confirm_tool',
+      tool,
+      command,
+      args: act.args && typeof act.args === 'object' ? act.args : {},
+      user_confirmed: true,
+    },
+  })
+}
+
 function handleAction(act, sourceMessage = null) {
   if (!act || interactionBusy.value || act.consumed) return
   act.consumed = true
-  if (sourceMessage && ['confirm_minimal_repair', 'decline_minimal_repair'].includes(act.type)) {
+  if (sourceMessage && ['confirm_minimal_repair', 'decline_minimal_repair', 'confirm_tool'].includes(act.type)) {
     sourceMessage.actions.forEach(action => { action.consumed = true })
   }
   if (act && act.type === 'export_preflight') {
@@ -1180,7 +1205,7 @@ function handleAction(act, sourceMessage = null) {
     return
   }
 
-  if (act.type === 'chat_prompt') send(act.label)
+  if (act.type === 'chat_prompt') send(act.prompt || act.label)
   else if (act.type === 'confirm_minimal_repair') {
     const confirmationId = actionConfirmationId(act)
     const text = act.label || '是，执行最小修复'
@@ -1198,28 +1223,87 @@ function handleAction(act, sourceMessage = null) {
         : null,
     })
   }
-  else if (act.type === 'run_command') triggerAndAutoAdvance(act.command, '执行')
-  else if (act.type === 'retry_stage') { addMessage('system', `重试: ${stepLabel(act.command)}`); triggerAndAutoAdvance(act.command, '重试') }
+  else if (act.type === 'confirm_tool') confirmSupervisorAction(act)
+  else if (act.type === 'run_command') {
+    // Confirm buttons carry tool / user_confirmed; pipeline stage buttons only have command
+    const tool = String(act.tool || '').trim()
+    const cmd = String(act.command || '').trim()
+    const needsConfirm = act.user_confirmed === true || Boolean(tool)
+      || String(act.label || '').includes('确认执行')
+    if (needsConfirm) {
+      confirmSupervisorAction(act)
+    } else {
+      triggerAndAutoAdvance(cmd, '执行')
+    }
+  }
+  else if (act.type === 'retry_stage' || act.type === 'rerun_stage') {
+    const cmd = act.command || act.params?.command || ''
+    addMessage('system', `重试: ${stepLabel(cmd)}`)
+    triggerAndAutoAdvance(cmd, '重试')
+  }
   else if (act.type === 'skip_stage') { skipFailedStage(act.command) }
   else if (act.type === 'dispatch_chapters') triggerAndAutoAdvance('write-all', '派发章节写作子 Agent')
   else if (act.type === 'dispatch_review') triggerAndAutoAdvance('review-fix-all', '派发审核改稿子 Agent')
-  else if (act.type === 'dispatch_rewrite') { send('对需要改稿的章节定向改稿') }
-  else if (act.type === 'global_review') triggerAndAutoAdvance('global-review', '触发全文审核子 Agent')
+  else if (act.type === 'dispatch_rewrite' || act.type === 'rewrite_chapters') {
+    send(act.label || '对需要改稿的章节定向改稿', {
+      action: { type: 'confirm_tool', tool: 'rewrite_chapters', user_confirmed: true, args: act.params || act.args || {} },
+    })
+  }
+  else if (act.type === 'global_review' || act.type === 'revalidate_gate') {
+    const cmd = act.command || act.params?.command || 'global-review'
+    triggerAndAutoAdvance(cmd, act.type === 'revalidate_gate' ? '重验' : '触发全文审核子 Agent')
+  }
+  else if (act.type === 'fix_coverage') {
+    send(act.label || '按覆盖缺口改稿', {
+      action: { type: 'confirm_tool', tool: 'fix_coverage', user_confirmed: true, args: act.params || act.args || {} },
+    })
+  }
+  else if (act.type === 'fix_compliance') {
+    send(act.label || '合规定向改稿', {
+      action: { type: 'confirm_tool', tool: 'fix_compliance', user_confirmed: true, args: act.params || act.args || {} },
+    })
+  }
   else if (act.type === 'auto_run') { if (!autoExecuting.value) startAutoRun() }
   else if (act.type === 'show_step') emit('preview', act.command || act.params?.command)
   else if (act.type === 'open_detail') {
     const cmd = act.command || act.params?.command || act.params?.stage_command || ''
     if (cmd) emit('preview', cmd)
+    else emit('focus-rail', 'issues')
   }
   else if (act.type === 'show_doc_editor') emit('open-doc-editor')
   else if (act.type === 'show_manual_review') {
     const cat = String(act.category || act.params?.category || '').trim()
     emit('preview', cat ? `manual-review:${cat}` : 'manual-review')
   }
-  else if (act.type === 'upload_batch') { /* handled by file input */ }
+  else if (act.type === 'upload_batch') {
+    const category = String(act.category || '').trim()
+    const list = pendingChatFiles.value
+    if (!category) {
+      addMessage('system', '未指定上传类别')
+      return
+    }
+    if (!list || !list.length) {
+      addMessage('system', '没有待上传文件，请重新点击附件选择')
+      openChatFile()
+      return
+    }
+    pendingChatFiles.value = []
+    uploadFiles(category, list)
+  }
+  else if (act.type === 'upload_materials' || act.type === 'upload_evidence') {
+    emit('focus-rail', 'materials')
+    addMessage('system', '请在右侧「材料」面板上传缺失资料，完成后可发送“继续”。')
+    openChatFile()
+  }
   else if (act.type === 'accept_rewrite') acceptRewrite(act)
   else if (act.type === 'discard_rewrite') discardRewrite()
   else if (act.type === 'undo_rewrite') undoRewrite()
+  else if (act.label) {
+    // Unknown action types: treat label as chat so the button is never a no-op
+    send(act.prompt || act.label)
+  } else {
+    addMessage('system', `未实现的操作类型: ${act.type || 'unknown'}`)
+  }
 }
 
 async function acceptRewrite(act) {

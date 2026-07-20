@@ -16,6 +16,18 @@ const canvas = document.getElementById('scene')
 const hudRoot = document.getElementById('hud')
 const tooltip = document.getElementById('tooltip')
 
+// 确保 HUD / 底栏永远在 3D 标签层之上
+if (hudRoot) {
+  hudRoot.style.zIndex = '20'
+  hudRoot.style.position = 'absolute'
+  hudRoot.style.inset = '0'
+}
+const viewBar = document.getElementById('view-bar')
+if (viewBar) {
+  viewBar.style.zIndex = '100'
+  viewBar.style.pointerEvents = 'auto'
+}
+
 const store = createStore()
 let app
 try {
@@ -64,6 +76,12 @@ function scheduleUi() {
   })
 }
 
+function stopAutoOrbit() {
+  orbitOn = false
+  app.autoOrbit = false
+  buttonState.orbit = false
+}
+
 const VIEW_ACTIONS = {
   overview: () => app.focusOverview(),
   front: () => app.focusFront(),
@@ -78,15 +96,12 @@ const VIEW_ACTIONS = {
   'zoom-out': () => app.zoomBy(1.28),
 }
 
-const hud = createHud(hudRoot, {
-  onAction(act) {
+function handleHudAction(act) {
+  if (!act || !app) return
+  console.info('[3d] action', act)
+  try {
     if (VIEW_ACTIONS[act]) {
-      // 切视角时暂停自动环游，避免抢控制
-      if (act !== 'orbit') {
-        orbitOn = false
-        app.autoOrbit = false
-        buttonState.orbit = false
-      }
+      stopAutoOrbit()
       VIEW_ACTIONS[act]()
       scheduleUi()
       return
@@ -101,7 +116,13 @@ const hud = createHud(hudRoot, {
     if (act === 'demo') startDemo()
     if (act === 'live') startLive()
     if (act === 'refresh-runs') loadRuns({ force: true })
-  },
+  } catch (err) {
+    console.error('[3d] action failed', act, err)
+  }
+}
+
+const hud = createHud(hudRoot, {
+  onAction: handleHudAction,
   onStageClick(index) {
     app.focusStage(index)
   },
@@ -112,6 +133,132 @@ const hud = createHud(hudRoot, {
     handleSelectRun(runId)
   },
 })
+
+// 底栏按钮：捕获阶段绑定到 document，确保一定能点到
+function wireViewBar() {
+  const bar = document.getElementById('view-bar')
+  if (!bar) {
+    console.warn('[3d] #view-bar missing')
+    return
+  }
+  bar.style.zIndex = '9999'
+  bar.style.pointerEvents = 'auto'
+  bar.style.position = 'absolute'
+
+  const onBarClick = (e) => {
+    const btn = e.target.closest?.('[data-act]')
+    if (!btn || !bar.contains(btn)) return
+    e.preventDefault()
+    e.stopPropagation()
+    const act = btn.getAttribute('data-act')
+    // 点击反馈
+    btn.classList.add('active')
+    setTimeout(() => {
+      if (act !== 'orbit' || !buttonState.orbit) btn.classList.remove('active')
+      if (act === 'orbit' && buttonState.orbit) btn.classList.add('active')
+    }, 180)
+    handleHudAction(act)
+  }
+  // 用 click + pointerup 双保险
+  bar.addEventListener('click', onBarClick, true)
+  bar.addEventListener('pointerup', (e) => {
+    if (e.button === 0) onBarClick(e)
+  }, true)
+  bar.addEventListener('pointerdown', (e) => {
+    e.stopPropagation()
+  }, true)
+  console.info('[3d] view-bar wired, buttons=', bar.querySelectorAll('[data-act]').length)
+}
+wireViewBar()
+
+// 结丹毛笔字
+const calliEl = document.getElementById('calligraphy')
+const calliMain = document.getElementById('calli-main')
+const calliSub = document.getElementById('calli-sub')
+const calliActions = document.getElementById('calli-actions')
+const btnReforge = document.getElementById('btn-reforge')
+const btnDismissCalli = document.getElementById('btn-dismiss-calli')
+let calliTimer = null
+let calliPinned = false
+
+function hideCalligraphy() {
+  if (!calliEl) return
+  clearTimeout(calliTimer)
+  calliPinned = false
+  calliEl.classList.remove('show', 'pinned')
+  if (calliActions) calliActions.hidden = true
+  const bookTitle = document.getElementById('book-title')
+  if (bookTitle) bookTitle.hidden = true
+  setTimeout(() => calliEl.classList.add('hidden'), 280)
+}
+
+function showCalligraphy(mainText, subText = '', { pin = false } = {}) {
+  if (!calliEl) return
+  clearTimeout(calliTimer)
+  calliPinned = pin
+  calliEl.classList.remove('hidden', 'show', 'pinned')
+  calliMain.textContent = mainText
+  calliSub.textContent = subText
+  // 长文案略缩小，默认更大更醒目
+  const len = String(mainText || '').length
+  if (len >= 8) calliMain.style.fontSize = 'clamp(40px, 5vw, 72px)'
+  else if (len >= 5) calliMain.style.fontSize = 'clamp(48px, 5.8vw, 84px)'
+  else calliMain.style.fontSize = 'clamp(56px, 6.5vw, 96px)'
+  calliMain.style.letterSpacing = len >= 6 ? '0.14em' : '0.2em'
+  // 单步成功绝不显示按钮；仅 pin（全流程完成）时显示
+  if (calliActions) {
+    calliActions.hidden = !pin
+    calliActions.style.display = pin ? '' : 'none'
+  }
+  void calliEl.offsetWidth
+  calliEl.classList.add('show')
+  if (pin) {
+    calliEl.classList.add('pinned')
+  } else {
+    calliTimer = setTimeout(() => {
+      calliEl.classList.remove('show')
+      setTimeout(() => calliEl.classList.add('hidden'), 300)
+    }, 2600)
+  }
+}
+
+btnReforge?.addEventListener('click', () => {
+  hideCalligraphy()
+  // 重新炼制 = 重启演示
+  app.stageTrack?.setOrbitMode?.(false)
+  app.danFx?.clearFinale?.()
+  app._completedIds?.clear?.()
+  app._allDoneFired = false
+  app._finaleBookShown = false
+  startDemo()
+})
+btnDismissCalli?.addEventListener('click', () => {
+  hideCalligraphy()
+})
+
+app.onStageComplete = (d) => {
+  // 按钮仅全流程完成后出现；单步只显示「工序名 + 成功」
+  if (d?.all) {
+    // 旋合过程中先提示，标书出现后再 pin
+    showCalligraphy('大道将成', '节点聚灵 · 标书成形', { pin: false })
+    return
+  }
+  const name = (d?.label || '工序').replace(/成功$/, '')
+  showCalligraphy(`${name}成功`, '', { pin: false })
+}
+
+app.onFinaleBook = () => {
+  showCalligraphy('标书已成', '黄金成卷 · 可重新炼制', { pin: true })
+  const bookTitle = document.getElementById('book-title')
+  if (bookTitle) {
+    bookTitle.hidden = false
+    bookTitle.textContent = '标 书'
+  }
+}
+
+app.onReforgeReset = () => {
+  if (calliPinned) hideCalligraphy()
+}
 
 app.onPick = (data) => {
   if (data.type === 'stage') {

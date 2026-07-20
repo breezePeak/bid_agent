@@ -1,13 +1,13 @@
 import { PHASES } from '../config/stages.js'
 
 const STATE_LABEL = {
-  done: '成丹',
-  running: '炼制',
-  ready: '候火',
-  blocked: '滞火',
-  error: '炸炉',
-  failed: '炸炉',
-  pending: '静候',
+  done: '完成',
+  running: '进行中',
+  ready: '就绪',
+  blocked: '阻塞',
+  error: '失败',
+  failed: '失败',
+  pending: '等待',
 }
 
 function el(html) {
@@ -60,7 +60,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick, onSelect
           <button type="button" class="mode-btn demo" data-act="demo">演法</button>
         </div>
       </div>
-      <div class="top-metrics" id="top-metrics"></div>
+      <div class="top-metrics interactive" id="top-metrics"></div>
     </div>
   `)
 
@@ -109,37 +109,7 @@ export function createHud(root, { onAction, onStageClick, onAgentClick, onSelect
     </div>
   `)
 
-  const bottom = el(`
-    <div class="hud-bottom">
-      <div class="bottom-msg">
-        <div class="title" id="bottom-title">炉火未启</div>
-        <div class="text" id="bottom-text">静候观火，或启演法一窥丹道</div>
-      </div>
-      <div class="legend">
-        <span><i style="background:#5fa88a;color:#5fa88a"></i>成丹</span>
-        <span><i style="background:#ff8a3d;color:#ff8a3d"></i>炼制</span>
-        <span><i style="background:#e0b44a;color:#e0b44a"></i>候火</span>
-        <span><i style="background:#e05555;color:#e05555"></i>炸炉</span>
-      </div>
-      <div class="controls view-controls">
-        <button class="btn" data-act="overview" title="1">总览</button>
-        <button class="btn" data-act="front" title="殿前">殿前</button>
-        <button class="btn" data-act="hall" title="4 殿内">殿内</button>
-        <button class="btn" data-act="furnace" title="5 丹炉">丹炉</button>
-        <button class="btn" data-act="agents" title="3 列队">列队</button>
-        <button class="btn" data-act="active" title="2 工序">工序</button>
-        <button class="btn" data-act="side" title="侧视">侧视</button>
-        <button class="btn" data-act="top" title="俯视">俯视</button>
-        <button class="btn" data-act="back" title="殿后">殿后</button>
-        <button class="btn" data-act="zoom-in" title="滚轮也可">放大</button>
-        <button class="btn" data-act="zoom-out" title="滚轮也可">缩小</button>
-        <button class="btn" data-act="orbit" title="空格">环游</button>
-        <button class="btn" data-act="refresh-runs">刷新</button>
-      </div>
-    </div>
-  `)
-
-  root.append(top, left, right, bottom)
+  root.append(top, left, right)
 
   const wsSelect = document.getElementById('workspace-select')
   wsSelect.addEventListener('change', () => {
@@ -147,8 +117,14 @@ export function createHud(root, { onAction, onStageClick, onAgentClick, onSelect
     if (id) onSelectRun?.(id)
   })
 
-  root.querySelectorAll('[data-act]').forEach((btn) => {
-    btn.addEventListener('click', () => onAction?.(btn.dataset.act, btn))
+  // 顶部观火/演法按钮
+  root.querySelectorAll('[data-act]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const act = el.getAttribute('data-act')
+      if (act) onAction?.(act, el)
+    })
   })
 
   const stageList = document.getElementById('stage-list')
@@ -319,9 +295,8 @@ export function createHud(root, { onAction, onStageClick, onAgentClick, onSelect
         : snap.connected
           ? '炉火静候'
           : '离线 · 可演法'
-    document.getElementById('bottom-title').textContent = title
     const runHint = snap.runName || snap.runId
-    document.getElementById('bottom-text').textContent =
+    const text =
       snap.runState?.message ||
       (snap.currentTask ? `当前工序：${snap.currentTask}` : '') ||
       (snap.demo
@@ -331,14 +306,16 @@ export function createHud(root, { onAction, onStageClick, onAgentClick, onSelect
             ? `丹房：${runHint} · 静候炉动`
             : '已接通 — 请择丹房'
           : '未接通后端 — 可启演法一窥')
+    const bt = document.getElementById('bottom-title')
+    const bx = document.getElementById('bottom-text')
+    if (bt) bt.textContent = title
+    if (bx) bx.textContent = text
 
-    root.querySelectorAll('[data-act]').forEach((btn) => {
+    // 顶部观火/演法 + 底栏环游高亮
+    document.querySelectorAll('[data-act]').forEach((btn) => {
       const act = btn.dataset.act
-      if (act === 'live' || act === 'demo') {
-        btn.classList.toggle('active', Boolean(extras.activeButtons?.[act]))
-        btn.classList.toggle('live', act === 'live')
-        btn.classList.toggle('demo', act === 'demo')
-      } else {
+      if (!act) return
+      if (act === 'live' || act === 'demo' || act === 'orbit') {
         btn.classList.toggle('active', Boolean(extras.activeButtons?.[act]))
       }
     })

@@ -306,6 +306,9 @@ def plan(
     status: dict[str, Any],
     llm_chat=None,
     review_context: list[dict[str, Any]] | None = None,
+    *,
+    user_confirmed: bool = False,
+    confirmed_tools: list[str] | None = None,
 ) -> dict[str, Any]:
     """Chat plan entry (PR-A2/A3).
 
@@ -323,6 +326,8 @@ def plan(
                 status,
                 llm_chat=llm_chat,
                 review_context=review_context,
+                user_confirmed=user_confirmed,
+                confirmed_tools=confirmed_tools,
             )
             if supervised:
                 supervised["mode"] = "agent"
