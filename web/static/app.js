@@ -2055,11 +2055,12 @@ async function viewGlobalReview() {
 }
 
 function confirmClean() {
-  if (!confirm("确认清空 workspace/ 和 outputs/ 目录？此操作不可恢复。")) return;
+  if (!confirm("确认清理 workspace/ 和 outputs/？现有内容将移入可恢复归档区。")) return;
   fetch("/api/clean-workspace", { method: "POST" })
     .then((response) => response.json())
-    .then((data) => {
-      if (data.ok) appendLog(data.message);
+    .then(async (data) => {
+      const confirmed = await confirmV2MaterialAction(data, "确认将现有工作区产物移入可恢复归档区？");
+      if (confirmed.ok) appendLog("工作区产物已清理并归档");
       resetCurrentRunStarted();
       loadStatus();
     });

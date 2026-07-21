@@ -495,3 +495,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B9 | 2026-07-21 | 项目类型切换迁入 `workspace.set_profile` Command 和持久化 Action 确认；兼容页面的人工复核与项目类型操作均完成提案确认适配，不再把 202 提案响应误当成已写入结果。工作区删除/清理和非流水线 utility command 仍待迁移。 |
 | V2.0-B10 | 2026-07-21 | 工作区内不属于标准阶段的维护命令迁入 `workspace.run_utility` Command；旧 `/api/run-command` 对此类命令只生成高风险 Action，Vue 与兼容页面确认后才由同一 Operation 同步执行。仅没有工作区上下文的根级 `validate/init-demo` 继续保留 V1 适配。 |
 | V2.0-B11 | 2026-07-21 | 补齐工作区目录边界的 ACL：新建工作区立即绑定创建者为 owner，非管理员的工作区列表按 ACL 过滤，切换工作区必须具备读权限，删除工作区必须具备写权限且仅 owner/admin 可执行。删除/清理仍待迁入可恢复的持久化 Action 流程。 |
+| V2.0-B12 | 2026-07-21 | 工作区删除和清理分别迁入 `workspace.archive` / `workspace.clean` 持久化 Action；Command 状态提交后才执行受边界校验的文件移动。删除改为移入 `runs/.trash`，清理改为保留 `control.db` 并将 V1 兼容状态与 outputs 移入工作区内归档，不再使用不可恢复的直接 `rmtree`。 |

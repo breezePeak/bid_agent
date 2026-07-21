@@ -184,6 +184,8 @@ class ControlStore:
         "document.apply_edit",
         "workspace.set_profile",
         "workspace.run_utility",
+        "workspace.archive",
+        "workspace.clean",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -818,6 +820,8 @@ class ControlStore:
                         "document.apply_edit",
                         "workspace.set_profile",
                         "workspace.run_utility",
+                        "workspace.archive",
+                        "workspace.clean",
                     }
                     and active is not None
                     and str(active["status"]) == "blocked"
@@ -1307,13 +1311,15 @@ class CommandGateway:
         if not should_dispatch:
             return receipt
         operation_id = str(receipt.operation_id or "")
+        after_commit: Any = None
         try:
             result = handler(self.context, envelope, operation_id) or {}
+            after_commit = result.pop("_after_commit", None)
             accepted = bool(result.get("accepted", True))
             message = str(result.get("message") or "命令已接收。")
             operation_status = str(result.get("operation_status") or ("running" if accepted else "failed"))
             error = result.get("error") if isinstance(result.get("error"), dict) else None
-            return self.store.finish_dispatch(
+            receipt = self.store.finish_dispatch(
                 envelope,
                 operation_id,
                 success=accepted,
@@ -1345,6 +1351,9 @@ class CommandGateway:
                 message=error.message,
                 error=error.as_dict(),
             )
+        if callable(after_commit):
+            after_commit()
+        return receipt
 
     def propose(self, envelope: CommandEnvelope, *, label: str, risk: str) -> dict[str, Any]:
         return self.store.propose_confirmation(envelope, label=label, risk=risk)

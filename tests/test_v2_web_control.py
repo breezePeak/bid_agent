@@ -1359,6 +1359,63 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertEqual(receipt.status, "accepted")
                 runner.assert_called_once_with("validate", "alpha", root.resolve())
 
+    def test_workspace_delete_archives_only_after_v2_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).grant_workspace_access("owner", role="owner")
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            request = _Request({"run_id": "alpha"})
+            request.state = type("State", (), {"principal": {"id": "owner", "role": "user"}})()
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "ACTIVE_RUN_FILE", runs / ".active_run"):
+                    proposed = asyncio.run(web_app.api_delete_run(request))
+                    proposal = _body(proposed)
+                    self.assertEqual(proposed.status_code, 202)
+                    self.assertTrue(root.exists())
+
+                    receipt = web_app._command_gateway(context).confirm(proposal["action"]["confirmation_id"])
+
+                self.assertEqual(receipt.status, "accepted")
+                self.assertFalse(root.exists())
+                archived = list((runs / ".trash").glob("alpha_*"))
+                self.assertEqual(len(archived), 1)
+                self.assertTrue((archived[0] / "workspace" / "control.db").exists())
+
+    def test_workspace_clean_preserves_control_db_and_archives_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "workspace").mkdir(parents=True)
+            (root / "outputs").mkdir(parents=True)
+            (root / "workspace" / "legacy.json").write_text("{}", encoding="utf-8")
+            (root / "outputs" / "final.md").write_text("draft", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = web_app.api_clean_workspace(_Request({}))
+                proposal = _body(proposed)
+                self.assertEqual(proposed.status_code, 202)
+                self.assertTrue((root / "outputs" / "final.md").exists())
+
+                receipt = web_app._command_gateway(context).confirm(proposal["action"]["confirmation_id"])
+
+                self.assertEqual(receipt.status, "accepted")
+                self.assertTrue((root / "workspace" / "control.db").exists())
+                self.assertFalse((root / "workspace" / "legacy.json").exists())
+                self.assertFalse((root / "outputs" / "final.md").exists())
+                archived = list((root / ".trash").glob("clean_*"))
+                self.assertEqual(len(archived), 1)
+                self.assertTrue((archived[0] / "workspace" / "legacy.json").exists())
+                self.assertTrue((archived[0] / "outputs" / "final.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

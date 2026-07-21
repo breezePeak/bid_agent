@@ -124,8 +124,11 @@ export async function downloadFinalDocx(runId) {
   }
 }
 
-export function deleteRun(runId) {
-  return api.post('/delete-run', { run_id: runId })
+export async function deleteRun(runId) {
+  const proposed = await api.post('/delete-run', { run_id: runId })
+  const actionId = proposed?.data?.action?.confirmation_id
+  if (!actionId) return proposed
+  return confirmWorkspaceAction(runId, actionId)
 }
 
 export function fetchLlmSettings() {

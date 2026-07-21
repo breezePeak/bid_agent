@@ -267,7 +267,10 @@ def _load_active_run_from_disk() -> None:
             ACTIVE_RUN_ROOT = run_root
             return
     if RUNS_DIR.exists():
-        run_dirs = sorted([path for path in RUNS_DIR.iterdir() if path.is_dir()], key=lambda path: path.stat().st_mtime)
+        run_dirs = sorted(
+            [path for path in RUNS_DIR.iterdir() if path.is_dir() and not path.name.startswith(".")],
+            key=lambda path: path.stat().st_mtime,
+        )
         if run_dirs:
             ACTIVE_RUN_ROOT = run_dirs[-1]
             ACTIVE_RUN_ID = ACTIVE_RUN_ROOT.name
@@ -5664,6 +5667,85 @@ def _handle_workspace_run_utility(
     return {"accepted": True, "operation_status": "succeeded", "message": f"{command} 执行完成。"}
 
 
+def _handle_workspace_archive(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    if RUNNING or SUPERVISOR.is_running(context.root):
+        raise ControlPlaneError("LEASE_CONFLICT", "运行中的工作区不能归档。", status_code=409)
+    runs_root = RUNS_DIR.resolve()
+    source = context.root.resolve()
+    if source.parent != runs_root or source.name != context.workspace_id or not source.is_dir():
+        raise ControlPlaneError("WORKSPACE_INVALID", "工作区路径无效，已拒绝归档。", status_code=400)
+    trash_root = (runs_root / ".trash").resolve()
+    if trash_root.parent != runs_root:
+        raise ControlPlaneError("WORKSPACE_INVALID", "归档目录无效。", status_code=400)
+    trash_root.mkdir(parents=True, exist_ok=True)
+    destination = (trash_root / f"{context.workspace_id}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}").resolve()
+    if destination.parent != trash_root or destination.exists():
+        raise ControlPlaneError("WORKSPACE_INVALID", "归档目标无效。", status_code=400)
+
+    def archive_after_commit() -> None:
+        global ACTIVE_RUN_ID, ACTIVE_RUN_ROOT
+        close_chat_store(source)
+        shutil.move(str(source), str(destination))
+        if context.workspace_id == ACTIVE_RUN_ID:
+            ACTIVE_RUN_ID = ""
+            ACTIVE_RUN_ROOT = None
+            ACTIVE_RUN_FILE.parent.mkdir(parents=True, exist_ok=True)
+            ACTIVE_RUN_FILE.write_text("", encoding="utf-8")
+        _append_log(f"[工作空间] 已归档: {context.workspace_id} -> {destination.name}")
+
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"工作空间 {context.workspace_id} 已移入可恢复归档区。",
+        "_after_commit": archive_after_commit,
+    }
+
+
+def _handle_workspace_clean(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    if RUNNING or SUPERVISOR.is_running(context.root):
+        raise ControlPlaneError("LEASE_CONFLICT", "运行中的工作区不能清理。", status_code=409)
+    root = context.root.resolve()
+    trash_root = (root / ".trash").resolve()
+    if trash_root.parent != root:
+        raise ControlPlaneError("WORKSPACE_INVALID", "清理归档目录无效。", status_code=400)
+    destination = (trash_root / f"clean_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}").resolve()
+    if destination.parent != trash_root or destination.exists():
+        raise ControlPlaneError("WORKSPACE_INVALID", "清理归档目标无效。", status_code=400)
+
+    def clean_after_commit() -> None:
+        trash_workspace = destination / "workspace"
+        destination.mkdir(parents=True, exist_ok=False)
+        close_chat_store(root)
+        outputs = root / "outputs"
+        if outputs.exists():
+            shutil.move(str(outputs), str(destination / "outputs"))
+        workspace = root / "workspace"
+        trash_workspace.mkdir(parents=True, exist_ok=True)
+        if workspace.exists():
+            for child in list(workspace.iterdir()):
+                if child.name.startswith("control.db"):
+                    continue
+                shutil.move(str(child), str(trash_workspace / child.name))
+        workspace.mkdir(parents=True, exist_ok=True)
+        outputs.mkdir(parents=True, exist_ok=True)
+        _append_log(f"[清理] 工作区产物已移入可恢复归档: {destination.name}")
+
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": "workspace/ 兼容状态与 outputs/ 已移入可恢复归档区。",
+        "_after_commit": clean_after_commit,
+    }
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -6280,6 +6362,8 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "document.apply_edit": _handle_document_apply_edit,
             "workspace.set_profile": _handle_workspace_set_profile,
             "workspace.run_utility": _handle_workspace_run_utility,
+            "workspace.archive": _handle_workspace_archive,
+            "workspace.clean": _handle_workspace_clean,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
@@ -6436,7 +6520,7 @@ def api_runs(request: Request) -> JSONResponse:
     principal_id = str(principal.get("id") or "").strip() if isinstance(principal, dict) else ""
     is_admin = isinstance(principal, dict) and str(principal.get("role") or "") == "admin"
     if RUNS_DIR.exists():
-        run_dirs = [path for path in RUNS_DIR.iterdir() if path.is_dir()]
+        run_dirs = [path for path in RUNS_DIR.iterdir() if path.is_dir() and not path.name.startswith(".")]
         for run_root in sorted(run_dirs, key=_latest_tree_mtime, reverse=True):
             if not is_admin:
                 try:
@@ -6619,6 +6703,8 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "document.apply_edit": "确认修改终稿并重新生成 Word",
                 "workspace.set_profile": "确认切换项目类型",
                 "workspace.run_utility": "确认执行工作区维护命令",
+                "workspace.archive": "确认归档工作区",
+                "workspace.clean": "确认清理工作区产物",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
@@ -8066,35 +8152,44 @@ async def api_delete_run(request: Request) -> JSONResponse:
     except ControlPlaneError as exc:
         return _command_error_response(exc)
 
-    close_chat_store(run_root)
-    shutil.rmtree(str(run_root))
-
-    if run_id == ACTIVE_RUN_ID:
-        ACTIVE_RUN_ID = ""
-        ACTIVE_RUN_ROOT = None
-        if ACTIVE_RUN_FILE.exists():
-            ACTIVE_RUN_FILE.write_text("", encoding="utf-8")
-
-    _append_log(f"[工作空间] 已删除: {run_id}")
-    return JSONResponse({"ok": True, "message": f"工作空间 {run_id} 已删除。"})
+    try:
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "workspace.archive",
+                "payload": {},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-workspace-archive:{uuid.uuid4()}",
+                "actor": _request_actor(request, source="legacy_web"),
+            },
+            workspace_id=context.workspace_id,
+        )
+        action = gateway.propose(envelope, label=f"确认归档工作空间 {run_id}", risk="critical")
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/clean-workspace")
-def api_clean_workspace() -> JSONResponse:
-    global LOG_LINES
-
+def api_clean_workspace(request: Request) -> JSONResponse:
     root = _active_root()
-    close_chat_store(root)
-    for sub in ["workspace", "outputs"]:
-        target = root / sub
-        if target.exists():
-            shutil.rmtree(str(target))
-
-    root.joinpath("workspace").mkdir(parents=True, exist_ok=True)
-    root.joinpath("outputs").mkdir(parents=True, exist_ok=True)
-
-    _append_log(f"[清空] 已清空 {root} 下的 workspace/ 和 outputs/")
-    return JSONResponse({"ok": True, "message": "workspace/ 和 outputs/ 已清空"})
+    try:
+        context = _workspace_context(ACTIVE_RUN_ID or root.name)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "workspace.clean",
+                "payload": {},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-workspace-clean:{uuid.uuid4()}",
+                "actor": _request_actor(request, source="legacy_web"),
+            },
+            workspace_id=context.workspace_id,
+        )
+        action = gateway.propose(envelope, label="确认清理工作区产物（可恢复）", risk="critical")
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 # ---------------------------------------------------------------
