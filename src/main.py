@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -628,6 +629,22 @@ def main() -> int:
         return control_main(sys.argv[2:])
     root = project_root()
     args = build_parser().parse_args()
+    runs_root = Path(
+        os.environ.get("BID_AGENT_RUNS_ROOT")
+        or (Path(__file__).resolve().parent.parent / "runs")
+    ).resolve()
+    managed_workspace = root.resolve() != runs_root and root.resolve().is_relative_to(runs_root)
+    execution_worker = str(os.environ.get("BID_AGENT_EXECUTION_WORKER") or "").lower() in {
+        "1",
+        "true",
+        "yes",
+    }
+    if managed_workspace and not execution_worker and args.command != "validate":
+        print(
+            "[拒绝] 受管 V2 工作区禁止通过旧阶段 CLI 直接执行 mutation；"
+            "请使用 `python src/main.py control ...` 提交 Command。"
+        )
+        return 2
 
     if args.command == "init":
         init_project(root)

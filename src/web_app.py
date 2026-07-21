@@ -5026,6 +5026,8 @@ def _run_process_once(command: str, run_root: Path) -> int:
     env["PYTHONUNBUFFERED"] = "1"
     env["BID_AGENT_ROOT"] = str(run_root)
     env["BID_AGENT_CONFIG_ROOT"] = str(ROOT)
+    env["BID_AGENT_EXECUTION_WORKER"] = "1"
+    env["BID_AGENT_RUNS_ROOT"] = str(RUNS_DIR)
     process = subprocess.Popen(
         [sys.executable, *args],
         cwd=str(ROOT),
