@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 7
+    SCHEMA_VERSION = 8
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -316,6 +316,16 @@ class ControlStore:
                         goal_id TEXT NOT NULL,
                         status TEXT NOT NULL,
                         goal_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS repair_job_state (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        job_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        phase TEXT NOT NULL,
+                        job_json TEXT NOT NULL,
                         source TEXT NOT NULL,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
@@ -997,6 +1007,132 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.goal_state() or {}
+
+    def ensure_repair_job_state(self, job: dict[str, Any] | None) -> int:
+        value = dict(job) if isinstance(job, dict) and job else None
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                imported = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'repair_job_v1_imported'"
+                ).fetchone()
+                if imported is not None:
+                    connection.commit()
+                    return 0
+                inserted = 0
+                if value is not None:
+                    job_id = str(value.get("job_id") or "").strip()
+                    if not job_id:
+                        raise ControlPlaneError("STATE_UNAVAILABLE", "V1 RepairJob 缺少 job_id。", status_code=503)
+                    connection.execute(
+                        """
+                        INSERT INTO repair_job_state(
+                            singleton, job_id, status, phase, job_json, source, created_at, updated_at
+                        ) VALUES (1, ?, ?, ?, ?, 'v1_import', ?, ?)
+                        """,
+                        (
+                            job_id,
+                            str(value.get("status") or "awaiting_confirmation"),
+                            str(value.get("phase") or "awaiting_confirmation"),
+                            _json(value),
+                            str(value.get("created_at") or now),
+                            str(value.get("updated_at") or now),
+                        ),
+                    )
+                    inserted = 1
+                connection.execute("INSERT INTO control_meta(key, value) VALUES ('repair_job_v1_imported', '1')")
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "RepairJobImported",
+                    "RepairJob",
+                    str((value or {}).get("job_id") or self.context.workspace_id),
+                    {"count": inserted, "source": "v1_import"},
+                )
+                connection.commit()
+                return inserted
+            except Exception:
+                connection.rollback()
+                raise
+
+    def repair_job_state(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM repair_job_state WHERE singleton = 1").fetchone()
+        if row is None:
+            return {}
+        value = dict(row)
+        job = _decode(value.pop("job_json", ""), {})
+        if not isinstance(job, dict):
+            raise ControlPlaneError("STATE_UNAVAILABLE", "RepairJob 控制状态损坏。", status_code=503)
+        job.update(
+            {
+                "job_id": value["job_id"],
+                "status": value["status"],
+                "phase": value["phase"],
+                "control_source": value["source"],
+                "control_updated_at": value["updated_at"],
+            }
+        )
+        return job
+
+    def upsert_repair_job_state(self, job: dict[str, Any], *, source: str = "v2_projection") -> dict[str, Any]:
+        value = dict(job)
+        job_id = str(value.get("job_id") or "").strip()
+        if not job_id:
+            raise ControlPlaneError("COMMAND_INVALID", "RepairJob 状态缺少 job_id。", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute("SELECT created_at FROM repair_job_state WHERE singleton = 1").fetchone()
+                created_at = str(existing["created_at"]) if existing is not None else str(value.get("created_at") or now)
+                connection.execute(
+                    """
+                    INSERT INTO repair_job_state(
+                        singleton, job_id, status, phase, job_json, source, created_at, updated_at
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET
+                        job_id = excluded.job_id,
+                        status = excluded.status,
+                        phase = excluded.phase,
+                        job_json = excluded.job_json,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        job_id,
+                        str(value.get("status") or "awaiting_confirmation"),
+                        str(value.get("phase") or "awaiting_confirmation"),
+                        _json(value),
+                        source,
+                        created_at,
+                        str(value.get("updated_at") or now),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('repair_job_v1_imported', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "RepairJobChanged",
+                    "RepairJob",
+                    job_id,
+                    {
+                        "status": str(value.get("status") or "awaiting_confirmation"),
+                        "phase": str(value.get("phase") or "awaiting_confirmation"),
+                        "source": source,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.repair_job_state()
 
     def workspace_acl(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
