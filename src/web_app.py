@@ -5988,7 +5988,15 @@ def _handle_workspace_set_profile(
     allowed = {str(item.get("project_type") or "") for item in project_profile_choices()}
     if project_type not in allowed:
         raise ControlPlaneError("COMMAND_INVALID", "项目类型无效。", status_code=400)
+    previous_type = str(load_project_profile(context.root).get("project_type") or "")
     save_project_profile(context.root, project_type)
+    if previous_type != project_type:
+        store = ControlStore(context)
+        store.mark_artifact_states_stale(
+            [item["artifact_key"] for item in store.artifact_states()],
+            reason=f"项目类型已从 {previous_type or '未设置'} 切换为 {project_type}",
+            source_command="workspace.set_profile",
+        )
     return {
         "accepted": True,
         "operation_status": "succeeded",

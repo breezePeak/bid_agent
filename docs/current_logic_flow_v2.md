@@ -545,3 +545,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B59 | 2026-07-21 | `document.apply_edit` 重建 Word 后同步刷新 final.md/final.docx 的 SQLite manifest；final.md 以受审计 manual_override 保留为 build-md 当前产物，合规与格式报告标记 stale。正式 GateReceipt 输入新增 format_check_report，使人工改稿后必须重新完成质量/格式检查，不能因旧报告文件仍存在而直接正式出稿。 |
 | V2.0-B60 | 2026-07-21 | 定向改稿、Issue 最小修复和材料回填等非 Pipeline 章节写入接入 SQLite Artifact 图：章节集合成功存在时刷新 write-all manifest，并按 StageSpec 传递 stale 到审核、摘要、来源追溯、评分覆盖、合规及最终文档链；外部 Worker 不再只写 V1 `stale_artifacts.json` 而让 V2 误判旧终稿 ready。 |
 | V2.0-B61 | 2026-07-21 | `review.update` 除写入一个版本的人工复核兼容投影外，同时追加不可变 SQLite PolicyDecision，记录 category、item、结论、操作说明与服务端 actor；人工复核变化因此进入 GateReceipt 的权威 Policy 指纹，既有正式凭据会失效，不再因只改了复核文件而继续有效。 |
+| V2.0-B62 | 2026-07-21 | `workspace.set_profile` 在项目类型实际变化后将当前 SQLite Artifact manifest 全部标记 stale；项目类型影响提示词、结构、篇幅和生成策略，后续 Pipeline 必须按新配置重建，不能继续复用旧项目类型下仅因文件存在而显示 ready 的产物。相同类型的幂等设置不触发失效。 |

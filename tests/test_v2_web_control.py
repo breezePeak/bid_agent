@@ -1614,6 +1614,18 @@ class V2WebControlTests(unittest.TestCase):
             root.mkdir(parents=True)
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).upsert_artifact_state(
+                {
+                    "artifact_key": "workspace/outline.json",
+                    "path": "workspace/outline.json",
+                    "kind": "file",
+                    "status": "ready",
+                    "producer": "generate-outline",
+                    "sha256": "old",
+                    "input_fingerprint": "old",
+                }
+            )
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 proposed = asyncio.run(
@@ -1630,6 +1642,10 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertEqual(receipt.status, "accepted")
                 profile = json.loads((root / "workspace" / "project_profile.json").read_text(encoding="utf-8"))
                 self.assertEqual(profile["project_type"], "software_project")
+                self.assertEqual(
+                    ControlStore(context).artifact_state("workspace/outline.json")["status"],
+                    "stale",
+                )
 
     def test_workspace_utility_command_requires_v2_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
