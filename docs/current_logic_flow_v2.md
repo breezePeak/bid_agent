@@ -483,3 +483,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-A6 | 2026-07-21 | 建立首版正式稿 GateReceipt：`gate.revalidate` 对质量门禁、材料验证、出稿预检和 final Artifact 执行 fail-closed 复核，将凭据持久化到 `control.db`；V2 正式稿下载会重算输入与 Artifact fingerprint，变化后返回 `GATE_RECEIPT_STALE`。旧下载入口和现有页面尚待完成切换，因此本阶段仍未验收。 |
 | V2.0-A7 | 2026-07-21 | Vue 与兼容页面的 Word 下载改为先执行 `gate.revalidate`、取得最新 GateReceipt，再访问 V2 正式稿接口；旧 `/api/download/final-docx` 也强制校验凭据，不再存在无门禁正式稿下载旁路。Markdown 下载仍按草稿能力保留。身份授权、领域状态迁移和发布验收仍未完成。 |
 | V2.0-A8 | 2026-07-21 | 材料清单重建迁入 `materials.rebuild` Command，Vue 与兼容端点不再直接调用材料 mutation runner。至此材料更新、重建、登记、验证、人工核验和回填均已有 CommandGateway 入口；材料领域表仍是 V1 文件投影，尚未迁入 SQLite。 |
+| V2.0-A9 | 2026-07-21 | V2 Command API 不再信任 JSON 中的 `actor`，统一从服务端请求上下文绑定主体；在认证中间件接入前使用明确的 `v2_api/anonymous` 兼容主体，避免客户端伪造操作者。正式身份认证、角色授权和工作区 ACL 仍未实施。 |

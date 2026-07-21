@@ -2014,7 +2014,6 @@ async function downloadFinalDocx() {
         payload: {},
         expected_revision: Number(snapshotData.snapshot?.revision || 0),
         idempotency_key: commandId,
-        actor: { type: "legacy_web", id: "current-user" },
       }),
     });
     const gate = await gateResponse.json();

@@ -628,7 +628,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(rejected["receipt"]["error"]["code"], "COMMAND_INVALID")
             upload.assert_not_called()
 
-    def test_material_human_verification_uses_command_actor_not_payload_operator(self) -> None:
+    def test_material_human_verification_uses_server_actor_not_client_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             root = runs / "alpha"
@@ -679,7 +679,7 @@ class V2WebControlTests(unittest.TestCase):
                             web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
                         )
             self.assertTrue(accepted["ok"])
-            self.assertEqual(verify.call_args.kwargs["operator"], "reviewer-7")
+            self.assertEqual(verify.call_args.kwargs["operator"], "anonymous")
 
     def test_legacy_material_upload_only_creates_v2_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

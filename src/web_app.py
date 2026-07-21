@@ -4846,6 +4846,20 @@ def _workspace_context(workspace_id: str) -> WorkspaceContext:
     return WorkspaceContext.resolve(RUNS_DIR, workspace_id)
 
 
+def _request_actor(request: Request, *, source: str) -> dict[str, str]:
+    """Bind Command actors on the server; never trust actor fields in JSON payloads."""
+    state = getattr(request, "state", None)
+    principal = getattr(state, "principal", None) if state is not None else None
+    if isinstance(principal, dict):
+        principal_id = str(principal.get("id") or "").strip()
+        if principal_id:
+            return {
+                "type": str(principal.get("type") or source).strip() or source,
+                "id": principal_id[:128],
+            }
+    return {"type": source, "id": "anonymous"}
+
+
 def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[str, Any]:
     """Fail-closed gate evaluation for V2 mutations using the explicit workspace."""
     try:
@@ -5868,6 +5882,8 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
         body = await request.json()
         if not isinstance(body, dict):
             raise ControlPlaneError("COMMAND_INVALID", "请求体必须是 JSON 对象。", status_code=400)
+        body = dict(body)
+        body["actor"] = _request_actor(request, source="v2_api")
         envelope = CommandEnvelope.from_mapping(body, workspace_id=context.workspace_id)
         gateway = _command_gateway(context)
         if envelope.kind in ControlStore.CONFIRMATION_REQUIRED_KINDS:

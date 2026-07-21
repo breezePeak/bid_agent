@@ -168,7 +168,6 @@ export async function submitWorkspaceCommand(runId, kind, payload = {}, options 
     payload,
     expected_revision: revision,
     idempotency_key: options.idempotencyKey || commandId,
-    actor: { type: 'web', id: 'current-user' },
   })
 }
 
@@ -187,7 +186,6 @@ export async function startOrResumePipeline(runId, startCommand = '') {
     payload,
     expected_revision: Number(snapshot.revision || 0),
     idempotency_key: commandId,
-    actor: { type: 'web', id: 'current-user' },
   })
 }
 
