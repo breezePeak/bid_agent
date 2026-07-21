@@ -1090,6 +1090,29 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["error"]["code"], "POLICY_DENIED")
 
+    def test_goal_resume_routes_through_gateway_and_bulk_confirmation_is_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("agent.goal.load_goal", return_value={"status": "blocked_human"}):
+                    with mock.patch(
+                        "agent.goal.resume_goal_after_materials",
+                        return_value={"status": "in_progress"},
+                    ) as resume:
+                        response = asyncio.run(web_app.api_agent_goal_resume(_Request({"note": "continue"})))
+                denied = asyncio.run(web_app.api_agent_goal_confirm(_Request({"all_mutations": True})))
+            payload = _body(response)
+            self.assertTrue(payload["ok"], payload)
+            self.assertEqual(payload["receipt"]["status"], "accepted")
+            self.assertTrue(web_app._same_path(resume.call_args.args[0], root))
+            denied_payload = _body(denied)
+            self.assertEqual(denied.status_code, 410)
+            self.assertEqual(denied_payload["error"]["code"], "POLICY_DENIED")
+
 
 if __name__ == "__main__":
     unittest.main()

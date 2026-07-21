@@ -3473,37 +3473,42 @@ def api_agent_snapshot() -> JSONResponse:
 
 @app.post("/api/agent/goal/resume")
 async def api_agent_goal_resume(request: Request) -> JSONResponse:
-    root = _active_root()
     try:
         body = await request.json()
     except Exception:
         body = {}
     note = str((body or {}).get("note") or "web_resume")
     try:
-        from agent.goal import resume_goal_after_materials
-
-        goal = resume_goal_after_materials(root, note=note)
-        return JSONResponse({"ok": True, "goal": goal, "message": "目标已恢复为 in_progress"})
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "goal.resume",
+                "payload": {"note": note},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-goal-resume:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
+        )
+        receipt = gateway.submit(envelope)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message},
+            status_code=202 if receipt.status != "rejected" else 409,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/agent/goal/confirm")
 async def api_agent_goal_confirm(request: Request) -> JSONResponse:
-    root = _active_root()
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    tools = body.get("tools") if isinstance(body, dict) else None
-    all_mutations = bool((body or {}).get("all_mutations", True))
-    try:
-        from agent.goal import grant_confirmation, load_goal
-
-        goal = grant_confirmation(root, tools=tools if isinstance(tools, list) else None, all_mutations=all_mutations)
-        return JSONResponse({"ok": True, "goal": goal or load_goal(root)})
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+    return _command_error_response(
+        ControlPlaneError(
+            "POLICY_DENIED",
+            "V2 不再支持为 Goal 批量授权 mutation；请逐个确认持久化 Action。",
+            status_code=410,
+        )
+    )
 
 
 @app.get("/api/agent/decisions")
@@ -5343,6 +5348,34 @@ def _handle_quality_revalidate(
     }
 
 
+def _handle_goal_resume(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.goal import load_goal, resume_goal_after_materials
+
+    goal = load_goal(context.root)
+    if not isinstance(goal, dict):
+        raise ControlPlaneError("GOAL_NOT_FOUND", "当前工作区没有可恢复的 Goal。", status_code=404)
+    status = str(goal.get("status") or "")
+    if status not in {"blocked_human", "in_progress"}:
+        raise ControlPlaneError(
+            "GOAL_STATE_INVALID",
+            f"Goal 状态 {status or '-'} 不允许恢复。",
+            status_code=409,
+        )
+    if status == "in_progress":
+        return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已在进行中。"}
+    resumed = resume_goal_after_materials(
+        context.root,
+        note=str(envelope.payload.get("note") or "v2_goal_resume"),
+    )
+    if not isinstance(resumed, dict) or str(resumed.get("status") or "") != "in_progress":
+        raise ControlPlaneError("GATE_BLOCKED", "Goal 恢复条件未满足。")
+    return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已恢复为 in_progress。"}
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -5954,6 +5987,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "repair.issues": _handle_repair_issues,
             "issues.accept_risk": _handle_accept_issue_risk,
             "quality.revalidate": _handle_quality_revalidate,
+            "goal.resume": _handle_goal_resume,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
