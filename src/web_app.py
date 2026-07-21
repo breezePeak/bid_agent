@@ -3266,20 +3266,44 @@ async def api_materials_confirm_verify(request: Request) -> JSONResponse:
 @app.get("/api/issues")
 def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONResponse:
     """List quality issues (open snapshot)."""
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
     try:
-        from agent.issues import issues_summary, load_open_issues
-        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+        if context:
+            from agent.issues import quality_gate_mode
 
-        try:
-            sync_issues_from_global_review(root)
-        except Exception:
-            pass
-        try:
-            sync_issues_from_compliance(root)
-        except Exception:
-            pass
-        issues = load_open_issues(root)
+            all_issues = ControlStore(context).issue_states()
+            open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
+            blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
+            warns = [i for i in open_issues if str(i.get("severity")) == "warn"]
+            mode = quality_gate_mode()
+            summary = {
+                "open_count": len(open_issues),
+                "block_count": len(blocks),
+                "warn_count": len(warns),
+                "can_proceed": mode == "soft" or not blocks,
+                "mode": mode,
+                "top_blocks": [
+                    {"id": i.get("id"), "code": i.get("code"), "title": i.get("title"), "stage_id": i.get("stage_id")}
+                    for i in blocks[:8]
+                ],
+                "source": "control.db",
+            }
+        else:
+            from agent.issues import issues_summary, load_open_issues
+            from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+            try:
+                sync_issues_from_global_review(root)
+            except Exception:
+                pass
+            try:
+                sync_issues_from_compliance(root)
+            except Exception:
+                pass
+            all_issues = load_open_issues(root)
+            summary = issues_summary(root)
+        issues = all_issues
         if status and status != "all":
             if status == "open":
                 issues = [i for i in issues if str(i.get("status")) in {"open", "in_progress"}]
@@ -3294,7 +3318,7 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
         return JSONResponse(
             {
                 "ok": True,
-                "summary": issues_summary(root),
+                "summary": summary,
                 "issues": issues,
                 "count": len(issues),
             }

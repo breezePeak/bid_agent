@@ -1708,6 +1708,10 @@ class V2WebControlTests(unittest.TestCase):
                 json.dumps({"blocking": False, "items": [{"check_id": "beta-check", "status": "ok"}]}),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).replace_issue_states(
+                [{"id": "alpha-issue", "status": "open", "severity": "block"}],
+                source="test",
+            )
             web_app.ACTIVE_RUN_ID = "beta"
             web_app.ACTIVE_RUN_ROOT = beta
 
@@ -1717,18 +1721,21 @@ class V2WebControlTests(unittest.TestCase):
                     _body(web_app.api_export_preflight("alpha"))
                 with mock.patch.object(web_app, "_material_items", return_value=[]):
                     materials = _body(web_app.api_materials_checklist("alpha"))
-                with mock.patch("agent.issues.load_open_issues", return_value=[{"id": "alpha-issue", "status": "open"}]) as load_issues:
-                    with mock.patch("agent.issues.issues_summary", return_value={"open": 1}):
-                        issues = _body(web_app.api_list_issues("open", "alpha"))
+                with mock.patch("agent.issues.load_open_issues") as load_issues:
+                    with mock.patch("agent.root_cause.sync_issues_from_compliance") as sync_compliance:
+                        with mock.patch("agent.root_cause.sync_issues_from_global_review") as sync_review:
+                            issues = _body(web_app.api_list_issues("open", "alpha"))
 
             self.assertTrue(compliance["blocking"])
             self.assertEqual(compliance["items"][0]["check_id"], "alpha-check")
             preflight.assert_called_once_with(alpha.resolve())
             self.assertTrue(materials["ok"])
             self.assertEqual(materials["items"], [])
-            self.assertTrue(load_issues.call_args_list)
-            self.assertTrue(all(call.args == (alpha.resolve(),) for call in load_issues.call_args_list))
+            load_issues.assert_not_called()
+            sync_compliance.assert_not_called()
+            sync_review.assert_not_called()
             self.assertEqual(issues["issues"][0]["id"], "alpha-issue")
+            self.assertEqual(issues["summary"]["source"], "control.db")
 
     def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
