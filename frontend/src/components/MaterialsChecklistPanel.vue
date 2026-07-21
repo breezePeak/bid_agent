@@ -31,6 +31,7 @@
           :title="refillPlans.length ? `将回填 ${refillPlans.length} 章` : '暂无已 ready 且正文仍有占位的章节'"
           @click="doRefill"
         >补料回填{{ refillPlans.length ? ` (${refillPlans.length})` : '' }}</button>
+        <input ref="materialInput" type="file" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.txt" style="display:none" @change="onMaterialFile" />
       </div>
       <div v-if="(summary.deferred || 0) > 0" class="mcp-hint">
         提示：补传公司资料后点「重建清单」→ 将对应项标为「已齐」→ 再点「补料回填」。
@@ -68,6 +69,11 @@
         <div class="mcp-reason" v-if="item.reason">{{ item.reason }}</div>
         <div class="mcp-status-row">
           <button
+            class="mcp-st"
+            :disabled="busyId === item.item_id"
+            @click="triggerMaterialUpload(item)"
+          >上传并核验</button>
+          <button
             v-for="st in statuses"
             :key="st.key"
             class="mcp-st"
@@ -99,6 +105,7 @@ import {
   updateMaterialsChecklistItem,
   rebuildMaterialsChecklist,
   refillMaterialsChecklist,
+  registerMaterialUpload,
 } from '../api'
 
 const props = defineProps({
@@ -116,6 +123,8 @@ const filter = ref('deferred')
 const notes = ref({})
 const msg = ref('')
 const companyInput = ref(null)
+const materialInput = ref(null)
+const selectedUploadItem = ref(null)
 const emptyMsg = ref('暂无材料清单。跑完「材料资格清单」阶段后会显示。')
 
 const filters = [
@@ -240,6 +249,37 @@ async function saveNote(item) {
 
 function triggerCompanyUpload() {
   companyInput.value?.click?.()
+}
+
+function triggerMaterialUpload(item) {
+  selectedUploadItem.value = item
+  materialInput.value?.click?.()
+}
+
+async function onMaterialFile(event) {
+  const item = selectedUploadItem.value
+  const file = event?.target?.files?.[0]
+  if (!item || !file) return
+  busyId.value = item.item_id
+  msg.value = `正在暂存并校验 ${file.name}…`
+  try {
+    const response = await registerMaterialUpload(
+      props.runId,
+      item.item_id,
+      file,
+      (notes.value[item.item_id] ?? '').trim(),
+    )
+    const data = await confirmCommandProposal(response, `确认将「${file.name}」登记到材料「${item.requirement || item.item_id}」并执行验证？`)
+    if (!data?.ok) throw new Error(data?.message || '材料登记失败')
+    if (!data.declined) await refresh()
+    msg.value = data.message || '材料已登记并完成验证'
+  } catch (error) {
+    msg.value = error?.response?.data?.message || error?.message || '材料登记失败'
+  } finally {
+    busyId.value = ''
+    selectedUploadItem.value = null
+    if (event?.target) event.target.value = ''
+  }
 }
 
 async function onCompanyFiles(e) {

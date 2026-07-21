@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import sys
 import tempfile
@@ -15,6 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import web_app  # noqa: E402
+from fastapi import UploadFile  # noqa: E402
 from agent.repair_jobs import create_confirmation  # noqa: E402
 from control_plane import CommandEnvelope, CommandGateway, ControlStore, WorkspaceContext  # noqa: E402
 
@@ -625,7 +627,7 @@ class V2WebControlTests(unittest.TestCase):
                     )
             self.assertEqual(proposed["receipt"]["status"], "requires_confirmation")
             self.assertFalse(rejected["ok"])
-            self.assertEqual(rejected["receipt"]["error"]["code"], "COMMAND_INVALID")
+            self.assertEqual(rejected["receipt"]["error"]["code"], "UPLOAD_TOKEN_REQUIRED")
             upload.assert_not_called()
 
     def test_material_human_verification_uses_server_actor_not_client_fields(self) -> None:
@@ -690,9 +692,19 @@ class V2WebControlTests(unittest.TestCase):
             web_app.ACTIVE_RUN_ROOT = root
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch("materials_checklist.mark_material_uploaded") as upload:
+                    context = WorkspaceContext.resolve(runs, "alpha")
+                    staged_path = root / "workspace" / "material_uploads" / "staging" / "item.pdf"
+                    staged_path.parent.mkdir(parents=True)
+                    staged_path.write_bytes(b"pdf")
+                    staged = ControlStore(context).register_material_upload(
+                        staged_path=staged_path.relative_to(root).as_posix(),
+                        filename="item.pdf",
+                        sha256="hash",
+                        size_bytes=3,
+                    )
                     response = asyncio.run(
                         web_app.api_materials_checklist_upload(
-                            _Request({"item_id": "legacy-item", "uploaded_path": "workspace/item.pdf"})
+                            _Request({"item_id": "legacy-item", "upload_token": staged["upload_token"]})
                         )
                     )
             payload = _body(response)
@@ -700,6 +712,80 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(response.headers.get("deprecation"), "true")
             self.assertEqual(payload["status"], "requires_confirmation")
             upload.assert_not_called()
+
+    def test_material_upload_token_is_workspace_scoped_and_single_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "mat-token", "response_status": "deferred"}]}),
+                encoding="utf-8",
+            )
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            upload = UploadFile(filename="certificate.txt", file=io.BytesIO(b"certificate evidence"))
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                staged_response = asyncio.run(web_app.api_v2_stage_material_upload("alpha", upload))
+                staged = _body(staged_response)
+                self.assertEqual(staged_response.status_code, 201)
+                self.assertNotIn("path", staged)
+                context = WorkspaceContext.resolve(runs, "alpha")
+                proposed = _body(
+                    asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "materials.upload",
+                                    "payload": {
+                                        "item_id": "mat-token",
+                                        "upload_token": staged["upload_token"],
+                                    },
+                                    "expected_revision": ControlStore(context).revision(),
+                                    "idempotency_key": "token-upload",
+                                }
+                            ),
+                        )
+                    )
+                )
+                with mock.patch(
+                    "materials_checklist.mark_material_uploaded",
+                    return_value={"ok": True, "lifecycle_status": "uploaded", "message": "registered"},
+                ) as register:
+                    accepted = _body(
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                    )
+                self.assertTrue(accepted["ok"])
+                token_row = ControlStore(context).material_upload(staged["upload_token"])
+                self.assertEqual(token_row["status"], "consumed")
+                registered_path = Path(register.call_args.kwargs["uploaded_path"])
+                self.assertTrue(web_app._same_path(registered_path.parent, workspace / "material_uploads" / "staging"))
+
+                replay = _body(
+                    asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "materials.upload",
+                                    "payload": {
+                                        "item_id": "mat-token",
+                                        "upload_token": staged["upload_token"],
+                                    },
+                                    "expected_revision": ControlStore(context).revision(),
+                                    "idempotency_key": "token-replay",
+                                }
+                            ),
+                        )
+                    )
+                )
+                rejected = _body(
+                    web_app.api_v2_confirm_action("alpha", replay["action"]["action_id"])
+                )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["receipt"]["error"]["code"], "UPLOAD_TOKEN_INVALID")
 
     def test_legacy_material_rebuild_routes_through_v2_gateway(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

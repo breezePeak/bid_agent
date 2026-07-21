@@ -3677,6 +3677,12 @@ async def api_materials_checklist_upload(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
     try:
+        if not str(body.get("upload_token") or "").strip():
+            raise ControlPlaneError(
+                "UPLOAD_TOKEN_REQUIRED",
+                "旧材料登记接口不再接受服务器路径，请先调用 V2 暂存上传接口取得 upload_token。",
+                status_code=400,
+            )
         context = _workspace_context(ACTIVE_RUN_ID)
         gateway = _command_gateway(context)
         envelope = CommandEnvelope.from_mapping(
@@ -5299,10 +5305,22 @@ def _handle_materials_upload(
 
     item_id = str(envelope.payload.get("item_id") or "").strip()
     _material_item(context, item_id)
-    uploaded_path = _workspace_material_path(
-        context,
-        envelope.payload.get("uploaded_path") or envelope.payload.get("path"),
-    )
+    upload_token = str(envelope.payload.get("upload_token") or "").strip()
+    if not upload_token:
+        raise ControlPlaneError(
+            "UPLOAD_TOKEN_REQUIRED",
+            "登记材料必须使用当前工作区签发的一次性 upload_token。",
+            status_code=400,
+        )
+    store = ControlStore(context)
+    staged = store.material_upload(upload_token)
+    if not staged or str(staged.get("status") or "") != "pending":
+        raise ControlPlaneError("UPLOAD_TOKEN_INVALID", "upload_token 不存在或不可用。", status_code=409)
+    uploaded_path = _workspace_material_path(context, staged.get("staged_path"))
+    actual_sha256 = hashlib.sha256(uploaded_path.read_bytes()).hexdigest()
+    if actual_sha256 != str(staged.get("sha256") or ""):
+        raise ControlPlaneError("UPLOAD_HASH_MISMATCH", "暂存材料摘要不匹配，已拒绝登记。", status_code=409)
+    store.consume_material_upload(upload_token)
     result = mark_material_uploaded(
         context.root,
         item_id,
@@ -5331,12 +5349,10 @@ def _handle_materials_verify(
 
     item_id = str(envelope.payload.get("item_id") or "").strip()
     _material_item(context, item_id)
-    raw_path = envelope.payload.get("uploaded_path") or envelope.payload.get("path")
-    uploaded_path = str(_workspace_material_path(context, raw_path)) if raw_path else ""
     result = verify_material(
         context.root,
         item_id,
-        uploaded_path=uploaded_path,
+        uploaded_path="",
         note=str(envelope.payload.get("note") or "").strip(),
     )
     if not result.get("ok"):
@@ -5875,6 +5891,95 @@ async def api_select_run(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "run": _active_run_payload(), "progress": _run_progress_summary(run_root)})
 
 
+_MATERIAL_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_MATERIAL_UPLOAD_EXTENSIONS = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".txt",
+}
+
+
+def _safe_upload_filename(filename: str) -> str:
+    name = Path(str(filename or "")).name.strip()
+    if not name or name in {".", ".."}:
+        raise ControlPlaneError("UPLOAD_INVALID", "上传文件名无效。", status_code=400)
+    extension = Path(name).suffix.lower()
+    if extension not in _MATERIAL_UPLOAD_EXTENSIONS:
+        raise ControlPlaneError("UPLOAD_TYPE_DENIED", f"不允许的材料文件类型: {extension or '无扩展名'}", status_code=400)
+    stem = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", Path(name).stem).strip("._") or "material"
+    return f"{stem[:120]}{extension}"
+
+
+@app.post("/api/v2/workspaces/{workspace_id}/materials/uploads")
+async def api_v2_stage_material_upload(
+    workspace_id: str,
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    destination: Path | None = None
+    try:
+        context = _workspace_context(workspace_id)
+        filename = _safe_upload_filename(file.filename or "")
+        staging_dir = context.root / "workspace" / "material_uploads" / "staging"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        destination = (staging_dir / f"{uuid.uuid4().hex}_{filename}").resolve()
+        if not destination.is_relative_to(staging_dir.resolve()):
+            raise ControlPlaneError("UPLOAD_INVALID", "材料暂存路径越界。", status_code=400)
+        digest = hashlib.sha256()
+        size_bytes = 0
+        with destination.open("xb") as output:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size_bytes += len(chunk)
+                if size_bytes > _MATERIAL_UPLOAD_MAX_BYTES:
+                    raise ControlPlaneError(
+                        "UPLOAD_TOO_LARGE",
+                        "单个材料文件不能超过 50 MB。",
+                        status_code=413,
+                    )
+                digest.update(chunk)
+                output.write(chunk)
+        if size_bytes <= 0:
+            raise ControlPlaneError("UPLOAD_INVALID", "上传文件为空。", status_code=400)
+        relative = destination.relative_to(context.root).as_posix()
+        staged = ControlStore(context).register_material_upload(
+            staged_path=relative,
+            filename=filename,
+            sha256=digest.hexdigest(),
+            size_bytes=size_bytes,
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "upload_token": staged["upload_token"],
+                "filename": staged["filename"],
+                "sha256": staged["sha256"],
+                "size_bytes": staged["size_bytes"],
+                "expires_at": staged["expires_at"],
+            },
+            status_code=201,
+        )
+    except ControlPlaneError as exc:
+        if destination is not None and destination.exists():
+            destination.unlink()
+        return _command_error_response(exc)
+    except Exception as exc:
+        if destination is not None and destination.exists():
+            destination.unlink()
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"材料暂存失败: {exc}", status_code=503)
+        )
+    finally:
+        await file.close()
+
+
 @app.post("/api/v2/workspaces/{workspace_id}/commands")
 async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResponse:
     try:
@@ -6264,6 +6369,31 @@ async def api_logs_stream(request: Request) -> StreamingResponse:
 # ---------------------------------------------------------------
 
 VALID_CATEGORIES = {"tender", "company", "template"}
+_SOURCE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+_SOURCE_UPLOAD_DENIED_EXTENSIONS = {
+    ".bat",
+    ".cmd",
+    ".com",
+    ".dll",
+    ".exe",
+    ".js",
+    ".msi",
+    ".ps1",
+    ".py",
+    ".scr",
+    ".vbs",
+}
+
+
+def _safe_source_filename(filename: str) -> str:
+    name = Path(str(filename or "")).name.strip()
+    if not name or name in {".", ".."}:
+        raise ControlPlaneError("UPLOAD_INVALID", "上传文件名无效。", status_code=400)
+    extension = Path(name).suffix.lower()
+    if extension in _SOURCE_UPLOAD_DENIED_EXTENSIONS:
+        raise ControlPlaneError("UPLOAD_TYPE_DENIED", f"不允许上传可执行文件: {extension}", status_code=400)
+    stem = re.sub(r"[^A-Za-z0-9._\-\u4e00-\u9fff]+", "_", Path(name).stem).strip("._") or "source"
+    return f"{stem[:160]}{extension[:20]}"
 
 
 @app.post("/api/upload")
@@ -6281,10 +6411,22 @@ async def api_upload(category: str = "tender", files: list[UploadFile] = File(..
     saved: list[str] = []
     for f in files:
         content = await f.read()
-        dest = dest_dir / f.filename
+        if not content:
+            return JSONResponse({"ok": False, "message": "上传文件为空。"}, status_code=400)
+        if len(content) > _SOURCE_UPLOAD_MAX_BYTES:
+            return JSONResponse({"ok": False, "message": "单个源文件不能超过 100 MB。"}, status_code=413)
+        try:
+            filename = _safe_source_filename(f.filename or "")
+        except ControlPlaneError as exc:
+            return _command_error_response(exc)
+        dest = (dest_dir / filename).resolve()
+        if not dest.is_relative_to(dest_dir.resolve()):
+            return JSONResponse({"ok": False, "message": "上传路径越界。"}, status_code=400)
+        if dest.exists():
+            dest = dest.with_name(f"{dest.stem}_{uuid.uuid4().hex[:8]}{dest.suffix}")
         dest.write_bytes(content)
-        saved.append(f.filename)
-        _append_log(f"[上传] {category} → {f.filename}")
+        saved.append(dest.name)
+        _append_log(f"[上传] {category} → {dest.name}")
 
     return JSONResponse({"ok": True, "saved": saved, "count": len(saved)})
 

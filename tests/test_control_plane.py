@@ -287,6 +287,23 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertGreater(store.revision(), 0)
             self.assertEqual(store.events(0)[-1]["kind"], "GateReceiptIssued")
 
+    def test_material_upload_token_is_one_time_control_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            staged = store.register_material_upload(
+                staged_path="workspace/material_uploads/staging/cert.pdf",
+                filename="cert.pdf",
+                sha256="abc123",
+                size_bytes=42,
+            )
+            self.assertEqual(staged["status"], "pending")
+            consumed = store.consume_material_upload(staged["upload_token"])
+            self.assertEqual(consumed["status"], "consumed")
+            with self.assertRaises(ControlPlaneError) as replay:
+                store.consume_material_upload(staged["upload_token"])
+            self.assertEqual(replay.exception.code, "UPLOAD_TOKEN_CONSUMED")
+
     def test_gate_rejection_keeps_operation_blocked_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

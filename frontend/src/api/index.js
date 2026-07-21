@@ -296,8 +296,24 @@ export function refillMaterialsChecklist(runId, payload = {}) {
   return submitWorkspaceCommand(runId, 'materials.refill', payload)
 }
 
-export function registerMaterialUpload(runId, payload) {
-  return submitWorkspaceCommand(runId, 'materials.upload', payload)
+export function stageMaterialUpload(runId, file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/materials/uploads`, formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+}
+
+export async function registerMaterialUpload(runId, itemId, file, note = '') {
+  const staged = await stageMaterialUpload(runId, file)
+  const uploadToken = staged?.data?.upload_token
+  if (!uploadToken) throw new Error('材料暂存未返回 upload_token')
+  return submitWorkspaceCommand(runId, 'materials.upload', {
+    item_id: itemId,
+    upload_token: uploadToken,
+    note,
+  })
 }
 
 export function verifyMaterial(runId, payload) {

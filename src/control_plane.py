@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -259,6 +259,17 @@ class ControlStore:
                         findings_json TEXT NOT NULL,
                         policy_decisions_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS material_upload_tokens (
+                        upload_token TEXT PRIMARY KEY,
+                        staged_path TEXT NOT NULL,
+                        filename TEXT NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        size_bytes INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        consumed_at TEXT
                     );
                     CREATE TABLE IF NOT EXISTS confirmations (
                         confirmation_id TEXT PRIMARY KEY,
@@ -373,6 +384,111 @@ class ControlStore:
                 "SELECT receipt_id FROM gate_receipts ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
         return self.gate_receipt(str(row["receipt_id"])) if row is not None else None
+
+    def register_material_upload(
+        self,
+        *,
+        staged_path: str,
+        filename: str,
+        sha256: str,
+        size_bytes: int,
+        ttl_seconds: int = 900,
+    ) -> dict[str, Any]:
+        relative = str(staged_path or "").strip().replace("\\", "/")
+        if not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+            raise ControlPlaneError("UPLOAD_INVALID", "材料暂存路径无效。", status_code=400)
+        if not sha256 or int(size_bytes) <= 0:
+            raise ControlPlaneError("UPLOAD_INVALID", "材料上传内容为空或摘要无效。", status_code=400)
+        token = str(uuid.uuid4())
+        created_at = _now()
+        expires_at = (datetime.now(timezone.utc) + timedelta(seconds=max(60, ttl_seconds))).isoformat(
+            timespec="milliseconds"
+        )
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    """
+                    INSERT INTO material_upload_tokens(
+                        upload_token, staged_path, filename, sha256, size_bytes,
+                        status, created_at, expires_at, consumed_at
+                    ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, NULL)
+                    """,
+                    (token, relative, filename[:255], sha256, int(size_bytes), created_at, expires_at),
+                )
+                self._event(
+                    connection,
+                    revision,
+                    "MaterialUploadStaged",
+                    "MaterialUpload",
+                    token,
+                    {"filename": filename[:255], "sha256": sha256, "size_bytes": int(size_bytes)},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.material_upload(token) or {}
+
+    def material_upload(self, upload_token: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM material_upload_tokens WHERE upload_token = ?",
+                (str(upload_token or ""),),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def consume_material_upload(self, upload_token: str) -> dict[str, Any]:
+        token = str(upload_token or "").strip()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM material_upload_tokens WHERE upload_token = ?",
+                    (token,),
+                ).fetchone()
+                if row is None:
+                    raise ControlPlaneError("UPLOAD_TOKEN_INVALID", "上传 token 不存在。", status_code=404)
+                if str(row["status"]) != "pending":
+                    raise ControlPlaneError("UPLOAD_TOKEN_CONSUMED", "上传 token 已使用。", status_code=409)
+                try:
+                    expires_at = datetime.fromisoformat(str(row["expires_at"]))
+                except ValueError as exc:
+                    raise ControlPlaneError("STATE_UNAVAILABLE", "上传 token 到期时间无效。", status_code=503) from exc
+                if expires_at <= datetime.now(timezone.utc):
+                    connection.execute(
+                        "UPDATE material_upload_tokens SET status = 'expired' WHERE upload_token = ?",
+                        (token,),
+                    )
+                    connection.commit()
+                    raise ControlPlaneError("UPLOAD_TOKEN_EXPIRED", "上传 token 已过期。", status_code=409)
+                now = _now()
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    """
+                    UPDATE material_upload_tokens
+                    SET status = 'consumed', consumed_at = ?
+                    WHERE upload_token = ? AND status = 'pending'
+                    """,
+                    (now, token),
+                )
+                self._event(
+                    connection,
+                    revision,
+                    "MaterialUploadConsumed",
+                    "MaterialUpload",
+                    token,
+                    {"sha256": str(row["sha256"]), "filename": str(row["filename"])},
+                )
+                connection.commit()
+                result = dict(row)
+                result.update({"status": "consumed", "consumed_at": now})
+                return result
+            except Exception:
+                if connection.in_transaction:
+                    connection.rollback()
+                raise
 
     @staticmethod
     def _revision(connection: sqlite3.Connection) -> int:
