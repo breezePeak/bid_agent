@@ -147,6 +147,15 @@ python src/main.py validate
 python src/main.py graph-run --workers 2
 ```
 
+V2 控制面 CLI 不直接调用阶段 runner，而是经过与聊天和页面按钮相同的认证、CommandGateway、确认和工作区 lease：
+
+```bash
+set BID_AGENT_AUTH_PASSWORD=your-password
+python src/main.py control submit --workspace demo --kind pipeline.start --payload "{}"
+python src/main.py control confirm --workspace demo --action-id ACTION_ID
+python src/main.py control snapshot --workspace demo
+```
+
 ## 建议
 
 - 第一次使用优先走 Web 页面  

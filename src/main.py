@@ -613,12 +613,19 @@ def build_parser() -> argparse.ArgumentParser:
     agent_graph_parser.add_argument("--yes", action="store_true", help="确认执行变更类 tool")
     agent_graph_parser.add_argument("--use-llm", action="store_true", help="使用 LLM 决策（默认规则）")
 
+    control_parser = subparsers.add_parser("control", help="通过 V2 HTTP CommandGateway 控制工作区")
+    control_parser.add_argument("control_args", nargs=argparse.REMAINDER)
+
 
     return parser
 
 
 def main() -> int:
     _configure_console_encoding()
+    if len(sys.argv) > 1 and sys.argv[1] == "control":
+        from control_cli import main as control_main
+
+        return control_main(sys.argv[2:])
     root = project_root()
     args = build_parser().parse_args()
 
@@ -755,6 +762,10 @@ def main() -> int:
         )
         print(json.dumps({k: result.get(k) for k in ("reply", "steps", "need_confirm", "done", "last_tool", "goal_id", "last_observation")}, ensure_ascii=False, indent=2))
         return 0 if result.get("done") or result.get("need_confirm") else 1
+    elif args.command == "control":
+        from control_cli import main as control_main
+
+        return control_main(getattr(args, "control_args", []))
     elif args.command == "tool":
         import json
         from agent.tool_registry import tool_manifest

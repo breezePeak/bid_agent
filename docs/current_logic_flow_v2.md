@@ -556,3 +556,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B70 | 2026-07-21 | V2 正式出稿预检对全文审核和专项合规报告执行严格 schema 检查；JSON 损坏、对象类型错误或缺少明确 `blocking` 布尔值均返回 `STATE_UNAVAILABLE` 并 fail-closed，不再把无法解析的质量状态当成“未阻断”。 |
 | V2.0-B71 | 2026-07-21 | 持久化 Action 的确认/拒绝绑定提案创建主体：HTTP 确认接口重新读取当前服务端 principal，主体 ID 不一致返回 `CONFIRMATION_FORBIDDEN` 且不消费 Action；执行时角色使用确认瞬间的服务端角色，避免其他 editor 代确认管理员 Action 或利用提案时的过期权限。 |
 | V2.0-B72 | 2026-07-21 | Cookie 会话的所有非只读 API 启用双提交 CSRF 防护：登录签发独立随机 token，服务端同时校验 SameSite cookie 与 `X-CSRF-Token`，Vue axios、原生 fetch 和 V1 静态页面统一自动附加请求头；缺失或不匹配返回 `CSRF_REQUIRED`，不进入 ACL 或 mutation。 |
+| V2.0-B73 | 2026-07-21 | 新增 V2 控制面 CLI：通过正在运行的 HTTP 应用完成登录、CSRF、Snapshot、Command 提交和持久化 Action 确认/拒绝，服务端绑定 actor 并执行同一 ACL、revision、Policy、Gate、lease 与审计逻辑；CLI 不再需要为 V2 操作直接导入阶段 runner。旧阶段 CLI 暂保留为 V1 兼容入口。 |
