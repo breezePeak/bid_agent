@@ -32,23 +32,34 @@ def new_goal_id() -> str:
     return uuid4().hex[:12]
 
 
+def _goal_control_store(root: Path):
+    from control_plane import ControlStore, WorkspaceContext
+
+    return ControlStore(WorkspaceContext.resolve(root.parent, root.name))
+
+
 def load_goal(root: Path | None = None) -> dict[str, Any] | None:
+    root = (root or project_root()).resolve()
     path = goal_path(root)
-    if not path.exists():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    return data if isinstance(data, dict) else None
+    imported: dict[str, Any] | None = None
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            data = None
+        imported = data if isinstance(data, dict) else None
+    store = _goal_control_store(root)
+    store.ensure_goal_state(imported)
+    return store.goal_state()
 
 
 def save_goal(root: Path | None, goal: dict[str, Any]) -> Path:
-    root = root or project_root()
+    root = (root or project_root()).resolve()
     path = goal_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     goal = dict(goal)
     goal["updated_at"] = _now()
+    _goal_control_store(root).upsert_goal_state(goal)
     path.write_text(json.dumps(goal, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
 

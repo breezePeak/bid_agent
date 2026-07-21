@@ -497,3 +497,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B11 | 2026-07-21 | 补齐工作区目录边界的 ACL：新建工作区立即绑定创建者为 owner，非管理员的工作区列表按 ACL 过滤，切换工作区必须具备读权限，删除工作区必须具备写权限且仅 owner/admin 可执行。删除/清理仍待迁入可恢复的持久化 Action 流程。 |
 | V2.0-B12 | 2026-07-21 | 工作区删除和清理分别迁入 `workspace.archive` / `workspace.clean` 持久化 Action；Command 状态提交后才执行受边界校验的文件移动。删除改为移入 `runs/.trash`，清理改为保留 `control.db` 并将 V1 兼容状态与 outputs 移入工作区内归档，不再使用不可恢复的直接 `rmtree`。 |
 | V2.0-B13 | 2026-07-21 | `control.db.issue_states` 与 `policy_decisions` 成为 Issue/Policy Decision 权威状态；V1 `workspace/issues/open.json` 首次单向导入后只作为兼容投影，后续文件变化不能覆盖 SQLite。风险接受追加不可变 Policy Decision，旧工作区已接受风险会生成确定性迁移记录，正式 GateReceipt 改为引用权威 Policy Decision。 |
+| V2.0-B14 | 2026-07-21 | `control.db.goal_state` 成为 Goal 权威状态；V1 `workspace/agent/goal_state.json` 首次单向导入后只作为兼容投影，所有 Goal 状态机写入先提交 SQLite。运行状态说明同步标注 Goal/Materials/Issues/Policy 的新权威源，避免页面和诊断继续把兼容文件误认为真相源。 |

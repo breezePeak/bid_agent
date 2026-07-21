@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 6
+    SCHEMA_VERSION = 7
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -310,6 +310,15 @@ class ControlStore:
                         decision_json TEXT NOT NULL,
                         actor_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS goal_state (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        goal_id TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        goal_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS confirmations (
                         confirmation_id TEXT PRIMARY KEY,
@@ -869,6 +878,125 @@ class ControlStore:
             value["actor"] = _decode(value.pop("actor_json", ""), {})
             result.append(value)
         return result
+
+    def ensure_goal_state(self, goal: dict[str, Any] | None) -> int:
+        """Import the V1 Goal once; absence is also recorded to prevent later stale-file takeover."""
+        value = dict(goal) if isinstance(goal, dict) else None
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                imported = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'goal_v1_imported'"
+                ).fetchone()
+                if imported is not None:
+                    connection.commit()
+                    return 0
+                inserted = 0
+                if value is not None:
+                    goal_id = str(value.get("goal_id") or value.get("id") or "").strip()
+                    if not goal_id:
+                        raise ControlPlaneError("STATE_UNAVAILABLE", "V1 Goal 缺少 goal_id，拒绝导入。", status_code=503)
+                    connection.execute(
+                        """
+                        INSERT INTO goal_state(
+                            singleton, goal_id, status, goal_json, source, created_at, updated_at
+                        ) VALUES (1, ?, ?, ?, 'v1_import', ?, ?)
+                        """,
+                        (
+                            goal_id,
+                            str(value.get("status") or "pending"),
+                            _json(value),
+                            str(value.get("created_at") or now),
+                            str(value.get("updated_at") or now),
+                        ),
+                    )
+                    inserted = 1
+                connection.execute("INSERT INTO control_meta(key, value) VALUES ('goal_v1_imported', '1')")
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "GoalStateImported",
+                    "Goal",
+                    str((value or {}).get("goal_id") or self.context.workspace_id),
+                    {"count": inserted, "source": "v1_import"},
+                )
+                connection.commit()
+                return inserted
+            except Exception:
+                connection.rollback()
+                raise
+
+    def goal_state(self) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM goal_state WHERE singleton = 1").fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        goal = _decode(value.pop("goal_json", ""), {})
+        if not isinstance(goal, dict):
+            raise ControlPlaneError("STATE_UNAVAILABLE", "Goal 控制状态损坏。", status_code=503)
+        goal.update(
+            {
+                "goal_id": value["goal_id"],
+                "status": value["status"],
+                "control_source": value["source"],
+                "control_updated_at": value["updated_at"],
+            }
+        )
+        return goal
+
+    def upsert_goal_state(self, goal: dict[str, Any], *, source: str = "v2_projection") -> dict[str, Any]:
+        value = dict(goal)
+        goal_id = str(value.get("goal_id") or value.get("id") or "").strip()
+        if not goal_id:
+            raise ControlPlaneError("COMMAND_INVALID", "Goal 状态缺少 goal_id。", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute("SELECT created_at FROM goal_state WHERE singleton = 1").fetchone()
+                created_at = str(existing["created_at"]) if existing is not None else str(value.get("created_at") or now)
+                connection.execute(
+                    """
+                    INSERT INTO goal_state(
+                        singleton, goal_id, status, goal_json, source, created_at, updated_at
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET
+                        goal_id = excluded.goal_id,
+                        status = excluded.status,
+                        goal_json = excluded.goal_json,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        goal_id,
+                        str(value.get("status") or "pending"),
+                        _json(value),
+                        source,
+                        created_at,
+                        str(value.get("updated_at") or now),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('goal_v1_imported', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "GoalStateChanged",
+                    "Goal",
+                    goal_id,
+                    {"status": str(value.get("status") or "pending"), "source": source},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.goal_state() or {}
 
     def workspace_acl(self) -> list[dict[str, Any]]:
         with self._connection() as connection:

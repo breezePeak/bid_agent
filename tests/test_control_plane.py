@@ -391,6 +391,21 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual([item["decision_id"] for item in decisions], [first["decision_id"], second["decision_id"]])
             self.assertEqual(decisions[0]["actor"]["id"], "reviewer")
 
+    def test_goal_v1_import_is_one_time_and_v2_update_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            legacy = {"goal_id": "goal-1", "status": "in_progress", "raw_user_goal": "legacy"}
+            self.assertEqual(store.ensure_goal_state(legacy), 1)
+            self.assertEqual(store.ensure_goal_state({**legacy, "status": "succeeded"}), 0)
+            self.assertEqual(store.goal_state()["status"], "in_progress")
+
+            updated = {**legacy, "status": "blocked_human", "raw_user_goal": "v2"}
+            current = store.upsert_goal_state(updated, source="test")
+            self.assertEqual(current["status"], "blocked_human")
+            self.assertEqual(current["raw_user_goal"], "v2")
+            self.assertEqual(current["control_source"], "test")
+
     def test_workspace_acl_denies_unassigned_and_read_only_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
