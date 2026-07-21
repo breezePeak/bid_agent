@@ -5455,6 +5455,55 @@ def _pipeline_status_to_operation(status: str) -> str:
     }.get(status, "")
 
 
+def _pipeline_snapshot_from_control(
+    operations: list[dict[str, Any]],
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    operation = next(
+        (
+            item
+            for item in operations
+            if str(item.get("kind") or "").startswith("pipeline.")
+        ),
+        None,
+    )
+    if not operation:
+        return {**checkpoint, "source": "v1_checkpoint", "consistent": True} if checkpoint else {}
+    status = {
+        "queued": "running",
+        "running": "running",
+        "pausing": "pausing",
+        "paused": "paused",
+        "cancelling": "cancelling",
+        "cancelled": "cancelled",
+        "succeeded": "complete",
+        "failed": "failed",
+        "blocked": "interrupted",
+    }.get(str(operation.get("status") or ""), "failed")
+    operation_id = str(operation.get("operation_id") or "")
+    fencing_token = int(operation.get("fencing_token") or 0)
+    checkpoint_matches = bool(
+        checkpoint
+        and str(checkpoint.get("operation_id") or "") == operation_id
+        and int(checkpoint.get("fencing_token") or 0) == fencing_token
+    )
+    return {
+        "run_id": str(checkpoint.get("run_id") or "") if checkpoint_matches else "",
+        "operation_id": operation_id,
+        "fencing_token": fencing_token,
+        "status": status,
+        "current_stage": str(checkpoint.get("current_stage") or operation.get("start_command") or "")
+        if checkpoint_matches
+        else str(operation.get("start_command") or ""),
+        "worker_pid": int(checkpoint.get("worker_pid") or 0) if checkpoint_matches else 0,
+        "message": str(operation.get("message") or checkpoint.get("message") or ""),
+        "error": operation.get("error"),
+        "source": "control.db",
+        "consistent": checkpoint_matches or not checkpoint,
+        "checkpoint_source": "pipeline_control.json" if checkpoint_matches else "ignored_mismatch",
+    }
+
+
 def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
     operation_id = str(payload.get("operation_id") or "").strip()
     operation_status = _pipeline_status_to_operation(str(payload.get("status") or ""))
@@ -7057,6 +7106,10 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "source": "control.db",
         }
         artifact_states = snapshot.get("artifacts") or []
+        pipeline_snapshot = _pipeline_snapshot_from_control(
+            snapshot.get("operations") or [],
+            compatibility.get("pipeline") or SUPERVISOR.load(context.root),
+        )
         workflow = []
         for raw_step in compatibility.get("workflow") or []:
             step = dict(raw_step) if isinstance(raw_step, dict) else {}
@@ -7080,7 +7133,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 },
                 "activity": activity_state or compatibility.get("agent_activity"),
                 "repair_job": repair_state or compatibility.get("repair_job"),
-                "pipeline": compatibility.get("pipeline") or SUPERVISOR.load(context.root),
+                "pipeline": pipeline_snapshot,
                 "materials": {**material_summary, "items": material_items},
                 "findings": {
                     "issues_summary": {

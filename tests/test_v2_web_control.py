@@ -1843,6 +1843,33 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(stale_step["state"], "ready")
             self.assertIn("已过期", stale_step["message"])
 
+    def test_pipeline_snapshot_rejects_stale_checkpoint_status(self) -> None:
+        operation = {
+            "operation_id": "op-current",
+            "kind": "pipeline.start",
+            "status": "failed",
+            "start_command": "build-docx",
+            "fencing_token": 4,
+            "message": "gate failed",
+            "error": {"code": "GATE_BLOCKED"},
+        }
+        checkpoint = {
+            "operation_id": "op-old",
+            "status": "running",
+            "current_stage": "write-all",
+            "worker_pid": 999,
+            "fencing_token": 3,
+        }
+
+        pipeline = web_app._pipeline_snapshot_from_control([operation], checkpoint)
+
+        self.assertEqual(pipeline["status"], "failed")
+        self.assertEqual(pipeline["operation_id"], "op-current")
+        self.assertEqual(pipeline["current_stage"], "build-docx")
+        self.assertEqual(pipeline["worker_pid"], 0)
+        self.assertFalse(pipeline["consistent"])
+        self.assertEqual(pipeline["checkpoint_source"], "ignored_mismatch")
+
     def test_workspace_event_stream_uses_stable_type_and_last_event_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
