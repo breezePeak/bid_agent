@@ -60,7 +60,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v12_adds_parent_operation_to_existing_database(self) -> None:
+    def test_schema_v13_adds_parent_operation_and_migration_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -94,11 +94,83 @@ class ControlPlaneTests(unittest.TestCase):
                 schema_version = migrated.execute(
                     "SELECT value FROM control_meta WHERE key = 'schema_version'"
                 ).fetchone()[0]
+                migration_table = migrated.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'migration_conflicts'"
+                ).fetchone()
             finally:
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "12")
+            self.assertEqual(schema_version, "13")
+            self.assertIsNotNone(migration_table)
+
+    def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            conflict = store.record_migration_conflict(
+                domain="goal",
+                legacy={"goal_id": "legacy", "status": "succeeded"},
+                authoritative={"goal_id": "current", "status": "in_progress"},
+                reason="goal ids disagree",
+            )
+            duplicate = store.record_migration_conflict(
+                domain="goal",
+                legacy={"goal_id": "legacy", "status": "succeeded"},
+                authoritative={"goal_id": "current", "status": "in_progress"},
+                reason="goal ids disagree",
+            )
+            self.assertEqual(conflict["conflict_id"], duplicate["conflict_id"])
+            self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
+            self.assertEqual(store.snapshot()["migration"]["open_count"], 1)
+
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
+            )
+            with self.assertRaises(ControlPlaneError) as blocked:
+                gateway.submit(_envelope(context, store, "pipeline.start"))
+            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+
+            resolved = store.resolve_migration_conflict(
+                conflict["conflict_id"],
+                resolution="keep_orphan",
+                actor={"type": "user", "id": "admin", "role": "admin"},
+                reason="retain SQLite authority",
+            )
+            self.assertEqual(resolved["status"], "resolved")
+            self.assertEqual(store.migration_state()["status"], "ready")
+            decisions = store.policy_decisions(issue_id=f"migration:{conflict['conflict_id']}")
+            self.assertEqual(decisions[0]["decision_type"], "migration_reconciliation")
+            self.assertTrue(any(event["kind"] == "MigrationConflictResolved" for event in store.events()))
+
+    def test_lazy_v1_import_detects_existing_authoritative_conflicts_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            connection = sqlite3.connect(store.path)
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO goal_state(
+                        singleton, goal_id, status, goal_json, source, created_at, updated_at
+                    ) VALUES (1, 'goal-v2', 'in_progress', ?, 'v2_command', 'now', 'now')
+                    """,
+                    ('{"goal_id":"goal-v2","raw_user_goal":"sqlite","status":"in_progress"}',),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaises(ControlPlaneError) as conflict:
+                store.ensure_goal_state(
+                    {"goal_id": "goal-v1", "status": "succeeded", "raw_user_goal": "legacy"}
+                )
+            self.assertEqual(conflict.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+            self.assertEqual(store.goal_state()["goal_id"], "goal-v2")
+            migration = store.migration_state()
+            self.assertEqual(migration["open_count"], 1)
+            self.assertEqual(migration["conflicts"][0]["domain"], "goal")
+            self.assertEqual(migration["conflicts"][0]["legacy"]["goal_id"], "goal-v1")
 
     def test_command_is_durable_idempotent_and_emits_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

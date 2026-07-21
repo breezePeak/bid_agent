@@ -5453,6 +5453,7 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
     from agent.issues import classify_issue_risk
 
     store = _ensure_v2_issue_import(context)
+    store.assert_migration_ready()
     issues = store.issue_states()
     open_issues = [
         item for item in issues
@@ -5644,6 +5645,7 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
         "issue_states": store.issue_states(),
         "policy_decisions": store.policy_decisions(),
         "artifact_states": store.artifact_states(),
+        "migration_conflicts": store.migration_conflicts(),
     }
     for domain, value in control_domains.items():
         digest.update(f"control.db:{domain}\0".encode("utf-8"))
@@ -7001,6 +7003,8 @@ def _handle_gate_revalidate(
     _assert_formal_artifacts_ready(context)
     try:
         preflight = _v2_export_preflight(context)
+    except ControlPlaneError:
+        raise
     except Exception as exc:
         raise ControlPlaneError(
             "STATE_UNAVAILABLE",
@@ -7030,6 +7034,36 @@ def _handle_gate_revalidate(
         "accepted": True,
         "operation_status": "succeeded",
         "message": f"正式稿门禁已通过，GateReceipt={receipt.get('receipt_id', '')}",
+    }
+
+
+def _handle_migration_reconcile(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    actor = dict(envelope.actor or {})
+    if str(actor.get("role") or "").strip().lower() != "admin":
+        raise ControlPlaneError(
+            "AUTH_FORBIDDEN",
+            "只有管理员可以处理迁移冲突。",
+            status_code=403,
+        )
+    conflict_id = str(envelope.payload.get("conflict_id") or "").strip()
+    resolution = str(envelope.payload.get("resolution") or "").strip()
+    reason = str(envelope.payload.get("reason") or "").strip()
+    if not conflict_id:
+        raise ControlPlaneError("COMMAND_INVALID", "迁移协调缺少 conflict_id。", status_code=400)
+    conflict = ControlStore(context).resolve_migration_conflict(
+        conflict_id,
+        resolution=resolution,
+        actor=actor,
+        reason=reason,
+    )
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"迁移冲突已处理: {conflict['conflict_id']}",
     }
 
 
@@ -7063,6 +7097,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.rebuild": _handle_materials_rebuild,
             "materials.refill": _handle_materials_refill,
             "gate.revalidate": _handle_gate_revalidate,
+            "migration.reconcile": _handle_migration_reconcile,
         },
     )
 
@@ -7418,6 +7453,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "workspace.run_utility": "确认执行工作区维护命令",
                 "workspace.archive": "确认归档工作区",
                 "workspace.clean": "确认清理工作区产物",
+                "migration.reconcile": "确认处理 V1/V2 迁移冲突",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")

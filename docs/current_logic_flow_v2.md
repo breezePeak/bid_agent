@@ -560,3 +560,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B74 | 2026-07-21 | 关闭受管 `runs/<workspace>` 的旧阶段 CLI mutation 旁路：交互式 CLI 只能使用 V2 `control` 客户端，直接阶段命令返回拒绝；PipelineSupervisor 启动的受 fencing/lease 控制 ExecutionWorker 使用专用环境标记才可调用 runner。只读 `validate` 和仓库根 V1 兼容工作流暂不受影响。 |
 | V2.0-B75 | 2026-07-21 | 删除已无调用方的 Web 内联阶段启动 fast-path，并要求定向改稿 Worker 必须携带有效 Operation ID 与 fencing token 才能启动；内部函数或未来适配器不能脱离 CommandGateway/lease 直接创建章节 mutation。 |
 | V2.0-B76 | 2026-07-21 | Goal 成功判定改为对 Issue、AgentActivity、RepairJob 和人工阻断状态读取异常 fail-closed；任一权威控制域不可用都会返回明确阻断原因，禁止因旧代码吞掉异常而把 criteria 已满足误判为 Goal succeeded。 |
+| V2.0-B77 | 2026-07-21 | `control.db` schema 升级为 13，新增不可覆盖原始证据的 MigrationConflict、`needs_reconciliation` Snapshot 状态和不可变协调审计；V1 Goal/Materials/Issues 在首次导入时若与既有 SQLite 权威状态冲突，不再猜测或覆盖。未解决冲突阻止所有普通 mutation 与正式 GateReceipt，只有服务端认证 admin 经持久化 Action 可选择绑定、标记失败或保留 orphan。迁移 dry-run、各选择的领域状态应用和备份恢复验收仍待后续切片。 |

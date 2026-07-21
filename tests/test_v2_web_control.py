@@ -2720,5 +2720,51 @@ class V2WebControlTests(unittest.TestCase):
         self.assertEqual(payload["choices"], [{"project_type": "goods"}])
 
 
+    def test_migration_reconciliation_requires_admin_and_formal_export_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            conflict = store.record_migration_conflict(
+                domain="materials",
+                legacy=[{"item_id": "m1", "status": "submitted"}],
+                authoritative=[{"item_id": "m1", "status": "verified"}],
+                reason="material status disagreement",
+            )
+            with mock.patch.object(web_app, "_ensure_v2_issue_import", return_value=store):
+                with self.assertRaises(ControlPlaneError) as blocked:
+                    web_app._v2_export_preflight(context)
+            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+
+            user_envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "migration.reconcile",
+                    "payload": {
+                        "conflict_id": conflict["conflict_id"],
+                        "resolution": "keep_orphan",
+                        "reason": "retain authority",
+                    },
+                    "expected_revision": store.revision(),
+                    "actor": {"type": "user", "id": "owner", "role": "user"},
+                },
+                workspace_id="alpha",
+            )
+            with self.assertRaises(ControlPlaneError) as forbidden:
+                web_app._handle_migration_reconcile(context, user_envelope, "op-user")
+            self.assertEqual(forbidden.exception.code, "AUTH_FORBIDDEN")
+
+            admin_envelope = CommandEnvelope.from_mapping(
+                {
+                    **user_envelope.as_dict(),
+                    "actor": {"type": "user", "id": "admin", "role": "admin"},
+                },
+                workspace_id="alpha",
+            )
+            result = web_app._handle_migration_reconcile(context, admin_envelope, "op-admin")
+            self.assertTrue(result["accepted"])
+            self.assertEqual(store.migration_state()["status"], "ready")
+
+
 if __name__ == "__main__":
     unittest.main()

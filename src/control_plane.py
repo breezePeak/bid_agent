@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 12
+    SCHEMA_VERSION = 13
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -186,6 +186,7 @@ class ControlStore:
         "workspace.run_utility",
         "workspace.archive",
         "workspace.clean",
+        "migration.reconcile",
     }
     BLOCKED_REMEDIATION_KINDS = {
         "repair.start",
@@ -396,11 +397,25 @@ class ControlStore:
                         payload_json TEXT NOT NULL,
                         occurred_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS migration_conflicts (
+                        conflict_id TEXT PRIMARY KEY,
+                        domain TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        legacy_json TEXT NOT NULL,
+                        authoritative_json TEXT NOT NULL,
+                        resolution_json TEXT,
+                        actor_json TEXT,
+                        reason TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        resolved_at TEXT
+                    );
                     CREATE INDEX IF NOT EXISTS idx_events_revision ON workspace_events(workspace_revision);
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
                     CREATE INDEX IF NOT EXISTS idx_policy_decisions_issue ON policy_decisions(issue_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_artifact_states_status ON artifact_states(status, producer);
+                    CREATE INDEX IF NOT EXISTS idx_migration_conflicts_status
+                        ON migration_conflicts(status, domain, created_at);
                     """
                 )
                 operation_columns = {
@@ -417,6 +432,141 @@ class ControlStore:
                     (str(self.SCHEMA_VERSION),),
                 )
                 connection.execute("INSERT OR IGNORE INTO control_meta(key, value) VALUES ('revision', '0')")
+
+    @staticmethod
+    def _migration_conflict_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["legacy"] = _decode(value.pop("legacy_json", None), {})
+        value["authoritative"] = _decode(value.pop("authoritative_json", None), {})
+        value["resolution"] = _decode(value.pop("resolution_json", None), None)
+        value["actor"] = _decode(value.pop("actor_json", None), None)
+        return value
+
+    def migration_conflicts(self, *, status: str | None = None) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            if status:
+                rows = connection.execute(
+                    "SELECT * FROM migration_conflicts WHERE status = ? ORDER BY created_at, conflict_id",
+                    (status,),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
+                ).fetchall()
+        return [self._migration_conflict_row(row) for row in rows]
+
+    def migration_state(self) -> dict[str, Any]:
+        conflicts = self.migration_conflicts()
+        open_conflicts = [item for item in conflicts if item.get("status") == "open"]
+        return {
+            "status": "needs_reconciliation" if open_conflicts else "ready",
+            "open_count": len(open_conflicts),
+            "conflicts": conflicts,
+        }
+
+    def assert_migration_ready(self) -> None:
+        state = self.migration_state()
+        if state["open_count"]:
+            raise ControlPlaneError(
+                "MIGRATION_RECONCILIATION_REQUIRED",
+                "工作区存在未解决的 V1/V2 状态冲突，已拒绝变更操作。",
+                status_code=409,
+                details={"open_count": state["open_count"]},
+            )
+
+    def record_migration_conflict(
+        self,
+        *,
+        domain: str,
+        legacy: Any,
+        authoritative: Any,
+        reason: str,
+    ) -> dict[str, Any]:
+        domain_name = str(domain or "").strip()
+        if not domain_name:
+            raise ControlPlaneError("COMMAND_INVALID", "迁移冲突缺少 domain。", status_code=400)
+        identity = _json(
+            {"workspace_id": self.context.workspace_id, "domain": domain_name,
+             "legacy": legacy, "authoritative": authoritative}
+        )
+        conflict_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"migration-conflict:{identity}"))
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO migration_conflicts(
+                        conflict_id, domain, status, legacy_json, authoritative_json,
+                        reason, created_at
+                    ) VALUES (?, ?, 'open', ?, ?, ?, ?)
+                    """,
+                    (conflict_id, domain_name, _json(legacy), _json(authoritative), str(reason), now),
+                )
+                if int(cursor.rowcount or 0):
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection, revision, "MigrationConflictDetected", "MigrationConflict",
+                        conflict_id, {"domain": domain_name, "reason": str(reason)},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return next(item for item in self.migration_conflicts() if item["conflict_id"] == conflict_id)
+
+    def resolve_migration_conflict(
+        self,
+        conflict_id: str,
+        *,
+        resolution: str,
+        actor: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        resolution_name = str(resolution or "").strip()
+        if resolution_name not in {"bind_legacy", "mark_failed", "keep_orphan"}:
+            raise ControlPlaneError("COMMAND_INVALID", "无效的迁移冲突处理方式。", status_code=400)
+        if not str(reason or "").strip():
+            raise ControlPlaneError("COMMAND_INVALID", "迁移冲突处理必须填写原因。", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT * FROM migration_conflicts WHERE conflict_id = ?", (conflict_id,)
+                ).fetchone()
+                if row is None:
+                    raise ControlPlaneError("MIGRATION_CONFLICT_NOT_FOUND", "迁移冲突不存在。", status_code=404)
+                if str(row["status"]) != "open":
+                    raise ControlPlaneError("MIGRATION_CONFLICT_RESOLVED", "迁移冲突已处理。", status_code=409)
+                resolution_value = {"choice": resolution_name, "original_evidence_preserved": True}
+                connection.execute(
+                    """
+                    UPDATE migration_conflicts
+                    SET status = 'resolved', resolution_json = ?, actor_json = ?, reason = ?, resolved_at = ?
+                    WHERE conflict_id = ? AND status = 'open'
+                    """,
+                    (_json(resolution_value), _json(actor), str(reason).strip(), now, conflict_id),
+                )
+                decision_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"migration-resolution:{conflict_id}"))
+                connection.execute(
+                    """
+                    INSERT INTO policy_decisions(
+                        decision_id, issue_id, decision_type, decision_json, actor_json, created_at
+                    ) VALUES (?, ?, 'migration_reconciliation', ?, ?, ?)
+                    """,
+                    (decision_id, f"migration:{conflict_id}", _json(resolution_value), _json(actor), now),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection, revision, "MigrationConflictResolved", "MigrationConflict", conflict_id,
+                    {"resolution": resolution_name, "reason": str(reason).strip(), "actor": actor},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return next(item for item in self.migration_conflicts() if item["conflict_id"] == conflict_id)
 
     def issue_gate_receipt(
         self,
@@ -622,6 +772,34 @@ class ControlStore:
                 if imported is not None:
                     connection.commit()
                     return 0
+                existing_rows = connection.execute(
+                    "SELECT item_id, response_status, lifecycle_status, evidence_status FROM material_states "
+                    "ORDER BY item_id"
+                ).fetchall()
+                legacy_projection = sorted(
+                    (
+                        str(item.get("item_id") or ""),
+                        str(item.get("response_status") or "deferred"),
+                        str(item.get("lifecycle_status") or "missing"),
+                        str(item.get("evidence_status") or "missing"),
+                    )
+                    for item in rows
+                )
+                authoritative_projection = [tuple(str(value) for value in row) for row in existing_rows]
+                if existing_rows and legacy_projection != authoritative_projection:
+                    authoritative = [dict(row) for row in existing_rows]
+                    connection.rollback()
+                    conflict = self.record_migration_conflict(
+                        domain="materials",
+                        legacy=rows,
+                        authoritative=authoritative,
+                        reason="V1 材料状态与 control.db 权威状态不一致。",
+                    )
+                    raise ControlPlaneError(
+                        "MIGRATION_RECONCILIATION_REQUIRED",
+                        "检测到 V1/V2 材料状态冲突，需管理员处理。",
+                        details={"conflict_id": conflict["conflict_id"]},
+                    )
                 inserted = 0
                 for item in rows:
                     item_id = str(item.get("item_id") or "").strip()
@@ -759,11 +937,37 @@ class ControlStore:
                 if imported is not None:
                     connection.commit()
                     return 0
+                existing_rows = connection.execute(
+                    "SELECT issue_id, status, severity FROM issue_states ORDER BY issue_id"
+                ).fetchall()
+                legacy_projection = sorted(
+                    (
+                        str(item.get("id") or ""),
+                        str(item.get("status") or "open"),
+                        str(item.get("severity") or "warn"),
+                    )
+                    for item in rows
+                )
+                authoritative_projection = [tuple(str(value) for value in row) for row in existing_rows]
+                if existing_rows and legacy_projection != authoritative_projection:
+                    authoritative = [dict(row) for row in existing_rows]
+                    connection.rollback()
+                    conflict = self.record_migration_conflict(
+                        domain="issues",
+                        legacy=rows,
+                        authoritative=authoritative,
+                        reason="V1 Issue 状态与 control.db 权威状态不一致。",
+                    )
+                    raise ControlPlaneError(
+                        "MIGRATION_RECONCILIATION_REQUIRED",
+                        "检测到 V1/V2 Issue 状态冲突，需管理员处理。",
+                        details={"conflict_id": conflict["conflict_id"]},
+                    )
                 for item in rows:
                     issue_id = str(item.get("id") or "").strip()
                     connection.execute(
                         """
-                        INSERT INTO issue_states(
+                        INSERT OR IGNORE INTO issue_states(
                             issue_id, status, severity, issue_json, source, created_at, updated_at
                         ) VALUES (?, ?, ?, ?, 'v1_import', ?, ?)
                         """,
@@ -1208,8 +1412,31 @@ class ControlStore:
                 if imported is not None:
                     connection.commit()
                     return 0
+                existing = connection.execute(
+                    "SELECT goal_id, status, goal_json FROM goal_state WHERE singleton = 1"
+                ).fetchone()
+                if existing is not None and value is not None:
+                    legacy_projection = (
+                        str(value.get("goal_id") or value.get("id") or ""),
+                        str(value.get("status") or "pending"),
+                    )
+                    authoritative_projection = (str(existing["goal_id"]), str(existing["status"]))
+                    if legacy_projection != authoritative_projection:
+                        authoritative = _decode(str(existing["goal_json"]), {})
+                        connection.rollback()
+                        conflict = self.record_migration_conflict(
+                            domain="goal",
+                            legacy=value,
+                            authoritative=authoritative,
+                            reason="V1 Goal 与 control.db 权威 Goal 不一致。",
+                        )
+                        raise ControlPlaneError(
+                            "MIGRATION_RECONCILIATION_REQUIRED",
+                            "检测到 V1/V2 Goal 状态冲突，需管理员处理。",
+                            details={"conflict_id": conflict["conflict_id"]},
+                        )
                 inserted = 0
-                if value is not None:
+                if value is not None and existing is None:
                     goal_id = str(value.get("goal_id") or value.get("id") or "").strip()
                     if not goal_id:
                         raise ControlPlaneError("STATE_UNAVAILABLE", "V1 Goal 缺少 goal_id，拒绝导入。", status_code=503)
@@ -1682,6 +1909,18 @@ class ControlStore:
                 if duplicate:
                     connection.commit()
                     return self._receipt_from_row(duplicate, duplicate=True), False
+
+                if envelope.kind != "migration.reconcile":
+                    open_conflicts = int(connection.execute(
+                        "SELECT COUNT(*) FROM migration_conflicts WHERE status = 'open'"
+                    ).fetchone()[0])
+                    if open_conflicts:
+                        raise ControlPlaneError(
+                            "MIGRATION_RECONCILIATION_REQUIRED",
+                            "工作区存在未解决的 V1/V2 状态冲突，已拒绝变更操作。",
+                            status_code=409,
+                            details={"open_count": open_conflicts},
+                        )
 
                 if envelope.kind in self.CONFIRMATION_REQUIRED_KINDS:
                     if not envelope.confirmation_id:
@@ -2179,6 +2418,9 @@ class ControlStore:
             artifact_rows = connection.execute(
                 "SELECT * FROM artifact_states ORDER BY artifact_key"
             ).fetchall()
+            migration_rows = connection.execute(
+                "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
+            ).fetchall()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         return {
@@ -2193,6 +2435,15 @@ class ControlStore:
             "confirmations": confirmations,
             "lease": dict(lease_row) if lease_row else None,
             "artifacts": [self._artifact_row(row) for row in artifact_rows],
+            "migration": {
+                "status": (
+                    "needs_reconciliation"
+                    if any(str(row["status"]) == "open" for row in migration_rows)
+                    else "ready"
+                ),
+                "open_count": sum(1 for row in migration_rows if str(row["status"]) == "open"),
+                "conflicts": [self._migration_conflict_row(row) for row in migration_rows],
+            },
         }
 
     def operation(self, operation_id: str) -> dict[str, Any] | None:
