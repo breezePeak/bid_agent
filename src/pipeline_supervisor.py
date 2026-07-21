@@ -12,6 +12,7 @@ from pipeline_registry import auto_run_commands, stage_outputs_ready, stage_spec
 
 
 RunStage = Callable[[str, str, Path], int]
+StatusListener = Callable[[Path, dict[str, Any]], None]
 
 
 def _now() -> str:
@@ -68,22 +69,31 @@ class PipelineSupervisor:
         self._lock = threading.RLock()
         self._thread: threading.Thread | None = None
         self._pause = threading.Event()
+        self._cancel = threading.Event()
         self._run_root: Path | None = None
         self._run_id = ""
+        self._operation_id = ""
+        self._fencing_token = 0
+        self._status_listener: StatusListener | None = None
+
+    def set_status_listener(self, listener: StatusListener | None) -> None:
+        with self._lock:
+            self._status_listener = listener
 
     @staticmethod
     def control_path(root: Path) -> Path:
         return root / "workspace" / "pipeline_control.json"
 
     def load(self, root: Path) -> dict[str, Any]:
-        path = self.control_path(root)
-        if not path.exists():
-            return {}
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        return value if isinstance(value, dict) else {}
+        with self._lock:
+            path = self.control_path(root)
+            if not path.exists():
+                return {}
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                return {}
+            return value if isinstance(value, dict) else {}
 
     def _save(self, root: Path, payload: dict[str, Any]) -> dict[str, Any]:
         with self._lock:
@@ -92,10 +102,18 @@ class PipelineSupervisor:
             current = self.load(root)
             current.update(payload)
             current["updated_at"] = _now()
-            temp = path.with_suffix(".json.tmp")
+            temp = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
             temp.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
             temp.replace(path)
-            return current
+            listener = self._status_listener
+        if listener:
+            try:
+                listener(root, dict(current))
+            except Exception:
+                # V1 compatibility: a control-plane projection failure must not
+                # corrupt the deterministic runner's own durable control file.
+                pass
+        return current
 
     def is_running(self, root: Path | None = None) -> bool:
         with self._lock:
@@ -140,19 +158,34 @@ class PipelineSupervisor:
             pass
         self._save(root, payload)
 
-    def start(self, run_id: str, root: Path, runner: RunStage, *, start_command: str = "") -> bool:
+    def start(
+        self,
+        run_id: str,
+        root: Path,
+        runner: RunStage,
+        *,
+        start_command: str = "",
+        operation_id: str = "",
+        fencing_token: int = 0,
+        single_command: bool = False,
+    ) -> bool:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return False
             self._pause.clear()
+            self._cancel.clear()
             self._run_root = root
             self._run_id = run_id
+            self._operation_id = operation_id
+            self._fencing_token = int(fencing_token or 0)
             self._save(
                 root,
                 {
                     "run_id": run_id,
+                    "operation_id": operation_id,
+                    "fencing_token": self._fencing_token,
                     "status": "running",
-                    "requested_action": "run_all",
+                    "requested_action": "run_stage" if single_command else "run_all",
                     "current_stage": start_command,
                     "started_at": _now(),
                     "heartbeat_at": _now(),
@@ -164,7 +197,7 @@ class PipelineSupervisor:
             )
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(run_id, root, runner, start_command),
+                args=(run_id, root, runner, start_command, single_command),
                 daemon=True,
                 name=f"pipeline-{run_id}",
             )
@@ -177,12 +210,30 @@ class PipelineSupervisor:
             if self._run_root:
                 self._save(self._run_root, {"status": "pausing", "message": "正在暂停流水线"})
 
-    def _loop(self, run_id: str, root: Path, runner: RunStage, start_command: str) -> None:
+    def cancel(self) -> None:
+        self._cancel.set()
+        with self._lock:
+            if self._run_root:
+                self._save(self._run_root, {"status": "cancelling", "message": "正在取消流水线"})
+
+    def _loop(
+        self,
+        run_id: str,
+        root: Path,
+        runner: RunStage,
+        start_command: str,
+        single_command: bool = False,
+    ) -> None:
         commands = auto_run_commands()
-        if start_command in commands:
+        if single_command and start_command in commands:
+            commands = [start_command]
+        elif start_command in commands:
             commands = commands[commands.index(start_command) :]
         try:
             for command in commands:
+                if self._cancel.is_set():
+                    self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})
+                    return
                 if self._pause.is_set():
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
@@ -230,6 +281,9 @@ class PipelineSupervisor:
                     },
                 )
                 exit_code = runner(command, run_id, root)
+                if self._cancel.is_set():
+                    self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})
+                    return
                 if self._pause.is_set():
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
@@ -273,9 +327,14 @@ class PipelineSupervisor:
             with self._lock:
                 self._run_root = None
                 self._run_id = ""
+                self._operation_id = ""
+                self._fencing_token = 0
 
     def reconcile(self, run_id: str, root: Path, runner: RunStage) -> bool:
         control = self.load(root)
+        operation_id = str(control.get("operation_id") or "")
+        fencing_token = int(control.get("fencing_token") or 0)
+        single_command = str(control.get("requested_action") or "") == "run_stage"
         if control.get("status") == "pausing":
             self._save(root, {"status": "paused", "worker_pid": 0, "message": "服务重启时完成暂停"})
             return False
@@ -299,24 +358,55 @@ class PipelineSupervisor:
                     return False
                 self._run_root = root
                 self._run_id = run_id
+                self._operation_id = operation_id
+                self._fencing_token = fencing_token
                 self._thread = threading.Thread(
                     target=self._monitor_then_resume,
-                    args=(pid, run_id, root, runner, command),
+                    args=(pid, run_id, root, runner, command, operation_id, fencing_token, single_command),
                     daemon=True,
                     name=f"pipeline-reconcile-{run_id}",
                 )
                 self._thread.start()
                 return True
         self._save(root, {"status": "interrupted", "worker_pid": 0, "message": "检测到服务中断，正在断点恢复"})
-        return self.start(run_id, root, runner, start_command=command)
+        return self.start(
+            run_id,
+            root,
+            runner,
+            start_command=command,
+            operation_id=operation_id,
+            fencing_token=fencing_token,
+            single_command=single_command,
+        )
 
-    def _monitor_then_resume(self, pid: int, run_id: str, root: Path, runner: RunStage, command: str) -> None:
+    def _monitor_then_resume(
+        self,
+        pid: int,
+        run_id: str,
+        root: Path,
+        runner: RunStage,
+        command: str,
+        operation_id: str = "",
+        fencing_token: int = 0,
+        single_command: bool = False,
+    ) -> None:
         self._save(root, {"status": "running", "message": f"重新接管仍在运行的进程 {pid}"})
-        while _pid_alive(pid) and not self._pause.wait(5):
+        while _pid_alive(pid) and not self._pause.wait(5) and not self._cancel.is_set():
             self.heartbeat(root, command=command, worker_pid=pid, message="监控重启前遗留进程")
         with self._lock:
             self._thread = None
+        if self._cancel.is_set():
+            self._save(root, {"status": "cancelled", "worker_pid": 0})
+            return
         if self._pause.is_set():
             self._save(root, {"status": "paused", "worker_pid": 0})
             return
-        self.start(run_id, root, runner, start_command=command)
+        self.start(
+            run_id,
+            root,
+            runner,
+            start_command=command,
+            operation_id=operation_id,
+            fencing_token=fencing_token,
+            single_command=single_command,
+        )

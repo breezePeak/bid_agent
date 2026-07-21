@@ -7,7 +7,7 @@
 > 关联文档：
 > - [agentization_development_plan.md](./agentization_development_plan.md) — Agent 化双模架构  
 > - [agentization_phase_status.md](./agentization_phase_status.md) — 已落地进度  
-> - [current_logic_flow.md](./current_logic_flow.md) — 当前线上流程真相源  
+> - [current_logic_flow_v1.md](./current_logic_flow_v1.md) — V1 当前线上流程真相源  
 
 ---
 
@@ -409,7 +409,7 @@ REPAIR_AUTO_REVALIDATE=1
 - outline/parse/write 等门禁发 Issue  
 - 出稿前总检查：open block == 0  
 - 指标：阻断次数、修复成功率、平均修复章节数  
-- 文档同步 `current_logic_flow.md`  
+- 文档同步 `current_logic_flow_v1.md`  
 
 ### Phase G4 — 可选增强
 
@@ -482,7 +482,7 @@ REPAIR_AUTO_REVALIDATE=1
 
 ## 13. 文档与发布
 
-- 实现后更新 `current_logic_flow.md`（门禁与停步行为）。  
+- 实现后更新 `current_logic_flow_v1.md`（门禁与停步行为）。  
 - 更新 `agentization_phase_status.md` 增加 G0–G3 状态。  
 - `.env.example` 增加门禁相关变量说明。  
 - 发布说明：强调「阻断后不会静默继续」。  
@@ -573,7 +573,7 @@ init → prepare_inputs → split_docs → parse_score → extract_facts
 - 新增阶段 Issue：`review_fix` / `write` 失败 / `outline` / `empty score`
 - 流水线阶段间 + 出稿前 `assert_can_proceed`
 - `GET /api/issues/metrics` 阻断/修复计数
-- `docs/current_logic_flow.md` 已同步门禁行为
+- `docs/current_logic_flow_v1.md` 已同步门禁行为
 
 
 ### G5 实施记录（工具层贯通 + 出稿清单）

@@ -37,6 +37,13 @@ ACTIVE_RUN_FILE = RUNS_DIR / ".active_run"
 sys.path.insert(0, str(ROOT / "src"))
 
 from chat_store import clear_messages, close_chat_store, load_messages, save_message
+from control_plane import (
+    CommandEnvelope,
+    CommandGateway,
+    ControlPlaneError,
+    ControlStore,
+    WorkspaceContext,
+)
 from agent.repair_jobs import (
     RUNNING_REPAIR_STATUSES,
     TERMINAL_REPAIR_STATUSES,
@@ -319,8 +326,8 @@ def _count_glob(directory: Path, pattern: str) -> int:
     return len(list(directory.glob(pattern))) if directory.exists() else 0
 
 
-def _list_source_files(category: str) -> list[dict[str, Any]]:
-    source_dir = _active_root() / "sources" / category
+def _list_source_files(category: str, root: Path | None = None) -> list[dict[str, Any]]:
+    source_dir = (root or _active_root()) / "sources" / category
     if not source_dir.exists():
         return []
     files: list[dict[str, Any]] = []
@@ -1578,9 +1585,7 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
     }
 
 
-@app.get("/api/status")
-def api_status() -> dict[str, Any]:
-    root = _active_root()
+def _status_payload(root: Path, run_id: str) -> dict[str, Any]:
     run_state = _read_run_state(root)
     run_events = load_run_events(root)
     project_profile = load_project_profile(root)
@@ -1652,9 +1657,9 @@ def api_status() -> dict[str, Any]:
             "template_docx": _exists(root / "inputs" / "template.docx"),
         },
         "sources": {
-            "tender": _list_source_files("tender"),
-            "company": _list_source_files("company"),
-            "template": _list_source_files("template"),
+            "tender": _list_source_files("tender", root),
+            "company": _list_source_files("company", root),
+            "template": _list_source_files("template", root),
         },
         "imported": {
             "tender_raw": _exists(root / "workspace" / "imported" / "tender_raw.md"),
@@ -1713,7 +1718,12 @@ def api_status() -> dict[str, Any]:
             "relative_root": str(CURRENT_RUN_ROOT.relative_to(ROOT)) if CURRENT_RUN_ROOT and CURRENT_RUN_ROOT.is_relative_to(ROOT) else (str(CURRENT_RUN_ROOT) if CURRENT_RUN_ROOT else ""),
             "command": effective_task,
         },
-        "active_run": _active_run_payload(),
+        "active_run": {
+            "id": run_id,
+            "root": str(root),
+            "relative_root": str(root.relative_to(ROOT)) if root != ROOT and root.is_relative_to(ROOT) else str(root),
+            "isolated": root != ROOT,
+        },
         "run_state": {
             "stage": run_state.get("stage", ""),
             "status": run_state_status,
@@ -1724,8 +1734,8 @@ def api_status() -> dict[str, Any]:
         "project_profile": project_profile,
         "project_profile_choices": project_profile_choices(),
         "llm_config": _active_llm_summary(),
-        "agent_activity": _safe_agent_activity(),
-        "issues_summary": _safe_issues_summary(),
+        "agent_activity": _safe_agent_activity(root),
+        "issues_summary": _safe_issues_summary(root),
         "pending_confirmation": pending_confirmation,
         "repair_job": repair_job or None,
         "manual_review_summary": review_summary,
@@ -1873,6 +1883,12 @@ def api_status() -> dict[str, Any]:
         "product_mode_label": runtime.get("product_mode_label") or "",
         "consistent": bool(runtime.get("consistent", True)),
     }
+
+
+@app.get("/api/status")
+def api_status() -> dict[str, Any]:
+    root = _active_root()
+    return _status_payload(root, ACTIVE_RUN_ID or root.name)
 
 
 @app.get("/api/workflow-step-detail")
@@ -2423,14 +2439,24 @@ def _repair_retry_actions(job: dict[str, Any]) -> list[dict[str, Any]]:
 
 @app.post("/api/chat/orchestrate")
 async def api_chat_orchestrate(request: Request) -> JSONResponse:
-    root = _active_root()
-    run_id = ACTIVE_RUN_ID or root.name
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON"}, status_code=400)
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON 对象"}, status_code=400)
+    sent_run_id = str(body.get("run_id") or "").strip()
+    if sent_run_id:
+        try:
+            context = _workspace_context(sent_run_id)
+        except ControlPlaneError as exc:
+            return _command_error_response(exc)
+        root = context.root
+        run_id = context.workspace_id
+    else:
+        # One-version compatibility for callers not yet sending run_id.
+        root = _active_root()
+        run_id = ACTIVE_RUN_ID or root.name
     action = body.get("action") if isinstance(body.get("action"), dict) else {}
     message = str(body.get("message") or "").strip()
     action_type = str(action.get("type") or "").strip()
@@ -2450,6 +2476,58 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                 "可以直接告诉我你想做什么，例如查看状态、继续流程或自动修复阻断问题。",
                 actions=[],
             )
+
+        control_text = re.sub(r"\s+", "", message)
+        pause_intent = control_text in {"暂停", "暂停流程", "暂停任务", "先暂停", "停一下"}
+        cancel_intent = control_text in {"取消", "取消流程", "取消任务", "终止流程", "终止任务"}
+        if pause_intent or cancel_intent:
+            try:
+                context = _workspace_context(run_id)
+                gateway = _command_gateway(context)
+                store = gateway.store
+                envelope = CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.pause" if pause_intent else "pipeline.cancel",
+                        "payload": {},
+                        "expected_revision": store.revision(),
+                        "idempotency_key": str(body.get("idempotency_key") or f"chat-control:{uuid.uuid4()}"),
+                        "actor": {"type": "chat", "id": "current-user"},
+                    },
+                    workspace_id=run_id,
+                )
+                if cancel_intent:
+                    action_proposal = gateway.propose(envelope, label="确认取消当前任务", risk="high")
+                    decline_proposal = {
+                        **action_proposal,
+                        "type": "decline_v2_command",
+                        "label": "保留任务，不取消",
+                    }
+                    return _chat_response(
+                        root,
+                        run_id,
+                        "取消会终止当前 Operation，且不能从正在写入的中间位置继续。请确认是否取消。",
+                        actions=[action_proposal, decline_proposal],
+                        intent="pipeline_cancel_confirmation",
+                    )
+                receipt = gateway.submit(envelope)
+                return _chat_response(
+                    root,
+                    run_id,
+                    receipt.message or "已发送暂停指令。",
+                    actions=[],
+                    intent="pipeline_control",
+                    command_receipts=[receipt.as_dict()],
+                    triggered_auto_run=False,
+                )
+            except ControlPlaneError as exc:
+                return _chat_response(
+                    root,
+                    run_id,
+                    exc.message,
+                    actions=[],
+                    intent="pipeline_control_error",
+                    command_error=exc.as_dict(),
+                )
 
         current_job = load_repair_job(root)
         job_status = str(current_job.get("status") or "")
@@ -2528,7 +2606,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                 busy=bool(result.get("busy")),
             )
 
-        status = api_status()
+        status = _status_payload(root, run_id)
         review_context = _load_review_context(root)
         # Frontend confirm buttons: tool_scope only when tool is present (PR-1)
         tool_name = str(action.get("tool") or "").strip()
@@ -2601,19 +2679,50 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                         start_cmd = ""
                 except Exception:
                     start_cmd = ""
-            if RUNNING or SUPERVISOR.is_running():
-                return _chat_response(
-                    root,
-                    run_id,
-                    "流水线已在运行，请稍候查看进度。",
-                    actions=[],
-                    intent="pipeline_control",
-                    triggered_auto_run=False,
-                    pipeline_already_running=True,
+            try:
+                context = _workspace_context(run_id)
+                gateway = _command_gateway(context)
+                snapshot = gateway.store.snapshot()
+                active_operation = snapshot.get("operation") if isinstance(snapshot.get("operation"), dict) else {}
+                active_status = str(active_operation.get("status") or "")
+                if active_status in {"running", "queued", "pausing", "cancelling"}:
+                    return _chat_response(
+                        root,
+                        run_id,
+                        "流水线已在运行，请稍候查看进度。",
+                        actions=[],
+                        intent="pipeline_control",
+                        triggered_auto_run=False,
+                        pipeline_already_running=True,
+                    )
+                command_kind = "pipeline.resume" if active_status in {"paused", "blocked"} else "pipeline.start"
+                payload: dict[str, Any] = {"start_command": start_cmd or ""}
+                if command_kind == "pipeline.resume" and active_operation.get("operation_id"):
+                    payload["operation_id"] = active_operation["operation_id"]
+                envelope = CommandEnvelope.from_mapping(
+                    {
+                        "kind": command_kind,
+                        "payload": payload,
+                        "expected_revision": int(snapshot.get("revision") or 0),
+                        "idempotency_key": str(body.get("idempotency_key") or f"chat-continue:{uuid.uuid4()}"),
+                        "actor": {"type": "chat", "id": "current-user"},
+                    },
+                    workspace_id=run_id,
                 )
-            gate = _gate_can_proceed(start_cmd or "auto_run")
-            if not gate.get("can_proceed", True):
-                reply = str(gate.get("message") or "质量门禁阻断，禁止启动流水线")
+                receipt = gateway.submit(envelope)
+                if receipt.status != "rejected":
+                    stage_label = WORKFLOW_COMMAND_LABELS.get(start_cmd, start_cmd) if start_cmd else "当前进度"
+                    return _chat_response(
+                        root,
+                        run_id,
+                        f"已通过统一命令入口从「{stage_label}」继续流水线。进度见下方执行计划。",
+                        actions=[],
+                        intent="pipeline_control",
+                        triggered_auto_run=True,
+                        triggered_command=start_cmd or "",
+                        command_receipts=[receipt.as_dict()],
+                    )
+                reply = receipt.message or "流水线未能启动。"
                 repair_prompt, repair_actions = _persistent_minimal_repair_prompt(root)
                 if repair_prompt:
                     reply = f"{reply}\n\n{repair_prompt}"
@@ -2621,35 +2730,19 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     root,
                     run_id,
                     reply,
-                    actions=repair_actions
-                    or [{"type": "auto_run", "label": "一键跑完剩余步骤"}],
+                    actions=repair_actions,
                     intent="pipeline_blocked",
-                    gate=gate,
+                    command_receipts=[receipt.as_dict()],
                 )
-            started = SUPERVISOR.start(
-                run_id,
-                root,
-                _run_sync,
-                start_command=start_cmd or "",
-            )
-            if started:
-                stage_label = WORKFLOW_COMMAND_LABELS.get(start_cmd, start_cmd) if start_cmd else "当前进度"
+            except ControlPlaneError as exc:
                 return _chat_response(
                     root,
                     run_id,
-                    f"已启动后端流水线（从「{stage_label}」继续）。进度见下方执行计划。",
+                    exc.message,
                     actions=[],
-                    intent="pipeline_control",
-                    triggered_auto_run=True,
-                    triggered_command=start_cmd or "",
+                    intent="pipeline_control_error",
+                    command_error=exc.as_dict(),
                 )
-            return _chat_response(
-                root,
-                run_id,
-                "流水线未能启动（可能已有调度线程）。请点「继续整个流程」重试。",
-                actions=[{"type": "auto_run", "label": "继续整个流程"}],
-                intent="pipeline_control",
-            )
 
         try:
             plan_result = await run_in_threadpool(
@@ -2658,6 +2751,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                 history,
                 status,
                 review_context=review_context,
+                root=root,
                 user_confirmed=user_confirmed,
                 confirmed_tools=confirmed_tools or None,
             )
@@ -2681,19 +2775,42 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
 
         execution_notes: list[str] = []
         if trigger_command:
-            trigger_result = _trigger_command_inline(trigger_command)
-            if trigger_result.get("ok"):
-                label = WORKFLOW_COMMAND_LABELS.get(trigger_command, trigger_command)
-                note = f"已启动「{label}」。"
-                execution_notes.append(note)
-                if note not in reply:
-                    reply = f"{reply}\n\n{note}".strip() if reply else note
+            if trigger_command in set(auto_run_commands()):
+                try:
+                    context = _workspace_context(run_id)
+                    gateway = _command_gateway(context)
+                    envelope = CommandEnvelope.from_mapping(
+                        {
+                            "kind": "pipeline.run_stage",
+                            "payload": {"start_command": trigger_command},
+                            "expected_revision": gateway.store.revision(),
+                            "idempotency_key": str(body.get("idempotency_key") or f"chat-stage:{uuid.uuid4()}"),
+                            "actor": {"type": "chat", "id": "current-user"},
+                        },
+                        workspace_id=run_id,
+                    )
+                    receipt = gateway.submit(envelope)
+                    label = WORKFLOW_COMMAND_LABELS.get(trigger_command, trigger_command)
+                    note = (
+                        f"已通过统一命令入口启动「{label}」。"
+                        if receipt.status != "rejected"
+                        else f"启动失败：{receipt.message}"
+                    )
+                    execution_notes.append(note)
+                    if note not in reply:
+                        reply = f"{reply}\n\n{note}".strip() if reply else note
+                    if receipt.status == "rejected":
+                        actions = [item for item in actions if item.get("command") != trigger_command]
+                except ControlPlaneError as exc:
+                    note = f"启动失败：{exc.message}"
+                    execution_notes.append(note)
+                    if note not in reply:
+                        reply = f"{reply}\n\n{note}".strip() if reply else note
             else:
-                note = f"启动失败：{trigger_result.get('message', '')}"
+                note = f"「{trigger_command}」尚未迁入统一命令入口，本轮未执行。"
                 execution_notes.append(note)
                 if note not in reply:
                     reply = f"{reply}\n\n{note}".strip() if reply else note
-                actions = [item for item in actions if item.get("command") != trigger_command]
 
         if trigger_rewrite_targets:
             rewrite_result = _trigger_rewrite_targets_inline(trigger_rewrite_targets)
@@ -2762,6 +2879,25 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             thinking=thinking,
             **extra,
         )
+
+
+@app.post("/api/v2/workspaces/{workspace_id}/chat/turn")
+async def api_v2_chat_turn(workspace_id: str, request: Request) -> JSONResponse:
+    try:
+        _workspace_context(workspace_id)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ControlPlaneError("COMMAND_INVALID", "请求体必须是 JSON 对象。", status_code=400)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception:
+        return JSONResponse({"ok": False, "message": "请求体必须是 JSON 对象。"}, status_code=400)
+
+    class _WorkspaceChatRequest:
+        async def json(self) -> dict[str, Any]:
+            return {**body, "run_id": workspace_id}
+
+    return await api_chat_orchestrate(_WorkspaceChatRequest())  # type: ignore[arg-type]
 
 
 @app.get("/api/repair-jobs/current")
@@ -3715,18 +3851,18 @@ def _gate_can_proceed(next_command: str = "") -> dict:
         return {"ok": False, "can_proceed": True, "message": f"门禁检查异常(放行): {exc}", "blocks": []}
 
 
-def _safe_issues_summary() -> dict:
+def _safe_issues_summary(root: Path | None = None) -> dict:
     try:
         from agent.issues import issues_summary
-        return issues_summary(_active_root())
+        return issues_summary(root or _active_root())
     except Exception:
         return {"open_count": 0, "block_count": 0, "can_proceed": True}
 
 
-def _safe_agent_activity() -> dict:
+def _safe_agent_activity(root: Path | None = None) -> dict:
     try:
         from agent.activity import activity_for_api
-        return activity_for_api(_active_root())
+        return activity_for_api(root or _active_root())
     except Exception:
         return {"status": "idle", "agents": [], "summary": {}}
 
@@ -4605,6 +4741,230 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     return exit_code
 
 
+def _workspace_context(workspace_id: str) -> WorkspaceContext:
+    return WorkspaceContext.resolve(RUNS_DIR, workspace_id)
+
+
+def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[str, Any]:
+    """Fail-closed gate evaluation for V2 mutations using the explicit workspace."""
+    try:
+        from agent.issues import can_proceed
+        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+
+        sync_issues_from_global_review(context.root)
+        sync_issues_from_compliance(context.root)
+        gate = can_proceed(context.root, next_command=next_command)
+    except Exception as exc:
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            f"门禁状态读取失败，已拒绝执行: {exc}",
+            status_code=503,
+            retryable=True,
+        ) from exc
+    if not isinstance(gate, dict):
+        raise ControlPlaneError("STATE_UNAVAILABLE", "门禁返回无效状态，已拒绝执行。", status_code=503)
+    return gate
+
+
+def _pipeline_status_to_operation(status: str) -> str:
+    return {
+        "running": "running",
+        "recovering": "running",
+        "retrying": "running",
+        "interrupted": "blocked",
+        "pausing": "pausing",
+        "paused": "paused",
+        "cancelling": "cancelling",
+        "cancelled": "cancelled",
+        "complete": "succeeded",
+        "failed": "failed",
+    }.get(status, "")
+
+
+def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
+    operation_id = str(payload.get("operation_id") or "").strip()
+    operation_status = _pipeline_status_to_operation(str(payload.get("status") or ""))
+    if not operation_id or not operation_status:
+        return
+    try:
+        context = _workspace_context(root.name)
+        if not _same_path(context.root, root):
+            return
+        error = payload.get("error")
+        ControlStore(context).sync_operation(
+            operation_id,
+            operation_status,
+            message=str(payload.get("message") or ""),
+            error={"message": str(error)} if error else None,
+            fencing_token=int(payload.get("fencing_token") or 0),
+        )
+    except Exception:
+        # The supervisor retains its V1 control file. V2 snapshot exposes any
+        # projection problem on the next explicit command instead of changing roots.
+        return
+
+
+def _terminate_workspace_process(context: WorkspaceContext) -> None:
+    process = CURRENT_PROCESS if _same_path(CURRENT_RUN_ROOT, context.root) else None
+    if process:
+        _terminate_process_tree(process)
+        return
+    control = SUPERVISOR.load(context.root)
+    _terminate_pid_tree(int(control.get("worker_pid", 0) or 0))
+
+
+def _handle_pipeline_start(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    if RUNNING or SUPERVISOR.is_running():
+        raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。")
+    start_command = str(envelope.payload.get("start_command") or "").strip()
+    if envelope.kind == "pipeline.run_stage" and not start_command:
+        raise ControlPlaneError("COMMAND_INVALID", "run_stage 缺少 start_command。", status_code=400)
+    if start_command and start_command not in auto_run_commands():
+        raise ControlPlaneError("COMMAND_INVALID", f"无效起始阶段: {start_command}", status_code=400)
+    gate = _v2_gate_can_proceed(context, start_command or "auto_run")
+    if not gate.get("can_proceed", False):
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            str(gate.get("message") or "质量门禁阻断，禁止启动流水线。"),
+            details={"gate": gate},
+        )
+    operation = ControlStore(context).operation(operation_id) or {}
+    fencing_token = int(operation.get("fencing_token") or 0)
+    started = SUPERVISOR.start(
+        context.workspace_id,
+        context.root,
+        _run_sync,
+        start_command=start_command,
+        operation_id=operation_id,
+        fencing_token=fencing_token,
+        single_command=envelope.kind == "pipeline.run_stage",
+    )
+    if not started:
+        raise ControlPlaneError("LEASE_CONFLICT", "流水线未启动，已有调度线程正在运行。")
+    return {
+        "accepted": True,
+        "operation_status": "running",
+        "message": "后端自动流水线已启动。",
+    }
+
+
+def _handle_pipeline_resume(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    payload = dict(envelope.payload)
+    if not str(payload.get("start_command") or "").strip():
+        control = SUPERVISOR.load(context.root)
+        payload["start_command"] = str(control.get("current_stage") or "")
+    return _handle_pipeline_start(
+        context,
+        replace_command_envelope(envelope, kind="pipeline.resume", payload=payload),
+        operation_id,
+    )
+
+
+def replace_command_envelope(
+    envelope: CommandEnvelope,
+    *,
+    kind: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> CommandEnvelope:
+    return CommandEnvelope(
+        command_id=envelope.command_id,
+        workspace_id=envelope.workspace_id,
+        kind=kind or envelope.kind,
+        payload=payload if payload is not None else envelope.payload,
+        goal_id=envelope.goal_id,
+        actor=envelope.actor,
+        expected_revision=envelope.expected_revision,
+        idempotency_key=envelope.idempotency_key,
+        confirmation_id=envelope.confirmation_id,
+    )
+
+
+def _handle_pipeline_pause(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    global PAUSE_REQUESTED
+    if _same_path(CURRENT_RUN_ROOT, context.root):
+        PAUSE_REQUESTED = True
+    if SUPERVISOR.is_running(context.root):
+        SUPERVISOR.pause()
+        _append_log(f"[暂停] CommandGateway 正在停止: {context.workspace_id}/{CURRENT_TASK}")
+        _terminate_workspace_process(context)
+        return {"accepted": True, "operation_status": "pausing", "message": "已发送暂停指令。"}
+    return {"accepted": True, "operation_status": "paused", "message": "Operation 已处于暂停状态。"}
+
+
+def _handle_pipeline_cancel(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    global PAUSE_REQUESTED
+    if _same_path(CURRENT_RUN_ROOT, context.root):
+        PAUSE_REQUESTED = True
+    if SUPERVISOR.is_running(context.root):
+        SUPERVISOR.cancel()
+        _append_log(f"[取消] CommandGateway 正在终止: {context.workspace_id}/{CURRENT_TASK}")
+        _terminate_workspace_process(context)
+        return {"accepted": True, "operation_status": "cancelling", "message": "已发送取消指令。"}
+    return {"accepted": True, "operation_status": "cancelled", "message": "Operation 已取消。"}
+
+
+def _handle_pipeline_skip(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    stage_id = str(envelope.payload.get("stage_id") or "").strip()
+    reason = str(envelope.payload.get("reason") or "").strip()
+    if not stage_id or not reason:
+        raise ControlPlaneError("COMMAND_INVALID", "跳过阶段必须提供 stage_id 和 reason。", status_code=400)
+    # V1 registry has no optional-stage contract. Fail closed until a stage is
+    # explicitly declared optional with no required downstream artifacts.
+    raise ControlPlaneError(
+        "GATE_BLOCKED",
+        f"阶段 {stage_id} 尚未声明为 V2 可选阶段，不能跳过。",
+        details={"stage_id": stage_id, "operation_id": operation_id},
+    )
+
+
+def _command_gateway(context: WorkspaceContext) -> CommandGateway:
+    SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
+    return CommandGateway(
+        context,
+        {
+            "pipeline.start": _handle_pipeline_start,
+            "pipeline.run_stage": _handle_pipeline_start,
+            "pipeline.resume": _handle_pipeline_resume,
+            "pipeline.pause": _handle_pipeline_pause,
+            "pipeline.cancel": _handle_pipeline_cancel,
+            "pipeline.skip_stage": _handle_pipeline_skip,
+        },
+    )
+
+
+def _command_error_response(exc: ControlPlaneError) -> JSONResponse:
+    context_revision = exc.details.get("current_revision") if isinstance(exc.details, dict) else None
+    return JSONResponse(
+        {
+            "ok": False,
+            "error": exc.as_dict(),
+            "message": exc.message,
+            "workspace_revision": context_revision,
+        },
+        status_code=exc.status_code,
+    )
+
+
 def _artifact_present(root: Path, artifact: Any) -> bool:
     artifact_path = _artifact_path(artifact)
     artifact_kind = _artifact_kind(artifact)
@@ -4772,15 +5132,179 @@ async def api_select_run(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "run": _active_run_payload(), "progress": _run_progress_summary(run_root)})
 
 
-@app.post("/api/run-command")
-async def api_run_command(request: Request) -> JSONResponse:
-    global RUNNING
-    if RUNNING or SUPERVISOR.is_running():
+@app.post("/api/v2/workspaces/{workspace_id}/commands")
+async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ControlPlaneError("COMMAND_INVALID", "请求体必须是 JSON 对象。", status_code=400)
+        envelope = CommandEnvelope.from_mapping(body, workspace_id=context.workspace_id)
+        gateway = _command_gateway(context)
+        if envelope.kind in {"pipeline.cancel", "pipeline.skip_stage"}:
+            if envelope.confirmation_id:
+                raise ControlPlaneError(
+                    "CONFIRMATION_REQUIRED",
+                    "高风险 Command 只能通过已持久化 Action 的确认接口执行。",
+                    status_code=400,
+                )
+            label = "确认取消当前任务" if envelope.kind == "pipeline.cancel" else "确认跳过当前阶段"
+            action = gateway.propose(envelope, label=label, risk="high")
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "receipt": {
+                        "command_id": envelope.command_id,
+                        "operation_id": envelope.payload.get("operation_id"),
+                        "status": "requires_confirmation",
+                        "workspace_revision": action["expected_revision"],
+                        "confirmation_id": action["confirmation_id"],
+                        "error": None,
+                    },
+                    "action": action,
+                },
+                status_code=202,
+            )
+        receipt = gateway.submit(envelope)
         return JSONResponse(
-            {"ok": False, "message": "当前已有任务正在运行，请等待完成。"},
-            status_code=409,
+            {"ok": receipt.status not in {"rejected"}, "receipt": receipt.as_dict(), "message": receipt.message},
+            status_code=202 if receipt.status in {"accepted", "duplicate", "no_op"} else 409,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                f"控制状态不可用，已拒绝执行: {exc}",
+                status_code=503,
+                retryable=True,
+            )
         )
 
+
+@app.post("/api/v2/workspaces/{workspace_id}/actions/{action_id}/confirm")
+@app.post("/api/v2/workspaces/{workspace_id}/confirmations/{action_id}/confirm")
+def api_v2_confirm_action(workspace_id: str, action_id: str) -> JSONResponse:
+    try:
+        receipt = _command_gateway(_workspace_context(workspace_id)).confirm(action_id)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message},
+            status_code=202 if receipt.status != "rejected" else 409,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"确认处理失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.post("/api/v2/workspaces/{workspace_id}/actions/{action_id}/decline")
+@app.post("/api/v2/workspaces/{workspace_id}/confirmations/{action_id}/decline")
+def api_v2_decline_action(workspace_id: str, action_id: str) -> JSONResponse:
+    try:
+        result = _command_gateway(_workspace_context(workspace_id)).decline(action_id)
+        return JSONResponse({"ok": True, **result})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"拒绝确认失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/snapshot")
+def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        snapshot = ControlStore(context).snapshot()
+        compatibility = _status_payload(context.root, context.workspace_id)
+        snapshot.update(
+            {
+                "goal": compatibility.get("goal"),
+                "pipeline": compatibility.get("pipeline") or SUPERVISOR.load(context.root),
+                "materials": compatibility.get("materials_summary") or {},
+                "findings": {"issues_summary": compatibility.get("issues_summary") or {}},
+                "artifacts": {
+                    "inputs": compatibility.get("inputs") or {},
+                    "workspace": compatibility.get("workspace") or {},
+                    "outputs": compatibility.get("outputs") or {},
+                },
+                "compatibility_source": "v1_projection",
+            }
+        )
+        return JSONResponse({"ok": True, "snapshot": snapshot})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"快照读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/operations/{operation_id}")
+def api_v2_operation(workspace_id: str, operation_id: str) -> JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        operation = ControlStore(context).operation(operation_id)
+        if not operation:
+            raise ControlPlaneError("OPERATION_NOT_FOUND", "Operation 不存在。", status_code=404)
+        return JSONResponse({"ok": True, "operation": operation})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"Operation 读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/events", response_model=None)
+async def api_v2_workspace_events(
+    workspace_id: str,
+    request: Request,
+    after_seq: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=2000),
+) -> StreamingResponse | JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        store = ControlStore(context)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+
+    async def stream():
+        cursor = after_seq
+        last_keepalive = time.monotonic()
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                events = store.events(cursor, limit=limit)
+            except Exception as exc:
+                payload = json.dumps(
+                    {"code": "STATE_UNAVAILABLE", "message": str(exc), "retryable": True},
+                    ensure_ascii=False,
+                )
+                yield f"event: ControlPlaneError\ndata: {payload}\n\n"
+                break
+            for event in events:
+                cursor = int(event["seq"])
+                payload = json.dumps(event, ensure_ascii=False, default=str)
+                yield f"id: {cursor}\nevent: {event.get('kind', 'WorkspaceEvent')}\ndata: {payload}\n\n"
+            if time.monotonic() - last_keepalive >= 15:
+                yield ": keepalive\n\n"
+                last_keepalive = time.monotonic()
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/run-command")
+async def api_run_command(request: Request) -> JSONResponse:
     try:
         body = await request.json()
     except Exception:
@@ -4794,18 +5318,6 @@ async def api_run_command(request: Request) -> JSONResponse:
             {"ok": False, "message": f"未知命令: {command}，可用: {', '.join(sorted(COMMANDS))}"},
             status_code=400,
         )
-    # quality gate: open block issues stop progression (except pure query/init tools)
-    if command not in {"validate", "init", "init-demo", "set-project-profile"}:
-        gate = _gate_can_proceed(command)
-        if not gate.get("can_proceed", True):
-            return JSONResponse(
-                {
-                    "ok": False,
-                    "message": gate.get("message") or "质量门禁阻断，禁止执行该命令",
-                    "gate": gate,
-                },
-                status_code=409,
-            )
     if command not in {"validate", "init-demo"} and ACTIVE_RUN_ROOT is None:
         return JSONResponse(
             {"ok": False, "message": "请先点击“开始生成”，创建本次运行工作空间后再执行流程命令。"},
@@ -4818,16 +5330,54 @@ async def api_run_command(request: Request) -> JSONResponse:
             status_code=409,
         )
 
-    run_id = ACTIVE_RUN_ID
-    run_root = _active_root()
+    run_id = sent_run_id or ACTIVE_RUN_ID
+    if command in set(auto_run_commands()):
+        try:
+            context = _workspace_context(run_id)
+            store = ControlStore(context)
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "pipeline.run_stage",
+                    "payload": {"start_command": command},
+                    "expected_revision": store.revision(),
+                    "idempotency_key": str(body.get("idempotency_key") or f"legacy-run-stage:{uuid.uuid4()}"),
+                    "actor": {"type": "legacy_api", "id": "run-command"},
+                },
+                workspace_id=run_id,
+            )
+            receipt = _command_gateway(context).submit(envelope)
+            return JSONResponse(
+                {"ok": receipt.status != "rejected", "message": receipt.message, "receipt": receipt.as_dict()},
+                status_code=202 if receipt.status != "rejected" else 409,
+            )
+        except ControlPlaneError as exc:
+            return _command_error_response(exc)
+
+    # Utility commands remain on the V1 adapter until their domain services move
+    # behind CommandDispatcher in phase A.
+    if RUNNING or SUPERVISOR.is_running():
+        return JSONResponse({"ok": False, "message": "当前已有任务正在运行，请等待完成。"}, status_code=409)
+    if command in {"validate", "init-demo"} and not run_id:
+        run_root = ROOT
+    else:
+        try:
+            context = _workspace_context(run_id)
+            if command not in {"validate", "init", "init-demo", "set-project-profile"}:
+                gate = _v2_gate_can_proceed(context, command)
+                if not gate.get("can_proceed", False):
+                    return JSONResponse(
+                        {"ok": False, "message": gate.get("message") or "质量门禁阻断", "gate": gate},
+                        status_code=409,
+                    )
+            run_root = context.root
+        except ControlPlaneError as exc:
+            return _command_error_response(exc)
     threading.Thread(target=_run_sync, args=(command, run_id, run_root), daemon=True).start()
-    return JSONResponse({"ok": True, "message": f"命令已启动: {command}"})
+    return JSONResponse({"ok": True, "message": f"兼容命令已启动: {command}"})
 
 
 @app.post("/api/start-pipeline")
 async def api_start_pipeline(request: Request) -> JSONResponse:
-    if RUNNING or SUPERVISOR.is_running():
-        return JSONResponse({"ok": False, "message": "当前已有任务或流水线正在运行。"}, status_code=409)
     if ACTIVE_RUN_ROOT is None:
         return JSONResponse({"ok": False, "message": "请先创建并选择工作空间。"}, status_code=409)
     try:
@@ -4840,38 +5390,52 @@ async def api_start_pipeline(request: Request) -> JSONResponse:
     start_command = str(body.get("start_command", "")).strip()
     if start_command and start_command not in auto_run_commands():
         return JSONResponse({"ok": False, "message": f"无效起始阶段: {start_command}"}, status_code=400)
-    gate = _gate_can_proceed(start_command or "auto_run")
-    if not gate.get("can_proceed", True):
-        return JSONResponse(
+    try:
+        context = _workspace_context(sent_run_id or ACTIVE_RUN_ID)
+        store = ControlStore(context)
+        envelope = CommandEnvelope.from_mapping(
             {
-                "ok": False,
-                "message": gate.get("message") or "质量门禁阻断，禁止启动流水线",
-                "gate": gate,
+                "kind": "pipeline.start",
+                "payload": {"start_command": start_command},
+                "expected_revision": store.revision(),
+                "idempotency_key": str(body.get("idempotency_key") or f"legacy-start:{uuid.uuid4()}"),
+                "actor": {"type": "legacy_api", "id": "start-pipeline"},
             },
-            status_code=409,
+            workspace_id=context.workspace_id,
         )
-    started = SUPERVISOR.start(ACTIVE_RUN_ID, _active_root(), _run_sync, start_command=start_command)
-    if not started:
-        return JSONResponse({"ok": False, "message": "流水线未启动，已有调度线程正在运行。"}, status_code=409)
-    return JSONResponse({"ok": True, "message": "后端自动流水线已启动。"})
+        receipt = _command_gateway(context).submit(envelope)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "message": receipt.message, "receipt": receipt.as_dict()},
+            status_code=202 if receipt.status != "rejected" else 409,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/pause-run")
 def api_pause_run() -> JSONResponse:
-    global PAUSE_REQUESTED
-    if not RUNNING and not SUPERVISOR.is_running():
-        return JSONResponse({"ok": True, "message": "当前没有正在运行的任务。"})
-
-    PAUSE_REQUESTED = True
-    SUPERVISOR.pause()
-    process = CURRENT_PROCESS
-    _append_log(f"[暂停] 正在停止当前任务: {CURRENT_TASK}")
-    if process:
-        _terminate_process_tree(process)
-    else:
-        control = SUPERVISOR.load(_active_root())
-        _terminate_pid_tree(int(control.get("worker_pid", 0) or 0))
-    return JSONResponse({"ok": True, "message": "已发送暂停指令。"})
+    if not ACTIVE_RUN_ID:
+        return JSONResponse({"ok": False, "message": "请先选择工作空间。"}, status_code=409)
+    try:
+        context = _workspace_context(ACTIVE_RUN_ID)
+        store = ControlStore(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "pipeline.pause",
+                "payload": {},
+                "expected_revision": store.revision(),
+                "idempotency_key": f"legacy-pause:{uuid.uuid4()}",
+                "actor": {"type": "legacy_api", "id": "pause-run"},
+            },
+            workspace_id=context.workspace_id,
+        )
+        receipt = _command_gateway(context).submit(envelope)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "message": receipt.message, "receipt": receipt.as_dict()},
+            status_code=202 if receipt.status != "rejected" else 409,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 # ---------------------------------------------------------------
@@ -5906,6 +6470,10 @@ def api_clean_workspace() -> JSONResponse:
 
 
 def _startup_reconcile() -> None:
+    # Install the V2 control-state bridge before any persisted V1 pipeline is
+    # reconciled so subsequent status transitions carry the same operation
+    # identity and fencing token into control.db.
+    SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     # 启动时把“使用中”的大模型刷进进程环境，避免仅写了 models.json/.env 但进程仍用旧环境变量
     try:
         store = _read_models_store()

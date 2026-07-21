@@ -6,6 +6,7 @@
 > 建议路径：`docs/next_agent_development_plan.md`  
 > 目标版本：Agent 闭环强化版  
 > 实施说明：PR-9~PR-14 代码、测试与 Web 工作台已合入主干开发树；全量 `unittest discover` 通过。  
+> 后续目标架构与迁移计划：[current_logic_flow_v2.md](./current_logic_flow_v2.md)；本文保留该阶段的实施记录。  
 
 ## 1. 当前阶段判断
 
@@ -715,7 +716,7 @@ PR-9  Supervisor 多步闭环
 - [ ] 失败后有明确恢复方式；
 - [ ] 高风险动作经过 Policy；
 - [ ] 修改产物后失效传播正确；
-- [ ] `docs/current_logic_flow.md` 同步更新；
+- [ ] `docs/current_logic_flow_v1.md` 同步更新；
 - [ ] 当前文档中的实施状态已更新。
 
 ---

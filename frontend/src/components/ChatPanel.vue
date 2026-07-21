@@ -240,7 +240,18 @@
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import PlanList from './PlanList.vue'
 import UploadTile from './UploadTile.vue'
-import { fetchChatMessages, saveChatMessage, orchestrateChat, fetchExportPreflight, fetchCurrentRepairJob, fetchMaterialsChecklist } from '../api'
+import {
+  confirmWorkspaceAction,
+  declineWorkspaceAction,
+  fetchChatMessages,
+  fetchCurrentRepairJob,
+  fetchExportPreflight,
+  fetchMaterialsChecklist,
+  orchestrateChat,
+  saveChatMessage,
+  startOrResumePipeline,
+  submitWorkspaceCommand,
+} from '../api'
 import { pushStatusSnapshot, forceRuntimeRefresh } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
@@ -870,40 +881,48 @@ async function startAutoRun(fromCommand = null) {
   if (statusTimer) clearInterval(statusTimer)
   statusTimer = setInterval(loadStatus, 2000)
   try {
-    const resp = await fetch('/api/start-pipeline', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ run_id: props.runId, start_command: fromCommand || '' }),
-    })
-    const body = await resp.json()
-    // 409 通常表示聊天编排器已经在后端启动了同一条流水线，此时继续观察即可。
+    const resp = await startOrResumePipeline(props.runId, fromCommand || '')
+    const body = resp?.data || {}
     if (!body.ok) {
-      // 409 + gate: quality block; 409 without gate: already running
-      if (resp.status === 409 && body.gate && body.gate.can_proceed === false) {
-        autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
-        addMessage('system', body.message || '质量门禁阻断，请先处理问题再继续')
-        return
-      }
-      if (resp.status !== 409) {
-        autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
-        addMessage('system', `流水线启动失败: ${body.message || ''}`)
-      }
+      autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+      addMessage('system', `流水线启动失败: ${body.message || ''}`)
     }
   } catch (e) {
     autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
-    addMessage('system', `流水线启动请求失败: ${e.message}`)
+    const message = e?.response?.data?.message || e?.message || ''
+    addMessage('system', `流水线启动请求失败: ${message}`)
   }
 }
-function pauseAutoRun() {
+async function pauseAutoRun() {
   autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
-  fetch('/api/pause-run', { method: 'POST' }); addMessage('system', '流程已暂停')
+  try {
+    const response = await submitWorkspaceCommand(props.runId, 'pipeline.pause')
+    addMessage('system', response?.data?.message || '流程已暂停')
+  } catch (error) {
+    addMessage('system', error?.response?.data?.message || error?.message || '暂停失败')
+  }
 }
-function skipFailedStage(failedCmd) {
-  const commands = workflowCommands()
-  const idx = commands.indexOf(failedCmd)
-  if (idx < 0) return
-  addMessage('system', `已跳过 "${stepLabel(failedCmd)}"，继续下一步...`)
-  const nextCommand = commands[idx + 1]
-  if (nextCommand) startAutoRun(nextCommand)
+async function skipFailedStage(failedCmd) {
+  if (!failedCmd) return
+  try {
+    const response = await submitWorkspaceCommand(
+      props.runId,
+      'pipeline.skip_stage',
+      { stage_id: failedCmd, reason: `用户请求跳过 ${stepLabel(failedCmd)}` },
+    )
+    const body = response?.data || {}
+    const action = body.action
+    if (action) {
+      addMessage('assistant', '跳过阶段属于高风险操作，需要确认；必需阶段即使确认也会被门禁拒绝。', [
+        action,
+        { ...action, type: 'decline_v2_command', label: '不跳过' },
+      ])
+    } else {
+      addMessage('system', body.message || '跳过请求已提交。')
+    }
+  } catch (error) {
+    addMessage('system', error?.response?.data?.message || error?.message || '跳过请求失败')
+  }
 }
 async function runCommand(cmd) {
   try {
@@ -1011,18 +1030,6 @@ function isRewriteRequest(text) {
   return /@L\d+\s/.test(String(text || ''))
 }
 
-function isPipelineControlIntent(text) {
-  const t = String(text || '').replace(/\s+/g, '').trim()
-  if (!t) return false
-  // Explicit continue / run-all phrases — bypass chat confirm loop
-  if (/^(继续|继续啊|继续吧|继续执行|继续进行|继续进行啊|接着做|接着跑|继续跑|继续流程|继续整个|继续整个流程|整体推进|一键跑完|一键跑完剩余|跑完剩余|启动流水线|继续流水线)$/.test(t)) {
-    return true
-  }
-  if (t.length <= 16 && (t.startsWith('继续') || t.startsWith('接着'))) return true
-  if (/一键跑|跑完剩余|继续整个|整体推进|启动流水线/.test(t) && t.length <= 20) return true
-  return false
-}
-
 function isRetryFailedWriteIntent(text) {
   const t = String(text || '').trim()
   if (!t) return false
@@ -1035,19 +1042,6 @@ function send(msg, { action = null } = {}) {
   const text = String(msg || '').trim()
   if (!text && !action) return false
 
-  // Confirm / pipeline control: drive real pipeline, never re-enter confirm chat loop
-  if (!action && isPipelineControlIntent(text)) {
-    addMessage('user', text)
-    const nextPending = planSteps.value.find(s => s.status !== 'done')
-    const from = nextPending?.command || ''
-    if (autoExecuting.value || running.value) {
-      addMessage('system', '流水线已在运行，请稍候…')
-    } else {
-      addMessage('system', from ? `收到「${text}」，从 ${stepLabel(from)} 继续后端流水线…` : `收到「${text}」，启动后端流水线…`)
-      startAutoRun(from || null)
-    }
-    return true
-  }
   // "将写作失败的重新写" → re-run write-all (not a fake goal success)
   if (!action && isRetryFailedWriteIntent(text)) {
     addMessage('user', text)
@@ -1138,7 +1132,7 @@ async function doChat(text, { action = null } = {}) {
   }, 1800)
 
   try {
-    const resp = await orchestrateChat(text, { action })
+    const resp = await orchestrateChat(text, { runId: props.runId, action })
     const body = resp && resp.data ? resp.data : {}
     clearInterval(thinkTimer)
     streamingIdx.value = -1
@@ -1395,10 +1389,30 @@ function confirmSupervisorAction(act) {
   })
 }
 
+async function resolveV2CommandAction(act, decline = false) {
+  const actionId = String(act.action_id || act.confirmation_id || '').trim()
+  if (!actionId) {
+    addMessage('system', '确认操作缺少 action_id，请重新发送指令。')
+    return
+  }
+  try {
+    const response = decline
+      ? await declineWorkspaceAction(props.runId, actionId)
+      : await confirmWorkspaceAction(props.runId, actionId)
+    const body = response?.data || {}
+    addMessage('system', body.message || (decline ? '已保留当前任务。' : '操作已提交。'))
+    forceRuntimeRefresh()
+    await loadStatus()
+  } catch (error) {
+    const message = error?.response?.data?.message || error?.message || '确认操作失败'
+    addMessage('system', message)
+  }
+}
+
 function handleAction(act, sourceMessage = null) {
   if (!act || interactionBusy.value || act.consumed) return
   act.consumed = true
-  if (sourceMessage && ['confirm_minimal_repair', 'decline_minimal_repair', 'confirm_tool'].includes(act.type)) {
+  if (sourceMessage && ['confirm_minimal_repair', 'decline_minimal_repair', 'confirm_tool', 'confirm_v2_command', 'decline_v2_command'].includes(act.type)) {
     sourceMessage.actions.forEach(action => { action.consumed = true })
   }
   if (act && act.type === 'export_preflight') {
@@ -1420,6 +1434,8 @@ function handleAction(act, sourceMessage = null) {
   }
 
   if (act.type === 'chat_prompt') send(act.prompt || act.label)
+  else if (act.type === 'confirm_v2_command') resolveV2CommandAction(act, false)
+  else if (act.type === 'decline_v2_command') resolveV2CommandAction(act, true)
   else if (act.type === 'confirm_minimal_repair') {
     const confirmationId = actionConfirmationId(act)
     const text = act.label || '是，执行最小修复'

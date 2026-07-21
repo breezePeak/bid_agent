@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 from subagent_registry import (
@@ -307,6 +308,7 @@ def plan(
     llm_chat=None,
     review_context: list[dict[str, Any]] | None = None,
     *,
+    root: Path | None = None,
     user_confirmed: bool = False,
     confirmed_tools: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -326,6 +328,7 @@ def plan(
                 status,
                 llm_chat=llm_chat,
                 review_context=review_context,
+                root=root,
                 user_confirmed=user_confirmed,
                 confirmed_tools=confirmed_tools,
             )

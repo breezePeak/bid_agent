@@ -6,7 +6,8 @@
 
 - **业务使用**：如何上传资料、启动流程、拿到 Word → 看本文即可。
 - **3D 态势大屏**：炼丹阁可视化全流程与 Agent 活动 → 见 [frontend-3d/README.md](frontend-3d/README.md)。
-- **流程 / 实现细节**：阶段逻辑、Agent 编排 → 见 [docs/current_logic_flow.md](docs/current_logic_flow.md)。
+- **当前流程 V1**：现行阶段逻辑、Agent 编排与门禁 → 见 [docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)。
+- **目标架构 V2**：Agent 控制面、唯一执行内核与迁移计划 → 见 [docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)。
 
 ## 安装
 
@@ -151,7 +152,9 @@ python src/main.py graph-run --workers 2
 
 ## 进一步说明
 
-- 逻辑与流程：[docs/current_logic_flow.md](docs/current_logic_flow.md)  
+- 流程版本导航：[docs/current_logic_flow.md](docs/current_logic_flow.md)  
+- 当前流程 V1：[docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)  
+- 目标架构 V2：[docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)  
 - 开发演进：[docs/bid_agent_development_plan.md](docs/bid_agent_development_plan.md)  
-- Agent 化改造：[docs/agentization_development_plan.md](docs/agentization_development_plan.md)  
+- 历史 Agent 化阶段记录：[docs/agentization_development_plan.md](docs/agentization_development_plan.md)  
 - 3D 前端：[frontend-3d/README.md](frontend-3d/README.md)  

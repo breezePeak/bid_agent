@@ -1,0 +1,478 @@
+# 标书 Agent 控制面架构 V2
+
+> 版本：V2  
+> 状态：阶段 A 进行中，V2 尚未完成切换  
+> 确认日期：2026-07-21  
+> 现行实现：[current_logic_flow_v1.md](./current_logic_flow_v1.md)  
+> 版本导航：[current_logic_flow.md](./current_logic_flow.md)
+
+V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构，并按两阶段完成收敛与迁移。阶段 A 的第一个实施切片已开始，但迁移、回归和切换验收尚未完成；V1 仍是当前实现真相源。
+
+## 1. 背景与问题
+
+当前问题的核心不是功能数量，而是同一工作空间、同一阶段和同一状态存在多个所有者。
+
+### 1.1 工作区根目录分裂
+
+Web 状态读取活动工作区，但部分 Agent/Supervisor 路径仍可能回退到项目根目录。结果是聊天看到 A 工作区的状态，却在项目根或另一个工作区创建 Goal、DecisionTrace 或执行 Tool。
+
+V2 必须让工作区成为所有查询和变更的显式上下文，禁止业务层自行推断活动目录。
+
+### 1.2 多套执行内核并存
+
+当前阶段可能经由前端 fast-path、Web 后台流水线、Agent ToolRuntime、CLI 或 LangGraph 执行。阶段注册表虽然统一了顺序，但没有统一执行语义，不同入口具有不同的锁、确认、门禁、恢复、日志和完成判断。
+
+V2 只保留一个确定性 Pipeline 执行内核。Agent、Web、CLI 和调试适配器只能提交 Command，不得直接调用阶段 runner。
+
+### 1.3 状态来源过多
+
+Goal、Pipeline、Activity、RepairJob、Materials、Issues、stale artifacts、聊天历史和 Web 内存变量分别拥有独立生命周期。现有聚合状态只能发现冲突，不能保证一次状态迁移的原子性。
+
+V2 使用每工作区一个 `workspace/control.db` 保存权威控制状态，并通过同一事务写入当前状态和审计事件。
+
+### 1.4 材料与质量存在重复权威源
+
+材料同时存在响应状态、证据状态和生命周期状态；上传、验证、回填及 Goal 恢复没有形成单一状态机。质量报告、Issue、人工覆盖和多个 `can_proceed` 又分别解释是否阻断，异常路径还可能 fail-open。
+
+V2 将材料履约、质量 Finding、Issue 处理和 Policy Decision 分开建模，由唯一 GateEvaluator 计算是否允许继续或正式交付。
+
+## 2. 目标架构
+
+目标控制链如下：
+
+```text
+Chat / 页面按钮 / CLI
+  → CommandGateway
+  → Workspace revision + Policy + Confirmation + mutation lease
+  → CommandDispatcher
+      ├─ ExecutionController → ExecutionWorker → 确定性 Pipeline Stage Runner
+      ├─ MaterialsService
+      ├─ Quality / GateEvaluator
+      └─ Artifact / Export Service
+  → Artifact / Material / Quality 结果
+  → control.db + Workspace Event Stream
+  → GoalCoordinator 复核并推进计划
+```
+
+只有 Pipeline 阶段执行进入 Stage Runner；材料验证、Policy Decision、Gate 重验、暂停控制和下载等领域 Command 由 Dispatcher 路由到对应应用服务，但仍共享同一 Gateway、revision、Policy、Confirmation、lease/控制事务和审计事件。
+
+### 2.1 核心原则
+
+1. Agent 只负责理解目标、生成计划、提出 Command、读取结果和决定下一步。
+2. Pipeline 是唯一可以执行阶段和生成流水线产物的内核。
+3. Chat、页面按钮与 CLI 使用同一 CommandGateway、Policy 和门禁。
+4. 每个工作区显式携带 `workspace_id`，不存在服务端隐式“当前工作区”。
+5. SQLite 保存控制状态；Markdown、JSON 报告、DOCX 和源文件继续保留为文件。
+6. 每个工作区同一时刻只允许一个变更 Operation；只读查询可并发。
+7. 阶段完成必须有成功执行记录和有效 Artifact manifest，不能只凭文件存在判断。
+8. Policy、Gate、确认或状态读取异常一律 fail-closed。
+
+### 2.2 SQLite 控制面
+
+每个工作区创建 `workspace/control.db`，启用 WAL、外键、busy timeout 和 schema version。首版至少包含：
+
+- Goal 与 PlanStep 当前状态；
+- Command、Operation、StageRun 和确认记录；
+- Artifact manifest、依赖 fingerprint 与 stale 状态；
+- MaterialRequirement、Submission、Verification 与 Fulfillment；
+- GateEvaluation、Finding、Issue 和 PolicyDecision；
+- ChatMessage、ActionProposal；
+- 追加式 WorkspaceEvent 审计流。
+
+当前状态表是权威读模型；事件表用于审计、SSE 增量推送和故障诊断。V2 首版不要求仅靠事件回放重建全部业务状态。
+
+## 3. 公共协议
+
+### 3.1 `WorkspaceContext`
+
+```text
+WorkspaceContext:
+  workspace_id: string
+  root: absolute path
+```
+
+`WorkspaceContext` 必须在 API/CLI 边界解析并传入应用服务。领域模块不得使用可选 root，也不得回退到 `project_root()`。
+
+### 3.2 `CommandEnvelope`
+
+```text
+CommandEnvelope:
+  command_id: UUID
+  workspace_id: string
+  kind: string
+  payload: object
+  goal_id: string | null
+  actor: object
+  expected_revision: integer
+  idempotency_key: string
+  confirmation_id: string | null
+```
+
+首批标准 Command：
+
+- `pipeline.start`
+- `pipeline.resume`
+- `pipeline.run_stage`
+- `pipeline.pause`
+- `pipeline.cancel`
+- `pipeline.skip_stage`
+- `repair.execute`
+- `gate.revalidate`
+- `materials.attach`
+- `materials.verify`
+- `materials.confirm`
+- `materials.apply`
+- `document.rewrite`
+- `document.apply`
+- `document.undo`
+- `issue.accept_risk`
+- `export.build_draft`
+- `export.build_final`
+
+### 3.3 `CommandReceipt`
+
+```text
+CommandReceipt:
+  command_id: UUID
+  operation_id: UUID | null
+  status: accepted | requires_confirmation | rejected | duplicate | no_op
+  workspace_revision: integer
+  confirmation_id: string | null
+  error: object | null
+```
+
+相同 `idempotency_key` 只能产生一次 Operation。`expected_revision` 过期时返回冲突，不得根据旧动作继续执行。
+
+### 3.4 `ActionProposal`
+
+```text
+ActionProposal:
+  action_id: UUID
+  workspace_id: string
+  goal_id: string | null
+  label: string
+  command: CommandEnvelope
+  risk: low | medium | high | critical
+  requires_confirmation: boolean
+  expected_revision: integer
+  expires_at: timestamp
+```
+
+前端确认时只提交 `action_id`，不得重新拼接 tool、command 或参数，也不得通过按钮文案推测下一阶段。
+
+### 3.5 `WorkspaceSnapshot`
+
+Snapshot 必须包含单调递增的 `revision`，以及当前 Goal、Operation、Pipeline、Materials、Findings、Artifacts、确认请求和风险摘要。UI 首次加载 Snapshot，之后只订阅同一工作区的事件流；发现事件断档时重新拉取 Snapshot。
+
+### 3.6 `GateReceipt`
+
+```text
+GateReceipt:
+  receipt_id: UUID
+  workspace_id: string
+  workspace_revision: integer
+  artifact_revisions: object
+  gate_input_fingerprint: string
+  evaluator_version: string
+  verdict: pass | warn | block
+  blocking_finding_ids: string[]
+  accepted_risk_ids: string[]
+  created_at: timestamp
+```
+
+`gate_input_fingerprint` 覆盖输入 hash、材料 Fulfillment/Verification revision、正式稿 Artifact revision、当前 Finding 集、适用 PolicyDecision 和门禁规则版本。正式 Word 的生成和下载必须重新计算并匹配该 fingerprint；聊天消息等无关 revision 变化不应误使凭据失效，任一门禁依赖变化则必须使旧凭据失效。
+
+### 3.7 V2 API
+
+```text
+POST /api/v2/workspaces/{id}/chat/turn
+POST /api/v2/workspaces/{id}/commands
+POST /api/v2/workspaces/{id}/actions/{action_id}/confirm
+POST /api/v2/workspaces/{id}/actions/{action_id}/decline
+POST /api/v2/workspaces/{id}/confirmations/{confirmation_id}/confirm
+POST /api/v2/workspaces/{id}/confirmations/{confirmation_id}/decline
+GET  /api/v2/workspaces/{id}/operations/{operation_id}
+GET  /api/v2/workspaces/{id}/snapshot
+GET  /api/v2/workspaces/{id}/events?after_seq={seq}
+POST /api/v2/workspaces/{id}/materials/uploads
+GET  /api/v2/workspaces/{id}/exports/draft
+GET  /api/v2/workspaces/{id}/exports/final?gate_receipt_id={receipt_id}
+```
+
+`chat/turn` 请求至少包含 `message`、`expected_revision` 和 `idempotency_key`，响应包含持久化的用户/助手消息、`ActionProposal[]`、`CommandReceipt[]` 与最新 snapshot revision。查询只返回答案；用户显式输入“暂停”或“继续已确认 Goal”时，ConversationService 可把强类型 Command 提交给 CommandGateway 并返回 Receipt，但不得直接调用领域 mutation。取消、跳过和其他需要确认的意图只返回 ActionProposal，确认后再由 CommandGateway 执行。前端不得用正则自行提交第二次命令。
+
+直接提交 Command 时，如 Policy 判定需要确认，CommandGateway 持久化 `ConfirmationRequest` 并返回 `requires_confirmation + confirmation_id`；Chat 或按钮产生的 Action 则通过 `action_id` 确认。两条确认入口最终调用同一个 ConfirmationService，且确认请求只能消费一次。确认与拒绝请求均不得重新提交或覆盖原 Command payload。
+
+材料上传接口只把 multipart 文件写入隔离暂存区，返回短期、单次使用的 `upload_token/hash`，不创建 MaterialSubmission，也不改变材料状态。随后由 `materials.attach` Command 经 CommandGateway 校验 token、文件策略和 revision，转存为受控 Artifact 并创建 Submission，再由 `materials.verify` Command 驱动验证；禁止客户端提交任意服务端绝对路径作为材料来源。Operation 查询用于 CLI、刷新恢复和无 SSE 客户端读取终态。final 下载必须同时校验授权、final Artifact manifest 和 GateReceipt fingerprint；不匹配返回 `409 GATE_RECEIPT_STALE`，不得降级为无门禁下载。
+
+### 3.8 Event Stream 与错误协议
+
+```text
+WorkspaceEvent:
+  seq: integer
+  event_id: UUID
+  workspace_id: string
+  workspace_revision: integer
+  kind: string
+  aggregate_type: string
+  aggregate_id: string
+  payload: object
+  occurred_at: timestamp
+```
+
+SSE 使用 `text/event-stream`，事件 `id` 等于 `seq`；客户端通过 `Last-Event-ID` 或 `after_seq` 断点续传。事件允许重复投递，客户端按 `seq` 去重；发现乱序或缺口时停止应用增量并重新获取 Snapshot。V2 首版不自动删除 WorkspaceEvent；后续如压缩事件，必须保留可验证的 snapshot checkpoint，并对无法续传的游标返回 `410 EVENT_GAP`。
+
+公共错误至少包括 `REVISION_CONFLICT`、`LEASE_CONFLICT`、`CONFIRMATION_REQUIRED`、`ACTION_EXPIRED`、`ACTION_REPLAYED`、`GATE_BLOCKED`、`GATE_RECEIPT_STALE`、`AUTH_FORBIDDEN`、`EVENT_GAP` 和 `STATE_UNAVAILABLE`。错误响应必须带稳定 `code`、当前 revision、可否重试和关联 ID；未知错误不得被解释为成功。
+
+## 4. 领域边界
+
+### 4.1 Workspace / Conversation / Command 控制面
+
+- WorkspaceRegistry 负责将 `workspace_id` 解析为规范化根目录、工作区状态和访问控制；请求中的路径不能替代该映射。
+- Conversation 只拥有 ChatMessage 与 ActionProposal，不拥有 Pipeline、材料或 Gate 状态。
+- CommandGateway 负责命令规范化、幂等、revision 校验、Policy、Confirmation、workspace lease 申请和 Receipt；它是所有 mutation 的唯一入口。
+- ConfirmationService 负责动作过期、防重放、Command hash、actor 与授权范围校验。
+- 身份由服务端认证上下文产生，客户端 payload 中的 `actor` 仅作显示信息，不能自行声明角色。
+- 控制面不得直接写领域结果；它只能调用对应应用服务并在同一控制事务中记录状态与事件。
+
+### 4.2 Goal / Agent
+
+负责：
+
+- 用户目标、范围、约束和成功条件；
+- 计划步骤和确认范围；
+- 根据 Operation 结果复核目标并选择下一条 Command。
+
+禁止：
+
+- 直接调用阶段函数或长任务；
+- 直接写材料、Issue、Artifact 或 Pipeline 状态；
+- 根据聊天历史宣告任务已经完成。
+
+Goal 步骤只能由 `OperationCompleted`、`OperationBlocked`、`OperationFailed` 等执行事件推进。
+
+### 4.3 Execution / Pipeline
+
+负责：
+
+- workspace lease、Operation 队列和阶段 attempt；
+- 子进程启动、heartbeat、暂停、取消和重启接管；
+- 阶段依赖、重试、输出校验、Artifact manifest 和终态事件。
+
+状态机固定为：
+
+- Command：正常路径为 `received → pending_confirmation → accepted → dispatched → completed`，无需确认时可从 `received` 直接进入 `accepted`；确认前可进入 `rejected/expired`。重复幂等键只关联原 Command，不创建新分支。
+- Operation：正常路径为 `queued → running → succeeded`；暂停路径为 `running → pausing → paused → running`；`queued/running/paused` 可进入 `cancelling → cancelled`，执行也可进入 `failed` 或 `blocked` 终态。
+- StageRun：`queued → running → succeeded/failed/cancelled`，或在校验既有有效产物后记为 `reused`；`skipped` 仅适用于被声明为可选的阶段。
+
+终态通过带 revision 的 compare-and-set 写入且不可回退。暂停/取消与阶段完成竞态时，先成功提交的终态生效，后到控制命令返回 `no_op` 并携带当前终态；重试必须创建递增 attempt，不得覆盖旧 StageRun。
+
+`pipeline.pause/resume/cancel/skip_stage` 是绑定现有 `operation_id` 的控制 Command，不创建第二个 Operation，也不与目标 Operation 竞争 workspace lease。ExecutionController 使用目标 Operation 当前 fencing token 和 revision 执行状态转换；恢复时续租或事务性取得更大的 token。`skip_stage` 在确认后用同一 token/CAS 记录 PolicyDecision 与 StageRun 终态。只有 `pipeline.start/run_stage`、Repair、材料应用、改稿和导出等执行命令会创建新的变更 Operation。
+
+workspace lease 至少包含 `lease_id`、单调递增 `fencing_token`、owner、heartbeat 和 `expires_at`。Worker 的每次控制状态写入必须校验 fencing token；心跳超时只允许新 owner 通过事务接管并取得更大 token，旧 Worker 随后的写入全部拒绝，从而避免重启或网络抖动导致双跑。
+
+阶段 Ready 的统一条件为：
+
+1. 最新 StageRun 终态为 `succeeded/reused`；仅无必需输出且无强制下游依赖的可选阶段允许 `skipped`；
+2. 必需输出存在且校验通过；
+3. 输出 hash 与 manifest 一致；
+4. producer input fingerprint 等于当前依赖 fingerprint；
+5. Artifact 未标记 stale。
+
+阶段子进程可以继续在工作区生成文件，但不得写控制数据库。Worker 持有独占 lease，并在子进程退出后校验文件，再事务性记录 manifest 和终态。
+
+人工跳过必须记录 PolicyDecision，且只适用于无必需输出和无强制下游依赖的可选阶段。当前有效 Artifact 应记录为 `reused`，不属于 skip；缺少必需产物时拒绝 skip，目标 Operation 保持或进入 `blocked`，不能凭 waiver 将缺失产物标记为 ready。
+
+`pipeline.skip_stage` payload 必须包含 `operation_id`、`stage_id` 和非空 `reason`，始终要求确认。目标阶段非可选、存在必需下游输出、当前正在不可安全中断的写入，或 Gate/Policy 不允许跳过时，CommandGateway 即使收到确认也必须拒绝并返回稳定阻断原因。
+
+### 4.4 Materials
+
+统一生命周期：
+
+```text
+missing → requested → submitted → verifying → verified → applied → resolved
+```
+
+例外状态：`rejected`、`waived`、`not_applicable`。
+
+- `MaterialRequirement` 保存稳定 requirement ID、招标来源、风险级别和受影响章节。
+- `MaterialSubmission` 保存上传 Artifact、hash 和提交人。
+- `MaterialVerification` 保存自动/人工验证结果、字段、页码、主体、有效期和证据引用。
+- `MaterialFulfillment` 是唯一生命周期状态。
+- submitted/uploaded 绝不等于 verified。
+- 资格或 fatal 材料不能 waiver，也不能通过接受风险关闭。
+- 只有 verified 或具有完整审计记录的人工确认才能执行 `materials.apply`。
+- 应用材料后，通过依赖图失效受影响的 context、chapter、review、coverage、gate 和 export，再生成最小恢复 Operation；Materials 不直接恢复 Goal。
+
+### 4.5 Quality
+
+- 业务报告作为不可变证据 Artifact 保存。
+- `GateEvaluator` 基于当前 revision 产生不可变 `GateEvaluation` 和强类型 `Finding`。
+- Finding 必须包含稳定 rule/target key、风险类型、来源 revision 和证据引用，禁止根据标题文字推断 fatal/major。
+- `Issue` 是 Finding 的人工处理投影，负责 `open/in_progress/resolved/accepted` 生命周期。
+- `PolicyDecision` 单独记录接受风险、人工确认、actor、理由和适用范围，不得删除或修改 Finding。
+- `GateReceipt` 是 GateEvaluator 在指定输入 fingerprint 上应用 PolicyDecision 后的不可变凭据，引用 Finding 与决策集合；Issue 状态变化只触发重新评估，不能自行改写既有 Finding 或 GateReceipt。
+- 所有继续、导出和下载判断只调用一个 GateEvaluator，不允许各模块自行过滤报告或重复实现 `can_proceed`。
+- 结构化材料占位节点必须从文本命中扫描中排除，不能凭“授权委托书待补”等占位文字判定材料已存在。
+
+### 4.6 Artifact
+
+Artifact 负责路径、hash、producer、输入 fingerprint、revision 和 `ready/stale/missing` 状态。任何手工改写、材料应用或上游重跑都必须通过统一依赖图传播失效，目录型与 glob 型产物使用同一种规范化 key。
+
+### 4.7 Export
+
+- `draft.docx` 可在存在未解决风险时生成，但必须包含草稿标识和风险登记。
+- `final.docx` 必须持有当前有效且 verdict 非 block 的 GateReceipt。
+- final 下载接口重新验证 GateReceipt；历史遗留但凭据无效的 `final.docx` 只能作为草稿提供或先重验。
+- accepted major/minor 风险以及按管理员例外接受的 critical 风险持续显示并进入风险登记；fatal 与资格缺失永远阻断正式交付。
+
+## 5. 两阶段迁移
+
+### 5.1 阶段 A：止血并收敛控制链
+
+1. 冻结新增流程功能，为工作区隔离、聊天控制、材料、门禁和恢复建立基线用例。
+2. 引入强制 `WorkspaceContext`，修复 Agent、Goal Compiler、Tool 和 Chat 的隐式根目录回退。
+3. 建立最小 `control.db`、Workspace revision、Command、Operation、Confirmation、Event 和 lease 表。
+4. 由 CommandGateway 暂时包装现有后台 PipelineSupervisor，使阶段仍可复用当前 CLI 子进程实现。
+5. 将 Chat、按钮、CLI、旧 `start-pipeline/run-command`、Repair 和 mutation Tool 全部转入 CommandGateway。
+6. 删除前端和后端对“继续/确认”的执行 fast-path；不得在请求线程同步运行 mutation Tool。
+7. 增加 `pipeline.pause/resume/cancel`，让聊天输入“暂停/继续/取消”真正控制当前 Operation。
+8. 提供单一 Snapshot 和 workspace-scoped SSE，停止各面板独立轮询并维护本地运行真相。
+
+阶段 A 验收门槛：同一动作从 Chat、按钮或 CLI 发起时，必须得到相同的 Operation、Policy、Gate、日志和恢复行为；任何工作区都不能读写另一工作区或仓库根控制状态。
+
+### 5.2 阶段 B：迁移领域状态并删除旧边界
+
+1. 将 StageRun、Artifact manifest、stale 和依赖 fingerprint 全部迁入控制面，移除 artifact-only resume。
+2. 将材料 Requirement、Submission、Verification 和 Fulfillment 迁入统一仓储，主 UI 接入真实上传和验证链路。
+3. 将报告适配为 Finding，统一 GateEvaluator、Issue 投影、风险决策和 GateReceipt。
+4. Mutation Tool 只生成 Command；删除 ToolRuntime 直接运行阶段的能力。
+5. 前后端以 V2 API schema 和生成的契约类型为边界：ChatPanel 只管理消息和 ActionProposal，计划、执行、材料和问题由统一 Workspace Store 渲染；前端不得导入后端状态实现或直连文件/旧端点。
+6. Web 作为主产品入口；CLI 调用同一应用服务；LangGraph 只保留调试适配；3D 只读订阅 Snapshot/Event；旧静态前端下线。
+7. 兼容期结束后删除旧 orchestrator、前后端 fast-path、重复 Graph/CLI 编排和 JSON 控制状态双写。
+
+### 5.3 旧工作区导入
+
+- 首次打开 V1 工作区时，创建 `control.db` 并在单一事务中导入聊天、Goal、运行记录、材料、Issue 和 stale 状态。
+- 对现有 Artifact 重新计算 hash，并结合成功事件判断 readiness。
+- 导入过程记录 schema version、源文件 checksum 和迁移报告，可重复执行且不会重复创建记录。
+- 多个状态源发生冲突时，创建 `MigrationConflict`，将工作区迁移状态标记为 `needs_reconciliation`，把相关导入 Operation 归一为 `blocked`，Goal 保持 `in_progress/blocked`，禁止猜测成功。
+- 仓库根目录中的遗留 Goal 或 DecisionTrace 视为 orphan，不自动绑定任何 run。
+- 旧 API 保留一个版本，内部翻译为 V2 Command 并返回弃用头；兼容期内不得继续维护第二套执行逻辑。
+
+### 5.4 发布、兼容与回滚
+
+1. 导入前对 V1 控制文件、关键 Artifact manifest 和已有 `control.db` 做只读清单与可恢复备份；迁移器先执行 dry-run，输出将导入、冲突、orphan 和不可识别记录。
+2. V2 按工作区 feature flag 灰度开启。阶段 A 期间允许 V1 只读结果与 V2 Snapshot 做 shadow compare，但禁止两个控制面同时写同一工作区。
+3. dry-run 无未解释的 fatal 冲突、迁移契约测试通过且管理员确认报告后，才允许单工作区切换；切换事务写入 schema version、迁移 checksum 和 cutover event。
+4. `needs_reconciliation` 必须在受控的管理界面或 CLI 中逐项选择“绑定、标记失败、保留为 orphan”，保留 actor、理由和原始证据；未处理前禁止正式导出。
+5. 阶段 A 回滚通过工作区 flag 停止 V2 Worker，并恢复备份或让 V1 兼容适配器读取未发生 V2 领域写入的工作区；阶段 B 开始后不得直接降级，必须进入维护模式并执行经过验证的反向迁移或备份恢复。
+6. 兼容适配器至少保留一个已发布版本；只有迁移覆盖率、兼容 API 回归、监控窗口和回滚演练均通过后才能移除，移除条件写入阶段 B 验收记录。
+
+## 6. 确认与安全规则
+
+### 6.1 可直接执行
+
+- 状态、材料、问题和产物查询；
+- 暂停当前 Operation；
+- 用户明确说“继续”时，恢复已经确认过范围的 Goal；
+- Policy 允许的只读诊断。
+
+### 6.2 必须确认
+
+- 新建全量生成任务；
+- 正文写作、改稿、材料应用和问题修复；
+- 取消运行、跳过阶段；
+- 接受风险；
+- 生成或覆盖正式终稿。
+
+确认必须绑定精确 Command hash、workspace revision、风险级别、actor 和有效期。Goal 范围确认只能列出允许的 Command kind 和作用范围，禁止默认授予 `all_mutations`。
+
+critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明确允许且可信 admin 提供理由并完成二次确认时可接受；否则保持阻断。fatal 与资格材料风险对任何角色都不可接受。
+
+### 6.3 身份、接口与文件安全
+
+- 最小角色为 viewer、operator、reviewer、admin：viewer 只读；operator 可执行已确认 Goal 范围内的普通命令；reviewer 可完成人工材料验证和允许范围内的风险决策；admin 才可执行迁移 reconciliation 与受控关键操作。
+- 每个请求都校验工作区 ACL，任何角色都不能跨工作区复用 Action、Confirmation、Operation 或 GateReceipt；服务端不得信任客户端传入的 actor/role。
+- Action 与 Confirmation 绑定 workspace、Command hash、revision、actor、过期时间和一次性 nonce；确认后立即作废，篡改、过期、重复或跨工作区重放均拒绝并记审计事件。
+- Cookie 会话的 mutation 接口必须启用 CSRF 防护；SSE、Snapshot、下载和 CLI token 使用相同工作区授权策略。
+- 上传限制大小、扩展名和 MIME allowlist，净化文件名，按服务端生成 ID 落盘并计算 hash；压缩包防目录穿越和解压炸弹，可疑文件先隔离，不得进入解析或 Pipeline。下载同样校验工作区授权。
+- 凭证、原始敏感材料和绝对路径不得进入聊天文本、普通日志或 WorkspaceEvent payload；审计记录保留标识与受控引用。
+
+### 6.4 不可放行
+
+- fatal/废标 Finding；
+- 缺失或未验证的资格材料；
+- 无可信管理员身份时的 critical 风险；
+- 状态 revision 冲突、GateEvaluator 异常或来源不明的 Artifact；
+- 已失效或与当前输入 revision 不一致的 GateReceipt。
+
+认证、授权、Policy、Confirmation、Gate、lease 或状态读取任一异常时拒绝 mutation；不得以超时、解析失败或兼容适配器异常作为继续执行的理由。
+
+## 7. 测试与验收
+
+### 7.1 工作区与命令
+
+- 工作区 A 的 Chat、Goal、Command 和产物绝不写入工作区 B 或仓库根目录。
+- 多标签页切换不会改变服务端请求的 workspace 目标。
+- Chat“暂停/继续/取消”、页面按钮和 CLI 对同一操作产生一致 Command 与 Operation。
+- 暂停/恢复/取消只控制既有 operation_id，不创建竞争 Operation；取消仍在确认后执行。
+- 过期 Action、错误 revision 返回冲突；重复点击返回 duplicate，且只执行一次。
+- Action/Confirmation 的篡改、过期、重复消费和跨工作区重放全部拒绝并留下审计记录。
+
+### 7.2 执行与恢复
+
+- 一个工作区无法同时启动流水线、改稿、材料回填或文档编辑。
+- 服务重启后 lease 能安全过期、接管或恢复，不会双重运行。
+- 旧 Worker 持有过期 fencing token 时不能写入；SQLite WAL 在进程崩溃后可恢复到一致事务边界。
+- pause/cancel 与子进程完成同时发生时只产生一个合法终态，重复控制命令返回 no-op。
+- 非可选阶段、缺少 skip 理由或缺少必需产物时，即使已确认也必须拒绝 skip 并保持/进入 blocked；已有有效产物按 reused 验收，不能记为 skipped。
+- 文件存在但无成功 StageRun、hash 不符或已 stale 时不得复用。
+- 阶段进程崩溃留下的半成品不得成为 ready Artifact。
+
+### 7.3 材料
+
+- submitted/uploaded 状态不能关闭缺口或恢复 Goal。
+- 自动与人工验证结果持久化到同一材料聚合，并保留 actor 和证据。
+- 结构化待补占位符不得满足资格或必交材料门禁。
+- 材料应用只失效并重跑受影响分支，不默认全量重跑。
+
+### 7.4 质量与导出
+
+- GateEvaluator 异常、关键材料 deferred、开放 fatal/critical Finding 均阻止 final 构建和下载。
+- accepted major/minor 风险及符合管理员例外规则的 accepted critical 风险持续显示并进入风险登记。
+- fatal 与资格缺失无法通过 API、Chat、CLI 或前端按钮接受。
+- critical 仅在 Policy 允许、可信 admin 二次确认且不属于 fatal/资格缺口时可接受，其他 critical 保持阻断。
+- 任一输入、材料或正文 revision 变化都会使旧 GateReceipt 失效。
+- 与 Gate 无关的聊天 revision 变化不会单独使 GateReceipt 失效；门禁输入 fingerprint、规则版本或正式稿 manifest 任一变化必须阻断下载。
+
+### 7.5 迁移与架构约束
+
+- V1 工作区迁移可重复执行且结果一致，冲突和 orphan 不污染活动项目。
+- V1 兼容 API 与 V2 API 产生相同执行语义。
+- 架构测试禁止领域模块隐式调用 `project_root()`。
+- 非 ExecutionWorker 不得调用 mutation runner。
+- 前端不得直接调用旧执行端点或解释 Action label。
+- SSE 重复、乱序、断线和事件缺口均能通过 seq 去重或 Snapshot 恢复，不会回退 UI revision。
+- 迁移 dry-run、冲突 reconciliation、灰度切换和备份恢复演练通过；失败迁移不会修改 V1 真相源。
+- Python 测试、前端契约测试、生产构建和端到端场景全部通过后，才允许删除兼容适配器。
+
+## 8. 状态与变更记录
+
+### 8.1 实施状态
+
+| 范围 | 状态 | 完成标准 |
+|---|---|---|
+| V2 架构计划 | 已确认 | 目标边界、协议、迁移和验收规则形成本文档 |
+| 阶段 A | 进行中 | 唯一 Command 控制链与工作区隔离通过验收 |
+| 阶段 B | 未开始 | 领域状态迁移完成并删除旧执行旁路 |
+| V2 正式切换 | 未开始 | 全量回归、旧工作区迁移和发布验收通过 |
+
+状态只能按“未开始 → 进行中 → 已验收”推进。不得仅因代码合入就标记完成；代码已合入但尚未完成迁移、回归或发布验证时，只能标记为“进行中”。
+
+### 8.2 变更记录
+
+| 版本 | 日期 | 说明 |
+|---|---|---|
+| V2.0-plan | 2026-07-21 | 确认 Agent 控制面、唯一 Pipeline、SQLite 控制状态和两阶段迁移方案 |
+| V2.0-A1 | 2026-07-21 | 开始阶段 A：引入 WorkspaceContext、control.db、CommandGateway、revision/idempotency/lease/fencing、Action 确认、Snapshot/SSE；聊天与页面的启动、继续、暂停和取消已进入统一控制链。Repair、改稿、材料、正式导出、旧工作区导入与旧旁路删除仍未完成，不构成 V2 切换。 |

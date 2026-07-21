@@ -1,6 +1,6 @@
 # 标书写作 Agent 开发演进记录
 
-本文档保留项目从 MVP 到当前版本的演进脉络。它不再承担“当前流程说明”的职责，当前实际逻辑请优先查看 [current_logic_flow.md](/D:/my_project/bid_agent/docs/current_logic_flow.md:1)。
+本文档保留项目从 MVP 到当前版本的演进脉络。它不再承担“当前流程说明”的职责，V1 当前实际逻辑请优先查看 [current_logic_flow_v1.md](./current_logic_flow_v1.md)，版本演进请查看 [current_logic_flow.md](./current_logic_flow.md)。
 
 ## 1. 项目目标
 

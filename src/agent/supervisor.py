@@ -1075,13 +1075,14 @@ def plan_with_supervisor(
     llm_chat=None,
     review_context: list[dict[str, Any]] | None = None,
     *,
+    root: Path | None = None,
     user_confirmed: bool = False,
     confirmed_tools: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """If supervisor flag enabled, return a plan-like dict for session_orchestrator; else None."""
     if not agent_supervisor_enabled():
         return None
-    root = project_root()
+    root = root or project_root()
     use_llm = True
     try:
         result = run_supervisor_turn(

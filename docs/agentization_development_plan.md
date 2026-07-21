@@ -4,11 +4,12 @@
 > 日期：2026-07-16  
 > 路径：`docs/agentization_development_plan.md`  
 > 关联：
-> - [current_logic_flow.md](./current_logic_flow.md) — 当前实现真相源（已上线行为）
+> - [current_logic_flow_v1.md](./current_logic_flow_v1.md) — V1 当前实现真相源（已上线行为）
+> - [current_logic_flow_v2.md](./current_logic_flow_v2.md) — 后续目标架构与迁移计划（尚未实施）
 > - [bid_agent_development_plan.md](./bid_agent_development_plan.md) — 历史演进
 >
-> 本文职责：目标架构、分期实施、风险预案、测试验收、回滚与开放决策。  
-> `current_logic_flow.md` 只描述已上线行为；本文描述目标与计划。实现偏离时先记 ADR 再改版本号。
+> 本文职责：保留该 Agent 化阶段的目标、实施、风险、测试与开放决策记录。  
+> `current_logic_flow_v1.md` 描述 V1 已上线行为；后续架构演进以 `current_logic_flow_v2.md` 为准。实现偏离时先记 ADR 再改版本号。
 
 ---
 
@@ -308,7 +309,7 @@ GoalState+criteria；失效传播；覆盖率/合规驱动 rewrite；manual_revi
 
 ### Phase 4 双模硬化（1–2 周）
 
-supervisor graph；导出门禁 checklist；UI 区分模式；成本面板；更新 current_logic_flow.md。
+supervisor graph；导出门禁 checklist；UI 区分模式；成本面板；更新 current_logic_flow_v1.md。
 
 ### Phase 5 评测运营（持续）
 
@@ -322,7 +323,7 @@ supervisor graph；导出门禁 checklist；UI 区分模式；成本面板；更
 - [ ] flag 默认安全
 - [ ] 无密钥进仓库/decisions/日志
 - [ ] 本文变更记录已追加
-- [ ] 若改已上线行为：同步 current_logic_flow.md
+- [ ] 若改 V1 已上线行为：同步 current_logic_flow_v1.md
 - [ ] PR 写明回滚方式
 
 ### 7.2 依赖与并行
@@ -370,7 +371,7 @@ src/agent/
 | main.py | 小中 | CLI |
 | frontend | 中 | 轨迹/确认 |
 | tests | 大增 | 见第 10 章 |
-| docs/current_logic_flow.md | 同步 | Phase4 |
+| docs/current_logic_flow_v1.md | 同步 | Phase4 |
 
 不优先改：各业务 writer/parser/docx 细节。
 
@@ -576,7 +577,7 @@ pipeline_registry, session_orchestrator, subagent_*, pipeline_supervisor, graph/
 
 ### 18.2 文档约定
 
-current_logic_flow.md = 已上线行为；本文 = 目标计划。每 Phase 更新变更记录。
+current_logic_flow_v1.md = V1 已上线行为；本文 = 该阶段目标计划。每 Phase 更新变更记录。
 
 ### 18.3 变更记录
 

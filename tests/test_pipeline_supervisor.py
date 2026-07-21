@@ -118,6 +118,64 @@ class PipelineSupervisorTests(unittest.TestCase):
 
             self.assertEqual(calls, ["b"])
 
+    def test_single_command_stops_after_requested_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            completed: set[str] = set()
+            calls: list[str] = []
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                calls.append(command)
+                completed.add(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b", "c"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", side_effect=lambda r, stage: stage in completed),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        start_command="b",
+                        operation_id="op-1",
+                        single_command=True,
+                    )
+                )
+                payload = _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(calls, ["b"])
+            self.assertEqual(payload["operation_id"], "op-1")
+            self.assertEqual(payload["requested_action"], "run_stage")
+
+    def test_cancel_and_status_listener_preserve_operation_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            events: list[dict] = []
+            supervisor.set_status_listener(lambda event_root, payload: events.append(dict(payload)))
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                time.sleep(0.08)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", return_value=False),
+            ):
+                self.assertTrue(supervisor.start("run-1", root, runner, operation_id="op-cancel"))
+                time.sleep(0.02)
+                supervisor.cancel()
+                payload = _wait_for_status(supervisor, root, "cancelled")
+
+            self.assertEqual(payload["operation_id"], "op-cancel")
+            self.assertTrue(any(item.get("status") == "cancelling" for item in events))
+            self.assertTrue(any(item.get("status") == "cancelled" for item in events))
+
 
 if __name__ == "__main__":
     unittest.main()

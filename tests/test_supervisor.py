@@ -158,8 +158,29 @@ class SupervisorTests(unittest.TestCase):
                         self.assertTrue(plan.get("supervisor"))
                         self.assertEqual(plan.get("action"), "chat")
 
+    def test_plan_with_supervisor_uses_explicit_workspace_root(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch.dict(os.environ, {"AGENT_SUPERVISOR_ENABLED": "true"}):
+                with mock.patch("agent.supervisor.project_root") as fallback:
+                    with mock.patch("agent.supervisor.run_supervisor_turn") as mocked:
+                        mocked.return_value = {"reply": "ok", "actions": [], "steps": []}
+                        plan_with_supervisor("状态", [], {}, root=root)
+            fallback.assert_not_called()
+            self.assertEqual(mocked.call_args.kwargs["root"], root)
+
 
 class OrchestratorIntegrationTests(unittest.TestCase):
+
+    def test_orchestrator_forwards_explicit_workspace_root(self) -> None:
+        from session_orchestrator import plan
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch("agent.flags.agent_supervisor_enabled", return_value=True):
+                with mock.patch("agent.supervisor.plan_with_supervisor", return_value={"reply": "ok"}) as supervised:
+                    plan("状态", [], {}, root=root)
+            self.assertEqual(supervised.call_args.kwargs["root"], root)
 
     def test_orchestrator_uses_supervisor_when_flag_on(self) -> None:
         from session_orchestrator import plan

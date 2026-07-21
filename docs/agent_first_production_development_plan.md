@@ -5,6 +5,7 @@
 > 适用仓库：`bid_agent`  
 > 目标版本：Agent First Beta  
 > 依据：2026-07-20 项目进度检查与产品定位讨论  
+> 后续目标架构与迁移计划：[current_logic_flow_v2.md](./current_logic_flow_v2.md)；本文保留 Agent First Beta 阶段的实施记录。  
 >  
 > 进度摘要：  
 > - A0 并发统一配置 / LLM 信号量 / 429 降载  
@@ -679,4 +680,3 @@ GoalState=blocked_human
 8. Agent 能够自动完成目标或明确进入可恢复阻断；
 9. 正式 Word 无法绕过 fatal、材料和合规门禁；
 10. 用户无需理解内部流水线即可看懂当前目标、行动、阻断和结果。
-

@@ -6,6 +6,7 @@
 > 路径：`docs/supervisor_stable_beta_plan.md`  
 > 目标版本：Agent First Stable Beta  
 > 实施说明：PR-1~PR-10 与 `tests/test_agent_state_machine.py` 已合入开发树；状态机验收通过。  
+> 后续目标架构与迁移计划：[current_logic_flow_v2.md](./current_logic_flow_v2.md)；本文保留 Agent First Stable Beta 阶段的实施记录。  
 
 ## 一、开发目标
 

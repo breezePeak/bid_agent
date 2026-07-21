@@ -122,10 +122,65 @@ export function clearChatMessages() {
   return api.delete('/chat/messages')
 }
 
-export function orchestrateChat(message, { selectedCommand = '', action = null } = {}) {
-  const payload = { message, selected_command: selectedCommand }
+export function orchestrateChat(message, { runId = '', selectedCommand = '', action = null } = {}) {
+  const payload = { message, run_id: runId, selected_command: selectedCommand }
   if (action && typeof action === 'object') payload.action = action
-  return api.post('/chat/orchestrate', payload, { timeout: 120000 })
+  const path = runId
+    ? `/v2/workspaces/${encodeURIComponent(runId)}/chat/turn`
+    : '/chat/orchestrate'
+  return api.post(path, payload, { timeout: 120000 })
+}
+
+function newCommandId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID()
+  }
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+export function fetchWorkspaceSnapshot(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/snapshot`)
+}
+
+export async function submitWorkspaceCommand(runId, kind, payload = {}, options = {}) {
+  const snapshotResponse = await fetchWorkspaceSnapshot(runId)
+  const revision = Number(snapshotResponse?.data?.snapshot?.revision || 0)
+  const commandId = options.commandId || newCommandId()
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/commands`, {
+    command_id: commandId,
+    kind,
+    payload,
+    expected_revision: revision,
+    idempotency_key: options.idempotencyKey || commandId,
+    actor: { type: 'web', id: 'current-user' },
+  })
+}
+
+export async function startOrResumePipeline(runId, startCommand = '') {
+  const snapshotResponse = await fetchWorkspaceSnapshot(runId)
+  const snapshot = snapshotResponse?.data?.snapshot || {}
+  const operation = snapshot.operation && typeof snapshot.operation === 'object' ? snapshot.operation : null
+  const resume = operation && ['paused', 'blocked'].includes(String(operation.status || ''))
+  const kind = resume ? 'pipeline.resume' : 'pipeline.start'
+  const payload = { start_command: startCommand || '' }
+  if (resume) payload.operation_id = operation.operation_id
+  const commandId = newCommandId()
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/commands`, {
+    command_id: commandId,
+    kind,
+    payload,
+    expected_revision: Number(snapshot.revision || 0),
+    idempotency_key: commandId,
+    actor: { type: 'web', id: 'current-user' },
+  })
+}
+
+export function confirmWorkspaceAction(runId, actionId) {
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/actions/${encodeURIComponent(actionId)}/confirm`)
+}
+
+export function declineWorkspaceAction(runId, actionId) {
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/actions/${encodeURIComponent(actionId)}/decline`)
 }
 
 export function fetchCurrentRepairJob() {

@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+import uuid
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from control_plane import (  # noqa: E402
+    CommandEnvelope,
+    CommandGateway,
+    ControlPlaneError,
+    ControlStore,
+    WorkspaceContext,
+)
+
+
+def _envelope(
+    context: WorkspaceContext,
+    store: ControlStore,
+    kind: str,
+    *,
+    payload: dict | None = None,
+    key: str | None = None,
+) -> CommandEnvelope:
+    command_id = str(uuid.uuid4())
+    return CommandEnvelope.from_mapping(
+        {
+            "command_id": command_id,
+            "kind": kind,
+            "payload": payload or {},
+            "expected_revision": store.revision(),
+            "idempotency_key": key or command_id,
+            "actor": {"type": "test", "id": "tester"},
+        },
+        workspace_id=context.workspace_id,
+    )
+
+
+class ControlPlaneTests(unittest.TestCase):
+    def _workspace(self, base: Path, workspace_id: str) -> WorkspaceContext:
+        runs = base / "runs"
+        (runs / workspace_id).mkdir(parents=True)
+        return WorkspaceContext.resolve(runs, workspace_id)
+
+    def test_workspace_context_rejects_traversal_and_missing_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "safe").mkdir(parents=True)
+            self.assertEqual(WorkspaceContext.resolve(runs, "safe").root, (runs / "safe").resolve())
+            for invalid in ("", "..", "../safe", "safe/../other"):
+                with self.subTest(invalid=invalid), self.assertRaises(ControlPlaneError):
+                    WorkspaceContext.resolve(runs, invalid)
+            with self.assertRaises(ControlPlaneError) as missing:
+                WorkspaceContext.resolve(runs, "missing")
+            self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
+
+    def test_command_is_durable_idempotent_and_emits_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            calls: list[str] = []
+
+            def start(ctx, envelope, operation_id):
+                calls.append(operation_id)
+                return {"accepted": True, "operation_status": "running", "message": "started"}
+
+            gateway = CommandGateway(context, {"pipeline.start": start})
+            envelope = _envelope(context, gateway.store, "pipeline.start", key="same-request")
+            first = gateway.submit(envelope)
+            duplicate = gateway.submit(envelope)
+
+            self.assertEqual(first.status, "accepted")
+            self.assertEqual(duplicate.status, "duplicate")
+            self.assertEqual(first.operation_id, duplicate.operation_id)
+            self.assertEqual(len(calls), 1)
+            self.assertTrue((context.root / "workspace" / "control.db").exists())
+            snapshot = gateway.store.snapshot()
+            self.assertEqual(snapshot["operation"]["status"], "running")
+            self.assertEqual(len(snapshot["operations"]), 1)
+            self.assertEqual(len(gateway.store.events()), 2)
+
+    def test_revision_conflict_fails_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            called = False
+
+            def start(ctx, envelope, operation_id):
+                nonlocal called
+                called = True
+                return {"accepted": True, "operation_status": "running"}
+
+            gateway = CommandGateway(context, {"pipeline.start": start})
+            stale = CommandEnvelope.from_mapping(
+                {
+                    "kind": "pipeline.start",
+                    "payload": {},
+                    "expected_revision": 99,
+                    "idempotency_key": "stale",
+                },
+                workspace_id=context.workspace_id,
+            )
+            with self.assertRaises(ControlPlaneError) as error:
+                gateway.submit(stale)
+            self.assertEqual(error.exception.code, "REVISION_CONFLICT")
+            self.assertFalse(called)
+
+    def test_pause_reuses_existing_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+
+            def start(ctx, envelope, operation_id):
+                return {"accepted": True, "operation_status": "running", "message": "started"}
+
+            def pause(ctx, envelope, operation_id):
+                return {"accepted": True, "operation_status": "paused", "message": "paused"}
+
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": start, "pipeline.pause": pause},
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            paused = gateway.submit(_envelope(context, gateway.store, "pipeline.pause"))
+            snapshot = gateway.store.snapshot()
+
+            self.assertEqual(started.operation_id, paused.operation_id)
+            self.assertEqual(snapshot["operation"]["status"], "paused")
+            self.assertEqual(len(snapshot["operations"]), 1)
+            self.assertEqual(len(snapshot["commands"]), 2)
+
+    def test_cancel_confirmation_is_single_use_and_controls_same_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+
+            def start(ctx, envelope, operation_id):
+                return {"accepted": True, "operation_status": "running"}
+
+            def cancel(ctx, envelope, operation_id):
+                return {"accepted": True, "operation_status": "cancelled", "message": "cancelled"}
+
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": start, "pipeline.cancel": cancel},
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            cancel_envelope = _envelope(context, gateway.store, "pipeline.cancel")
+            action = gateway.propose(cancel_envelope, label="确认取消", risk="high")
+            cancelled = gateway.confirm(action["confirmation_id"])
+
+            self.assertEqual(cancelled.operation_id, started.operation_id)
+            self.assertEqual(gateway.store.snapshot()["operation"]["status"], "cancelled")
+            with self.assertRaises(ControlPlaneError) as replay:
+                gateway.confirm(action["confirmation_id"])
+            self.assertEqual(replay.exception.code, "ACTION_REPLAYED")
+
+    def test_workspaces_have_independent_databases_and_revisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            alpha = self._workspace(base, "alpha")
+            beta = self._workspace(base, "beta")
+            handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "running",
+            }
+            alpha_gateway = CommandGateway(alpha, {"pipeline.start": handler})
+            beta_store = ControlStore(beta)
+            alpha_gateway.submit(_envelope(alpha, alpha_gateway.store, "pipeline.start"))
+
+            self.assertGreater(alpha_gateway.store.revision(), 0)
+            self.assertEqual(beta_store.revision(), 0)
+            self.assertIsNone(beta_store.snapshot()["operation"])
+            self.assertNotEqual(alpha_gateway.store.path, beta_store.path)
+
+    def test_gate_rejection_keeps_operation_blocked_for_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+
+            def blocked(ctx, envelope, operation_id):
+                raise ControlPlaneError("GATE_BLOCKED", "quality gate blocked")
+
+            gateway = CommandGateway(context, {"pipeline.start": blocked})
+            receipt = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+
+            self.assertEqual(receipt.status, "rejected")
+            self.assertEqual(receipt.error["code"], "GATE_BLOCKED")
+            self.assertEqual(gateway.store.snapshot()["operation"]["status"], "blocked")
+
+    def test_resume_increments_fencing_token_and_rejects_stale_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "running",
+            }
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": handler, "pipeline.resume": handler},
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            gateway.store.sync_operation(started.operation_id or "", "paused", fencing_token=1)
+            resumed = gateway.submit(
+                _envelope(
+                    context,
+                    gateway.store,
+                    "pipeline.resume",
+                    payload={"operation_id": started.operation_id},
+                )
+            )
+            operation = gateway.store.operation(resumed.operation_id or "") or {}
+            self.assertEqual(operation["fencing_token"], 2)
+            with self.assertRaises(ControlPlaneError) as fenced:
+                gateway.store.sync_operation(
+                    resumed.operation_id or "",
+                    "running",
+                    message="stale worker",
+                    fencing_token=1,
+                )
+            self.assertEqual(fenced.exception.code, "LEASE_FENCED")
+
+
+if __name__ == "__main__":
+    unittest.main()
