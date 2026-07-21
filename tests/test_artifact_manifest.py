@@ -9,7 +9,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from artifact_manifest import record_stage_artifacts, stage_artifacts_reusable  # noqa: E402
+from artifact_manifest import (  # noqa: E402
+    record_document_edit_artifacts,
+    record_stage_artifacts,
+    stage_artifacts_reusable,
+)
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext  # noqa: E402
 
 
@@ -107,6 +111,41 @@ class ArtifactManifestTests(unittest.TestCase):
             self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
             (root / "inputs" / "tender.md").write_text("changed", encoding="utf-8")
             self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+
+    def test_document_edit_refreshes_final_manifests_and_stales_quality_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "workspace" / "chapters").mkdir(parents=True)
+            (root / "outputs").mkdir(parents=True)
+            (root / "inputs").mkdir(parents=True)
+            (root / "workspace" / "chapters" / "01.md").write_text("chapter", encoding="utf-8")
+            (root / "workspace" / "outline.json").write_text("{}", encoding="utf-8")
+            (root / "outputs" / "final.md").write_text("edited", encoding="utf-8")
+            (root / "outputs" / "final.docx").write_bytes(b"docx")
+            (root / "workspace" / "compliance_report.json").write_text("{}", encoding="utf-8")
+            (root / "workspace" / "format_check_report.json").write_text("{}", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            for key in ("workspace/compliance_report.json", "workspace/format_check_report.json"):
+                store.upsert_artifact_state(
+                    {
+                        "artifact_key": key,
+                        "path": key,
+                        "kind": "file",
+                        "status": "ready",
+                        "producer": "quality-test",
+                        "sha256": "old",
+                        "input_fingerprint": "old",
+                    }
+                )
+
+            record_document_edit_artifacts(context)
+
+            self.assertEqual(store.artifact_state("outputs/final.md")["disposition"], "manual_override")
+            self.assertEqual(store.artifact_state("outputs/final.docx")["status"], "ready")
+            self.assertEqual(store.artifact_state("workspace/compliance_report.json")["status"], "stale")
+            self.assertEqual(store.artifact_state("workspace/format_check_report.json")["status"], "stale")
 
 
 if __name__ == "__main__":

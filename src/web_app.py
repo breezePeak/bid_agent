@@ -5345,6 +5345,7 @@ _FORMAL_GATE_INPUTS = (
     "outputs/final.docx",
     "workspace/global_review.json",
     "workspace/compliance_report.json",
+    "workspace/format_check_report.json",
 )
 _FORMAL_GATE_TREES = (
     "inputs/tender",
@@ -5935,6 +5936,10 @@ def _handle_document_apply_edit(
         if backup and backup.is_file() and backup.is_relative_to(context.root.resolve()):
             path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
         raise ControlPlaneError("COMMAND_DISPATCH_FAILED", "文档编辑后的 Word 重建失败，已恢复 final.md。")
+
+    from artifact_manifest import record_document_edit_artifacts
+
+    record_document_edit_artifacts(context)
 
     _PENDING_LINE_EDITS.pop(context.root.resolve(), None)
     _PENDING_DOC_EDIT.pop(context.root.resolve(), None)

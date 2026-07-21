@@ -1537,7 +1537,11 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertEqual(proposed.status_code, 202)
                 self.assertEqual(final_md.read_text(encoding="utf-8"), "# 标题\n原内容\n")
 
-                with mock.patch.object(web_app, "_run_sync", return_value=0) as rebuild:
+                def rebuild_docx(command, run_id, run_root):
+                    (run_root / "outputs" / "final.docx").write_bytes(b"rebuilt-docx")
+                    return 0
+
+                with mock.patch.object(web_app, "_run_sync", side_effect=rebuild_docx) as rebuild:
                     receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
                         proposal["action"]["confirmation_id"]
                     )

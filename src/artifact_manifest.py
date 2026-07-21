@@ -145,3 +145,31 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
         if state.get("input_fingerprint") != fingerprint:
             return False
     return True
+
+
+def record_document_edit_artifacts(context: WorkspaceContext) -> None:
+    """Keep manual final.md edits authoritative while invalidating quality outputs."""
+    store = ControlStore(context)
+    store.mark_artifact_states_stale(
+        [
+            *downstream_artifact_keys("build-md"),
+            "workspace/compliance_report.json",
+            "workspace/format_check_report.json",
+        ],
+        reason="终稿 Markdown 已由 document.apply_edit 修改",
+        source_command="document.apply_edit",
+    )
+    final_md = describe_artifact(context.root, RunArtifact("outputs/final.md"))
+    if final_md["status"] != "ready":
+        raise ControlPlaneError("ARTIFACT_NOT_READY", "文档编辑后的 final.md 无效。", status_code=409)
+    final_md.update(
+        {
+            "producer": "build-md",
+            "stage_id": "build_markdown",
+            "input_fingerprint": stage_input_fingerprint(context.root, "build-md"),
+            "disposition": "manual_override",
+            "overridden_by": "document.apply_edit",
+        }
+    )
+    store.upsert_artifact_state(final_md)
+    record_stage_artifacts(context, "build-docx", disposition="produced")
