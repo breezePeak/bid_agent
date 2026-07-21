@@ -95,7 +95,7 @@ def record_stage_artifacts(
             )
         manifests.append(manifest)
     stored = store.upsert_artifact_states(manifests)
-    if disposition == "produced" and any(
+    if disposition != "reused" and any(
         not previous.get(item["artifact_key"])
         or previous[item["artifact_key"]].get("sha256") != item.get("sha256")
         or previous[item["artifact_key"]].get("input_fingerprint") != input_fingerprint
@@ -173,3 +173,15 @@ def record_document_edit_artifacts(context: WorkspaceContext) -> None:
     )
     store.upsert_artifact_state(final_md)
     record_stage_artifacts(context, "build-docx", disposition="produced")
+
+
+def record_external_chapter_mutation(
+    context: WorkspaceContext,
+    *,
+    disposition: str,
+) -> list[dict[str, Any]]:
+    """Bridge non-Pipeline chapter writers into the SQLite Artifact graph."""
+    spec = stage_spec_by_command("write-all")
+    if not all(describe_artifact(context.root, artifact)["status"] == "ready" for artifact in spec.produces):
+        return []
+    return record_stage_artifacts(context, "write-all", disposition=disposition)

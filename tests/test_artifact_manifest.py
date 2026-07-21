@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from artifact_manifest import (  # noqa: E402
     record_document_edit_artifacts,
+    record_external_chapter_mutation,
     record_stage_artifacts,
     stage_artifacts_reusable,
 )
@@ -146,6 +147,36 @@ class ArtifactManifestTests(unittest.TestCase):
             self.assertEqual(store.artifact_state("outputs/final.docx")["status"], "ready")
             self.assertEqual(store.artifact_state("workspace/compliance_report.json")["status"], "stale")
             self.assertEqual(store.artifact_state("workspace/format_check_report.json")["status"], "stale")
+
+    def test_external_chapter_mutation_refreshes_chapters_and_stales_downstream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "workspace" / "contexts").mkdir(parents=True)
+            (root / "workspace" / "chapters").mkdir(parents=True)
+            (root / "workspace" / "contexts" / "01_context.json").write_text("{}", encoding="utf-8")
+            (root / "workspace" / "chapters" / "01.md").write_text("new chapter", encoding="utf-8")
+            (root / "outputs").mkdir(parents=True)
+            (root / "outputs" / "final.md").write_text("old final", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.upsert_artifact_state(
+                {
+                    "artifact_key": "outputs/final.md",
+                    "path": "outputs/final.md",
+                    "kind": "file",
+                    "status": "ready",
+                    "producer": "build-md",
+                    "sha256": "old",
+                    "input_fingerprint": "old",
+                }
+            )
+
+            recorded = record_external_chapter_mutation(context, disposition="chapter_rewrite")
+
+            self.assertEqual(recorded[0]["disposition"], "chapter_rewrite")
+            self.assertEqual(store.artifact_state("workspace/chapters/*.md")["status"], "ready")
+            self.assertEqual(store.artifact_state("outputs/final.md")["status"], "stale")
 
 
 if __name__ == "__main__":
