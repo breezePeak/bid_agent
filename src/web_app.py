@@ -3056,77 +3056,64 @@ def api_agent_flags() -> JSONResponse:
 
 @app.post("/api/materials-checklist/verify")
 async def api_materials_verify(request: Request) -> JSONResponse:
-    """Run authenticity verification on an uploaded material (PR-A5)."""
-    root = _active_root()
+    """Compatibility adapter: route verification through the V2 gateway."""
     try:
         body = await request.json()
     except Exception:
         body = {}
-    item_id = str((body or {}).get("item_id") or "").strip()
-    uploaded_path = str((body or {}).get("uploaded_path") or "").strip()
-    note = str((body or {}).get("note") or "").strip()
-    if not item_id:
-        return JSONResponse({"ok": False, "message": "缺少 item_id"}, status_code=400)
     try:
-        from agent.material_verifier import verify_material
-        from materials_checklist import mark_material_uploaded
-
-        if uploaded_path:
-            # re-mark with verify path
-            result = mark_material_uploaded(
-                root,
-                item_id,
-                uploaded_path=uploaded_path,
-                note=note,
-                auto_verify=True,
-            )
-        else:
-            result = verify_material(root, item_id, uploaded_path=uploaded_path, note=note)
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "materials.verify",
+                "payload": body if isinstance(body, dict) else {},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-material-verify:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
+        )
+        receipt = gateway.submit(envelope)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message},
+            status_code=202 if receipt.status != "rejected" else 409,
+            headers={"Deprecation": "true", "Link": f'</api/v2/workspaces/{context.workspace_id}/commands>; rel="successor-version"'},
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/materials-checklist/confirm-verify")
 async def api_materials_confirm_verify(request: Request) -> JSONResponse:
-    """Human confirm/reject material verification (PR-A5)."""
-    root = _active_root()
+    """Compatibility adapter: create a persisted V2 confirmation proposal."""
     try:
         body = await request.json()
     except Exception:
         body = {}
-    item_id = str((body or {}).get("item_id") or "").strip()
-    accept = bool((body or {}).get("accept", True))
-    operator = str((body or {}).get("operator") or "operator").strip()
-    reason = str((body or {}).get("reason") or "").strip()
-    if not item_id:
-        return JSONResponse({"ok": False, "message": "缺少 item_id"}, status_code=400)
     try:
-        from agent.material_verifier import human_confirm_verification
-        from materials_checklist import update_item_response
-
-        result = human_confirm_verification(
-            root, item_id, operator=operator, accept=accept, reason=reason
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        payload = dict(body) if isinstance(body, dict) else {}
+        payload.pop("operator", None)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "materials.confirm_verification",
+                "payload": payload,
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-material-confirm:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
         )
-        if result.get("ok") and accept:
-            update_item_response(
-                root,
-                item_id,
-                response_status="ready",
-                reason=reason or f"人工确认验证通过 by {operator}",
-                rebuild=True,
-            )
-            try:
-                from agent.goal import load_goal, resume_goal_after_materials
-
-                goal = load_goal(root)
-                if goal and str(goal.get("status")) == "blocked_human":
-                    resume_goal_after_materials(root, note=f"material_human_verified:{item_id}")
-            except Exception:
-                pass
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        action = gateway.propose(envelope, label="确认材料人工核验结论", risk="high")
+        return JSONResponse(
+            {"ok": True, "status": "requires_confirmation", "action": action},
+            status_code=202,
+            headers={"Deprecation": "true", "Link": f'</api/v2/workspaces/{context.workspace_id}/commands>; rel="successor-version"'},
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.get("/api/issues")
@@ -3679,26 +3666,32 @@ async def api_materials_checklist_refill(request: Request) -> JSONResponse:
 
 @app.post("/api/materials-checklist/upload")
 async def api_materials_checklist_upload(request: Request) -> JSONResponse:
-    """Mark material uploaded / verified and build minimal recovery plan (PR-13)."""
-    root = _active_root()
+    """Compatibility adapter: create a persisted V2 upload proposal."""
     try:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
     try:
-        from materials_checklist import mark_material_uploaded
-
-        result = mark_material_uploaded(
-            root,
-            str(body.get("item_id") or ""),
-            uploaded_path=str(body.get("uploaded_path") or body.get("path") or ""),
-            note=str(body.get("note") or body.get("reason") or ""),
-            rebuild=bool(body.get("rebuild", True)),
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "materials.upload",
+                "payload": body,
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-material-upload:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
         )
-        code = 200 if result.get("ok") else 400
-        return JSONResponse(result, status_code=code)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        action = gateway.propose(envelope, label="确认登记并验证上传材料", risk="high")
+        return JSONResponse(
+            {"ok": True, "status": "requires_confirmation", "action": action},
+            status_code=202,
+            headers={"Deprecation": "true", "Link": f'</api/v2/workspaces/{context.workspace_id}/commands>; rel="successor-version"'},
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.get("/api/manual-review/summary")
@@ -5136,6 +5129,174 @@ def _protected_material(item: dict[str, Any]) -> bool:
     }
 
 
+def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
+    from materials_checklist import load_materials_checklist
+
+    value = str(item_id or "").strip()
+    if not value:
+        raise ControlPlaneError("COMMAND_INVALID", "缺少 item_id。", status_code=400)
+    checklist = load_materials_checklist(context.root)
+    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    item = next(
+        (
+            dict(row)
+            for row in items
+            if isinstance(row, dict) and str(row.get("item_id") or "").strip() == value
+        ),
+        None,
+    )
+    if item is None:
+        raise ControlPlaneError("COMMAND_INVALID", f"材料项不存在: {value}", status_code=404)
+    return item
+
+
+def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
+    value = str(raw_path or "").strip()
+    if not value:
+        raise ControlPlaneError("COMMAND_INVALID", "登记上传材料必须提供 uploaded_path。", status_code=400)
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = context.root / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(context.root.resolve()) or not resolved.is_file():
+        raise ControlPlaneError(
+            "COMMAND_INVALID",
+            "uploaded_path 必须指向当前工作区内已存在的文件。",
+            status_code=400,
+        )
+    return resolved
+
+
+def _resume_goal_for_verified_material(context: WorkspaceContext, item_id: str, note: str) -> None:
+    try:
+        from agent.goal import load_goal, resume_goal_after_materials
+
+        goal = load_goal(context.root)
+        if goal and str(goal.get("status")) == "blocked_human":
+            resume_goal_after_materials(context.root, note=note, item_ids=[item_id])
+    except Exception:
+        # Goal compatibility state is not authoritative for this material command.
+        pass
+
+
+def _handle_materials_upload(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from materials_checklist import mark_material_uploaded
+
+    item_id = str(envelope.payload.get("item_id") or "").strip()
+    _material_item(context, item_id)
+    uploaded_path = _workspace_material_path(
+        context,
+        envelope.payload.get("uploaded_path") or envelope.payload.get("path"),
+    )
+    result = mark_material_uploaded(
+        context.root,
+        item_id,
+        uploaded_path=str(uploaded_path),
+        note=str(envelope.payload.get("note") or envelope.payload.get("reason") or "").strip(),
+        rebuild=True,
+        auto_verify=True,
+    )
+    if not result.get("ok"):
+        raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "上传材料验证失败。"))
+    lifecycle = str(result.get("lifecycle_status") or "uploaded")
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": str(result.get("message") or f"材料 {item_id} 已登记，状态={lifecycle}。"),
+    }
+
+
+def _handle_materials_verify(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.material_verifier import verify_material
+    from materials_checklist import update_item_response
+
+    item_id = str(envelope.payload.get("item_id") or "").strip()
+    _material_item(context, item_id)
+    raw_path = envelope.payload.get("uploaded_path") or envelope.payload.get("path")
+    uploaded_path = str(_workspace_material_path(context, raw_path)) if raw_path else ""
+    result = verify_material(
+        context.root,
+        item_id,
+        uploaded_path=uploaded_path,
+        note=str(envelope.payload.get("note") or "").strip(),
+    )
+    if not result.get("ok"):
+        raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "材料验证失败。"))
+    lifecycle = str(result.get("lifecycle_status") or "uploaded").strip().lower()
+    if lifecycle not in {"uploaded", "verified", "rejected"}:
+        raise ControlPlaneError("STATE_UNAVAILABLE", "材料验证返回了未知生命周期，已拒绝更新。", status_code=503)
+    update = update_item_response(
+        context.root,
+        item_id,
+        response_status=lifecycle,
+        reason=str(result.get("message") or "材料自动验证"),
+        rebuild=True,
+    )
+    if not update.get("ok"):
+        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "验证状态保存失败。"))
+    if lifecycle == "verified":
+        _resume_goal_for_verified_material(context, item_id, f"material_verified:{item_id}")
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": str(result.get("message") or f"材料 {item_id} 验证完成。"),
+    }
+
+
+def _handle_materials_confirm_verification(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.material_verifier import human_confirm_verification
+    from materials_checklist import update_item_response
+
+    item_id = str(envelope.payload.get("item_id") or "").strip()
+    _material_item(context, item_id)
+    accept = envelope.payload.get("accept", True)
+    if not isinstance(accept, bool):
+        raise ControlPlaneError("COMMAND_INVALID", "accept 必须是布尔值。", status_code=400)
+    reason = str(envelope.payload.get("reason") or "").strip()
+    if not accept and len(reason) < 4:
+        raise ControlPlaneError("COMMAND_INVALID", "拒绝材料核验必须填写原因。", status_code=400)
+    actor = envelope.actor if isinstance(envelope.actor, dict) else {}
+    operator = str(actor.get("id") or actor.get("type") or "unknown-actor").strip()[:80]
+    result = human_confirm_verification(
+        context.root,
+        item_id,
+        operator=operator,
+        accept=accept,
+        reason=reason,
+    )
+    if not result.get("ok"):
+        raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "材料核验记录不存在。"))
+    lifecycle = "verified" if accept else "rejected"
+    update = update_item_response(
+        context.root,
+        item_id,
+        response_status=lifecycle,
+        reason=reason or f"人工确认验证通过 by {operator}",
+        rebuild=True,
+    )
+    if not update.get("ok"):
+        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "核验结论保存失败。"))
+    if accept:
+        _resume_goal_for_verified_material(context, item_id, f"material_human_verified:{item_id}")
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"材料 {item_id} 已人工{'确认通过' if accept else '拒绝'}。",
+    }
+
+
 def _handle_materials_update(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -5310,7 +5471,10 @@ def _handle_materials_refill(
     if raw_ids is not None and not isinstance(raw_ids, list):
         raise ControlPlaneError("COMMAND_INVALID", "chapter_ids 必须是数组。", status_code=400)
     chapter_ids = [str(item).strip() for item in raw_ids or [] if str(item).strip()] or None
-    max_chapters = max(1, min(int(envelope.payload.get("max_chapters") or 20), 100))
+    try:
+        max_chapters = max(1, min(int(envelope.payload.get("max_chapters") or 20), 100))
+    except (TypeError, ValueError) as exc:
+        raise ControlPlaneError("COMMAND_INVALID", "max_chapters 必须是整数。", status_code=400) from exc
     operation = ControlStore(context).operation(operation_id) or {}
     result = _trigger_material_refill(
         context,
@@ -5338,6 +5502,9 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "pipeline.skip_stage": _handle_pipeline_skip,
             "repair.start": _handle_repair_start,
             "rewrite.chapters": _handle_rewrite_chapters,
+            "materials.upload": _handle_materials_upload,
+            "materials.verify": _handle_materials_verify,
+            "materials.confirm_verification": _handle_materials_confirm_verification,
             "materials.update": _handle_materials_update,
             "materials.refill": _handle_materials_refill,
         },
@@ -5547,6 +5714,8 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "rewrite.chapters": "确认执行定向改稿",
                 "materials.update": "确认更新材料状态",
                 "materials.refill": "确认将已验证材料回填正文",
+                "materials.upload": "确认登记并验证上传材料",
+                "materials.confirm_verification": "确认材料人工核验结论",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")

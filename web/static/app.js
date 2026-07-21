@@ -1716,6 +1716,27 @@ async function resumeAgentGoal() {
   }
 }
 
+async function confirmV2MaterialAction(data, promptText) {
+  if (data?.status !== "requires_confirmation" || !data?.action) return data;
+  if (!window.confirm(promptText || data.action.label || "确认执行此操作？")) {
+    const workspaceId = encodeURIComponent(data.action.workspace_id || "");
+    const actionId = encodeURIComponent(data.action.action_id || data.action.confirmation_id || "");
+    if (workspaceId && actionId) {
+      await fetch(`/api/v2/workspaces/${workspaceId}/actions/${actionId}/decline`, { method: "POST" });
+    }
+    return { ok: false, cancelled: true, message: "已取消操作" };
+  }
+  const workspaceId = encodeURIComponent(data.action.workspace_id || "");
+  const actionId = encodeURIComponent(data.action.action_id || data.action.confirmation_id || "");
+  if (!workspaceId || !actionId) throw new Error("确认信息不完整");
+  const response = await fetch(`/api/v2/workspaces/${workspaceId}/actions/${actionId}/confirm`, {
+    method: "POST",
+  });
+  const confirmed = await response.json();
+  if (!confirmed.ok) throw new Error(confirmed.message || confirmed.error?.message || "执行失败");
+  return confirmed;
+}
+
 async function markMaterialUploaded(itemId) {
   if (!itemId) return;
   try {
@@ -1724,11 +1745,13 @@ async function markMaterialUploaded(itemId) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ item_id: itemId, note: "用户在工作台标记已上传" }),
     });
-    const data = await response.json();
+    let data = await response.json();
     if (!data.ok) {
       alert(data.message || "标记失败");
       return;
     }
+    data = await confirmV2MaterialAction(data, "确认登记并验证这份材料？");
+    if (data.cancelled) return;
     appendLog("[材料] " + (data.message || itemId));
     await loadAgentWorkbench(true);
   } catch (error) {
@@ -1743,7 +1766,10 @@ async function refillMaterials() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ replan_jobs: true, max_chapters: 10 }),
     });
-    const data = await response.json();
+    let data = await response.json();
+    if (!data.ok) throw new Error(data.message || "回填失败");
+    data = await confirmV2MaterialAction(data, "确认将已验证材料回填正文？");
+    if (data.cancelled) return;
     alert(data.message || (data.ok ? "回填完成" : "回填失败"));
     await loadAgentWorkbench(true);
     setTimeout(loadStatus, 500);

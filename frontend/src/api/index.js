@@ -281,3 +281,15 @@ export function rebuildMaterialsChecklist() {
 export function refillMaterialsChecklist(runId, payload = {}) {
   return submitWorkspaceCommand(runId, 'materials.refill', payload)
 }
+
+export function registerMaterialUpload(runId, payload) {
+  return submitWorkspaceCommand(runId, 'materials.upload', payload)
+}
+
+export function verifyMaterial(runId, payload) {
+  return submitWorkspaceCommand(runId, 'materials.verify', payload)
+}
+
+export function confirmMaterialVerification(runId, payload) {
+  return submitWorkspaceCommand(runId, 'materials.confirm_verification', payload)
+}

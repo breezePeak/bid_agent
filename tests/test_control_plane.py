@@ -232,11 +232,18 @@ class ControlPlaneTests(unittest.TestCase):
             }
             gateway = CommandGateway(
                 context,
-                {"materials.update": handler, "materials.refill": handler},
+                {
+                    "materials.update": handler,
+                    "materials.refill": handler,
+                    "materials.upload": handler,
+                    "materials.confirm_verification": handler,
+                },
             )
             for kind, payload in (
                 ("materials.update", {"item_id": "m1", "response_status": "deferred"}),
                 ("materials.refill", {}),
+                ("materials.upload", {"item_id": "m1", "uploaded_path": "workspace/m1.pdf"}),
+                ("materials.confirm_verification", {"item_id": "m1", "accept": True}),
             ):
                 envelope = _envelope(context, gateway.store, kind, payload=payload)
                 with self.assertRaises(ControlPlaneError) as unconfirmed:

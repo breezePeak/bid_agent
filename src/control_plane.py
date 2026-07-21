@@ -176,6 +176,8 @@ class ControlStore:
         "rewrite.chapters",
         "materials.update",
         "materials.refill",
+        "materials.upload",
+        "materials.confirm_verification",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -388,6 +390,8 @@ class ControlStore:
                         "rewrite.chapters",
                         "materials.update",
                         "materials.refill",
+                        "materials.upload",
+                        "materials.confirm_verification",
                     }
                     and active is not None
                     and str(active["status"]) == "blocked"

@@ -588,6 +588,119 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(payload["action"]["type"], "confirm_v2_command")
             update.assert_not_called()
 
+    def test_material_upload_requires_confirmation_and_workspace_local_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "mat-upload", "response_status": "deferred"}]}),
+                encoding="utf-8",
+            )
+            outside = Path(tmp) / "outside.txt"
+            outside.write_text("not workspace owned", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = _body(
+                    asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "materials.upload",
+                                    "payload": {"item_id": "mat-upload", "uploaded_path": str(outside)},
+                                    "expected_revision": 0,
+                                    "idempotency_key": "upload-outside",
+                                }
+                            ),
+                        )
+                    )
+                )
+                with mock.patch("materials_checklist.mark_material_uploaded") as upload:
+                    rejected = _body(
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                    )
+            self.assertEqual(proposed["receipt"]["status"], "requires_confirmation")
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["receipt"]["error"]["code"], "COMMAND_INVALID")
+            upload.assert_not_called()
+
+    def test_material_human_verification_uses_command_actor_not_payload_operator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "mat-review", "response_status": "deferred"}]}),
+                encoding="utf-8",
+            )
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = _body(
+                    asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "materials.confirm_verification",
+                                    "payload": {
+                                        "item_id": "mat-review",
+                                        "accept": True,
+                                        "operator": "spoofed-operator",
+                                    },
+                                    "actor": {"type": "user", "id": "reviewer-7"},
+                                    "expected_revision": 0,
+                                    "idempotency_key": "confirm-material",
+                                }
+                            ),
+                        )
+                    )
+                )
+                verifier_result = {
+                    "ok": True,
+                    "item_id": "mat-review",
+                    "lifecycle_status": "verified",
+                }
+                with mock.patch(
+                    "agent.material_verifier.human_confirm_verification",
+                    return_value=verifier_result,
+                ) as verify:
+                    with mock.patch(
+                        "materials_checklist.update_item_response",
+                        return_value={"ok": True, "message": "updated"},
+                    ):
+                        accepted = _body(
+                            web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                        )
+            self.assertTrue(accepted["ok"])
+            self.assertEqual(verify.call_args.kwargs["operator"], "reviewer-7")
+
+    def test_legacy_material_upload_only_creates_v2_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("materials_checklist.mark_material_uploaded") as upload:
+                    response = asyncio.run(
+                        web_app.api_materials_checklist_upload(
+                            _Request({"item_id": "legacy-item", "uploaded_path": "workspace/item.pdf"})
+                        )
+                    )
+            payload = _body(response)
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.headers.get("deprecation"), "true")
+            self.assertEqual(payload["status"], "requires_confirmation")
+            upload.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
