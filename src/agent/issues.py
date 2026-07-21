@@ -116,6 +116,13 @@ def save_open_issues(root: Path | None, issues: list[dict[str, Any]]) -> Path:
     root = (root or project_root()).resolve()
     normalized = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
     _issue_control_store(root).replace_issue_states(normalized)
+    return write_open_issues_projection(root, normalized)
+
+
+def write_open_issues_projection(root: Path, issues: list[dict[str, Any]]) -> Path:
+    """Write the one-version V1 compatibility projection without changing SQLite."""
+    root = root.resolve()
+    normalized = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
     path = open_issues_path(root)
     payload = {
         "updated_at": _now(),

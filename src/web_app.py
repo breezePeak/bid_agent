@@ -5332,10 +5332,14 @@ def _request_actor(request: Request, *, source: str) -> dict[str, str]:
     if isinstance(principal, dict):
         principal_id = str(principal.get("id") or "").strip()
         if principal_id:
-            return {
+            actor = {
                 "type": str(principal.get("type") or source).strip() or source,
                 "id": principal_id[:128],
             }
+            principal_role = str(principal.get("role") or "").strip().lower()[:32]
+            if principal_role:
+                actor["role"] = principal_role
+            return actor
     return {"type": source, "id": "anonymous"}
 
 
@@ -5838,7 +5842,13 @@ def _handle_accept_issue_risk(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from agent.issues import accept_issue_risk
+    from agent.issues import (
+        accept_risk_enabled,
+        append_issue_log,
+        classify_issue_risk,
+        write_open_issues_projection,
+        write_risk_register,
+    )
 
     issue_id = str(envelope.payload.get("issue_id") or "").strip()
     reason = str(envelope.payload.get("reason") or "").strip()
@@ -5846,31 +5856,85 @@ def _handle_accept_issue_risk(
         raise ControlPlaneError("COMMAND_INVALID", "缺少 issue_id。", status_code=400)
     if len("".join(reason.split())) < 8:
         raise ControlPlaneError("COMMAND_INVALID", "接受风险原因至少需要 8 个有效字符。", status_code=400)
+    if not accept_risk_enabled():
+        raise ControlPlaneError("POLICY_DENIED", "未开启接受风险功能。")
     actor = envelope.actor if isinstance(envelope.actor, dict) else {}
     actor_id = str(actor.get("id") or "anonymous").strip()[:128]
-    result = accept_issue_risk(
-        context.root,
-        issue_id,
-        reason=reason,
-        actor=actor_id,
-        # Role authorization is fail-closed until server authentication exposes
-        # an administrator principal. Client flags are deliberately ignored.
-        is_admin=False,
-        confirm_critical=False,
+    actor_role = str(actor.get("role") or "user").strip().lower()
+    store = _ensure_v2_issue_import(context)
+    issues = store.issue_states()
+    found = next((dict(item) for item in issues if str(item.get("id") or "") == issue_id), None)
+    if found is None:
+        raise ControlPlaneError("ISSUE_NOT_FOUND", f"未找到问题: {issue_id}", status_code=404)
+    risk_class = classify_issue_risk(found)
+    if risk_class == "fatal":
+        raise ControlPlaneError(
+            "POLICY_DENIED",
+            "fatal 废标项禁止通过接受风险关闭。",
+            details={"policy_code": "fatal_forbidden"},
+        )
+    if risk_class == "qualification":
+        raise ControlPlaneError(
+            "POLICY_DENIED",
+            "资格材料缺失不可直接接受风险，请补料或标记 deferred。",
+            details={"policy_code": "qualification_deferred_only"},
+        )
+    if risk_class == "critical" and actor_role != "admin":
+        raise ControlPlaneError(
+            "POLICY_DENIED",
+            "critical 合规冲突仅管理员可接受风险。",
+            details={"policy_code": "admin_required"},
+        )
+    if str(found.get("severity") or "") not in {"block", "warn"}:
+        raise ControlPlaneError("GATE_BLOCKED", "仅 block/warn 问题支持接受风险。")
+
+    accepted_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    evidence = dict(found.get("evidence") or {})
+    evidence.setdefault(
+        "pre_accept_snapshot",
+        {
+            "status": found.get("status"),
+            "severity": found.get("severity"),
+            "detail": str(found.get("detail") or "")[:500],
+        },
     )
-    if not result.get("ok"):
-        code = str(result.get("code") or "")
-        error_code = "POLICY_DENIED" if code in {
-            "fatal_forbidden",
-            "qualification_deferred_only",
-            "admin_required",
-            "confirm_critical_required",
-        } else "GATE_BLOCKED"
-        raise ControlPlaneError(error_code, str(result.get("message") or "风险接受被拒绝。"), details={"policy_code": code})
+    found.update(
+        {
+            "status": "accepted",
+            "updated_at": accepted_at,
+            "accepted_at": accepted_at,
+            "accepted_by": actor_id,
+            "accept_reason": reason[:500],
+            "evidence": evidence,
+            "risk_class": risk_class,
+        }
+    )
+    decision = {
+        "risk_class": risk_class,
+        "reason": reason[:500],
+        "accepted_at": accepted_at,
+        "evidence": evidence,
+        "confirmation_id": envelope.confirmation_id,
+    }
+    store.update_issue_state_with_policy(
+        found,
+        decision_type="accept_risk",
+        decision=decision,
+        actor={"type": str(actor.get("type") or "authenticated_user"), "id": actor_id, "role": actor_role},
+        source="v2_command",
+    )
+    updated_issues = [found if str(item.get("id") or "") == issue_id else item for item in issues]
+    projection_warning = ""
+    try:
+        append_issue_log(context.root, found)
+        write_open_issues_projection(context.root, updated_issues)
+        write_risk_register(context.root)
+    except Exception as exc:
+        projection_warning = f"；V1 兼容投影刷新失败: {exc}"
     return {
         "accepted": True,
         "operation_status": "succeeded",
-        "message": str(result.get("message") or "风险接受已记录。"),
+        "message": f"风险接受已记录。{projection_warning}",
     }
 
 

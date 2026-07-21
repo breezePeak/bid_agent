@@ -1310,6 +1310,116 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(rejected["ok"])
             self.assertEqual(rejected["receipt"]["error"]["code"], "POLICY_DENIED")
 
+    def test_authenticated_admin_accepts_authoritative_critical_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            issues_dir = root / "workspace" / "issues"
+            issues_dir.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            authoritative = {
+                "id": "critical-admin",
+                "code": "CRITICAL_CONFLICT",
+                "title": "critical conflict",
+                "detail": "authoritative sqlite detail",
+                "severity": "block",
+                "status": "open",
+                "evidence": {"source": "quality-gate"},
+            }
+            ControlStore(context).replace_issue_states([authoritative], source="test")
+            # A conflicting V1 projection must not lower the authoritative risk class.
+            (issues_dir / "open.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            **authoritative,
+                            "code": "LOW_RISK",
+                            "severity": "warn",
+                            "risk_class": "minor",
+                            "detail": "tampered projection",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            principal = {"type": "user", "id": "admin-1", "role": "admin"}
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.dict("os.environ", {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
+                    proposed = _body(
+                        asyncio.run(
+                            web_app.api_v2_submit_command(
+                                "alpha",
+                                _Request(
+                                    {
+                                        "kind": "issues.accept_risk",
+                                        "payload": {
+                                            "issue_id": "critical-admin",
+                                            "reason": "管理员完成专项复核并记录充分接受理由",
+                                            "is_admin": False,
+                                            "confirm_critical": False,
+                                        },
+                                        "expected_revision": ControlStore(context).revision(),
+                                        "idempotency_key": "critical-admin-risk",
+                                    },
+                                    principal=principal,
+                                ),
+                            )
+                        )
+                    )
+                    accepted = _body(
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                    )
+            self.assertTrue(accepted["ok"])
+            state = ControlStore(context).issue_states()[0]
+            self.assertEqual(state["status"], "accepted")
+            self.assertEqual(state["risk_class"], "critical")
+            self.assertEqual(state["detail"], "authoritative sqlite detail")
+            decisions = ControlStore(context).policy_decisions(issue_id="critical-admin")
+            self.assertEqual(len(decisions), 1)
+            self.assertEqual(decisions[0]["actor"]["id"], "admin-1")
+            self.assertEqual(decisions[0]["actor"]["role"], "admin")
+            self.assertTrue(decisions[0]["decision"]["confirmation_id"])
+
+    def test_admin_still_cannot_accept_fatal_or_qualification_risk(self) -> None:
+        for issue_id, code in (("fatal-1", "FATAL"), ("qualification-1", "QUALIFICATION_MISSING")):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as tmp:
+                runs = Path(tmp) / "runs"
+                root = runs / "alpha"
+                root.mkdir(parents=True)
+                context = WorkspaceContext.resolve(runs, "alpha")
+                ControlStore(context).replace_issue_states(
+                    [{"id": issue_id, "code": code, "severity": "block", "status": "open"}],
+                    source="test",
+                )
+                with mock.patch.object(web_app, "RUNS_DIR", runs):
+                    with mock.patch.dict("os.environ", {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
+                        proposed = _body(
+                            asyncio.run(
+                                web_app.api_v2_submit_command(
+                                    "alpha",
+                                    _Request(
+                                        {
+                                            "kind": "issues.accept_risk",
+                                            "payload": {
+                                                "issue_id": issue_id,
+                                                "reason": "管理员复核后仍尝试接受该项风险",
+                                            },
+                                            "expected_revision": ControlStore(context).revision(),
+                                            "idempotency_key": f"deny-{issue_id}",
+                                        },
+                                        principal={"type": "user", "id": "admin", "role": "admin"},
+                                    ),
+                                )
+                            )
+                        )
+                        rejected = _body(
+                            web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                        )
+                self.assertFalse(rejected["ok"])
+                self.assertEqual(rejected["receipt"]["error"]["code"], "POLICY_DENIED")
+                self.assertEqual(ControlStore(context).issue_states()[0]["status"], "open")
+                self.assertEqual(ControlStore(context).policy_decisions(issue_id=issue_id), [])
+
     def test_quality_revalidation_runs_through_explicit_workspace_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

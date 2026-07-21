@@ -548,3 +548,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B62 | 2026-07-21 | `workspace.set_profile` 在项目类型实际变化后将当前 SQLite Artifact manifest 全部标记 stale；项目类型影响提示词、结构、篇幅和生成策略，后续 Pipeline 必须按新配置重建，不能继续复用旧项目类型下仅因文件存在而显示 ready 的产物。相同类型的幂等设置不触发失效。 |
 | V2.0-B63 | 2026-07-21 | V2 人工复核列表与摘要改为以 SQLite `manual_review` PolicyDecision 覆盖兼容文件结论；同一 category/item 的最新不可变决定控制 pending/closed 展示，响应标注 `control.db` 或 `v1_projection` 来源。V2 摘要读取不再调用会写 `summary.json` 的 V1 聚合函数，消除查询时修改状态的副作用。 |
 | V2.0-B64 | 2026-07-21 | 人工复核的执行期消费者（章节上下文、评分点分配、全文复核过滤和清单生成）在 control.db 存在时也以最新 SQLite PolicyDecision 覆盖 V1 override 文件；兼容投影被后续篡改为 pending/open 不能逆转已审计决定。无 control.db 的 V1 工作区继续沿用旧文件语义。 |
+| V2.0-B65 | 2026-07-21 | V2 风险接受改为直接读取 SQLite 权威 Issue，并在同一事务内更新 Issue 与追加 PolicyDecision；critical 只接受服务端认证的 admin 角色和已消费的持久化 Action 确认，客户端 admin/confirm 标志继续无效，fatal 与资格材料风险始终 fail-closed。V1 open.json 仅在权威提交后作为兼容投影刷新。 |

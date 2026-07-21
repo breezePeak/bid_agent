@@ -894,6 +894,84 @@ class ControlStore:
                 connection.rollback()
                 raise
 
+    def update_issue_state_with_policy(
+        self,
+        issue: dict[str, Any],
+        *,
+        decision_type: str,
+        decision: dict[str, Any],
+        actor: dict[str, Any],
+        source: str = "v2_command",
+    ) -> dict[str, Any]:
+        """Atomically update one authoritative Issue and append its PolicyDecision."""
+        item = dict(issue) if isinstance(issue, dict) else {}
+        issue_id = str(item.get("id") or "").strip()
+        if not issue_id:
+            raise ControlPlaneError("COMMAND_INVALID", "Issue 缺少 id。", status_code=400)
+        decision_id = str(uuid.uuid4())
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT created_at FROM issue_states WHERE issue_id = ?",
+                    (issue_id,),
+                ).fetchone()
+                if not existing:
+                    raise ControlPlaneError("ISSUE_NOT_FOUND", f"未找到问题: {issue_id}", status_code=404)
+                connection.execute(
+                    """
+                    UPDATE issue_states
+                    SET status = ?, severity = ?, issue_json = ?, source = ?, updated_at = ?
+                    WHERE issue_id = ?
+                    """,
+                    (
+                        str(item.get("status") or "open"),
+                        str(item.get("severity") or "warn"),
+                        _json(item),
+                        source,
+                        str(item.get("updated_at") or now),
+                        issue_id,
+                    ),
+                )
+                connection.execute(
+                    """
+                    INSERT INTO policy_decisions(
+                        decision_id, issue_id, decision_type, decision_json, actor_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (decision_id, issue_id, decision_type, _json(decision), _json(actor), now),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "IssueStateChanged",
+                    "Issue",
+                    issue_id,
+                    {"status": str(item.get("status") or "open"), "source": source},
+                )
+                self._event(
+                    connection,
+                    revision,
+                    "PolicyDecisionRecorded",
+                    "PolicyDecision",
+                    decision_id,
+                    {"issue_id": issue_id, "decision_type": decision_type},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "decision_id": decision_id,
+            "issue_id": issue_id,
+            "decision_type": decision_type,
+            "decision": dict(decision),
+            "actor": dict(actor),
+            "created_at": now,
+        }
+
     def record_policy_decision(
         self,
         *,

@@ -530,6 +530,41 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual([item["decision_id"] for item in decisions], [first["decision_id"], second["decision_id"]])
             self.assertEqual(decisions[0]["actor"]["id"], "reviewer")
 
+    def test_issue_update_and_policy_decision_commit_together(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            issue = {
+                "id": "iss-atomic",
+                "status": "open",
+                "severity": "block",
+                "code": "CRITICAL_CONFLICT",
+            }
+            store.replace_issue_states([issue], source="test")
+            accepted = {**issue, "status": "accepted", "accepted_by": "admin"}
+            result = store.update_issue_state_with_policy(
+                accepted,
+                decision_type="accept_risk",
+                decision={"reason": "approved after review"},
+                actor={"id": "admin", "role": "admin"},
+                source="test_command",
+            )
+            self.assertEqual(result["issue_id"], "iss-atomic")
+            self.assertEqual(store.issue_states()[0]["status"], "accepted")
+            self.assertEqual(store.issue_states()[0]["control_source"], "test_command")
+            decisions = store.policy_decisions(issue_id="iss-atomic")
+            self.assertEqual(len(decisions), 1)
+            self.assertEqual(decisions[0]["actor"]["role"], "admin")
+
+            with self.assertRaises(ControlPlaneError):
+                store.update_issue_state_with_policy(
+                    {**accepted, "id": "missing"},
+                    decision_type="accept_risk",
+                    decision={"reason": "must not persist"},
+                    actor={"id": "admin"},
+                )
+            self.assertEqual(store.policy_decisions(issue_id="missing"), [])
+
     def test_goal_v1_import_is_one_time_and_v2_update_is_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
