@@ -51,6 +51,7 @@ from agent.repair_jobs import (
     RUNNING_REPAIR_STATUSES,
     TERMINAL_REPAIR_STATUSES,
     claim_repair_job,
+    claim_repair_job_authorized,
     create_confirmation,
     decline_repair_job,
     load_repair_job,
@@ -2221,8 +2222,8 @@ def _trigger_repair_job(
 ) -> dict[str, Any]:
     """Claim exactly one repair slot and run the persisted job in the background.
 
-    If confirmation is stale (previous job failed/interrupted), optionally remint
-    a new confirmation and claim it so "继续修复" always works.
+    V2 calls use the confirmed control Operation as authorization. V1 calls use
+    the compatibility confirmation token and may remint it after interruption.
     """
     global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
     with _REPAIR_START_LOCK:
@@ -2233,10 +2234,14 @@ def _trigger_repair_job(
         pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
         if RUNNING or SUPERVISOR.is_running() or pipeline_busy:
             return {"ok": False, "busy": True, "job": current, "message": "当前已有任务正在运行，修复确认已保留，请稍后重试"}
-        claimed = claim_repair_job(root, confirmation_id)
+        claimed = (
+            claim_repair_job_authorized(root, control_operation_id)
+            if control_operation_id
+            else claim_repair_job(root, confirmation_id)
+        )
         if not claimed.get("ok"):
             # Stale terminal job or invalid confirmation → remint and claim once
-            if allow_remint and (
+            if not control_operation_id and allow_remint and (
                 claimed.get("stale")
                 or str(current.get("status") or "") in TERMINAL_REPAIR_STATUSES
                 or "失效" in str(claimed.get("message") or "")
@@ -2584,11 +2589,13 @@ def _trigger_rewrite_targets_inline(
             status=state_status,
             message=state_message,
         )
-        _sync_control(operation_status, state_message, operation_error)
+        # Publish the terminal Operation only after the in-process worker state
+        # is terminal too, so snapshot observers never see succeeded + RUNNING.
         RUNNING = False
         CURRENT_TASK = ""
         CURRENT_RUN_ID = ""
         CURRENT_RUN_ROOT = None
+        _sync_control(operation_status, state_message, operation_error)
 
     threading.Thread(target=_run_rewrite_sync, args=(chapter_ids, run_root), daemon=True).start()
     return {"ok": True, "message": f"定向改稿已启动: {chapter_ids}"}

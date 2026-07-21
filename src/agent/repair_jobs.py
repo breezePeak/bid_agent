@@ -203,6 +203,47 @@ def claim_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
         return {"ok": True, "duplicate": False, "job": job}
 
 
+def claim_repair_job_authorized(root: Path, operation_id: str) -> dict[str, Any]:
+    """Claim a job for the Operation created from a confirmed V2 Action.
+
+    This is intentionally separate from the V1 confirmation-token adapter: the
+    CommandGateway confirmation is the sole user authorization for V2 callers.
+    """
+    if not str(operation_id or "").strip():
+        return {"ok": False, "message": "缺少 V2 Operation 授权标识"}
+    with _job_lock(root):
+        job = load_repair_job(root)
+        if not job:
+            return {"ok": False, "message": "没有待执行的修复任务"}
+        status = str(job.get("status") or "")
+        if status in RUNNING_REPAIR_STATUSES:
+            return {"ok": True, "duplicate": True, "job": job}
+        if status in TERMINAL_REPAIR_STATUSES:
+            return {
+                "ok": False,
+                "stale": True,
+                "duplicate": False,
+                "job": job,
+                "message": "上一轮修复已结束或中断，请重新发起最小修复",
+            }
+        if status != "awaiting_confirmation":
+            return {"ok": False, "message": "修复任务状态不可执行"}
+        job.update(
+            {
+                "status": "running",
+                "phase": "analyzing",
+                "authorized_by_operation": str(operation_id),
+                "started_at": _now(),
+                "finished_at": "",
+                "failed_count": 0,
+                "progress_percent": 5,
+                "message": "正在分析阻断问题并合并根因动作",
+            }
+        )
+        job = _write_job(root, job)
+        return {"ok": True, "duplicate": False, "job": job}
+
+
 def update_repair_job(root: Path, job_id: str, **changes: Any) -> dict[str, Any]:
     with _job_lock(root):
         job = load_repair_job(root)
