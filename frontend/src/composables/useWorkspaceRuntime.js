@@ -21,6 +21,10 @@ const state = reactive({
 })
 
 let pollTimer = null
+let eventSource = null
+let eventRunId = ''
+let eventCursor = 0
+let eventRefreshTimer = null
 let pollInFlight = false
 let refreshPending = false
 let subscribers = 0
@@ -74,6 +78,49 @@ function startPolling(ms = pollMs) {
   pollTimer = setInterval(() => refresh(), pollMs)
 }
 
+function scheduleEventRefresh() {
+  if (eventRefreshTimer) return
+  eventRefreshTimer = setTimeout(() => {
+    eventRefreshTimer = null
+    refresh()
+  }, 50)
+}
+
+function stopEventStream() {
+  if (eventSource) eventSource.close()
+  eventSource = null
+  eventRunId = ''
+  if (eventRefreshTimer) clearTimeout(eventRefreshTimer)
+  eventRefreshTimer = null
+}
+
+function startEventStream(runId) {
+  const id = String(runId || '').trim()
+  if (!id || typeof EventSource === 'undefined') return
+  if (eventSource && eventRunId === id) return
+  stopEventStream()
+  eventRunId = id
+  const path = `/api/v2/workspaces/${encodeURIComponent(id)}/events?after_seq=${eventCursor}`
+  eventSource = new EventSource(path)
+  eventSource.addEventListener('WorkspaceEvent', (event) => {
+    if (eventRunId !== state.runId) return
+    const seq = Number(event.lastEventId || 0)
+    if (seq > 0) {
+      if (eventCursor > 0 && seq > eventCursor + 1) {
+        eventCursor = 0
+      } else if (seq <= eventCursor) {
+        return
+      } else {
+        eventCursor = seq
+      }
+    }
+    scheduleEventRefresh()
+  })
+  eventSource.onerror = () => {
+    // Browser reconnect and the polling fallback both preserve availability.
+  }
+}
+
 function stopPolling() {
   if (pollTimer) {
     clearInterval(pollTimer)
@@ -88,6 +135,8 @@ function bindRun(runId) {
     state.status = null
     state.runtime = null
     state.error = ''
+    eventCursor = 0
+    if (subscribers > 0) startEventStream(id)
   }
 }
 
@@ -147,13 +196,17 @@ export function useWorkspaceRuntime(options = {}) {
   onMounted(() => {
     subscribers += 1
     bindRun(resolveRunId())
+    startEventStream(resolveRunId())
     if (auto && subscribers === 1) startPolling(intervalMs)
     else if (auto) refresh()
   })
 
   onBeforeUnmount(() => {
     subscribers = Math.max(0, subscribers - 1)
-    if (subscribers === 0) stopPolling()
+    if (subscribers === 0) {
+      stopPolling()
+      stopEventStream()
+    }
   })
 
   if (runIdRef && typeof runIdRef === 'object' && 'value' in runIdRef) {

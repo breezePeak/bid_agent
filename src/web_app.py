@@ -6949,6 +6949,16 @@ async def api_v2_workspace_events(
     try:
         context = _workspace_context(workspace_id)
         store = ControlStore(context)
+        header_cursor = str(request.headers.get("last-event-id") or "").strip()
+        if header_cursor:
+            try:
+                after_seq = max(after_seq, int(header_cursor))
+            except ValueError as exc:
+                raise ControlPlaneError(
+                    "COMMAND_INVALID",
+                    "Last-Event-ID 必须是非负整数。",
+                    status_code=400,
+                ) from exc
     except ControlPlaneError as exc:
         return _command_error_response(exc)
 
@@ -6970,7 +6980,7 @@ async def api_v2_workspace_events(
             for event in events:
                 cursor = int(event["seq"])
                 payload = json.dumps(event, ensure_ascii=False, default=str)
-                yield f"id: {cursor}\nevent: {event.get('kind', 'WorkspaceEvent')}\ndata: {payload}\n\n"
+                yield f"id: {cursor}\nevent: WorkspaceEvent\ndata: {payload}\n\n"
             if time.monotonic() - last_keepalive >= 15:
                 yield ": keepalive\n\n"
                 last_keepalive = time.monotonic()

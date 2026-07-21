@@ -35,6 +35,14 @@ class _Request:
         return self.body
 
 
+class _EventRequest:
+    def __init__(self, last_event_id: str = "") -> None:
+        self.headers = {"last-event-id": last_event_id} if last_event_id else {}
+
+    async def is_disconnected(self) -> bool:
+        return False
+
+
 def _body(response) -> dict:
     return json.loads(response.body.decode("utf-8"))
 
@@ -1617,6 +1625,32 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(snapshot["findings"]["issues_summary"]["block_count"], 1)
             self.assertFalse(snapshot["findings"]["issues_summary"]["can_proceed"])
             self.assertEqual(snapshot["findings"]["issues_summary"]["source"], "control.db")
+
+    def test_workspace_event_stream_uses_stable_type_and_last_event_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.ensure_material_states([])
+            store.upsert_goal_state({"goal_id": "goal-events", "status": "running"})
+
+            async def first_chunk() -> str:
+                with mock.patch.object(web_app, "RUNS_DIR", runs):
+                    response = await web_app.api_v2_workspace_events(
+                        "alpha",
+                        _EventRequest("1"),
+                        after_seq=0,
+                        limit=20,
+                    )
+                    chunk = await anext(response.body_iterator)
+                    await response.body_iterator.aclose()
+                    return chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+
+            chunk = asyncio.run(first_chunk())
+            self.assertIn("id: 2\n", chunk)
+            self.assertIn("event: WorkspaceEvent\n", chunk)
+            self.assertIn('"kind": "GoalStateChanged"', chunk)
 
 
 if __name__ == "__main__":
