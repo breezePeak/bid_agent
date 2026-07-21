@@ -1,3 +1,17 @@
+const csrfFetch = window.fetch.bind(window);
+window.fetch = (input, init = {}) => {
+  const method = String(init.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+  const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
+  if (url.origin === window.location.origin && !["GET", "HEAD", "OPTIONS"].includes(method)) {
+    const item = document.cookie.split(";").map((value) => value.trim()).find((value) => value.startsWith("bid_agent_csrf="));
+    const token = item ? decodeURIComponent(item.slice("bid_agent_csrf=".length)) : "";
+    const headers = new Headers(init.headers || (input instanceof Request ? input.headers : undefined));
+    if (token) headers.set("X-CSRF-Token", token);
+    init = { ...init, headers };
+  }
+  return csrfFetch(input, init);
+};
+
 const logBox = document.getElementById("log-box");
 const logBand = document.getElementById("log-band");
 const runningNotice = document.getElementById("running-notice");

@@ -1589,6 +1589,11 @@ class V2WebControlTests(unittest.TestCase):
                 token = cookie[web_app._AUTH_COOKIE].value
                 principal = web_app._session_principal(token)
                 self.assertEqual(principal["id"], "tester")
+                self.assertTrue(_body(accepted)["csrf_token"])
+                self.assertEqual(
+                    web_app._session_record(token)["csrf_token"],
+                    _body(accepted)["csrf_token"],
+                )
                 context = WorkspaceContext.resolve(runs, "alpha")
                 web_app._ensure_workspace_acl(context, principal, write=True)
                 self.assertEqual(ControlStore(context).workspace_acl()[0]["principal_id"], "tester")
@@ -1629,6 +1634,11 @@ class V2WebControlTests(unittest.TestCase):
                                 json={"username": "tester", "password": "secret-pass"},
                             )
                             self.assertEqual(login.status_code, 200)
+                            csrf_token = login.json()["csrf_token"]
+                            csrf_denied = await client.post("/api/select-run", json={"run_id": "alpha"})
+                            self.assertEqual(csrf_denied.status_code, 403)
+                            self.assertEqual(csrf_denied.json()["error"]["code"], "CSRF_REQUIRED")
+                            csrf_headers = {"X-CSRF-Token": csrf_token}
                             runs_response = await client.get("/api/runs")
                             self.assertEqual(runs_response.status_code, 200)
                             self.assertEqual(runs_response.headers["deprecation"], "true")
@@ -1637,9 +1647,13 @@ class V2WebControlTests(unittest.TestCase):
                             self.assertEqual(forbidden.status_code, 403)
                             self.assertNotIn("deprecation", forbidden.headers)
                             self.assertEqual(forbidden.json()["error"]["code"], "WORKSPACE_FORBIDDEN")
-                            select_forbidden = await client.post("/api/select-run", json={"run_id": "alpha"})
+                            select_forbidden = await client.post(
+                                "/api/select-run", json={"run_id": "alpha"}, headers=csrf_headers
+                            )
                             self.assertEqual(select_forbidden.status_code, 403)
-                            delete_forbidden = await client.post("/api/delete-run", json={"run_id": "alpha"})
+                            delete_forbidden = await client.post(
+                                "/api/delete-run", json={"run_id": "alpha"}, headers=csrf_headers
+                            )
                             self.assertEqual(delete_forbidden.status_code, 403)
                             ControlStore(context).grant_workspace_access("tester", role="editor")
                             query_allowed = await client.get(

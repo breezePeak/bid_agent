@@ -79,6 +79,7 @@ from utils import read_json
 app = FastAPI(title="标书 Agent 控制台", docs_url=None, redoc_url=None)
 
 _AUTH_COOKIE = "bid_agent_session"
+_CSRF_COOKIE = "bid_agent_csrf"
 _AUTH_SESSION_SECONDS = 12 * 60 * 60
 _AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
 _AUTH_LOCK = threading.Lock()
@@ -109,7 +110,7 @@ def _auth_credentials() -> tuple[str, str]:
     )
 
 
-def _session_principal(token: str) -> dict[str, Any] | None:
+def _session_record(token: str) -> dict[str, Any] | None:
     value = str(token or "").strip()
     if not value:
         return None
@@ -121,7 +122,12 @@ def _session_principal(token: str) -> dict[str, Any] | None:
         if float(session.get("expires_at") or 0) <= now:
             _AUTH_SESSIONS.pop(value, None)
             return None
-        return dict(session.get("principal") or {})
+        return dict(session)
+
+
+def _session_principal(token: str) -> dict[str, Any] | None:
+    session = _session_record(token)
+    return dict(session.get("principal") or {}) if session else None
 
 
 def _ensure_workspace_acl(context: WorkspaceContext, principal: dict[str, Any], *, write: bool) -> None:
@@ -140,12 +146,30 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
     path = request.url.path
     if not path.startswith("/api/") or path == "/api/auth/login":
         return await call_next(request)
-    principal = _session_principal(request.cookies.get(_AUTH_COOKIE, ""))
+    session = _session_record(request.cookies.get(_AUTH_COOKIE, ""))
+    principal = dict(session.get("principal") or {}) if session else None
     if not principal:
         return JSONResponse(
             {"ok": False, "error": {"code": "AUTH_REQUIRED", "message": "请先登录。"}, "message": "请先登录。"},
             status_code=401,
         )
+    if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        expected_csrf = str(session.get("csrf_token") or "")
+        header_csrf = str(request.headers.get("x-csrf-token") or "")
+        cookie_csrf = str(request.cookies.get(_CSRF_COOKIE, "") or "")
+        if not (
+            expected_csrf
+            and hmac.compare_digest(header_csrf, expected_csrf)
+            and hmac.compare_digest(cookie_csrf, expected_csrf)
+        ):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": {"code": "CSRF_REQUIRED", "message": "请求缺少有效的 CSRF 令牌。"},
+                    "message": "请求缺少有效的 CSRF 令牌。",
+                },
+                status_code=403,
+            )
     request.state.principal = principal
     try:
         workspace_id = ""
@@ -191,20 +215,32 @@ async def api_auth_login(request: Request) -> JSONResponse:
     if not (hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)):
         return JSONResponse({"ok": False, "message": "用户名或密码错误。"}, status_code=401)
     token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
     principal = {"type": "user", "id": username[:128], "role": "admin"}
     with _AUTH_LOCK:
         _AUTH_SESSIONS[token] = {
             "principal": principal,
+            "csrf_token": csrf_token,
             "expires_at": time.time() + _AUTH_SESSION_SECONDS,
         }
-    response = JSONResponse({"ok": True, "principal": principal})
+    response = JSONResponse({"ok": True, "principal": principal, "csrf_token": csrf_token})
+    secure_cookie = str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"}
     response.set_cookie(
         _AUTH_COOKIE,
         token,
         max_age=_AUTH_SESSION_SECONDS,
         httponly=True,
         samesite="strict",
-        secure=str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"},
+        secure=secure_cookie,
+        path="/",
+    )
+    response.set_cookie(
+        _CSRF_COOKIE,
+        csrf_token,
+        max_age=_AUTH_SESSION_SECONDS,
+        httponly=False,
+        samesite="strict",
+        secure=secure_cookie,
         path="/",
     )
     return response
@@ -217,6 +253,7 @@ def api_auth_logout(request: Request) -> JSONResponse:
         _AUTH_SESSIONS.pop(token, None)
     response = JSONResponse({"ok": True})
     response.delete_cookie(_AUTH_COOKIE, path="/")
+    response.delete_cookie(_CSRF_COOKIE, path="/")
     return response
 
 

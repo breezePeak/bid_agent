@@ -1,8 +1,18 @@
 import axios from 'axios'
+import { csrfToken } from '../csrf'
 
 const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
+})
+
+api.interceptors.request.use(config => {
+  const method = String(config.method || 'get').toUpperCase()
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+    const token = csrfToken()
+    if (token) config.headers.set('X-CSRF-Token', token)
+  }
+  return config
 })
 
 api.interceptors.response.use(
