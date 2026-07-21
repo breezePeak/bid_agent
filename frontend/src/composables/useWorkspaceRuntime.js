@@ -3,19 +3,20 @@
  *
  * All panels must read from here — do not independently poll
  * /agent/goal, /agent/activity, /repair-jobs/current for "truth".
- * Source: GET /api/status (embeds runtime + goal + activity + repair_job).
+ * Source: GET /api/v2/workspaces/:id/snapshot.
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { fetchStatus, fetchRuntimeStatus } from '../api'
+import { fetchWorkspaceSnapshot } from '../api'
+import { statusFromV2Snapshot } from './workspaceSnapshot'
 
 const state = reactive({
   runId: '',
   loading: false,
   error: '',
   updatedAt: 0,
-  /** full /api/status payload */
+  /** V2 snapshot adapted to the existing presentation view-model */
   status: null,
-  /** /api/runtime stores slice (also inside status.runtime) */
+  /** presentation-only runtime diagnostics from the V2 snapshot */
   runtime: null,
 })
 
@@ -32,98 +33,17 @@ function applyStatusPayload(data) {
   state.error = ''
 }
 
-function applyRuntimePayload(data) {
-  if (!data || typeof data !== 'object' || data.ok === false) return
-  state.runtime = data
-  // mirror into status shell so consumers can use either path
-  if (state.status && typeof state.status === 'object') {
-    state.status = {
-      ...state.status,
-      runtime: data,
-      product_mode: data.product_mode,
-      product_mode_label: data.product_mode_label,
-      consistent: data.consistent,
-      consistency_warnings: data.warnings || [],
-      goal: goalFromRuntime(data) || state.status.goal,
-      agent_activity: activityFromRuntime(data) || state.status.agent_activity,
-      repair_job: repairFromRuntime(data) || state.status.repair_job,
-      materials_summary: materialsFromRuntime(data) || state.status.materials_summary,
-    }
-  }
-  state.updatedAt = Date.now()
-}
-
-function goalFromRuntime(runtime) {
-  const g = runtime?.stores?.goal
-  if (!g?.exists) return state.status?.goal || null
-  return {
-    goal_id: g.goal_id,
-    status: g.status,
-    all_criteria_ok: g.all_criteria_ok,
-    blocked_reason: g.blocked_reason,
-    raw_user_goal: g.raw_user_goal,
-    ...(state.status?.goal && typeof state.status.goal === 'object' ? {} : {}),
-  }
-}
-
-function activityFromRuntime(runtime) {
-  const a = runtime?.stores?.activity
-  if (!a) return state.status?.agent_activity || null
-  // keep full activity from /api/status when present; runtime only has summary slice
-  return state.status?.agent_activity || {
-    status: a.status,
-    phase: a.phase,
-    phase_label: a.phase_label,
-    summary: {
-      running: a.running,
-      queued: a.queued,
-      done: a.done,
-      failed: a.failed,
-    },
-    materials_deferred: a.materials_deferred,
-    agents: [],
-  }
-}
-
-function repairFromRuntime(runtime) {
-  const r = runtime?.stores?.repair
-  if (!r?.exists && !r?.job_id) return state.status?.repair_job || null
-  return {
-    ...(state.status?.repair_job || {}),
-    job_id: r.job_id,
-    status: r.status,
-    phase: r.phase,
-    message: r.message,
-    resume_command: r.resume_command,
-  }
-}
-
-function materialsFromRuntime(runtime) {
-  const m = runtime?.stores?.materials
-  if (!m) return state.status?.materials_summary || null
-  return {
-    exists: m.exists,
-    total: m.total,
-    deferred: m.deferred,
-    ready: m.ready,
-    missing: m.missing,
-  }
-}
-
-async function refresh({ heal = false } = {}) {
+async function refresh() {
   if (pollInFlight) return state.status
   pollInFlight = true
   state.loading = true
   try {
-    // Primary: full status (workflow + activity agents + repair + runtime)
-    const resp = await fetchStatus()
-    const data = resp?.data || resp
+    const runId = resolveBoundRunId()
+    if (!runId) return null
+    const resp = await fetchWorkspaceSnapshot(runId)
+    const body = resp?.data || resp
+    const data = statusFromV2Snapshot(body?.snapshot)
     applyStatusPayload(data)
-    // Optional heal path via runtime endpoint
-    if (heal) {
-      const r = await fetchRuntimeStatus(true)
-      applyRuntimePayload(r?.data || r)
-    }
     return state.status
   } catch (e) {
     state.error = e?.message || 'status poll failed'
@@ -132,6 +52,10 @@ async function refresh({ heal = false } = {}) {
     pollInFlight = false
     state.loading = false
   }
+}
+
+function resolveBoundRunId() {
+  return String(state.runId || '').trim()
 }
 
 function startPolling(ms = pollMs) {
@@ -185,7 +109,7 @@ export function useWorkspaceRuntime(options = {}) {
     return Array.isArray(w) ? w : []
   })
   const goal = computed(() => {
-    // Prefer full goal object from /api/status (single bus)
+    // V2 snapshot exposes the authoritative full Goal object.
     const full = state.status?.goal_full
     if (full && typeof full === 'object' && (full.goal_id || full.status)) {
       return {
@@ -253,7 +177,8 @@ export function useWorkspaceRuntime(options = {}) {
     error: computed(() => state.error),
     updatedAt: computed(() => state.updatedAt),
     refresh,
-    heal: () => refresh({ heal: true }),
+    // Kept as a presentation API alias; V2 UI no longer invokes V1 healing reads.
+    heal: refresh,
   }
 }
 
@@ -270,6 +195,6 @@ export function pushStatusSnapshot(data) {
   applyStatusPayload(data)
 }
 
-export async function forceRuntimeRefresh(opts) {
-  return refresh(opts)
+export async function forceRuntimeRefresh() {
+  return refresh()
 }

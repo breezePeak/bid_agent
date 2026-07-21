@@ -1571,6 +1571,53 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(resumed)
             reconcile.assert_called_once_with("alpha", context.root, web_app._run_sync)
 
+    def test_v2_snapshot_uses_sqlite_authority_for_control_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.upsert_goal_state({"goal_id": "goal-v2", "status": "running", "plan": [{"id": "p1"}]})
+            store.upsert_agent_activity_state({"status": "running", "phase": "writing", "agents": [{"id": "a1"}]})
+            store.upsert_repair_job_state({"job_id": "repair-v2", "status": "partial", "phase": "complete"})
+            store.upsert_material_state(
+                {
+                    "item_id": "material-v2",
+                    "response_status": "ready",
+                    "lifecycle_status": "verified",
+                    "evidence_status": "verified",
+                }
+            )
+            store.replace_issue_states(
+                [{"id": "issue-v2", "status": "open", "severity": "block"}],
+                source="test",
+            )
+            compatibility = {
+                "goal": {"goal_id": "goal-v1", "status": "failed", "summary": "compat summary"},
+                "goal_full": {"goal_id": "goal-v1", "status": "failed"},
+                "agent_activity": {"status": "idle"},
+                "repair_job": {"job_id": "repair-v1", "status": "completed"},
+                "materials_summary": {"total": 99, "ready": 0},
+                "issues_summary": {"total": 99, "open": 0},
+                "pipeline": {},
+                "workflow": [],
+            }
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            snapshot = payload["snapshot"]
+            self.assertEqual(snapshot["goal"]["goal_id"], "goal-v2")
+            self.assertEqual(snapshot["goal"]["summary"], "compat summary")
+            self.assertEqual(snapshot["activity"]["phase"], "writing")
+            self.assertEqual(snapshot["repair_job"]["job_id"], "repair-v2")
+            self.assertEqual(snapshot["materials"]["ready"], 1)
+            self.assertEqual(snapshot["materials"]["source"], "control.db")
+            self.assertEqual(snapshot["findings"]["issues_summary"]["block_count"], 1)
+            self.assertFalse(snapshot["findings"]["issues_summary"]["can_proceed"])
+            self.assertEqual(snapshot["findings"]["issues_summary"]["source"], "control.db")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5843,8 +5843,7 @@ def _material_items(context: WorkspaceContext) -> list[dict[str, Any]]:
     store.ensure_material_states(
         [_authoritative_material_state(dict(item)) for item in items if isinstance(item, dict)]
     )
-    authoritative = store.material_states()
-    return authoritative or [dict(item) for item in items if isinstance(item, dict)]
+    return store.material_states()
 
 
 def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
@@ -6792,28 +6791,90 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         store = ControlStore(context)
         snapshot = store.snapshot()
         compatibility = _status_payload(context.root, context.workspace_id)
-        material_items = store.material_states()
-        material_summary = (
-            {
-                "total": len(material_items),
-                "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
-                "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
-                "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
-                "source": "control.db",
-            }
-            if material_items
-            else compatibility.get("materials_summary") or {}
-        )
+        goal_state = store.goal_state()
+        activity_state = store.agent_activity_state()
+        repair_state = store.repair_job_state()
+        issue_states = store.issue_states()
+        material_items = _material_items(context)
+        material_summary = {
+            "exists": bool(material_items),
+            "total": len(material_items),
+            "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
+            "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
+            "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
+            "source": "control.db",
+        }
         snapshot.update(
             {
-                "goal": compatibility.get("goal"),
+                "goal": {
+                    **(compatibility.get("goal") or {}),
+                    **(goal_state or compatibility.get("goal_full") or {}),
+                },
+                "activity": activity_state or compatibility.get("agent_activity"),
+                "repair_job": repair_state or compatibility.get("repair_job"),
                 "pipeline": compatibility.get("pipeline") or SUPERVISOR.load(context.root),
                 "materials": {**material_summary, "items": material_items},
-                "findings": {"issues_summary": compatibility.get("issues_summary") or {}},
+                "findings": {
+                    "issues_summary": {
+                        **(compatibility.get("issues_summary") or {}),
+                        "open_count": sum(
+                            1 for item in issue_states
+                            if str(item.get("status") or "") in {"open", "in_progress"}
+                        ),
+                        "block_count": sum(
+                            1 for item in issue_states
+                            if str(item.get("status") or "") in {"open", "in_progress"}
+                            and str(item.get("severity") or "") == "block"
+                        ),
+                        "warn_count": sum(
+                            1 for item in issue_states
+                            if str(item.get("status") or "") in {"open", "in_progress"}
+                            and str(item.get("severity") or "") == "warn"
+                        ),
+                        "can_proceed": (
+                            str((compatibility.get("issues_summary") or {}).get("mode") or "hard") == "soft"
+                            or not any(
+                                str(item.get("status") or "") in {"open", "in_progress"}
+                                and str(item.get("severity") or "") == "block"
+                                for item in issue_states
+                            )
+                        ),
+                        "mode": str((compatibility.get("issues_summary") or {}).get("mode") or "hard"),
+                        "top_blocks": [
+                            {
+                                "id": item.get("id"),
+                                "code": item.get("code"),
+                                "title": item.get("title"),
+                                "stage_id": item.get("stage_id"),
+                            }
+                            for item in issue_states
+                            if str(item.get("status") or "") in {"open", "in_progress"}
+                            and str(item.get("severity") or "") == "block"
+                        ][:8],
+                        "source": "control.db",
+                    },
+                    "issues": issue_states,
+                },
                 "artifacts": {
                     "inputs": compatibility.get("inputs") or {},
                     "workspace": compatibility.get("workspace") or {},
                     "outputs": compatibility.get("outputs") or {},
+                },
+                # Presentation-only projections remain file-derived during the
+                # one-version adapter window; control fields above are SQLite-first.
+                "presentation": {
+                    "workflow": compatibility.get("workflow") or [],
+                    "running": bool(compatibility.get("running")),
+                    "current_task": compatibility.get("current_task") or "",
+                    "run_state": compatibility.get("run_state") or {},
+                    "next_step": compatibility.get("next_step"),
+                    "blocked_step": compatibility.get("blocked_step"),
+                    "compliance_summary": compatibility.get("compliance_summary") or {},
+                    "runtime": compatibility.get("runtime") or {},
+                    "product_mode": compatibility.get("product_mode") or "",
+                    "product_mode_label": compatibility.get("product_mode_label") or "",
+                    "consistent": bool(compatibility.get("consistent", True)),
+                    "consistency_warnings": compatibility.get("consistency_warnings") or [],
                 },
                 "compatibility_source": "v1_projection",
             }

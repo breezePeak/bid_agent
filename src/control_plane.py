@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 9
+    SCHEMA_VERSION = 10
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -587,12 +587,16 @@ class ControlStore:
 
     def ensure_material_states(self, items: list[dict[str, Any]]) -> int:
         rows = [dict(item) for item in items if isinstance(item, dict) and str(item.get("item_id") or "").strip()]
-        if not rows:
-            return 0
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                imported = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'materials_v1_imported'"
+                ).fetchone()
+                if imported is not None:
+                    connection.commit()
+                    return 0
                 inserted = 0
                 for item in rows:
                     item_id = str(item.get("item_id") or "").strip()
@@ -614,16 +618,16 @@ class ControlStore:
                         ),
                     )
                     inserted += max(0, int(cursor.rowcount or 0))
-                if inserted:
-                    revision = self._bump_revision(connection)
-                    self._event(
-                        connection,
-                        revision,
-                        "MaterialStateImported",
-                        "Materials",
-                        self.context.workspace_id,
-                        {"count": inserted, "source": "v1_import"},
-                    )
+                connection.execute("INSERT INTO control_meta(key, value) VALUES ('materials_v1_imported', '1')")
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "MaterialStateImported",
+                    "Materials",
+                    self.context.workspace_id,
+                    {"count": inserted, "source": "v1_import"},
+                )
                 connection.commit()
                 return inserted
             except Exception:
@@ -693,6 +697,10 @@ class ControlStore:
                         created_at,
                         now,
                     ),
+                )
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('materials_v1_imported', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
                 )
                 revision = self._bump_revision(connection)
                 self._event(

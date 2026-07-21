@@ -256,11 +256,6 @@ export function fetchConcurrencyMetrics() {
   return api.get('/concurrency')
 }
 
-/** Unified live runtime (goal + activity + repair + pipeline) */
-export function fetchRuntimeStatus(heal = false) {
-  return api.get('/runtime', { params: heal ? { heal: true } : {} })
-}
-
 export function invokeAgentTool(name, args = {}, { dryRun = false } = {}) {
   return api.post('/agent/tools/invoke', { name, args, dry_run: dryRun }, { timeout: 300000 })
 }

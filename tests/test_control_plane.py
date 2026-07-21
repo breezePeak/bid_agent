@@ -367,6 +367,20 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(current["lifecycle_status"], "verified")
             self.assertEqual(current["control_source"], "v2_command")
 
+    def test_empty_material_import_is_also_frozen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            self.assertEqual(store.ensure_material_states([]), 0)
+            late_legacy = {
+                "item_id": "late-v1-item",
+                "response_status": "ready",
+                "lifecycle_status": "uploaded",
+                "evidence_status": "missing",
+            }
+            self.assertEqual(store.ensure_material_states([late_legacy]), 0)
+            self.assertEqual(store.material_states(), [])
+
     def test_issue_v1_import_does_not_overwrite_authoritative_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

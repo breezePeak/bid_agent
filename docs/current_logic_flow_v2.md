@@ -505,3 +505,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B19 | 2026-07-21 | Chat 与全部 V1 兼容命令适配器改为从服务端认证 Session 绑定 Command actor，移除 `current-user`、`run-command` 等伪主体常量；客户端 payload 继续不能覆盖审计主体，使 Chat、按钮和兼容 API 的权限与审计语义一致。 |
 | V2.0-B20 | 2026-07-21 | 修复 blocked Operation 的补救命令分发表不一致问题：所有声明可在 blocked 状态执行的修复、材料、复核、文档和工作区命令统一复用同一判定集合，并刷新 fencing token；避免部分已确认命令因映射缺失触发异常或绕开 lease。 |
 | V2.0-B21 | 2026-07-21 | 定向改稿与最小修复 Worker 在开始内容变更前必须成功同步权威 Operation；控制库写入失败会中止执行，不再静默继续。异步终态发布统一先清理进程内运行标志，再写 Operation，避免观察到 succeeded 与 RUNNING 并存。 |
+| V2.0-B22 | 2026-07-21 | 主 Vue 控制台的共享状态总线从 V1 `/api/status` 切换到工作区 V2 Snapshot；Goal、AgentActivity、RepairJob、Materials、Issues 和 Operation 由 Snapshot 的 SQLite 权威字段提供，workflow/合规展示暂放在显式 `presentation` 兼容区。材料导入增加一次性空集合标记，SQLite 空状态也不再回退读取后来出现的 V1 项，避免兼容投影重新成为隐性权威。 |
