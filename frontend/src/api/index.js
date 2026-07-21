@@ -28,7 +28,7 @@ export function fetchCurrentUser() {
 }
 
 export function fetchRuns() {
-  return api.get('/runs')
+  return api.get('/v2/workspaces')
 }
 
 export function createRun(name, projectType, expectedPages) {
@@ -37,10 +37,6 @@ export function createRun(name, projectType, expectedPages) {
     project_type: projectType,
     expected_pages: expectedPages,
   })
-}
-
-export function selectRun(runId) {
-  return api.post('/select-run', { run_id: runId })
 }
 
 export function fetchProjectProfile() {
@@ -92,7 +88,7 @@ export async function downloadFinalDocx(runId) {
 }
 
 export async function deleteRun(runId) {
-  const proposed = await api.post('/delete-run', { run_id: runId })
+  const proposed = await submitWorkspaceCommand(runId, 'workspace.archive', {})
   const actionId = proposed?.data?.action?.confirmation_id
   if (!actionId) return proposed
   return confirmWorkspaceAction(runId, actionId)
@@ -195,28 +191,12 @@ export function fetchComplianceReport(runId) {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/compliance-report`)
 }
 
-export function fetchAgentGoal() {
-  return api.get('/agent/goal')
-}
-
 export function fetchAgentDecisions(runId, tail = 20) {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/agent/decisions`, { params: { tail } })
 }
 
-export function fetchAgentTools() {
-  return api.get('/agent/tools')
-}
-
 export function fetchAgentFlags() {
   return api.get('/agent/flags')
-}
-
-export function fetchConcurrencyMetrics() {
-  return api.get('/concurrency')
-}
-
-export function invokeAgentTool(name, args = {}, { dryRun = false } = {}) {
-  return api.post('/agent/tools/invoke', { name, args, dry_run: dryRun }, { timeout: 300000 })
 }
 
 

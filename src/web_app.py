@@ -6621,9 +6621,7 @@ async def api_start_run(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "run": _active_run_payload()})
 
 
-@app.get("/api/runs")
-def api_runs(request: Request) -> JSONResponse:
-    _load_active_run_from_disk()
+def _visible_workspace_runs(request: Request, *, include_legacy_active: bool) -> list[dict[str, Any]]:
     runs: list[dict[str, Any]] = []
     principal = _request_principal(request)
     principal_id = str(principal.get("id") or "").strip() if isinstance(principal, dict) else ""
@@ -6646,13 +6644,26 @@ def api_runs(request: Request) -> JSONResponse:
                     "id": run_root.name,
                     "root": str(run_root),
                     "relative_root": str(run_root.relative_to(ROOT)) if run_root.is_relative_to(ROOT) else str(run_root),
-                    "active": run_root == ACTIVE_RUN_ROOT,
                     "progress": progress,
                     "project_type": profile.get("project_type", ""),
                     "project_label": profile.get("label", ""),
                     "expected_pages": profile.get("expected_pages", 0),
                 }
             )
+            if include_legacy_active:
+                runs[-1]["active"] = run_root == ACTIVE_RUN_ROOT
+    return runs
+
+
+@app.get("/api/v2/workspaces")
+def api_v2_workspaces(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "runs": _visible_workspace_runs(request, include_legacy_active=False)})
+
+
+@app.get("/api/runs")
+def api_runs(request: Request) -> JSONResponse:
+    _load_active_run_from_disk()
+    runs = _visible_workspace_runs(request, include_legacy_active=True)
     return JSONResponse({"ok": True, "active_run_id": ACTIVE_RUN_ID, "runs": runs})
 
 

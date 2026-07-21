@@ -1902,6 +1902,24 @@ class V2WebControlTests(unittest.TestCase):
                     web_app._run_sync("parse-tender", "alpha", root)
             self.assertFalse(hasattr(web_app._LOG_CONTEXT, "run_root"))
 
+    def test_v2_workspace_catalog_has_no_process_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            (runs / "beta").mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = runs / "beta"
+            request = _Request({}, principal={"id": "admin", "role": "admin"})
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_load_active_run_from_disk") as load_active:
+                    payload = _body(web_app.api_v2_workspaces(request))
+
+            load_active.assert_not_called()
+            self.assertNotIn("active_run_id", payload)
+            self.assertEqual({item["id"] for item in payload["runs"]}, {"alpha", "beta"})
+            self.assertTrue(all("active" not in item for item in payload["runs"]))
+
 
 if __name__ == "__main__":
     unittest.main()

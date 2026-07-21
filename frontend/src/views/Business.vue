@@ -18,12 +18,7 @@
         @settings="showSettingsDialog = true"
       />
       <div class="main-content">
-        <!-- loading during workspace switch -->
-        <div v-if="switchingWorkspace" class="workspace-loading">
-          <div class="workspace-loading-spinner"></div>
-          <p>正在加载工作空间...</p>
-        </div>
-        <template v-else-if="!activeRunId">
+        <template v-if="!activeRunId">
           <div class="empty-state">
             <div class="empty-icon">&#x1F4C1;</div>
             <h2>欢迎使用标书 Agent</h2>
@@ -68,12 +63,11 @@ import CreateWorkspaceDialog from '../components/CreateWorkspaceDialog.vue'
 import SettingsDialog from '../components/SettingsDialog.vue'
 import WorkspaceView from '../components/WorkspaceView.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { fetchRuns, selectRun, deleteRun } from '../api'
+import { fetchRuns, deleteRun } from '../api'
 
 const runs = ref([])
 const activeRunId = ref('')
 const runsLoading = ref(false)
-const switchingWorkspace = ref(false)
 const showCreateDialog = ref(false)
 const showSettingsDialog = ref(false)
 const sidebarCollapsed = ref(false)
@@ -91,8 +85,8 @@ async function loadRuns() {
     const { data } = await fetchRuns()
     if (data.ok) {
       runs.value = data.runs || []
-      if (data.active_run_id && !activeRunId.value) {
-        activeRunId.value = data.active_run_id
+      if (!activeRunId.value && runs.value.length) {
+        activeRunId.value = runs.value[0].id
       }
     }
   } catch (e) {
@@ -102,17 +96,9 @@ async function loadRuns() {
   }
 }
 
-async function handleSelectRun(runId) {
+function handleSelectRun(runId) {
   if (runId === activeRunId.value) return
-  switchingWorkspace.value = true
   activeRunId.value = runId
-  try {
-    await selectRun(runId)
-  } catch (e) {
-    console.error('切换工作空间失败', e)
-  } finally {
-    switchingWorkspace.value = false
-  }
 }
 
 function handleDeleteRun(runId) {
