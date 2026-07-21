@@ -293,3 +293,17 @@ export function verifyMaterial(runId, payload) {
 export function confirmMaterialVerification(runId, payload) {
   return submitWorkspaceCommand(runId, 'materials.confirm_verification', payload)
 }
+
+export function revalidateFormalGate(runId) {
+  return submitWorkspaceCommand(runId, 'gate.revalidate', {})
+}
+
+export function fetchLatestGateReceipt(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/gates/latest`)
+}
+
+export function downloadFormalDocx(runId, gateReceiptId) {
+  const workspace = encodeURIComponent(runId)
+  const receipt = encodeURIComponent(gateReceiptId)
+  window.open(`/api/v2/workspaces/${workspace}/exports/final?gate_receipt_id=${receipt}`, '_blank')
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import queue
@@ -4862,6 +4863,98 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     return gate
 
 
+_FORMAL_GATE_RULES_VERSION = "v2-formal-2026-07-21"
+_FORMAL_GATE_INPUTS = (
+    "outputs/final.md",
+    "outputs/final.docx",
+    "workspace/global_review.json",
+    "workspace/compliance_report.json",
+    "workspace/materials_checklist.json",
+    "workspace/materials_overrides.json",
+    "workspace/issues/open.json",
+)
+_FORMAL_GATE_TREES = (
+    "inputs/tender",
+    "inputs/company",
+    "workspace/chapters",
+    "workspace/policy_decisions",
+)
+
+
+def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
+    digest = hashlib.sha256()
+    artifact_sha256 = ""
+    for relative in _FORMAL_GATE_INPUTS:
+        path = context.root / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        if not path.exists() or not path.is_file():
+            digest.update(b"<missing>")
+            continue
+        content = path.read_bytes()
+        file_hash = hashlib.sha256(content).hexdigest()
+        digest.update(file_hash.encode("ascii"))
+        if relative == "outputs/final.docx":
+            artifact_sha256 = file_hash
+    for relative_dir in _FORMAL_GATE_TREES:
+        directory = context.root / relative_dir
+        digest.update(relative_dir.encode("utf-8"))
+        digest.update(b"\0")
+        if not directory.exists() or not directory.is_dir():
+            digest.update(b"<missing-tree>")
+            continue
+        for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+            relative = path.relative_to(context.root).as_posix()
+            digest.update(relative.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))
+    digest.update(_FORMAL_GATE_RULES_VERSION.encode("utf-8"))
+    return digest.hexdigest(), artifact_sha256
+
+
+def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
+    from materials_checklist import load_materials_checklist
+
+    checklist = load_materials_checklist(context.root)
+    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    unsafe = [
+        str(item.get("item_id") or "")
+        for item in items
+        if isinstance(item, dict)
+        and str(item.get("response_status") or "") == "ready"
+        and not _material_fulfillment_verified(item)
+    ]
+    if unsafe:
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            "正式稿包含未验证的 ready 材料，已拒绝签发 GateReceipt。",
+            details={"item_ids": unsafe[:50]},
+        )
+
+
+def _validate_formal_gate_receipt(
+    context: WorkspaceContext,
+    receipt_id: str,
+) -> tuple[dict[str, Any], Path]:
+    if not str(receipt_id or "").strip():
+        raise ControlPlaneError("GATE_RECEIPT_REQUIRED", "正式稿下载必须提供 GateReceipt。", status_code=409)
+    receipt = ControlStore(context).gate_receipt(receipt_id)
+    if not receipt or receipt.get("verdict") != "pass":
+        raise ControlPlaneError("GATE_RECEIPT_INVALID", "GateReceipt 不存在或未通过。", status_code=409)
+    if receipt.get("rules_version") != _FORMAL_GATE_RULES_VERSION:
+        raise ControlPlaneError("GATE_RECEIPT_STALE", "GateReceipt 规则版本已过期。", status_code=409)
+    artifact = context.root / str(receipt.get("artifact_path") or "outputs/final.docx")
+    fingerprint, artifact_sha256 = _formal_gate_fingerprint(context)
+    if (
+        fingerprint != receipt.get("gate_input_fingerprint")
+        or artifact_sha256 != receipt.get("artifact_sha256")
+        or not artifact.exists()
+        or not artifact.is_file()
+    ):
+        raise ControlPlaneError("GATE_RECEIPT_STALE", "正式稿或门禁输入已变化，请重新验收。", status_code=409)
+    return receipt, artifact
+
+
 def _pipeline_status_to_operation(status: str) -> str:
     return {
         "running": "running",
@@ -5489,6 +5582,58 @@ def _handle_materials_refill(
     return {"accepted": True, "operation_status": "running", "message": result["message"]}
 
 
+def _handle_gate_revalidate(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.issues import export_preflight
+
+    artifact = context.root / "outputs" / "final.docx"
+    if not artifact.exists() or not artifact.is_file() or artifact.stat().st_size <= 0:
+        raise ControlPlaneError("GATE_BLOCKED", "final.docx 不存在或为空，不能签发正式稿凭据。")
+    gate = _v2_gate_can_proceed(context, "build-docx")
+    if not gate.get("can_proceed") or gate.get("block_count"):
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            str(gate.get("message") or "质量门禁未通过。"),
+            details={"blocks": gate.get("blocks") or []},
+        )
+    _assert_formal_materials_verified(context)
+    try:
+        preflight = export_preflight(context.root)
+    except Exception as exc:
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            f"正式出稿检查读取失败，已拒绝签发: {exc}",
+            status_code=503,
+            retryable=True,
+        ) from exc
+    if not isinstance(preflight, dict):
+        raise ControlPlaneError("STATE_UNAVAILABLE", "正式出稿检查返回无效状态。", status_code=503)
+    if not preflight.get("can_export"):
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            str(preflight.get("message") or "正式出稿检查未通过。"),
+            details={"checks": preflight.get("checks") or []},
+        )
+    fingerprint, artifact_sha256 = _formal_gate_fingerprint(context)
+    receipt = ControlStore(context).issue_gate_receipt(
+        verdict="pass",
+        gate_input_fingerprint=fingerprint,
+        artifact_path="outputs/final.docx",
+        artifact_sha256=artifact_sha256,
+        rules_version=_FORMAL_GATE_RULES_VERSION,
+        findings=preflight.get("block_issues") or [],
+        policy_decisions=preflight.get("accepted_risks") or [],
+    )
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"正式稿门禁已通过，GateReceipt={receipt.get('receipt_id', '')}",
+    }
+
+
 def _command_gateway(context: WorkspaceContext) -> CommandGateway:
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     return CommandGateway(
@@ -5507,6 +5652,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.confirm_verification": _handle_materials_confirm_verification,
             "materials.update": _handle_materials_update,
             "materials.refill": _handle_materials_refill,
+            "gate.revalidate": _handle_gate_revalidate,
         },
     )
 
@@ -5809,6 +5955,41 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
     except Exception as exc:
         return _command_error_response(
             ControlPlaneError("STATE_UNAVAILABLE", f"快照读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/gates/latest")
+def api_v2_latest_gate_receipt(workspace_id: str) -> JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        receipt = ControlStore(context).latest_gate_receipt()
+        return JSONResponse({"ok": True, "gate_receipt": receipt})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"GateReceipt 读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/exports/final", response_model=None)
+def api_v2_download_final(
+    workspace_id: str,
+    gate_receipt_id: str = Query(..., min_length=1),
+) -> FileResponse | JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        _, artifact = _validate_formal_gate_receipt(context, gate_receipt_id)
+        return FileResponse(
+            str(artifact),
+            filename="final.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"正式稿下载校验失败: {exc}", status_code=503)
         )
 
 

@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -249,6 +249,17 @@ class ControlStore:
                         heartbeat_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS gate_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        verdict TEXT NOT NULL,
+                        gate_input_fingerprint TEXT NOT NULL,
+                        artifact_path TEXT NOT NULL,
+                        artifact_sha256 TEXT NOT NULL,
+                        rules_version TEXT NOT NULL,
+                        findings_json TEXT NOT NULL,
+                        policy_decisions_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS confirmations (
                         confirmation_id TEXT PRIMARY KEY,
                         command_json TEXT NOT NULL,
@@ -277,10 +288,91 @@ class ControlStore:
                     """
                 )
                 connection.execute(
-                    "INSERT OR IGNORE INTO control_meta(key, value) VALUES ('schema_version', ?)",
+                    """
+                    INSERT INTO control_meta(key, value) VALUES ('schema_version', ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
                     (str(self.SCHEMA_VERSION),),
                 )
                 connection.execute("INSERT OR IGNORE INTO control_meta(key, value) VALUES ('revision', '0')")
+
+    def issue_gate_receipt(
+        self,
+        *,
+        verdict: str,
+        gate_input_fingerprint: str,
+        artifact_path: str,
+        artifact_sha256: str,
+        rules_version: str,
+        findings: list[Any] | None = None,
+        policy_decisions: list[Any] | None = None,
+    ) -> dict[str, Any]:
+        if verdict not in {"pass", "block"} or not gate_input_fingerprint or not artifact_sha256:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "GateReceipt 输入无效，已拒绝签发。", status_code=503)
+        receipt_id = str(uuid.uuid4())
+        created_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    """
+                    INSERT INTO gate_receipts(
+                        receipt_id, verdict, gate_input_fingerprint, artifact_path,
+                        artifact_sha256, rules_version, findings_json,
+                        policy_decisions_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id,
+                        verdict,
+                        gate_input_fingerprint,
+                        artifact_path,
+                        artifact_sha256,
+                        rules_version,
+                        _json(findings or []),
+                        _json(policy_decisions or []),
+                        created_at,
+                    ),
+                )
+                self._event(
+                    connection,
+                    revision,
+                    "GateReceiptIssued",
+                    "GateReceipt",
+                    receipt_id,
+                    {
+                        "verdict": verdict,
+                        "gate_input_fingerprint": gate_input_fingerprint,
+                        "artifact_path": artifact_path,
+                        "rules_version": rules_version,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.gate_receipt(receipt_id) or {}
+
+    def gate_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM gate_receipts WHERE receipt_id = ?",
+                (str(receipt_id or ""),),
+            ).fetchone()
+        if row is None:
+            return None
+        result = dict(row)
+        result["findings"] = _decode(result.pop("findings_json", ""), [])
+        result["policy_decisions"] = _decode(result.pop("policy_decisions_json", ""), [])
+        return result
+
+    def latest_gate_receipt(self) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT receipt_id FROM gate_receipts ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        return self.gate_receipt(str(row["receipt_id"])) if row is not None else None
 
     @staticmethod
     def _revision(connection: sqlite3.Connection) -> int:

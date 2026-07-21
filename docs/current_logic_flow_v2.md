@@ -480,3 +480,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-A3 | 2026-07-21 | 将聊天定向改稿迁入 `rewrite.chapters` Command 和持久化 Action 确认；改稿 Worker 使用显式 WorkspaceContext，并将运行、成功、部分失败或异常回写同一 Operation/fencing token。聊天不再直接启动改稿线程。材料、正式导出和其余 mutation Tool 仍待迁移。 |
 | V2.0-A4 | 2026-07-21 | 将材料状态更新与回填迁入 `materials.update` / `materials.refill` Command，页面与旧 API 均先创建持久化确认。禁止把 uploaded/submitted 直接标记为 ready，禁止放弃资格、必交和阻断材料，且未验证 ready 材料不得进入正文回填。材料领域表迁入 `control.db`、人工验证身份授权和上传文件清单仍待完成。 |
 | V2.0-A5 | 2026-07-21 | 将材料登记、自动验证和人工核验迁入 `materials.upload` / `materials.verify` / `materials.confirm_verification` Command；登记与人工结论使用持久化确认，上传路径限制在当前工作区，人工核验操作者不再读取业务 payload。身份仍来自兼容 actor，服务端认证主体绑定和材料领域表迁移尚未完成。 |
+| V2.0-A6 | 2026-07-21 | 建立首版正式稿 GateReceipt：`gate.revalidate` 对质量门禁、材料验证、出稿预检和 final Artifact 执行 fail-closed 复核，将凭据持久化到 `control.db`；V2 正式稿下载会重算输入与 Artifact fingerprint，变化后返回 `GATE_RECEIPT_STALE`。旧下载入口和现有页面尚待完成切换，因此本阶段仍未验收。 |

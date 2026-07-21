@@ -701,6 +701,85 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(payload["status"], "requires_confirmation")
             upload.assert_not_called()
 
+    def test_formal_export_requires_current_gate_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            outputs = root / "outputs"
+            workspace.mkdir(parents=True)
+            outputs.mkdir(parents=True)
+            (outputs / "final.md").write_text("formal markdown", encoding="utf-8")
+            (outputs / "final.docx").write_bytes(b"formal-docx-v1")
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": []}),
+                encoding="utf-8",
+            )
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            preflight = {
+                "ok": True,
+                "can_export": True,
+                "checks": [],
+                "block_issues": [],
+                "accepted_risks": [],
+            }
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(
+                    web_app,
+                    "_v2_gate_can_proceed",
+                    return_value={"can_proceed": True, "block_count": 0, "blocks": []},
+                ):
+                    with mock.patch("agent.issues.export_preflight", return_value=preflight):
+                        issued = _body(
+                            asyncio.run(
+                                web_app.api_v2_submit_command(
+                                    "alpha",
+                                    _Request(
+                                        {
+                                            "kind": "gate.revalidate",
+                                            "payload": {},
+                                            "expected_revision": 0,
+                                            "idempotency_key": "formal-gate",
+                                        }
+                                    ),
+                                )
+                            )
+                        )
+                self.assertTrue(issued["ok"])
+                latest = _body(web_app.api_v2_latest_gate_receipt("alpha"))["gate_receipt"]
+                allowed = web_app.api_v2_download_final("alpha", latest["receipt_id"])
+                self.assertEqual(Path(allowed.path).read_bytes(), b"formal-docx-v1")
+
+                (outputs / "final.docx").write_bytes(b"formal-docx-v2")
+                stale = _body(web_app.api_v2_download_final("alpha", latest["receipt_id"]))
+            self.assertFalse(stale["ok"])
+            self.assertEqual(stale["error"]["code"], "GATE_RECEIPT_STALE")
+
+    def test_formal_gate_fails_closed_without_docx(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                response = asyncio.run(
+                    web_app.api_v2_submit_command(
+                        "alpha",
+                        _Request(
+                            {
+                                "kind": "gate.revalidate",
+                                "payload": {},
+                                "expected_revision": 0,
+                                "idempotency_key": "missing-final",
+                            }
+                        ),
+                    )
+                )
+            payload = _body(response)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["receipt"]["error"]["code"], "GATE_BLOCKED")
+
 
 if __name__ == "__main__":
     unittest.main()

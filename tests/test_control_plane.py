@@ -271,6 +271,22 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertIsNone(beta_store.snapshot()["operation"])
             self.assertNotEqual(alpha_gateway.store.path, beta_store.path)
 
+    def test_gate_receipt_is_persisted_with_event_and_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            receipt = store.issue_gate_receipt(
+                verdict="pass",
+                gate_input_fingerprint="fingerprint-1",
+                artifact_path="outputs/final.docx",
+                artifact_sha256="artifact-sha",
+                rules_version="rules-v1",
+            )
+            self.assertEqual(receipt["verdict"], "pass")
+            self.assertEqual(store.latest_gate_receipt()["receipt_id"], receipt["receipt_id"])
+            self.assertGreater(store.revision(), 0)
+            self.assertEqual(store.events(0)[-1]["kind"], "GateReceiptIssued")
+
     def test_gate_rejection_keeps_operation_blocked_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
