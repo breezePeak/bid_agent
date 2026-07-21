@@ -1744,6 +1744,10 @@ class V2WebControlTests(unittest.TestCase):
             beta = runs / "beta"
             alpha.mkdir(parents=True)
             beta.mkdir(parents=True)
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).replace_issue_states(
+                [{"id": "issue-1", "status": "open", "severity": "block", "code": "TEST_ISSUE"}],
+                source="test",
+            )
             web_app.ACTIVE_RUN_ID = "beta"
             web_app.ACTIVE_RUN_ROOT = beta
             command = str(web_app.WORKFLOW_STEPS[0]["command"])
@@ -1757,7 +1761,7 @@ class V2WebControlTests(unittest.TestCase):
                     items = _body(web_app.api_manual_review_items("score_coverage", "alpha"))
                 with mock.patch("agent.repair.build_repair_plan", return_value={"ok": True}) as build_plan:
                     preview = _body(web_app.api_preview_repair("issue-1", "alpha"))
-                with mock.patch("agent.issues.load_open_issues", return_value=[{"id": "issue-1"}]):
+                with mock.patch("agent.issues.load_open_issues") as legacy_issues:
                     with mock.patch("agent.root_cause.refine_issue_cause_with_llm", return_value={"ok": True}) as explain:
                         explained = _body(asyncio.run(web_app.api_explain_issue_cause("issue-1", _Request({}), "alpha")))
                 with mock.patch("agent.repair.execute_repair_batch", return_value={"ok": True}) as batch:
@@ -1768,9 +1772,17 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(Path(detail["run_root"]), resolved)
             review_summary.assert_called_once_with(resolved)
             review_items.assert_called_once_with(resolved, "score_coverage")
-            build_plan.assert_called_once_with(resolved, "issue-1")
-            explain.assert_called_once_with(resolved, {"id": "issue-1"})
-            batch.assert_called_once_with(resolved, ["issue-1"], confirm=False, dry_run=True)
+            plan_issue = build_plan.call_args.kwargs["issue"]
+            self.assertEqual(plan_issue["id"], "issue-1")
+            build_plan.assert_called_once_with(resolved, "issue-1", issue=plan_issue)
+            explain_issue = explain.call_args.args[1]
+            self.assertEqual(explain_issue["id"], "issue-1")
+            explain.assert_called_once_with(resolved, explain_issue)
+            legacy_issues.assert_not_called()
+            self.assertEqual(batch.call_args.args, (resolved, ["issue-1"]))
+            self.assertFalse(batch.call_args.kwargs["confirm"])
+            self.assertTrue(batch.call_args.kwargs["dry_run"])
+            self.assertEqual(batch.call_args.kwargs["issue_snapshot"][0]["id"], "issue-1")
             self.assertEqual(summary["summary"], {"alpha": True})
             self.assertEqual(items["items"][0]["id"], "alpha-review")
             self.assertTrue(preview["ok"])

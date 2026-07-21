@@ -75,11 +75,16 @@ def _open_issue_map(root: Path) -> dict[str, list[dict[str, Any]]]:
     return result
 
 
-def build_repair_plan(root: Path | None, issue_id: str) -> dict[str, Any]:
+def build_repair_plan(
+    root: Path | None,
+    issue_id: str,
+    *,
+    issue: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Preview a minimal repair plan for one issue (no side effects)."""
 
     root = root or project_root()
-    issue = _issue_by_id(root, issue_id)
+    issue = issue if isinstance(issue, dict) else _issue_by_id(root, issue_id)
     if not issue:
         return {"ok": False, "message": f"未找到问题: {issue_id}"}
 
@@ -179,6 +184,7 @@ def build_repair_batch_plan(
     issue_ids: list[str],
     *,
     max_issues: int | None = None,
+    issue_snapshot: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one grouped, de-duplicated plan for the selected issues."""
 
@@ -198,7 +204,8 @@ def build_repair_batch_plan(
             "errors": [],
         }
 
-    snapshot = {str(item.get("id")): item for item in load_open_issues(root)}
+    source_issues = issue_snapshot if issue_snapshot is not None else load_open_issues(root)
+    snapshot = {str(item.get("id")): item for item in source_issues if isinstance(item, dict)}
     records: list[dict[str, Any]] = []
     plans: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -210,7 +217,7 @@ def build_repair_batch_plan(
             plans.append(error)
             errors.append(error)
             continue
-        plan = build_repair_plan(root, issue_id)
+        plan = build_repair_plan(root, issue_id, issue=issue)
         plans.append(plan)
         if not plan.get("ok"):
             errors.append(plan)
@@ -616,6 +623,7 @@ def execute_repair_batch(
     confirm: bool = False,
     dry_run: bool = False,
     max_issues: int | None = None,
+    issue_snapshot: list[dict[str, Any]] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> dict[str, Any]:
     """Execute a grouped repair batch, then revalidate and classify once.
@@ -637,7 +645,7 @@ def execute_repair_batch(
     )
     selected_ids = requested_ids[:limit] if limit is not None else requested_ids
     truncated = len(selected_ids) < requested_count
-    batch_plan = build_repair_batch_plan(root, selected_ids)
+    batch_plan = build_repair_batch_plan(root, selected_ids, issue_snapshot=issue_snapshot)
     _emit_progress(
         progress_callback,
         "analysis",

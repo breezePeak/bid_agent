@@ -3345,11 +3345,16 @@ def api_get_issue(issue_id: str) -> JSONResponse:
 @app.post("/api/v2/workspaces/{workspace_id}/issues/{issue_id}/actions/preview")
 @app.post("/api/issues/{issue_id}/actions/preview")
 def api_preview_repair(issue_id: str, workspace_id: str = "") -> JSONResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
     try:
         from agent.repair import build_repair_plan
 
-        plan = build_repair_plan(root, issue_id)
+        if context:
+            issue = next((item for item in ControlStore(context).issue_states() if str(item.get("id")) == issue_id), None)
+            plan = build_repair_plan(root, issue_id, issue=issue) if issue else {"ok": False, "message": f"未找到问题: {issue_id}"}
+        else:
+            plan = build_repair_plan(root, issue_id)
         status = 200 if plan.get("ok") else 404
         return JSONResponse(plan, status_code=status)
     except Exception as exc:
@@ -3424,12 +3429,14 @@ async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse
 @app.post("/api/issues/{issue_id}/actions/explain")
 async def api_explain_issue_cause(issue_id: str, request: Request, workspace_id: str = "") -> JSONResponse:
     """Rule + optional LLM whitelist root-cause refinement."""
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
     try:
         from agent.issues import load_open_issues
         from agent.root_cause import refine_issue_cause_with_llm
 
-        issue = next((i for i in load_open_issues(root) if str(i.get("id")) == issue_id), None)
+        source = ControlStore(context).issue_states() if context else load_open_issues(root)
+        issue = next((i for i in source if str(i.get("id")) == issue_id), None)
         if not issue:
             return JSONResponse({"ok": False, "message": "未找到问题"}, status_code=404)
         result = refine_issue_cause_with_llm(root, issue)
@@ -3441,7 +3448,8 @@ async def api_explain_issue_cause(issue_id: str, request: Request, workspace_id:
 @app.post("/api/v2/workspaces/{workspace_id}/issues/actions/batch-preview")
 @app.post("/api/issues/actions/batch-preview")
 async def api_batch_preview_repair(request: Request, workspace_id: str = "") -> JSONResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
     try:
         body = await request.json()
     except Exception:
@@ -3452,7 +3460,14 @@ async def api_batch_preview_repair(request: Request, workspace_id: str = "") -> 
     try:
         from agent.repair import execute_repair_batch
 
-        result = execute_repair_batch(root, [str(x) for x in ids], confirm=False, dry_run=True)
+        issue_snapshot = ControlStore(context).issue_states() if context else None
+        result = execute_repair_batch(
+            root,
+            [str(x) for x in ids],
+            confirm=False,
+            dry_run=True,
+            issue_snapshot=issue_snapshot,
+        )
         return JSONResponse(result)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
