@@ -10,7 +10,11 @@ import {
   fetchRuns,
   selectRun,
   probeBackend,
+  startRun,
+  uploadFiles,
+  startPipeline,
 } from './api/client.js'
+import { createUploadGate } from './ui/uploadGate.js'
 
 const canvas = document.getElementById('scene')
 const hudRoot = document.getElementById('hud')
@@ -130,8 +134,15 @@ function handleHudAction(act) {
       scheduleUi()
       return
     }
-    if (act === 'demo') startDemo()
-    if (act === 'live') startLive()
+    if (act === 'demo') {
+      demo.stop()
+      openUploadGate({ demo: true })
+      return
+    }
+    if (act === 'live') {
+      openUploadGate({ demo: false })
+      return
+    }
     if (act === 'refresh-runs') loadRuns({ force: true })
     if (act === 'wave') {
       // 强制播放水平灵力波；俯视才能看清圆环扩张
@@ -252,13 +263,14 @@ function showCalligraphy(mainText, subText = '', { pin = false } = {}) {
 
 btnReforge?.addEventListener('click', () => {
   hideCalligraphy()
-  // 重新炼制 = 重启演示
+  // 重新炼制 = 再走投料门 → 演法
   app.stageTrack?.setOrbitMode?.(false)
   app.danFx?.clearFinale?.()
   app._completedIds?.clear?.()
   app._allDoneFired = false
   app._finaleBookShown = false
-  startDemo()
+  demo.stop()
+  openUploadGate({ demo: true })
 })
 btnDismissCalli?.addEventListener('click', () => {
   hideCalligraphy()
@@ -419,6 +431,77 @@ function startDemo() {
   scheduleUi()
 }
 
+let uploadGateInst = null
+
+function ensureRunsTimer() {
+  if (runsTimer) return
+  runsTimer = setInterval(() => {
+    if (mode === 'live') loadRuns()
+  }, 15000)
+}
+
+/** 开场三宝门：从天而降；齐备后开炼 */
+function openUploadGate({ demo: isDemo }) {
+  if (uploadGateInst?.isOpen?.()) return
+  const mount = document.getElementById('app') || document.body
+  uploadGateInst = createUploadGate(mount, {
+    demo: isDemo,
+    async onComplete(payload) {
+      app.audio?.playChime?.({ bright: true })
+      if (payload.demo) {
+        // 演法：模拟投料后开跑演示
+        await new Promise((r) => setTimeout(r, 350))
+        startDemo()
+        app.focusFurnace?.()
+        showCalligraphy('三宝已备', '演法开炉 · 周天运转', { pin: false })
+        return
+      }
+      // 观火：建丹房 → 上传 → 启流水线
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')
+      const created = await startRun({
+        name: `炼丹阁-${stamp}`,
+        project_type: 'software_project',
+      })
+      const runId = created?.run?.id || created?.run_id || ''
+      if (runId) activeRunId = runId
+      for (const cat of ['tender', 'company', 'template']) {
+        const files = payload.files?.[cat] || []
+        if (files.length) await uploadFiles(cat, files)
+      }
+      try {
+        await startPipeline({ run_id: activeRunId || '' })
+      } catch (err) {
+        console.warn('[3d] start-pipeline', err)
+        showCalligraphy('投料已成', String(err?.message || '流水线未启动，可稍后继续'), {
+          pin: false,
+        })
+      }
+      await loadRuns()
+      startLive()
+      ensureRunsTimer()
+      app.focusHall?.()
+      showCalligraphy('开炉炼制', '三宝入炉 · 流水线已启', { pin: false })
+    },
+    onSkip() {
+      app.audio?.playUiTap?.()
+      if (isDemo) {
+        // 跳过演法自动跑，仅观览场景；可再点「演法」
+        mode = 'demo'
+        buttonState.demo = true
+        buttonState.live = false
+        scheduleUi()
+        app.focusOverview?.()
+        return
+      }
+      loadRuns().then(() => {
+        startLive()
+        ensureRunsTimer()
+      })
+      app.focusOverview?.()
+    },
+  })
+}
+
 async function bootstrap() {
   app.start()
   await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)))
@@ -518,17 +601,14 @@ async function bootstrap() {
     online = false
   }
 
+  // 无论在线与否：先从天而降三宝门
   if (online) {
-    console.info('[3d] backend online → live mode')
+    console.info('[3d] backend online → upload gate (live)')
     await loadRuns()
-    startLive()
-    // refresh workspace list periodically in live mode
-    runsTimer = setInterval(() => {
-      if (mode === 'live') loadRuns()
-    }, 15000)
+    openUploadGate({ demo: false })
   } else {
-    console.info('[3d] backend offline → demo')
-    setTimeout(() => startDemo(), 400)
+    console.info('[3d] backend offline → upload gate (demo)')
+    openUploadGate({ demo: true })
   }
 }
 
