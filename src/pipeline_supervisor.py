@@ -105,7 +105,14 @@ class PipelineSupervisor:
             current["updated_at"] = _now()
             temp = path.with_name(f".{path.name}.{threading.get_ident()}.tmp")
             temp.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
-            temp.replace(path)
+            for attempt in range(5):
+                try:
+                    temp.replace(path)
+                    break
+                except PermissionError:
+                    if attempt >= 4:
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
             listener = self._status_listener
         if listener:
             try:

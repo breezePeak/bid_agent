@@ -1054,6 +1054,47 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(stale["ok"])
             self.assertEqual(stale["error"]["code"], "GATE_RECEIPT_STALE")
 
+    def test_formal_gate_fingerprint_uses_sqlite_control_domains_not_v1_projections(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            issue_dir = root / "workspace" / "issues"
+            issue_dir.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.replace_issue_states(
+                [{"id": "issue-1", "status": "open", "severity": "warn"}],
+                source="test",
+            )
+            store.ensure_material_states([])
+
+            first, _ = web_app._formal_gate_fingerprint(context)
+            (issue_dir / "open.json").write_text(
+                json.dumps({"issues": [{"id": "v1-only", "status": "open", "severity": "block"}]}),
+                encoding="utf-8",
+            )
+            (root / "workspace" / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "v1-only"}]}),
+                encoding="utf-8",
+            )
+            projected, _ = web_app._formal_gate_fingerprint(context)
+            store.replace_issue_states(
+                [{"id": "issue-1", "status": "fixed", "severity": "warn"}],
+                source="test",
+            )
+            changed_issue, _ = web_app._formal_gate_fingerprint(context)
+            store.record_policy_decision(
+                issue_id="issue-1",
+                decision_type="accept_risk",
+                decision={"reason": "test"},
+                actor={"type": "user", "id": "owner"},
+            )
+            changed_policy, _ = web_app._formal_gate_fingerprint(context)
+
+            self.assertEqual(first, projected)
+            self.assertNotEqual(projected, changed_issue)
+            self.assertNotEqual(changed_issue, changed_policy)
+
     def test_formal_gate_fails_closed_without_docx(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

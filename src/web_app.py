@@ -5293,32 +5293,34 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     return gate
 
 
-_FORMAL_GATE_RULES_VERSION = "v2-formal-2026-07-21"
+_FORMAL_GATE_RULES_VERSION = "v2-formal-control-2026-07-21"
 _FORMAL_GATE_INPUTS = (
     "outputs/final.md",
     "outputs/final.docx",
     "workspace/global_review.json",
     "workspace/compliance_report.json",
-    "workspace/materials_checklist.json",
-    "workspace/materials_overrides.json",
-    "workspace/issues/open.json",
 )
 _FORMAL_GATE_TREES = (
     "inputs/tender",
     "inputs/company",
     "workspace/chapters",
-    "workspace/policy_decisions",
 )
 
 
 def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
     digest = hashlib.sha256()
     artifact_sha256 = ""
-    material_states = ControlStore(context).material_states()
-    digest.update(b"control.db:material_states\0")
-    digest.update(
-        json.dumps(material_states, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    )
+    store = _ensure_v2_issue_import(context)
+    control_domains = {
+        "material_states": store.material_states(),
+        "issue_states": store.issue_states(),
+        "policy_decisions": store.policy_decisions(),
+    }
+    for domain, value in control_domains.items():
+        digest.update(f"control.db:{domain}\0".encode("utf-8"))
+        digest.update(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
     for relative in _FORMAL_GATE_INPUTS:
         path = context.root / relative
         digest.update(relative.encode("utf-8"))
