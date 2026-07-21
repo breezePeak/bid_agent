@@ -701,6 +701,32 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(payload["status"], "requires_confirmation")
             upload.assert_not_called()
 
+    def test_legacy_material_rebuild_routes_through_v2_gateway(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch(
+                    "materials_checklist.build_materials_checklist",
+                    return_value=root / "workspace" / "materials_checklist.json",
+                ) as rebuild:
+                    with mock.patch(
+                        "materials_checklist.load_materials_checklist",
+                        return_value={"summary": {"total": 0}, "items": []},
+                    ):
+                        (root / "workspace").mkdir(parents=True)
+                        (root / "workspace" / "materials_checklist.json").write_text("{}", encoding="utf-8")
+                        response = web_app.api_materials_checklist_rebuild()
+            payload = _body(response)
+            self.assertEqual(response.status_code, 202)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["receipt"]["status"], "accepted")
+            rebuild.assert_called_once()
+            self.assertTrue(web_app._same_path(rebuild.call_args.args[0], root))
+
     def test_formal_export_requires_current_gate_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

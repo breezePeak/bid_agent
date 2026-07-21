@@ -290,8 +290,8 @@ export function updateMaterialsChecklistItem(runId, payload) {
   return submitWorkspaceCommand(runId, 'materials.update', payload)
 }
 
-export function rebuildMaterialsChecklist() {
-  return api.post('/materials-checklist/rebuild', {}, { timeout: 120000 })
+export function rebuildMaterialsChecklist(runId) {
+  return submitWorkspaceCommand(runId, 'materials.rebuild', {})
 }
 
 export function refillMaterialsChecklist(runId, payload = {}) {

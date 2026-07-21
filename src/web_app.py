@@ -3616,23 +3616,27 @@ async def api_materials_checklist_update(request: Request) -> JSONResponse:
 
 @app.post("/api/materials-checklist/rebuild")
 def api_materials_checklist_rebuild() -> JSONResponse:
-    root = _active_root()
     try:
-        from materials_checklist import build_materials_checklist, load_materials_checklist
-
-        path = build_materials_checklist(root)
-        data = load_materials_checklist(root)
-        return JSONResponse(
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
             {
-                "ok": True,
-                "path": str(path),
-                "summary": data.get("summary") or {},
-                "items": data.get("items") or [],
-                "message": "材料清单已重建",
-            }
+                "kind": "materials.rebuild",
+                "payload": {},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-material-rebuild:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
         )
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        receipt = gateway.submit(envelope)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message},
+            status_code=202 if receipt.status != "rejected" else 409,
+            headers={"Deprecation": "true", "Link": f'</api/v2/workspaces/{context.workspace_id}/commands>; rel="successor-version"'},
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/materials-checklist/refill")
@@ -5470,6 +5474,25 @@ def _handle_materials_update(
     }
 
 
+def _handle_materials_rebuild(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from materials_checklist import build_materials_checklist, load_materials_checklist
+
+    path = build_materials_checklist(context.root)
+    checklist = load_materials_checklist(context.root)
+    if not path.exists() or not isinstance(checklist, dict):
+        raise ControlPlaneError("STATE_UNAVAILABLE", "材料清单重建后状态不可用。", status_code=503)
+    summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"材料清单已重建：total={summary.get('total', 0)}。",
+    }
+
+
 def _trigger_material_refill(
     context: WorkspaceContext,
     operation_id: str,
@@ -5651,6 +5674,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.verify": _handle_materials_verify,
             "materials.confirm_verification": _handle_materials_confirm_verification,
             "materials.update": _handle_materials_update,
+            "materials.rebuild": _handle_materials_rebuild,
             "materials.refill": _handle_materials_refill,
             "gate.revalidate": _handle_gate_revalidate,
         },

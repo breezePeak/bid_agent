@@ -269,7 +269,7 @@ async function doRebuild() {
   busy.value = true
   msg.value = '重建中…'
   try {
-    const { data } = await rebuildMaterialsChecklist()
+    const { data } = await rebuildMaterialsChecklist(props.runId)
     if (!data?.ok) throw new Error(data?.message || '重建失败')
     await refresh()
     msg.value = data.message || '已重建'
