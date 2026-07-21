@@ -5074,6 +5074,12 @@ def _request_actor(request: Request, *, source: str) -> dict[str, str]:
     return {"type": source, "id": "anonymous"}
 
 
+def _request_principal(request: Request) -> dict[str, Any]:
+    state = getattr(request, "state", None)
+    principal = getattr(state, "principal", None) if state is not None else None
+    return dict(principal) if isinstance(principal, dict) else {}
+
+
 def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[str, Any]:
     """Fail-closed gate evaluation for V2 mutations using the explicit workspace."""
     try:
@@ -6404,6 +6410,10 @@ async def api_start_run(request: Request) -> JSONResponse:
             {"ok": False, "message": "请先设置工作空间名称。"},
             status_code=400,
         )
+    principal = _request_principal(request)
+    principal_id = str(principal.get("id") or "").strip()
+    if not principal_id:
+        return JSONResponse({"ok": False, "message": "缺少服务端认证主体。"}, status_code=401)
 
     try:
         run_id, run_root = _create_run_workspace(run_name, project_type, expected_pages=expected_pages)
@@ -6412,18 +6422,30 @@ async def api_start_run(request: Request) -> JSONResponse:
 
     ACTIVE_RUN_ID = run_id
     ACTIVE_RUN_ROOT = run_root
+    ControlStore(WorkspaceContext.resolve(RUNS_DIR, run_id)).grant_workspace_access(principal_id, role="owner")
     ACTIVE_RUN_FILE.write_text(run_id, encoding="utf-8")
     _append_log(f"[运行] 已创建独立工作空间: {run_root.relative_to(ROOT)}")
     return JSONResponse({"ok": True, "run": _active_run_payload()})
 
 
 @app.get("/api/runs")
-def api_runs() -> JSONResponse:
+def api_runs(request: Request) -> JSONResponse:
     _load_active_run_from_disk()
     runs: list[dict[str, Any]] = []
+    principal = _request_principal(request)
+    principal_id = str(principal.get("id") or "").strip() if isinstance(principal, dict) else ""
+    is_admin = isinstance(principal, dict) and str(principal.get("role") or "") == "admin"
     if RUNS_DIR.exists():
         run_dirs = [path for path in RUNS_DIR.iterdir() if path.is_dir()]
         for run_root in sorted(run_dirs, key=_latest_tree_mtime, reverse=True):
+            if not is_admin:
+                try:
+                    ControlStore(WorkspaceContext.resolve(RUNS_DIR, run_root.name)).require_workspace_access(
+                        principal_id,
+                        write=False,
+                    )
+                except ControlPlaneError:
+                    continue
             progress = _run_progress_summary(run_root)
             profile = load_project_profile(run_root)
             runs.append(
@@ -6457,6 +6479,15 @@ async def api_select_run(request: Request) -> JSONResponse:
     runs_root = RUNS_DIR.resolve()
     if not run_root.is_relative_to(runs_root) or not run_root.exists() or not run_root.is_dir():
         return JSONResponse({"ok": False, "message": f"工作空间不存在: {run_id}"}, status_code=404)
+
+    try:
+        _ensure_workspace_acl(
+            WorkspaceContext.resolve(RUNS_DIR, run_id),
+            _request_principal(request),
+            write=False,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
     ACTIVE_RUN_ID = run_id
     ACTIVE_RUN_ROOT = run_root
@@ -8024,6 +8055,16 @@ async def api_delete_run(request: Request) -> JSONResponse:
     runs_root = RUNS_DIR.resolve()
     if not run_root.is_relative_to(runs_root) or not run_root.exists() or not run_root.is_dir():
         return JSONResponse({"ok": False, "message": f"工作空间不存在: {run_id}"}, status_code=404)
+
+    try:
+        context = WorkspaceContext.resolve(RUNS_DIR, run_id)
+        principal = _request_principal(request)
+        _ensure_workspace_acl(context, principal, write=True)
+        access = ControlStore(context).require_workspace_access(str(principal.get("id") or ""), write=True)
+        if access.get("role") != "owner" and str(principal.get("role") or "") != "admin":
+            raise ControlPlaneError("WORKSPACE_FORBIDDEN", "只有工作区所有者可以删除工作区。", status_code=403)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
     close_chat_store(run_root)
     shutil.rmtree(str(run_root))

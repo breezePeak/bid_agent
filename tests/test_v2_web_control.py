@@ -1182,6 +1182,11 @@ class V2WebControlTests(unittest.TestCase):
                             forbidden = await client.get("/api/v2/workspaces/alpha/snapshot")
                             self.assertEqual(forbidden.status_code, 403)
                             self.assertEqual(forbidden.json()["error"]["code"], "WORKSPACE_FORBIDDEN")
+                            select_forbidden = await client.post("/api/select-run", json={"run_id": "alpha"})
+                            self.assertEqual(select_forbidden.status_code, 403)
+                            delete_forbidden = await client.post("/api/delete-run", json={"run_id": "alpha"})
+                            self.assertEqual(delete_forbidden.status_code, 403)
+                            self.assertTrue(root.exists())
 
         asyncio.run(scenario())
 
