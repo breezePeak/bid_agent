@@ -8729,6 +8729,60 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
     )
 
 
+def _reconcile_inactive_workspace(context: WorkspaceContext) -> dict[str, Any]:
+    """Fail closed for V2 work that this single-process worker cannot reclaim."""
+    store = ControlStore(context)
+    operations = store.snapshot().get("operations") or []
+    operation = next(
+        (
+            item
+            for item in operations
+            if str(item.get("kind") or "").startswith("pipeline.")
+            and str(item.get("status") or "") in {"queued", "running", "pausing", "cancelling"}
+        ),
+        None,
+    )
+    if not operation:
+        return {"changed": False, "workspace_id": context.workspace_id}
+    operation_id = str(operation.get("operation_id") or "")
+    fencing_token = int(operation.get("fencing_token") or 0)
+    old_status = str(operation.get("status") or "")
+    if old_status == "pausing":
+        new_status = "paused"
+        message = "服务重启时完成暂停；该工作区未被当前 Worker 自动接管。"
+    elif old_status == "cancelling":
+        new_status = "cancelled"
+        message = "服务重启时完成取消；该工作区未被当前 Worker 自动接管。"
+    else:
+        new_status = "blocked"
+        message = "服务重启后该工作区未被当前 Worker 接管，请在工作区内显式继续。"
+    store.sync_operation(
+        operation_id,
+        new_status,
+        message=message,
+        error={"code": "ORPHANED_AFTER_RESTART", "previous_status": old_status}
+        if new_status == "blocked"
+        else None,
+        fencing_token=fencing_token,
+    )
+    goal = store.goal_state()
+    if goal and str(goal.get("status") or "") in {"planning", "in_progress", "running"}:
+        store.upsert_goal_state(
+            {
+                **goal,
+                "status": "blocked_human",
+                "blocked_reason": "服务重启后执行 Operation 未被自动接管，请确认后继续。",
+                "orphaned_operation_id": operation_id,
+            }
+        )
+    return {
+        "changed": True,
+        "workspace_id": context.workspace_id,
+        "operation_id": operation_id,
+        "status": new_status,
+    }
+
+
 def _startup_reconcile() -> None:
     # Install the V2 control-state bridge before any persisted V1 pipeline is
     # reconciled so subsequent status transitions carry the same operation
@@ -8757,18 +8811,24 @@ def _startup_reconcile() -> None:
         _append_log(f"[警告] 读取 Agent 开关失败: {exc}")
 
     _load_active_run_from_disk()
-    try:
-        reconcile_interrupted_repair(ACTIVE_RUN_ROOT or ROOT)
-    except Exception as exc:
-        _append_log(f"[警告] 修复任务恢复检查失败: {exc}")
-    try:
-        from agent.activity import reconcile_interrupted_activity
+    workspace_roots = [path for path in RUNS_DIR.iterdir() if path.is_dir() and not path.name.startswith(".")]
+    if not workspace_roots and ACTIVE_RUN_ROOT is None:
+        # Preserve the one-version non-isolated V1 workspace adapter.
+        workspace_roots = [ROOT]
+    for workspace_root in workspace_roots:
+        try:
+            reconcile_interrupted_repair(workspace_root)
+            from agent.activity import reconcile_interrupted_activity
 
-        act = reconcile_interrupted_activity(ACTIVE_RUN_ROOT or ROOT)
-        if str(act.get("status") or "") == "interrupted":
-            _append_log("[系统] 已清理重启后残留的在岗/排队工位状态")
-    except Exception as exc:
-        _append_log(f"[警告] 工位活动恢复检查失败: {exc}")
+            act = reconcile_interrupted_activity(workspace_root)
+            if str(act.get("status") or "") == "interrupted":
+                _append_log(f"[系统] 已清理重启后残留工位: {workspace_root.name}")
+            if workspace_root != ROOT and not _same_path(workspace_root, ACTIVE_RUN_ROOT):
+                result = _reconcile_inactive_workspace(_workspace_context(workspace_root.name))
+                if result.get("changed"):
+                    _append_log(f"[系统] 已阻断未接管 Operation: {workspace_root.name}")
+        except Exception as exc:
+            _append_log(f"[警告] 工作区恢复检查失败 {workspace_root.name}: {exc}")
 
     # Unified soft-heal + consistency log (replaces ad-hoc goal/pipeline only check)
     if ACTIVE_RUN_ROOT is not None:

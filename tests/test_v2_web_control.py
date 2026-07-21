@@ -1870,6 +1870,43 @@ class V2WebControlTests(unittest.TestCase):
         self.assertFalse(pipeline["consistent"])
         self.assertEqual(pipeline["checkpoint_source"], "ignored_mismatch")
 
+    def test_inactive_workspace_reconcile_blocks_orphaned_pipeline_and_goal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "running",
+                    }
+                },
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "build-md"},
+                        "expected_revision": 0,
+                        "idempotency_key": "orphaned-pipeline",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.upsert_goal_state({"goal_id": "goal-1", "status": "in_progress"})
+
+            result = web_app._reconcile_inactive_workspace(context)
+
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            goal = gateway.store.goal_state() or {}
+            self.assertTrue(result["changed"])
+            self.assertEqual(operation["status"], "blocked")
+            self.assertEqual(operation["error"]["code"], "ORPHANED_AFTER_RESTART")
+            self.assertEqual(goal["status"], "blocked_human")
+            self.assertEqual(goal["orphaned_operation_id"], receipt.operation_id)
+
     def test_workspace_event_stream_uses_stable_type_and_last_event_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
