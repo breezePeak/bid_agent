@@ -1043,6 +1043,53 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(rejected["ok"])
             self.assertEqual(rejected["receipt"]["error"]["code"], "POLICY_DENIED")
 
+    def test_quality_revalidation_runs_through_explicit_workspace_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch(
+                    "agent.repair.revalidate_gate",
+                    return_value={"ok": True, "message": "revalidated"},
+                ) as revalidate:
+                    response = asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "quality.revalidate",
+                                    "payload": {"command": "global-review"},
+                                    "expected_revision": 0,
+                                    "idempotency_key": "quality-revalidate",
+                                }
+                            ),
+                        )
+                    )
+            payload = _body(response)
+            self.assertTrue(payload["ok"], payload)
+            self.assertTrue(web_app._same_path(revalidate.call_args.args[0], alpha))
+            self.assertFalse((beta / "workspace" / "control.db").exists())
+
+    def test_debug_tool_api_rejects_mutation_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            response = asyncio.run(
+                web_app.api_agent_tools_invoke(
+                    _Request({"name": "build_export", "args": {}, "dry_run": False})
+                )
+            )
+            payload = _body(response)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["error"]["code"], "POLICY_DENIED")
+
 
 if __name__ == "__main__":
     unittest.main()

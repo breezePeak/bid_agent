@@ -3317,7 +3317,6 @@ async def api_batch_execute_repair(request: Request) -> JSONResponse:
 
 @app.post("/api/gates/revalidate")
 async def api_revalidate_gate(request: Request) -> JSONResponse:
-    root = _active_root()
     try:
         body = await request.json()
     except Exception:
@@ -3326,12 +3325,25 @@ async def api_revalidate_gate(request: Request) -> JSONResponse:
     if not command:
         return JSONResponse({"ok": False, "message": "缺少 command"}, status_code=400)
     try:
-        from agent.repair import revalidate_gate
-
-        result = revalidate_gate(root, command)
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "quality.revalidate",
+                "payload": {"command": command},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-quality-revalidate:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
+        )
+        receipt = gateway.submit(envelope)
+        return JSONResponse(
+            {"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message},
+            status_code=202 if receipt.status != "rejected" else 409,
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.get("/api/compliance-report")
@@ -3530,10 +3542,22 @@ async def api_agent_tools_invoke(request: Request) -> JSONResponse:
     if not name:
         return JSONResponse({"ok": False, "message": "缺少 tool name"}, status_code=400)
     try:
+        from agent.tool_registry import get_tool
         from agent.tool_runtime import invoke as tool_invoke
 
+        spec = get_tool(name)
+        if spec is None:
+            raise ControlPlaneError("COMMAND_INVALID", f"未知工具: {name}", status_code=404)
+        if not dry_run and str(spec.kind) != "analysis":
+            raise ControlPlaneError(
+                "POLICY_DENIED",
+                "调试 Tool API 只允许只读 analysis 工具；mutation/export 必须通过 V2 CommandGateway。",
+                status_code=409,
+            )
         result = tool_invoke(name, args, root=root, dry_run=dry_run, actor="api")
         return JSONResponse({"ok": result.ok, "result": result.to_dict()})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
@@ -5286,6 +5310,39 @@ def _handle_accept_issue_risk(
     }
 
 
+def _handle_quality_revalidate(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.repair import revalidate_gate
+
+    command = str(envelope.payload.get("command") or "").strip()
+    allowed = {str(step.get("command") or "") for step in WORKFLOW_STEPS}
+    if not command or command not in allowed:
+        raise ControlPlaneError("COMMAND_INVALID", f"不可重验的门禁命令: {command or '-'}", status_code=400)
+    try:
+        result = revalidate_gate(context.root, command)
+    except Exception as exc:
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            f"门禁重验失败，已保持阻断: {exc}",
+            status_code=503,
+            retryable=True,
+        ) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            str(result.get("message") if isinstance(result, dict) else "门禁重验返回无效状态。"),
+            details={"command": command},
+        )
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": str(result.get("message") or f"门禁 {command} 已重验。"),
+    }
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -5896,6 +5953,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "repair.start": _handle_repair_start,
             "repair.issues": _handle_repair_issues,
             "issues.accept_risk": _handle_accept_issue_risk,
+            "quality.revalidate": _handle_quality_revalidate,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,

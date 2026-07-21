@@ -256,8 +256,8 @@ export function executeIssueRepair(runId, issueId, { dryRun = false } = {}) {
   return submitWorkspaceCommand(runId, 'repair.issues', { issue_ids: [issueId] })
 }
 
-export function revalidateGate(command) {
-  return api.post('/gates/revalidate', { command }, { timeout: 600000 })
+export function revalidateGate(runId, command) {
+  return submitWorkspaceCommand(runId, 'quality.revalidate', { command })
 }
 
 export function acceptIssueRisk(runId, issueId, reason) {
