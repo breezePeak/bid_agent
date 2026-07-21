@@ -5092,6 +5092,15 @@ def _attempt_auto_recovery(command: str, run_root: Path, error_lines: list[str])
 
 
 def _run_sync(command: str, run_id: str, run_root: Path) -> int:
+    _LOG_CONTEXT.run_root = run_root
+    try:
+        return _run_sync_impl(command, run_id, run_root)
+    finally:
+        if hasattr(_LOG_CONTEXT, "run_root"):
+            del _LOG_CONTEXT.run_root
+
+
+def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
     global RUNNING, CURRENT_TASK, CURRENT_PROCESS, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
     RUNNING = True
     CURRENT_TASK = command
@@ -5099,7 +5108,6 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     CURRENT_RUN_ID = run_id
     CURRENT_RUN_ROOT = run_root
     PAUSE_REQUESTED = False
-    _LOG_CONTEXT.run_root = run_root
 
     log_start = len(LOG_LINES)
     args = ["src/main.py", command, *COMMANDS.get(command, [])]
@@ -5163,8 +5171,6 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     CURRENT_RUN_ID = ""
     CURRENT_RUN_ROOT = None
     PAUSE_REQUESTED = False
-    if hasattr(_LOG_CONTEXT, "run_root"):
-        del _LOG_CONTEXT.run_root
     return exit_code
 
 

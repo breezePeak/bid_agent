@@ -1893,6 +1893,15 @@ class V2WebControlTests(unittest.TestCase):
             self.assertIn("alpha-log", chunk)
             self.assertNotIn("beta-log", chunk)
 
+    def test_workspace_log_context_is_cleared_when_pipeline_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "alpha"
+            root.mkdir()
+            with mock.patch.object(web_app, "_run_sync_impl", side_effect=RuntimeError("boom")):
+                with self.assertRaisesRegex(RuntimeError, "boom"):
+                    web_app._run_sync("parse-tender", "alpha", root)
+            self.assertFalse(hasattr(web_app._LOG_CONTEXT, "run_root"))
+
 
 if __name__ == "__main__":
     unittest.main()
