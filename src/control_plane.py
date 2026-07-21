@@ -183,6 +183,7 @@ class ControlStore:
         "review.update",
         "document.apply_edit",
         "workspace.set_profile",
+        "workspace.run_utility",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -816,6 +817,7 @@ class ControlStore:
                         "review.update",
                         "document.apply_edit",
                         "workspace.set_profile",
+                        "workspace.run_utility",
                     }
                     and active is not None
                     and str(active["status"]) == "blocked"

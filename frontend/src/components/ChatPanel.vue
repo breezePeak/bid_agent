@@ -928,6 +928,11 @@ async function skipFailedStage(failedCmd) {
 async function runCommand(cmd) {
   try {
     const r = await fetch('/api/run-command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd, run_id: props.runId }) }).then(r => r.json())
+    if (r.ok && r.action?.confirmation_id) {
+      if (!window.confirm(r.action.label || `确认执行 ${cmd}？`)) return
+      const confirmed = await confirmWorkspaceAction(props.runId, r.action.confirmation_id)
+      if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || `${cmd} 执行失败`)
+    }
     if (!r.ok) { addMessage('system', `执行失败: ${r.message || cmd}`); autoExecuting.value = false }
   } catch (e) { addMessage('system', `执行请求失败: ${e.message}`); autoExecuting.value = false }
 }

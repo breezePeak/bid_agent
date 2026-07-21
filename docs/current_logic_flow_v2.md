@@ -493,3 +493,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B7 | 2026-07-21 | 人工复核更新迁入 `review.update` Command，并强制使用持久化 Action 确认；旧 `/api/manual-review/update` 只生成提案，Vue 在确认成功后刷新状态，不再直接写人工复核覆盖文件。人工复核文件仍作为一个版本的兼容投影，后续需迁入权威领域表。 |
 | V2.0-B8 | 2026-07-21 | final.md 的单行、块、选区、全文和撤销写入统一迁入 `document.apply_edit` Command；旧编辑接口仅生成 Action，确认时校验 Artifact hash 防止覆盖并发修改，在同一 Operation 内同步重建 Word，重建失败自动恢复 final.md。AI 生成预览仍保持只读，只有确认操作能够写入终稿。 |
 | V2.0-B9 | 2026-07-21 | 项目类型切换迁入 `workspace.set_profile` Command 和持久化 Action 确认；兼容页面的人工复核与项目类型操作均完成提案确认适配，不再把 202 提案响应误当成已写入结果。工作区删除/清理和非流水线 utility command 仍待迁移。 |
+| V2.0-B10 | 2026-07-21 | 工作区内不属于标准阶段的维护命令迁入 `workspace.run_utility` Command；旧 `/api/run-command` 对此类命令只生成高风险 Action，Vue 与兼容页面确认后才由同一 Operation 同步执行。仅没有工作区上下文的根级 `validate/init-demo` 继续保留 V1 适配。 |

@@ -1838,6 +1838,10 @@ async function runCommand(command) {
       body: JSON.stringify({ command, run_id: currentStatus?.active_run?.id || "" }),
     });
     const data = await response.json();
+    if (data.ok && data.action) {
+      const confirmed = await confirmV2MaterialAction(data, data.action.label || `确认执行 ${command}？`);
+      if (!confirmed.ok) return;
+    }
     if (!data.ok) {
       alert(data.message);
       return;

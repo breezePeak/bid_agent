@@ -1329,6 +1329,31 @@ class V2WebControlTests(unittest.TestCase):
                 profile = json.loads((root / "workspace" / "project_profile.json").read_text(encoding="utf-8"))
                 self.assertEqual(profile["project_type"], "software_project")
 
+    def test_workspace_utility_command_requires_v2_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_run_sync", return_value=0) as runner:
+                    proposed = asyncio.run(
+                        web_app.api_run_command(_Request({"run_id": "alpha", "command": "validate"}))
+                    )
+                    proposal = _body(proposed)
+                    self.assertEqual(proposed.status_code, 202)
+                    self.assertEqual(proposal["status"], "requires_confirmation")
+                    runner.assert_not_called()
+
+                    receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
+                        proposal["action"]["confirmation_id"]
+                    )
+
+                self.assertEqual(receipt.status, "accepted")
+                runner.assert_called_once_with("validate", "alpha", root.resolve())
+
 
 if __name__ == "__main__":
     unittest.main()

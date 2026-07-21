@@ -5633,6 +5633,31 @@ def _handle_workspace_set_profile(
     }
 
 
+def _handle_workspace_run_utility(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    command = str(envelope.payload.get("command") or "").strip()
+    allowed = set(COMMANDS) - set(auto_run_commands())
+    if command not in allowed:
+        raise ControlPlaneError("COMMAND_INVALID", f"不支持的工作区 utility command: {command}", status_code=400)
+    if RUNNING or SUPERVISOR.is_running():
+        raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。", status_code=409)
+    if command not in {"validate", "init"}:
+        gate = _v2_gate_can_proceed(context, command)
+        if not gate.get("can_proceed", False):
+            raise ControlPlaneError(
+                "GATE_BLOCKED",
+                str(gate.get("message") or "质量门禁阻断。"),
+                details={"gate": gate},
+            )
+    exit_code = _run_sync(command, context.workspace_id, context.root)
+    if exit_code != 0:
+        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", f"{command} 执行失败，exit_code={exit_code}")
+    return {"accepted": True, "operation_status": "succeeded", "message": f"{command} 执行完成。"}
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -6248,6 +6273,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "review.update": _handle_review_update,
             "document.apply_edit": _handle_document_apply_edit,
             "workspace.set_profile": _handle_workspace_set_profile,
+            "workspace.run_utility": _handle_workspace_run_utility,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
@@ -6561,6 +6587,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "review.update": "确认更新人工复核结论",
                 "document.apply_edit": "确认修改终稿并重新生成 Word",
                 "workspace.set_profile": "确认切换项目类型",
+                "workspace.run_utility": "确认执行工作区维护命令",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
@@ -6815,8 +6842,26 @@ async def api_run_command(request: Request) -> JSONResponse:
         except ControlPlaneError as exc:
             return _command_error_response(exc)
 
-    # Utility commands remain on the V1 adapter until their domain services move
-    # behind CommandDispatcher in phase A.
+    if run_id:
+        try:
+            context = _workspace_context(run_id)
+            gateway = _command_gateway(context)
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "workspace.run_utility",
+                    "payload": {"command": command},
+                    "expected_revision": gateway.store.revision(),
+                    "idempotency_key": str(body.get("idempotency_key") or f"legacy-utility:{uuid.uuid4()}"),
+                    "actor": _request_actor(request, source="legacy_api"),
+                },
+                workspace_id=context.workspace_id,
+            )
+            action = gateway.propose(envelope, label=f"确认执行维护命令 {command}", risk="high")
+            return JSONResponse({"ok": True, "status": "requires_confirmation", "action": action}, status_code=202)
+        except ControlPlaneError as exc:
+            return _command_error_response(exc)
+
+    # Only root-level validate/init-demo remain outside a workspace control plane.
     if RUNNING or SUPERVISOR.is_running():
         return JSONResponse({"ok": False, "message": "当前已有任务正在运行，请等待完成。"}, status_code=409)
     if command in {"validate", "init-demo"} and not run_id:
