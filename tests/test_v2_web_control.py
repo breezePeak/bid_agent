@@ -2392,6 +2392,30 @@ class V2WebControlTests(unittest.TestCase):
             beta = runs / "beta"
             alpha.mkdir(parents=True)
             beta.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.upsert_artifact_states(
+                [
+                    {
+                        "artifact_key": "inputs/company.md",
+                        "path": "inputs/company.md",
+                        "kind": "file",
+                        "status": "ready",
+                        "producer": "prepare-inputs",
+                        "sha256": "old-company",
+                        "input_fingerprint": "old-sources",
+                    },
+                    {
+                        "artifact_key": "workspace/chunks/company_chunks.json",
+                        "path": "workspace/chunks/company_chunks.json",
+                        "kind": "file",
+                        "status": "ready",
+                        "producer": "split-docs",
+                        "sha256": "old-chunks",
+                        "input_fingerprint": "old-inputs",
+                    },
+                ]
+            )
             web_app.ACTIVE_RUN_ID = "beta"
             web_app.ACTIVE_RUN_ROOT = beta
             upload = UploadFile(filename="company.txt", file=io.BytesIO(b"alpha company evidence"))
@@ -2406,6 +2430,10 @@ class V2WebControlTests(unittest.TestCase):
                 b"alpha company evidence",
             )
             self.assertFalse((beta / "sources" / "company" / "company.txt").exists())
+            states = {item["artifact_key"]: item for item in store.artifact_states()}
+            self.assertEqual(states["inputs/company.md"]["status"], "stale")
+            self.assertEqual(states["workspace/chunks/company_chunks.json"]["status"], "stale")
+            self.assertEqual(states["inputs/company.md"]["stale_source_command"], "sources.upload")
 
     def test_v2_agent_decisions_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

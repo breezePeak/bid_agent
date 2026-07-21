@@ -185,3 +185,17 @@ def record_external_chapter_mutation(
     if not all(describe_artifact(context.root, artifact)["status"] == "ready" for artifact in spec.produces):
         return []
     return record_stage_artifacts(context, "write-all", disposition=disposition)
+
+
+def invalidate_after_source_change(context: WorkspaceContext, *, category: str) -> int:
+    """Invalidate imported and downstream artifacts after source files change."""
+    prepare = stage_spec_by_command("prepare-inputs")
+    artifact_keys = [
+        *(str(artifact.path).replace("\\", "/") for artifact in prepare.produces),
+        *downstream_artifact_keys("prepare-inputs"),
+    ]
+    return ControlStore(context).mark_artifact_states_stale(
+        list(dict.fromkeys(artifact_keys)),
+        reason=f"源文件已变化: {category}",
+        source_command="sources.upload",
+    )

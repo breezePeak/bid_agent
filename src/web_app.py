@@ -7791,9 +7791,15 @@ async def api_upload(
     if category not in VALID_CATEGORIES:
         return JSONResponse({"ok": False, "message": f"无效 category: {category}"}, status_code=400)
 
-    active_root = _workspace_context(workspace_id).root if workspace_id else _active_root()
+    context = _workspace_context(workspace_id) if workspace_id else None
+    active_root = context.root if context is not None else _active_root()
     if active_root == ROOT:
         return JSONResponse({"ok": False, "message": "请先选择或创建工作空间。"}, status_code=400)
+    if context is None:
+        try:
+            context = WorkspaceContext.resolve(RUNS_DIR, active_root.name)
+        except ControlPlaneError as exc:
+            return _command_error_response(exc)
 
     dest_dir = active_root / "sources" / category
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -7817,6 +7823,20 @@ async def api_upload(
         dest.write_bytes(content)
         saved.append(dest.name)
         _append_log(f"[上传] {category} → {dest.name}")
+
+    try:
+        from artifact_manifest import invalidate_after_source_change
+
+        invalidate_after_source_change(context, category=category)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                f"源文件已保存，但 Artifact 失效状态写入失败，已拒绝继续: {exc}",
+                status_code=503,
+                retryable=True,
+            )
+        )
 
     return JSONResponse({"ok": True, "saved": saved, "count": len(saved)})
 
