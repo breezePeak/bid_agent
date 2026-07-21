@@ -223,6 +223,29 @@ class ControlPlaneTests(unittest.TestCase):
             receipt = gateway.confirm(action["confirmation_id"])
             self.assertEqual(receipt.status, "accepted")
 
+    def test_material_mutations_require_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "succeeded",
+            }
+            gateway = CommandGateway(
+                context,
+                {"materials.update": handler, "materials.refill": handler},
+            )
+            for kind, payload in (
+                ("materials.update", {"item_id": "m1", "response_status": "deferred"}),
+                ("materials.refill", {}),
+            ):
+                envelope = _envelope(context, gateway.store, kind, payload=payload)
+                with self.assertRaises(ControlPlaneError) as unconfirmed:
+                    gateway.submit(envelope)
+                self.assertEqual(unconfirmed.exception.code, "CONFIRMATION_REQUIRED")
+                action = gateway.propose(envelope, label=f"confirm {kind}", risk="high")
+                receipt = gateway.confirm(action["confirmation_id"])
+                self.assertEqual(receipt.status, "accepted")
+
     def test_workspaces_have_independent_databases_and_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

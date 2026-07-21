@@ -93,6 +93,8 @@
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
 import {
+  confirmWorkspaceAction,
+  declineWorkspaceAction,
   fetchMaterialsChecklist,
   updateMaterialsChecklistItem,
   rebuildMaterialsChecklist,
@@ -151,6 +153,20 @@ function notePlaceholder(st) {
 
 const emit = defineEmits(['status'])
 
+async function confirmCommandProposal(response, prompt) {
+  const body = response?.data || {}
+  const action = body.action
+  if (!action) return body
+  const actionId = String(action.action_id || action.confirmation_id || '').trim()
+  if (!actionId) throw new Error('确认提案缺少 action_id')
+  if (!window.confirm(prompt || action.label || '确认执行此操作？')) {
+    await declineWorkspaceAction(props.runId, actionId)
+    return { ok: true, declined: true, message: '已取消操作' }
+  }
+  const confirmed = await confirmWorkspaceAction(props.runId, actionId)
+  return confirmed?.data || {}
+}
+
 function applyPayload(data) {
   exists.value = !!data.exists
   summary.value = data.summary || data.checklist?.summary || {}
@@ -186,12 +202,22 @@ async function setStatus(item, status) {
   msg.value = ''
   try {
     const reason = (notes.value[item.item_id] ?? item.reason ?? '').trim()
-    const { data } = await updateMaterialsChecklistItem({
+    const response = await updateMaterialsChecklistItem(props.runId, {
       item_id: item.item_id,
       response_status: status,
       reason,
     })
+    const data = await confirmCommandProposal(
+      response,
+      status === 'waived'
+        ? `确认放弃材料「${item.requirement || item.item_id}」？`
+        : `确认将材料「${item.requirement || item.item_id}」更新为「${status}」？`,
+    )
     if (!data?.ok) throw new Error(data?.message || '更新失败')
+    if (data.declined) {
+      msg.value = data.message
+      return
+    }
     if (data.checklist) {
       applyPayload({ exists: true, checklist: data.checklist, items: data.checklist.items, summary: data.checklist.summary, refill_plans: refillPlans.value })
       await refresh()
@@ -258,8 +284,13 @@ async function doRefill() {
   busy.value = true
   msg.value = '正在按已齐材料回填章节…'
   try {
-    const { data } = await refillMaterialsChecklist({})
+    const response = await refillMaterialsChecklist(props.runId, {})
+    const data = await confirmCommandProposal(response, `确认将已验证材料回填到 ${refillPlans.value.length} 个章节？`)
     if (!data?.ok && !(data?.rewritten || []).length) throw new Error(data?.message || '回填失败')
+    if (data.declined) {
+      msg.value = data.message
+      return
+    }
     await refresh()
     msg.value = data.message || '回填完成'
   } catch (e) {

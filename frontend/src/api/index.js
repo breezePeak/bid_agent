@@ -270,14 +270,14 @@ export function fetchMaterialsChecklist() {
   return api.get('/materials-checklist')
 }
 
-export function updateMaterialsChecklistItem(payload) {
-  return api.post('/materials-checklist/update', payload)
+export function updateMaterialsChecklistItem(runId, payload) {
+  return submitWorkspaceCommand(runId, 'materials.update', payload)
 }
 
 export function rebuildMaterialsChecklist() {
   return api.post('/materials-checklist/rebuild', {}, { timeout: 120000 })
 }
 
-export function refillMaterialsChecklist(payload = {}) {
-  return api.post('/materials-checklist/refill', payload, { timeout: 900000 })
+export function refillMaterialsChecklist(runId, payload = {}) {
+  return submitWorkspaceCommand(runId, 'materials.refill', payload)
 }

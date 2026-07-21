@@ -174,6 +174,8 @@ class ControlStore:
         "pipeline.skip_stage",
         "repair.start",
         "rewrite.chapters",
+        "materials.update",
+        "materials.refill",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -381,7 +383,12 @@ class ControlStore:
 
                 active = self._current_operation(connection)
                 blocked_mutation_retry = (
-                    envelope.kind in {"repair.start", "rewrite.chapters"}
+                    envelope.kind in {
+                        "repair.start",
+                        "rewrite.chapters",
+                        "materials.update",
+                        "materials.refill",
+                    }
                     and active is not None
                     and str(active["status"]) == "blocked"
                 )
@@ -413,6 +420,8 @@ class ControlStore:
                         "pipeline.skip_stage": {"paused", "blocked"},
                         "repair.start": {"blocked"},
                         "rewrite.chapters": {"blocked"},
+                        "materials.update": {"blocked"},
+                        "materials.refill": {"blocked"},
                     }
                     if previous_status not in allowed[envelope.kind]:
                         raise ControlPlaneError(
@@ -427,8 +436,16 @@ class ControlStore:
                         "pipeline.skip_stage": previous_status,
                         "repair.start": "queued",
                         "rewrite.chapters": "queued",
+                        "materials.update": "queued",
+                        "materials.refill": "queued",
                     }[envelope.kind]
-                    if envelope.kind in {"pipeline.resume", "repair.start", "rewrite.chapters"}:
+                    if envelope.kind in {
+                        "pipeline.resume",
+                        "repair.start",
+                        "rewrite.chapters",
+                        "materials.update",
+                        "materials.refill",
+                    }:
                         fencing_token += 1
                     connection.execute(
                         "UPDATE operations SET status = ?, fencing_token = ?, updated_at = ? WHERE operation_id = ?",

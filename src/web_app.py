@@ -3604,23 +3604,26 @@ async def api_materials_checklist_update(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
     try:
-        from materials_checklist import batch_update_item_responses, update_item_response
-
-        if isinstance(body.get("updates"), list):
-            result = batch_update_item_responses(root, body.get("updates") or [], rebuild=True)
-        else:
-            result = update_item_response(
-                root,
-                str(body.get("item_id") or ""),
-                response_status=str(body.get("response_status") or body.get("status") or ""),
-                reason=str(body.get("reason") or body.get("note") or ""),
-                suggested_attachment=str(body.get("suggested_attachment") or ""),
-                rebuild=True,
-            )
-        status = 200 if result.get("ok") else 400
-        return JSONResponse(result, status_code=status)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        context = _workspace_context(ACTIVE_RUN_ID or root.name)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "materials.update",
+                "payload": body,
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-material-update:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
+        )
+        action = gateway.propose(envelope, label="确认更新材料状态", risk="high")
+        return JSONResponse(
+            {"ok": True, "status": "requires_confirmation", "action": action},
+            status_code=202,
+            headers={"Deprecation": "true", "Link": f'</api/v2/workspaces/{context.workspace_id}/commands>; rel="successor-version"'},
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/materials-checklist/rebuild")
@@ -3652,25 +3655,26 @@ async def api_materials_checklist_refill(request: Request) -> JSONResponse:
     except Exception:
         body = {}
     try:
-        from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
-
-        chapter_ids = body.get("chapter_ids") if isinstance(body, dict) else None
-        if chapter_ids is not None and not isinstance(chapter_ids, list):
-            return JSONResponse({"ok": False, "message": "chapter_ids 必须是数组"}, status_code=400)
-        result = refill_material_gaps(
-            root,
-            chapter_ids=[str(x) for x in chapter_ids] if chapter_ids is not None else None,
-            replan_jobs=bool(body.get("replan_jobs", True)) if isinstance(body, dict) else True,
-            max_chapters=int(body.get("max_chapters", 20) or 20) if isinstance(body, dict) else 20,
+        context = _workspace_context(ACTIVE_RUN_ID or root.name)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "materials.refill",
+                "payload": body if isinstance(body, dict) else {},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-material-refill:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
         )
-        try:
-            result["revalidate"] = revalidate_issues_after_materials(root)
-        except Exception:
-            pass
-        status = 200 if result.get("ok") else 400
-        return JSONResponse(result, status_code=status)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        action = gateway.propose(envelope, label="确认将已验证材料回填正文", risk="high")
+        return JSONResponse(
+            {"ok": True, "status": "requires_confirmation", "action": action},
+            status_code=202,
+            headers={"Deprecation": "true", "Link": f'</api/v2/workspaces/{context.workspace_id}/commands>; rel="successor-version"'},
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/materials-checklist/upload")
@@ -5106,6 +5110,221 @@ def _handle_rewrite_chapters(
     }
 
 
+def _material_fulfillment_verified(item: dict[str, Any]) -> bool:
+    lifecycle = str(item.get("lifecycle_status") or "").strip().lower()
+    evidence = str(item.get("evidence_status") or "").strip().lower()
+    if lifecycle in {"verified", "human_verified"}:
+        return True
+    if evidence in {"verified", "satisfied"}:
+        return True
+    # Legacy refill may replace verified with resolved/injected. Preserve that
+    # compatibility only when verification provenance is still present; a bare
+    # legacy ready flag must never become authoritative by passing through refill.
+    return lifecycle in {"resolved", "injected"} and bool(
+        item.get("verified_at") or item.get("verification_confidence")
+    )
+
+
+def _protected_material(item: dict[str, Any]) -> bool:
+    category = str(item.get("category") or "").strip().lower()
+    severity = str(item.get("severity") or "").strip().lower()
+    return category in {"qualification", "disqualification", "mandatory_doc"} or severity in {
+        "fatal",
+        "critical",
+        "block",
+        "blocker",
+    }
+
+
+def _handle_materials_update(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from materials_checklist import (
+        batch_update_item_responses,
+        load_materials_checklist,
+        update_item_response,
+    )
+
+    raw_updates = envelope.payload.get("updates")
+    if isinstance(raw_updates, list):
+        updates = [dict(item) for item in raw_updates if isinstance(item, dict)]
+    else:
+        updates = [dict(envelope.payload)]
+    if not updates:
+        raise ControlPlaneError("COMMAND_INVALID", "材料更新列表不能为空。", status_code=400)
+    if len(updates) > 200:
+        raise ControlPlaneError("COMMAND_INVALID", "单次最多更新 200 条材料。", status_code=400)
+
+    checklist = load_materials_checklist(context.root)
+    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    by_id = {str(item.get("item_id") or ""): item for item in items if isinstance(item, dict)}
+    normalized: list[dict[str, Any]] = []
+    for update in updates:
+        item_id = str(update.get("item_id") or "").strip()
+        status = str(update.get("response_status") or update.get("status") or "").strip().lower()
+        reason = str(update.get("reason") or update.get("note") or "").strip()
+        item = by_id.get(item_id)
+        if not item:
+            raise ControlPlaneError("COMMAND_INVALID", f"材料项不存在: {item_id}", status_code=404)
+        if status not in {"deferred", "ready", "waived"}:
+            raise ControlPlaneError("COMMAND_INVALID", f"无效材料状态: {status}", status_code=400)
+        if status == "ready" and str(item.get("response_status") or "") != "ready":
+            if not _material_fulfillment_verified(item):
+                raise ControlPlaneError(
+                    "GATE_BLOCKED",
+                    f"材料 {item_id} 尚未验证，submitted/uploaded 不能直接标记为 ready。",
+                    details={"item_id": item_id, "lifecycle_status": item.get("lifecycle_status")},
+                )
+        if status == "waived":
+            if _protected_material(item):
+                raise ControlPlaneError(
+                    "GATE_BLOCKED",
+                    f"材料 {item_id} 属于资格/必交/阻断材料，不允许放弃。",
+                    details={"item_id": item_id},
+                )
+            if len(reason) < 4:
+                raise ControlPlaneError("COMMAND_INVALID", "放弃可选材料必须填写原因。", status_code=400)
+        normalized.append(
+            {
+                "item_id": item_id,
+                "response_status": status,
+                "reason": reason,
+                "suggested_attachment": str(update.get("suggested_attachment") or ""),
+            }
+        )
+
+    if len(normalized) == 1:
+        item = normalized[0]
+        result = update_item_response(
+            context.root,
+            item["item_id"],
+            response_status=item["response_status"],
+            reason=item["reason"],
+            suggested_attachment=item["suggested_attachment"],
+            rebuild=True,
+        )
+    else:
+        result = batch_update_item_responses(context.root, normalized, rebuild=True)
+    if not result.get("ok"):
+        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(result.get("message") or "材料状态更新失败。"))
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": str(result.get("message") or f"已更新 {len(normalized)} 条材料。"),
+    }
+
+
+def _trigger_material_refill(
+    context: WorkspaceContext,
+    operation_id: str,
+    fencing_token: int,
+    *,
+    chapter_ids: list[str] | None,
+    replan_jobs: bool,
+    max_chapters: int,
+) -> dict[str, Any]:
+    global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
+    if RUNNING or SUPERVISOR.is_running():
+        return {"ok": False, "busy": True, "message": "当前已有任务在运行。"}
+    RUNNING = True
+    CURRENT_TASK = "materials-refill"
+    CURRENT_RUN_ID = context.workspace_id
+    CURRENT_RUN_ROOT = context.root
+    PAUSE_REQUESTED = False
+
+    def worker() -> None:
+        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
+        status = "failed"
+        message = "材料回填失败。"
+        error: dict[str, Any] | None = None
+        try:
+            from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
+
+            ControlStore(context).sync_operation(
+                operation_id,
+                "running",
+                message="正在按已验证材料回填章节。",
+                fencing_token=fencing_token,
+            )
+            result = refill_material_gaps(
+                context.root,
+                chapter_ids=chapter_ids,
+                replan_jobs=replan_jobs,
+                max_chapters=max_chapters,
+            )
+            try:
+                result["revalidate"] = revalidate_issues_after_materials(context.root)
+            except Exception as exc:
+                result["revalidate_error"] = str(exc)
+            failed = result.get("failed") if isinstance(result.get("failed"), list) else []
+            status = "succeeded" if result.get("ok") and not failed else "blocked"
+            message = str(result.get("message") or "材料回填完成。")
+            error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
+        except Exception as exc:
+            error = {"message": str(exc)}
+            message = f"材料回填失败: {exc}"
+        finally:
+            try:
+                ControlStore(context).sync_operation(
+                    operation_id,
+                    status,
+                    message=message,
+                    error=error,
+                    fencing_token=fencing_token,
+                )
+            finally:
+                RUNNING = False
+                CURRENT_TASK = ""
+                CURRENT_RUN_ID = ""
+                CURRENT_RUN_ROOT = None
+
+    threading.Thread(target=worker, daemon=True, name=f"materials-refill-{context.workspace_id}").start()
+    return {"ok": True, "message": "材料回填已启动。"}
+
+
+def _handle_materials_refill(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from materials_checklist import load_materials_checklist
+
+    checklist = load_materials_checklist(context.root)
+    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    unsafe_ready = [
+        str(item.get("item_id") or "")
+        for item in items
+        if isinstance(item, dict)
+        and str(item.get("response_status") or "") == "ready"
+        and not _material_fulfillment_verified(item)
+    ]
+    if unsafe_ready:
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            "存在未验证却标记为 ready 的材料，已拒绝回填。",
+            details={"item_ids": unsafe_ready[:50]},
+        )
+    raw_ids = envelope.payload.get("chapter_ids")
+    if raw_ids is not None and not isinstance(raw_ids, list):
+        raise ControlPlaneError("COMMAND_INVALID", "chapter_ids 必须是数组。", status_code=400)
+    chapter_ids = [str(item).strip() for item in raw_ids or [] if str(item).strip()] or None
+    max_chapters = max(1, min(int(envelope.payload.get("max_chapters") or 20), 100))
+    operation = ControlStore(context).operation(operation_id) or {}
+    result = _trigger_material_refill(
+        context,
+        operation_id,
+        int(operation.get("fencing_token") or 0),
+        chapter_ids=chapter_ids,
+        replan_jobs=bool(envelope.payload.get("replan_jobs", True)),
+        max_chapters=max_chapters,
+    )
+    if not result.get("ok"):
+        raise ControlPlaneError("LEASE_CONFLICT", str(result.get("message") or "材料回填未能启动。"))
+    return {"accepted": True, "operation_status": "running", "message": result["message"]}
+
+
 def _command_gateway(context: WorkspaceContext) -> CommandGateway:
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     return CommandGateway(
@@ -5119,6 +5338,8 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "pipeline.skip_stage": _handle_pipeline_skip,
             "repair.start": _handle_repair_start,
             "rewrite.chapters": _handle_rewrite_chapters,
+            "materials.update": _handle_materials_update,
+            "materials.refill": _handle_materials_refill,
         },
     )
 
@@ -5324,6 +5545,8 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "pipeline.skip_stage": "确认跳过当前阶段",
                 "repair.start": "确认执行最小修复",
                 "rewrite.chapters": "确认执行定向改稿",
+                "materials.update": "确认更新材料状态",
+                "materials.refill": "确认将已验证材料回填正文",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
