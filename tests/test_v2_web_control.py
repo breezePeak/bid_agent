@@ -1516,6 +1516,13 @@ class V2WebControlTests(unittest.TestCase):
                 override = root / "workspace" / "manual_review" / "chapter_actions.json"
                 self.assertTrue(override.exists())
                 self.assertEqual(json.loads(override.read_text(encoding="utf-8"))["items"]["chapter-1"]["status"], "accepted")
+                decisions = ControlStore(WorkspaceContext.resolve(runs, "alpha")).policy_decisions(
+                    issue_id="manual-review:chapter_review:chapter-1"
+                )
+                self.assertEqual(len(decisions), 1)
+                self.assertEqual(decisions[0]["decision_type"], "manual_review")
+                self.assertEqual(decisions[0]["decision"]["status"], "accepted")
+                self.assertEqual(decisions[0]["actor"]["id"], "anonymous")
 
     def test_final_md_edit_requires_confirmation_and_rebuilds_in_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -5888,10 +5888,26 @@ def _handle_review_update(
         result = apply_manual_review_update(context.root, category, payload)
     except ValueError as exc:
         raise ControlPlaneError("COMMAND_INVALID", str(exc), status_code=400) from exc
+    item_id = str(result.get("item_id") or payload.get("item_id") or "").strip()
+    actor = envelope.actor if isinstance(envelope.actor, dict) else {}
+    ControlStore(context).record_policy_decision(
+        issue_id=f"manual-review:{category}:{item_id or 'unknown'}",
+        decision_type="manual_review",
+        decision={
+            "category": category,
+            "item_id": item_id,
+            "status": str(payload.get("status") or ""),
+            "operator_instruction": str(payload.get("operator_instruction") or payload.get("note") or "")[:2000],
+        },
+        actor={
+            "type": str(actor.get("type") or "user"),
+            "id": str(actor.get("id") or "anonymous")[:128],
+        },
+    )
     return {
         "accepted": True,
         "operation_status": "succeeded",
-        "message": f"人工复核 {result.get('item_id', '')} 已更新。",
+        "message": f"人工复核 {item_id} 已更新。",
     }
 
 
