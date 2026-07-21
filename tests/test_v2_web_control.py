@@ -957,6 +957,92 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["receipt"]["error"]["code"], "GATE_BLOCKED")
 
+    def test_issue_repair_and_risk_acceptance_require_persisted_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("agent.repair.execute_repair_batch") as execute:
+                    repair = _body(
+                        asyncio.run(
+                            web_app.api_execute_repair(
+                                "iss-1",
+                                _Request({"confirm": True, "dry_run": False}),
+                            )
+                        )
+                    )
+                with mock.patch("agent.issues.accept_issue_risk") as accept:
+                    risk = _body(
+                        asyncio.run(
+                            web_app.api_accept_issue_risk(
+                                "iss-1",
+                                _Request(
+                                    {
+                                        "reason": "这是一个充分记录的风险原因",
+                                        "actor": "spoofed",
+                                        "is_admin": True,
+                                        "confirm_critical": True,
+                                    }
+                                ),
+                            )
+                        )
+                    )
+            self.assertEqual(repair["status"], "requires_confirmation")
+            self.assertEqual(risk["status"], "requires_confirmation")
+            execute.assert_not_called()
+            accept.assert_not_called()
+
+    def test_critical_risk_cannot_use_client_admin_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            issues = root / "workspace" / "issues"
+            issues.mkdir(parents=True)
+            (issues / "open.json").write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "critical-1",
+                            "code": "CRITICAL_CONFLICT",
+                            "title": "critical conflict",
+                            "severity": "block",
+                            "status": "open",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.dict("os.environ", {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
+                    proposed = _body(
+                        asyncio.run(
+                            web_app.api_v2_submit_command(
+                                "alpha",
+                                _Request(
+                                    {
+                                        "kind": "issues.accept_risk",
+                                        "payload": {
+                                            "issue_id": "critical-1",
+                                            "reason": "这是一个充分记录并经过讨论的风险原因",
+                                            "is_admin": True,
+                                            "confirm_critical": True,
+                                        },
+                                        "expected_revision": 0,
+                                        "idempotency_key": "critical-risk",
+                                    }
+                                ),
+                            )
+                        )
+                    )
+                    rejected = _body(
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                    )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["receipt"]["error"]["code"], "POLICY_DENIED")
+
 
 if __name__ == "__main__":
     unittest.main()

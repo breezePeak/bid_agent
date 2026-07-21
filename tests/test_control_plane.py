@@ -237,6 +237,8 @@ class ControlPlaneTests(unittest.TestCase):
                     "materials.refill": handler,
                     "materials.upload": handler,
                     "materials.confirm_verification": handler,
+                    "repair.issues": handler,
+                    "issues.accept_risk": handler,
                 },
             )
             for kind, payload in (
@@ -244,6 +246,8 @@ class ControlPlaneTests(unittest.TestCase):
                 ("materials.refill", {}),
                 ("materials.upload", {"item_id": "m1", "uploaded_path": "workspace/m1.pdf"}),
                 ("materials.confirm_verification", {"item_id": "m1", "accept": True}),
+                ("repair.issues", {"issue_ids": ["iss-1"]}),
+                ("issues.accept_risk", {"issue_id": "iss-1", "reason": "documented reason"}),
             ):
                 envelope = _envelope(context, gateway.store, kind, payload=payload)
                 with self.assertRaises(ControlPlaneError) as unconfirmed:

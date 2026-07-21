@@ -486,3 +486,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-A9 | 2026-07-21 | V2 Command API 不再信任 JSON 中的 `actor`，统一从服务端请求上下文绑定主体；在认证中间件接入前使用明确的 `v2_api/anonymous` 兼容主体，避免客户端伪造操作者。正式身份认证、角色授权和工作区 ACL 仍未实施。 |
 | V2.0-B1 | 2026-07-21 | 开始阶段 B：新增工作区隔离的材料暂存接口和 `control.db` 一次性 upload token；`materials.upload` 只消费当前工作区 token 并复核文件 hash，不再接受客户端提供的服务器路径，Vue 材料清单支持逐项“上传并核验”。同时收紧旧源文件上传的文件名、路径、可执行类型和大小边界。材料生命周期领域表与正式 ACL 仍待迁移。 |
 | V2.0-B2 | 2026-07-21 | 新增 `control.db.material_states` 作为材料响应、生命周期和证据状态的 V2 权威表；旧工作区首次访问时单向导入，后续 V1 文件变化不覆盖 V2 状态。材料 Command 更新 SQLite 并同步 V1 文件投影，Snapshot、材料列表、回填门禁和正式稿 fingerprint 优先读取控制库。当前仍保留一个版本的 V1 双写适配，Finding/Issue/Policy 领域表与 ACL 尚待迁移。 |
+| V2.0-B3 | 2026-07-21 | 单条/批量问题修复与风险接受迁入 `repair.issues` / `issues.accept_risk` Command，并强制持久化 Action 确认；旧 API 只生成提案，不再直接执行 mutation。风险接受忽略客户端 actor、admin 和二次确认标志，fatal、资格材料及未经服务端授权的 critical 风险均 fail-closed。Issue/Policy 权威表和正式角色授权仍待迁移。 |

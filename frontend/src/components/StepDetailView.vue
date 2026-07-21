@@ -396,6 +396,7 @@ import {
   fetchManualReviewSummary,
   fetchManualReviewItems,
   updateManualReview,
+  confirmWorkspaceAction,
 } from '../api'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 
@@ -685,13 +686,19 @@ async function confirmRepairDialog() {
   repairBusy.value = dialog.kind === 'risk' ? dialog.issueIds[0] : (dialog.kind === 'batch-execute' ? 'batch' : dialog.issueIds[0])
   repairMsg.value = dialog.kind === 'risk' ? '正在提交…' : '正在执行修复…'
   try {
-    let data
+    let response
     if (dialog.kind === 'risk') {
-      ({ data } = await acceptIssueRisk(dialog.issueIds[0], riskReason.value.trim()))
+      response = await acceptIssueRisk(props.runId, dialog.issueIds[0], riskReason.value.trim())
     } else if (dialog.kind === 'batch-execute') {
-      ({ data } = await batchExecuteRepairs(dialog.issueIds, { confirm: true }))
+      response = await batchExecuteRepairs(props.runId, dialog.issueIds)
     } else {
-      ({ data } = await executeIssueRepair(dialog.issueIds[0], { confirm: true }))
+      response = await executeIssueRepair(props.runId, dialog.issueIds[0])
+    }
+    let data = response?.data || {}
+    if (data.action) {
+      const actionId = data.action.action_id || data.action.confirmation_id
+      const confirmed = await confirmWorkspaceAction(props.runId, actionId)
+      data = confirmed?.data || {}
     }
     if (!data?.ok && !data?.executed) throw new Error(data?.message || '操作失败')
     repairMsg.value = data.message || '操作完成'

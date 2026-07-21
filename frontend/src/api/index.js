@@ -249,19 +249,19 @@ export function previewIssueRepair(issueId) {
   return api.post(`/issues/${encodeURIComponent(issueId)}/actions/preview`)
 }
 
-export function executeIssueRepair(issueId, { confirm = true, dryRun = false } = {}) {
-  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/execute`, {
-    confirm,
-    dry_run: dryRun,
-  }, { timeout: 600000 })
+export function executeIssueRepair(runId, issueId, { dryRun = false } = {}) {
+  if (dryRun) {
+    return api.post(`/issues/${encodeURIComponent(issueId)}/actions/execute`, { dry_run: true })
+  }
+  return submitWorkspaceCommand(runId, 'repair.issues', { issue_ids: [issueId] })
 }
 
 export function revalidateGate(command) {
   return api.post('/gates/revalidate', { command }, { timeout: 600000 })
 }
 
-export function acceptIssueRisk(issueId, reason, actor = 'web_user') {
-  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/accept`, { reason, actor })
+export function acceptIssueRisk(runId, issueId, reason) {
+  return submitWorkspaceCommand(runId, 'issues.accept_risk', { issue_id: issueId, reason })
 }
 
 export function explainIssueCause(issueId) {
@@ -272,8 +272,8 @@ export function batchPreviewRepairs(issueIds) {
   return api.post('/issues/actions/batch-preview', { issue_ids: issueIds })
 }
 
-export function batchExecuteRepairs(issueIds, { confirm = true } = {}) {
-  return api.post('/issues/actions/batch-execute', { issue_ids: issueIds, confirm }, { timeout: 900000 })
+export function batchExecuteRepairs(runId, issueIds) {
+  return submitWorkspaceCommand(runId, 'repair.issues', { issue_ids: issueIds })
 }
 
 export function fetchExportPreflight() {

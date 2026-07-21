@@ -173,6 +173,8 @@ class ControlStore:
         "pipeline.cancel",
         "pipeline.skip_stage",
         "repair.start",
+        "repair.issues",
+        "issues.accept_risk",
         "rewrite.chapters",
         "materials.update",
         "materials.refill",
@@ -742,6 +744,8 @@ class ControlStore:
                 blocked_mutation_retry = (
                     envelope.kind in {
                         "repair.start",
+                        "repair.issues",
+                        "issues.accept_risk",
                         "rewrite.chapters",
                         "materials.update",
                         "materials.refill",

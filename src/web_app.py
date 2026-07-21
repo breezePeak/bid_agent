@@ -3187,28 +3187,42 @@ def api_preview_repair(issue_id: str) -> JSONResponse:
 
 @app.post("/api/issues/{issue_id}/actions/execute")
 async def api_execute_repair(issue_id: str, request: Request) -> JSONResponse:
-    root = _active_root()
     try:
         body = await request.json()
     except Exception:
         body = {}
     if not isinstance(body, dict):
         body = {}
-    confirm = bool(body.get("confirm", False))
     dry_run = bool(body.get("dry_run", False))
-    try:
-        from agent.repair import execute_repair_plan
+    if dry_run:
+        try:
+            from agent.repair import execute_repair_plan
 
-        result = execute_repair_plan(root, issue_id, confirm=confirm, dry_run=dry_run)
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+            return JSONResponse(execute_repair_plan(_active_root(), issue_id, confirm=False, dry_run=True))
+        except Exception as exc:
+            return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+    try:
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "repair.issues",
+                "payload": {"issue_ids": [issue_id]},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-repair-issue:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
+        )
+        action = gateway.propose(envelope, label="确认执行问题最小修复", risk="high")
+        return JSONResponse({"ok": True, "status": "requires_confirmation", "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 
 @app.post("/api/issues/{issue_id}/actions/accept")
 async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse:
-    root = _active_root()
     try:
         body = await request.json()
     except Exception:
@@ -3216,24 +3230,23 @@ async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse
     if not isinstance(body, dict):
         body = {}
     reason = str(body.get("reason") or "").strip()
-    actor = str(body.get("actor") or "web_user").strip() or "web_user"
-    is_admin = bool(body.get("is_admin") or body.get("admin"))
-    confirm_critical = bool(body.get("confirm_critical") or body.get("confirm"))
     try:
-        from agent.issues import accept_issue_risk
-
-        result = accept_issue_risk(
-            root,
-            issue_id,
-            reason=reason,
-            actor=actor,
-            is_admin=is_admin,
-            confirm_critical=confirm_critical,
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "issues.accept_risk",
+                "payload": {"issue_id": issue_id, "reason": reason},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-accept-risk:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
         )
-        code = 200 if result.get("ok") else 400
-        return JSONResponse(result, status_code=code)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        action = gateway.propose(envelope, label="确认接受问题风险", risk="high")
+        return JSONResponse({"ok": True, "status": "requires_confirmation", "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/issues/{issue_id}/actions/explain")
@@ -3274,7 +3287,6 @@ async def api_batch_preview_repair(request: Request) -> JSONResponse:
 
 @app.post("/api/issues/actions/batch-execute")
 async def api_batch_execute_repair(request: Request) -> JSONResponse:
-    root = _active_root()
     try:
         body = await request.json()
     except Exception:
@@ -3284,19 +3296,23 @@ async def api_batch_execute_repair(request: Request) -> JSONResponse:
     ids = body.get("issue_ids")
     if not isinstance(ids, list) or not ids:
         return JSONResponse({"ok": False, "message": "issue_ids 必须是非空数组"}, status_code=400)
-    confirm = bool(body.get("confirm", False))
     try:
-        from agent.repair import execute_repair_batch
-
-        result = execute_repair_batch(
-            root,
-            [str(x) for x in ids],
-            confirm=confirm,
-            dry_run=not confirm,
+        context = _workspace_context(ACTIVE_RUN_ID)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "repair.issues",
+                "payload": {"issue_ids": [str(x) for x in ids]},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-repair-batch:{uuid.uuid4()}",
+                "actor": {"type": "legacy_web", "id": "current-user"},
+            },
+            workspace_id=context.workspace_id,
         )
-        return JSONResponse(result)
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+        action = gateway.propose(envelope, label="确认执行批量最小修复", risk="high")
+        return JSONResponse({"ok": True, "status": "requires_confirmation", "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/gates/revalidate")
@@ -5198,6 +5214,78 @@ def _handle_repair_start(
     }
 
 
+def _handle_repair_issues(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.repair import execute_repair_batch
+
+    raw_ids = envelope.payload.get("issue_ids")
+    if not isinstance(raw_ids, list):
+        raise ControlPlaneError("COMMAND_INVALID", "issue_ids 必须是数组。", status_code=400)
+    issue_ids = list(dict.fromkeys(str(item).strip() for item in raw_ids if str(item).strip()))
+    if not issue_ids:
+        raise ControlPlaneError("COMMAND_INVALID", "issue_ids 不能为空。", status_code=400)
+    if len(issue_ids) > 100:
+        raise ControlPlaneError("COMMAND_INVALID", "单次最多修复 100 个问题。", status_code=400)
+    result = execute_repair_batch(context.root, issue_ids, confirm=True, dry_run=False)
+    failed = result.get("failed") if isinstance(result.get("failed"), list) else []
+    still_open = result.get("still_open") if isinstance(result.get("still_open"), list) else []
+    if not result.get("ok") or failed or still_open:
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            str(result.get("message") or "问题修复后仍有阻断项。"),
+            details={"failed": failed, "still_open": still_open},
+        )
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": str(result.get("message") or f"已修复 {len(issue_ids)} 个问题。"),
+    }
+
+
+def _handle_accept_issue_risk(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.issues import accept_issue_risk
+
+    issue_id = str(envelope.payload.get("issue_id") or "").strip()
+    reason = str(envelope.payload.get("reason") or "").strip()
+    if not issue_id:
+        raise ControlPlaneError("COMMAND_INVALID", "缺少 issue_id。", status_code=400)
+    if len("".join(reason.split())) < 8:
+        raise ControlPlaneError("COMMAND_INVALID", "接受风险原因至少需要 8 个有效字符。", status_code=400)
+    actor = envelope.actor if isinstance(envelope.actor, dict) else {}
+    actor_id = str(actor.get("id") or "anonymous").strip()[:128]
+    result = accept_issue_risk(
+        context.root,
+        issue_id,
+        reason=reason,
+        actor=actor_id,
+        # Role authorization is fail-closed until server authentication exposes
+        # an administrator principal. Client flags are deliberately ignored.
+        is_admin=False,
+        confirm_critical=False,
+    )
+    if not result.get("ok"):
+        code = str(result.get("code") or "")
+        error_code = "POLICY_DENIED" if code in {
+            "fatal_forbidden",
+            "qualification_deferred_only",
+            "admin_required",
+            "confirm_critical_required",
+        } else "GATE_BLOCKED"
+        raise ControlPlaneError(error_code, str(result.get("message") or "风险接受被拒绝。"), details={"policy_code": code})
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": str(result.get("message") or "风险接受已记录。"),
+    }
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -5806,6 +5894,8 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "pipeline.cancel": _handle_pipeline_cancel,
             "pipeline.skip_stage": _handle_pipeline_skip,
             "repair.start": _handle_repair_start,
+            "repair.issues": _handle_repair_issues,
+            "issues.accept_risk": _handle_accept_issue_risk,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
@@ -6109,6 +6199,8 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "pipeline.cancel": "确认取消当前任务",
                 "pipeline.skip_stage": "确认跳过当前阶段",
                 "repair.start": "确认执行最小修复",
+                "repair.issues": "确认执行问题最小修复",
+                "issues.accept_risk": "确认接受问题风险",
                 "rewrite.chapters": "确认执行定向改稿",
                 "materials.update": "确认更新材料状态",
                 "materials.refill": "确认将已验证材料回填正文",
