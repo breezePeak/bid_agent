@@ -5210,12 +5210,49 @@ def _request_principal(request: Request) -> dict[str, Any]:
 def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[str, Any]:
     """Fail-closed gate evaluation for V2 mutations using the explicit workspace."""
     try:
-        from agent.issues import can_proceed
-        from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
+        from agent.issues import quality_gate_mode
 
-        sync_issues_from_global_review(context.root)
-        sync_issues_from_compliance(context.root)
-        gate = can_proceed(context.root, next_command=next_command)
+        issues = ControlStore(context).issue_states()
+        open_issues = [
+            item for item in issues
+            if str(item.get("status") or "") in {"open", "in_progress"}
+        ]
+        blocks = [
+            item for item in open_issues
+            if str(item.get("severity") or "") in {"block", "fatal"}
+        ]
+        mode = quality_gate_mode()
+        block_commands = {str(item.get("command") or "") for item in blocks}
+        revalidate_allowed = bool(next_command and next_command in block_commands)
+        non_overridable = [
+            item for item in blocks
+            if str(item.get("severity") or "") == "fatal"
+            or str(item.get("category") or "") in {"qualification", "disqualification"}
+        ]
+        can_proceed = (
+            not blocks
+            or revalidate_allowed
+            or (mode == "soft" and not non_overridable)
+        )
+        gate = {
+            "ok": True,
+            "can_proceed": can_proceed,
+            "mode": mode,
+            "block_count": len(blocks),
+            "blocks": blocks,
+            "next_command": next_command,
+            "revalidate_allowed": revalidate_allowed,
+            "source": "control.db",
+            "message": (
+                f"允许重验门禁阶段 `{next_command}`（当前仍有 {len(blocks)} 条 block）"
+                if revalidate_allowed
+                else "无 open block 问题"
+                if not blocks
+                else "soft 模式：仅记录可接受风险"
+                if can_proceed
+                else f"存在 {len(blocks)} 条阻断问题，禁止继续执行。"
+            ),
+        }
     except Exception as exc:
         raise ControlPlaneError(
             "STATE_UNAVAILABLE",

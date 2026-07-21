@@ -83,6 +83,57 @@ class V2WebControlTests(unittest.TestCase):
             )
         )
 
+    def test_v2_gate_reads_sqlite_without_syncing_legacy_issue_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).replace_issue_states(
+                [{"id": "block-1", "status": "open", "severity": "block", "command": "global-review"}],
+                source="test",
+            )
+
+            with mock.patch("agent.issues.quality_gate_mode", return_value="hard"):
+                with mock.patch("agent.root_cause.sync_issues_from_compliance") as sync_compliance:
+                    with mock.patch("agent.root_cause.sync_issues_from_global_review") as sync_review:
+                        blocked = web_app._v2_gate_can_proceed(context, "build-md")
+                        revalidate = web_app._v2_gate_can_proceed(context, "global-review")
+
+            sync_compliance.assert_not_called()
+            sync_review.assert_not_called()
+            self.assertFalse(blocked["can_proceed"])
+            self.assertEqual(blocked["source"], "control.db")
+            self.assertTrue(revalidate["can_proceed"])
+            self.assertTrue(revalidate["revalidate_allowed"])
+
+    def test_v2_gate_never_soft_allows_fatal_or_qualification_risk(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).replace_issue_states(
+                [
+                    {"id": "fatal-1", "status": "open", "severity": "fatal"},
+                    {"id": "qualification-1", "status": "open", "severity": "block", "category": "qualification"},
+                ],
+                source="test",
+            )
+
+            with mock.patch("agent.issues.quality_gate_mode", return_value="soft"):
+                gate = web_app._v2_gate_can_proceed(context, "build-md")
+
+            self.assertFalse(gate["can_proceed"])
+            self.assertEqual(gate["block_count"], 2)
+
+    def test_v2_gate_fails_closed_when_sqlite_state_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            with mock.patch.object(ControlStore, "issue_states", side_effect=sqlite3.OperationalError("locked")):
+                with self.assertRaisesRegex(Exception, "已拒绝执行"):
+                    web_app._v2_gate_can_proceed(context, "build-md")
+
     def test_v2_start_snapshot_pause_and_cancel_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
