@@ -1185,6 +1185,47 @@ class V2WebControlTests(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_manual_review_update_requires_v2_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            request = _Request(
+                {
+                    "category": "chapter_review",
+                    "payload": {
+                        "item_id": "chapter-1",
+                        "status": "accepted",
+                        "operator_instruction": "采用人工结论",
+                    },
+                }
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "apply_manual_review_update", wraps=web_app.apply_manual_review_update) as apply:
+                    proposed = asyncio.run(web_app.api_manual_review_update(request))
+                    proposal = _body(proposed)
+                    self.assertEqual(proposed.status_code, 202)
+                    self.assertEqual(proposal["action"]["type"], "confirm_v2_command")
+                    apply.assert_not_called()
+
+                    receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
+                        proposal["action"]["confirmation_id"]
+                    )
+
+                self.assertEqual(receipt.status, "accepted")
+                self.assertEqual(
+                    web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).store.operation(
+                        receipt.operation_id or ""
+                    )["status"],
+                    "succeeded",
+                )
+                override = root / "workspace" / "manual_review" / "chapter_actions.json"
+                self.assertTrue(override.exists())
+                self.assertEqual(json.loads(override.read_text(encoding="utf-8"))["items"]["chapter-1"]["status"], "accepted")
+
 
 if __name__ == "__main__":
     unittest.main()

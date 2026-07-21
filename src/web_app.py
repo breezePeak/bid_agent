@@ -3905,10 +3905,26 @@ async def api_manual_review_update(request: Request) -> JSONResponse:
     if not category or not isinstance(payload, dict):
         return JSONResponse({"ok": False, "message": "缺少 category 或 payload。"}, status_code=400)
     try:
-        result = apply_manual_review_update(root, category, payload)
+        context = _workspace_context(ACTIVE_RUN_ID or root.name)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "review.update",
+                "payload": {"category": category, "payload": payload},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-review-update:{uuid.uuid4()}",
+                "actor": _request_actor(request, source="legacy_web"),
+            },
+            workspace_id=context.workspace_id,
+        )
+        action = gateway.propose(envelope, label="确认更新人工复核结论", risk="high")
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
     except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    return JSONResponse({"ok": True, "result": result, "summary": manual_review_summary(root)})
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"控制状态不可用，已拒绝更新: {exc}", status_code=503)
+        )
 
 
 @app.get("/api/agent-runs")
@@ -5498,6 +5514,28 @@ def _handle_goal_resume(
     return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已恢复为 in_progress。"}
 
 
+def _handle_review_update(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    category = str(envelope.payload.get("category") or "").strip()
+    payload = envelope.payload.get("payload")
+    if category not in {"template_evidence", "score_coverage", "chapter_review", "global_review"}:
+        raise ControlPlaneError("COMMAND_INVALID", "人工复核 category 无效。", status_code=400)
+    if not isinstance(payload, dict):
+        raise ControlPlaneError("COMMAND_INVALID", "人工复核 payload 必须是对象。", status_code=400)
+    try:
+        result = apply_manual_review_update(context.root, category, payload)
+    except ValueError as exc:
+        raise ControlPlaneError("COMMAND_INVALID", str(exc), status_code=400) from exc
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"人工复核 {result.get('item_id', '')} 已更新。",
+    }
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -6110,6 +6148,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "issues.accept_risk": _handle_accept_issue_risk,
             "quality.revalidate": _handle_quality_revalidate,
             "goal.resume": _handle_goal_resume,
+            "review.update": _handle_review_update,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
@@ -6420,6 +6459,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "materials.refill": "确认将已验证材料回填正文",
                 "materials.upload": "确认登记并验证上传材料",
                 "materials.confirm_verification": "确认材料人工核验结论",
+                "review.update": "确认更新人工复核结论",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")

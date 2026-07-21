@@ -88,8 +88,8 @@ export function fetchManualReviewItems(category) {
   return api.get('/manual-review/items', { params: { category } })
 }
 
-export function updateManualReview(category, payload) {
-  return api.post('/manual-review/update', { category, payload })
+export function updateManualReview(runId, category, payload) {
+  return submitWorkspaceCommand(runId, 'review.update', { category, payload })
 }
 
 export function fetchFilePreview(path) {

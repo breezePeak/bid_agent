@@ -785,16 +785,17 @@ async function submitMr(item, status) {
   actionMsg.value = ''
   try {
     const note = (notes.value[item.item_id] ?? noteOf(item) ?? '').trim()
-    const { data } = await updateManualReview(mrCategory.value, {
+    const { data } = await updateManualReview(props.runId, mrCategory.value, {
       item_id: item.item_id,
       status,
       operator_note: note,
       operator_instruction: note,
       target_chapter_id: item.chapter_id || item.target_chapter_id || '',
     })
-    if (!data?.ok) throw new Error(data?.message || '更新失败')
-    actionMsg.value = `已更新 ${item.item_id} → ${status}` + (data.result?.recommended_stage ? `，建议从 ${data.result.recommended_stage} 重跑` : '')
-    if (data.summary) summary.value = data.summary
+    if (!data?.ok || !data?.action?.confirmation_id) throw new Error(data?.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, data.action.confirmation_id)
+    if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '更新确认失败')
+    actionMsg.value = `已更新 ${item.item_id} → ${status}`
     await switchMrCategory(mrCategory.value, { keepMsg: true })
   } catch (e) {
     actionMsg.value = e.message || '更新失败'
