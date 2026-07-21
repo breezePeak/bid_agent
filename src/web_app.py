@@ -5536,6 +5536,70 @@ def _handle_review_update(
     }
 
 
+def _handle_document_apply_edit(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    if RUNNING:
+        raise ControlPlaneError("LEASE_CONFLICT", "当前已有执行任务，不能并发修改终稿。", status_code=409)
+    path = context.root / "outputs" / "final.md"
+    if not path.exists() or not path.is_file():
+        raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)
+    expected_hash = str(envelope.payload.get("base_sha256") or "").strip()
+    actual_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not expected_hash or not hmac.compare_digest(expected_hash, actual_hash):
+        raise ControlPlaneError("REVISION_CONFLICT", "final.md 已变化，请刷新后重新确认。", status_code=409)
+
+    mode = str(envelope.payload.get("mode") or "").strip()
+    instruction = str(envelope.payload.get("instruction") or "").strip()
+    result: dict[str, Any]
+    try:
+        if mode == "line":
+            line_number = int(envelope.payload.get("line_number") or 0)
+            new_text = str(envelope.payload.get("new_text") or "").rstrip("\n\r")
+            if line_number < 1 or not new_text.strip():
+                raise ValueError("缺少有效的 line_number 或 new_text。")
+            result = _save_final_md_line_edit(context.root, line_number, new_text, instruction, "v2_line_edit")
+        elif mode == "block":
+            block_id = str(envelope.payload.get("block_id") or "").strip()
+            new_text = str(envelope.payload.get("new_text") or "").rstrip("\n\r")
+            if not block_id or not new_text.strip():
+                raise ValueError("缺少 block_id 或 new_text。")
+            result = _replace_final_md_block(context.root, block_id, new_text, instruction, "v2_block_edit")
+        elif mode == "overwrite":
+            new_md = str(envelope.payload.get("new_md") or "")
+            if not new_md.strip():
+                raise ValueError("缺少 new_md。")
+            result = _overwrite_final_md(context.root, new_md, instruction, "v2_document_overwrite")
+        elif mode == "undo":
+            relative = str(envelope.payload.get("backup_path") or "").strip()
+            backup = (context.root / relative).resolve()
+            allowed = (context.root / "workspace" / "manual_line_edits").resolve()
+            if not relative or not backup.is_relative_to(allowed) or not backup.is_file():
+                raise ValueError("撤销备份不存在或路径无效。")
+            rollback = _backup_final_md(context.root, path.read_text(encoding="utf-8"), "undo_operation")
+            path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+            result = {"review": {"backup_path": str(rollback.relative_to(context.root)).replace("\\", "/")}}
+            _LAST_BACKUP.pop(context.root.resolve(), None)
+        else:
+            raise ValueError("不支持的文档编辑模式。")
+    except (OSError, ValueError) as exc:
+        raise ControlPlaneError("COMMAND_INVALID", str(exc), status_code=400) from exc
+
+    exit_code = _run_sync("build-docx", context.workspace_id, context.root)
+    if exit_code != 0:
+        backup_relative = str(result.get("review", {}).get("backup_path") or result.get("backup_path") or "")
+        backup = (context.root / backup_relative).resolve() if backup_relative else None
+        if backup and backup.is_file() and backup.is_relative_to(context.root.resolve()):
+            path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
+        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", "文档编辑后的 Word 重建失败，已恢复 final.md。")
+
+    _PENDING_LINE_EDITS.pop(context.root.resolve(), None)
+    _PENDING_DOC_EDIT.pop(context.root.resolve(), None)
+    return {"accepted": True, "operation_status": "succeeded", "message": "文档修改已保存，Word 已重新生成。"}
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -6149,6 +6213,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "quality.revalidate": _handle_quality_revalidate,
             "goal.resume": _handle_goal_resume,
             "review.update": _handle_review_update,
+            "document.apply_edit": _handle_document_apply_edit,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
@@ -6460,6 +6525,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "materials.upload": "确认登记并验证上传材料",
                 "materials.confirm_verification": "确认材料人工核验结论",
                 "review.update": "确认更新人工复核结论",
+                "document.apply_edit": "确认修改终稿并重新生成 Word",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
@@ -6946,15 +7012,35 @@ def _save_final_md_line_edit(root: Path, line_number: int, new_text: str, instru
         "review_notes": [
             "已完成选中行改写。",
             "已记录修改前备份。",
-            "将后台重新执行 build-docx 生成 Word。",
+            "由当前 V2 Operation 执行 build-docx 生成 Word。",
         ],
         "backup_path": str(backup_path.relative_to(root)).replace("\\", "/"),
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     review_path = backup_dir / f"line_{line_number}_{stamp}_review.json"
     review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
-    threading.Thread(target=_run_sync, args=("build-docx", ACTIVE_RUN_ID, root), daemon=True).start()
     return {"review": review, "review_path": str(review_path.relative_to(root)).replace("\\", "/")}
+
+
+def _propose_document_edit(request: Request, root: Path, payload: dict[str, Any], *, label: str) -> dict[str, Any]:
+    path = root / "outputs" / "final.md"
+    if not path.exists() or not path.is_file():
+        raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)
+    context = _workspace_context(ACTIVE_RUN_ID or root.name)
+    gateway = _command_gateway(context)
+    command_payload = dict(payload)
+    command_payload["base_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+    envelope = CommandEnvelope.from_mapping(
+        {
+            "kind": "document.apply_edit",
+            "payload": command_payload,
+            "expected_revision": gateway.store.revision(),
+            "idempotency_key": f"legacy-document-edit:{uuid.uuid4()}",
+            "actor": _request_actor(request, source="legacy_web"),
+        },
+        workspace_id=context.workspace_id,
+    )
+    return gateway.propose(envelope, label=label, risk="high")
 
 
 @app.post("/api/final-md/line-edit")
@@ -6983,17 +7069,15 @@ async def api_final_md_line_edit(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "请填写修改后的内容。"}, status_code=400)
 
     try:
-        result = _save_final_md_line_edit(root, line_number, new_text, instruction, "manual")
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    _append_log(f"[人工改写] final.md 第 {line_number} 行已修改，开始重新生成 Word。")
-    return JSONResponse(
-        {
-            "ok": True,
-            "message": "已保存该行修改，并开始重新生成 Word。",
-            **result,
-        }
-    )
+        action = _propose_document_edit(
+            request,
+            root,
+            {"mode": "line", "line_number": line_number, "new_text": new_text, "instruction": instruction},
+            label=f"确认修改 final.md 第 {line_number} 行",
+        )
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/final-md/line-regenerate")
@@ -7088,12 +7172,20 @@ async def api_final_md_line_confirm(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "没有待确认的修改预览。"}, status_code=404)
     new_text = str(body.get("new_text", pending.get("new_text", ""))).rstrip("\n\r") or pending["new_text"]
     try:
-        result = _save_final_md_line_edit(root, pending["line_number"], new_text, pending.get("instruction", ""), pending.get("source", "ai_regenerate"))
-    except ValueError as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    _PENDING_LINE_EDITS.pop(key, None)
-    _append_log(f"[AI改写] final.md 第 {pending['line_number']} 行已确认保存，开始重新生成 Word。")
-    return JSONResponse({"ok": True, "message": "已确认保存，并开始重新生成 Word。", **result})
+        action = _propose_document_edit(
+            request,
+            root,
+            {
+                "mode": "line",
+                "line_number": pending["line_number"],
+                "new_text": new_text,
+                "instruction": pending.get("instruction", ""),
+            },
+            label=f"确认应用 final.md 第 {pending['line_number']} 行的 AI 改写",
+        )
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/final-md/line-discard")
@@ -7259,10 +7351,6 @@ def _final_docx_path(root: Path) -> Path:
     return root / "outputs" / "final.docx"
 
 
-def _trigger_build_docx_async(root: Path) -> None:
-    threading.Thread(target=_run_sync, args=("build-docx", ACTIVE_RUN_ID, root), daemon=True).start()
-
-
 def _backup_final_md(root: Path, original: str, label: str) -> Path:
     backup_dir = root / "workspace" / "manual_line_edits"
     backup_dir.mkdir(parents=True, exist_ok=True)
@@ -7328,7 +7416,6 @@ def _replace_final_md_block(root: Path, block_id: str, new_text: str, instructio
     review_path = backup_dir / f"block_{block_id}_{time.strftime('%Y%m%d_%H%M%S')}_review.json"
     review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    _trigger_build_docx_async(root)
     return {"review": review, "review_path": str(review_path.relative_to(root)).replace("\\", "/")}
 
 
@@ -7352,7 +7439,6 @@ def _overwrite_final_md(root: Path, new_md: str, instruction: str, source: str) 
     backup_dir = root / "workspace" / "manual_line_edits"
     review_path = backup_dir / f"chat_edit_{time.strftime('%Y%m%d_%H%M%S')}_review.json"
     review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
-    _trigger_build_docx_async(root)
     return {"review": review, "review_path": str(review_path.relative_to(root)).replace("\\", "/")}
 
 
@@ -7395,12 +7481,15 @@ async def api_final_doc_block_edit(request: Request) -> JSONResponse:
     if not block_id or not new_text.strip():
         return JSONResponse({"ok": False, "message": "缺少 block_id 或 new_text。"}, status_code=400)
     try:
-        result = _replace_final_md_block(root, block_id, new_text, instruction, "manual_block_edit")
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    _append_log(f"[WYSIWYG] 块 {block_id} 已修改，开始重新生成 Word。")
-    triggerDocRefresh()
-    return JSONResponse({"ok": True, "message": "已保存该块修改，并开始重新生成 Word。", **result})
+        action = _propose_document_edit(
+            request,
+            root,
+            {"mode": "block", "block_id": block_id, "new_text": new_text, "instruction": instruction},
+            label=f"确认修改终稿块 {block_id}",
+        )
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/final-doc/selection-rewrite")
@@ -7488,13 +7577,20 @@ async def api_final_doc_selection_apply(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "没有待确认的选区改写预览。"}, status_code=404)
     new_text = str(body.get("new_text", pending.get("new_text", ""))).rstrip("\n\r") or pending["new_text"]
     try:
-        result = _replace_final_md_block(root, pending["block_id"], new_text, pending.get("instruction", ""), pending.get("source", "ai_selection_rewrite"))
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    _PENDING_DOC_EDIT.pop(key, None)
-    _append_log(f"[WYSIWYG] 块 {pending['block_id']} 已应用 AI 选区改写，开始重新生成 Word。")
-    triggerDocRefresh()
-    return JSONResponse({"ok": True, "message": "已确认写入，并开始重新生成 Word。", **result})
+        action = _propose_document_edit(
+            request,
+            root,
+            {
+                "mode": "block",
+                "block_id": pending["block_id"],
+                "new_text": new_text,
+                "instruction": pending.get("instruction", ""),
+            },
+            label=f"确认应用终稿块 {pending['block_id']} 的 AI 改写",
+        )
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/final-doc/selection-discard")
@@ -7583,13 +7679,15 @@ async def api_final_doc_chat_apply(request: Request) -> JSONResponse:
     if not new_md:
         return JSONResponse({"ok": False, "message": "缺少 new_md。"}, status_code=400)
     try:
-        result = _overwrite_final_md(root, new_md, instruction, "ai_chat_edit")
-    except Exception as exc:
-        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    _PENDING_DOC_EDIT.pop(key, None)
-    _append_log("[WYSIWYG] 全文改写已写入，开始重新生成 Word。")
-    triggerDocRefresh()
-    return JSONResponse({"ok": True, "message": "已写入全文改写，并开始重新生成 Word。", **result})
+        action = _propose_document_edit(
+            request,
+            root,
+            {"mode": "overwrite", "new_md": new_md, "instruction": instruction},
+            label="确认应用 AI 全文改写",
+        )
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 @app.post("/api/final-doc/chat-discard")
@@ -7611,18 +7709,22 @@ def api_final_doc_pending() -> JSONResponse:
 
 
 @app.post("/api/final-doc/undo-rewrite")
-def api_final_doc_undo_rewrite() -> JSONResponse:
+def api_final_doc_undo_rewrite(request: Request) -> JSONResponse:
     root = _active_root()
     key = root.resolve()
-    backup_path = _LAST_BACKUP.pop(key, None)
+    backup_path = _LAST_BACKUP.get(key)
     if not backup_path or not backup_path.exists():
         return JSONResponse({"ok": False, "message": "没有可撤销的改写。"}, status_code=404)
-    final_md = _final_md_path(root)
-    original = backup_path.read_text(encoding="utf-8")
-    final_md.write_text(original, encoding="utf-8")
-    _append_log("[WYSIWYG] 已撤销上次改写，恢复到上一版本。")
-    triggerDocRefresh()
-    return JSONResponse({"ok": True, "message": "已撤销。"})
+    try:
+        action = _propose_document_edit(
+            request,
+            root,
+            {"mode": "undo", "backup_path": str(backup_path.relative_to(root)).replace("\\", "/")},
+            label="确认撤销上一次终稿改写",
+        )
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 def _sse_event(event: str, data: dict[str, Any]) -> str:

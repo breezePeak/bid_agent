@@ -1226,6 +1226,85 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertTrue(override.exists())
                 self.assertEqual(json.loads(override.read_text(encoding="utf-8"))["items"]["chapter-1"]["status"], "accepted")
 
+    def test_final_md_edit_requires_confirmation_and_rebuilds_in_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            final_md = root / "outputs" / "final.md"
+            final_md.write_text("# 标题\n原内容\n", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = asyncio.run(
+                    web_app.api_final_md_line_edit(
+                        _Request({"line_number": 2, "new_text": "新内容", "instruction": "人工修订"})
+                    )
+                )
+                proposal = _body(proposed)
+                self.assertEqual(proposed.status_code, 202)
+                self.assertEqual(final_md.read_text(encoding="utf-8"), "# 标题\n原内容\n")
+
+                with mock.patch.object(web_app, "_run_sync", return_value=0) as rebuild:
+                    receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
+                        proposal["action"]["confirmation_id"]
+                    )
+
+                self.assertEqual(receipt.status, "accepted")
+                self.assertEqual(final_md.read_text(encoding="utf-8"), "# 标题\n新内容\n")
+                rebuild.assert_called_once_with("build-docx", "alpha", root.resolve())
+
+    def test_final_md_edit_rejects_stale_artifact_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            final_md = root / "outputs" / "final.md"
+            final_md.write_text("旧内容\n", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = asyncio.run(
+                    web_app.api_final_md_line_edit(_Request({"line_number": 1, "new_text": "提议内容"}))
+                )
+                proposal = _body(proposed)
+                final_md.write_text("并发修改\n", encoding="utf-8")
+                with mock.patch.object(web_app, "_run_sync") as rebuild:
+                    receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
+                        proposal["action"]["confirmation_id"]
+                    )
+
+                self.assertEqual(receipt.status, "rejected")
+                self.assertEqual(receipt.error["code"], "REVISION_CONFLICT")
+                self.assertEqual(final_md.read_text(encoding="utf-8"), "并发修改\n")
+                rebuild.assert_not_called()
+
+    def test_final_md_edit_rolls_back_when_docx_rebuild_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            final_md = root / "outputs" / "final.md"
+            final_md.write_text("原内容\n", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = asyncio.run(
+                    web_app.api_final_md_line_edit(_Request({"line_number": 1, "new_text": "未完成内容"}))
+                )
+                proposal = _body(proposed)
+                with mock.patch.object(web_app, "_run_sync", return_value=1):
+                    receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
+                        proposal["action"]["confirmation_id"]
+                    )
+
+                self.assertEqual(receipt.status, "rejected")
+                self.assertEqual(receipt.error["code"], "COMMAND_DISPATCH_FAILED")
+                self.assertEqual(final_md.read_text(encoding="utf-8"), "原内容\n")
+
 
 if __name__ == "__main__":
     unittest.main()

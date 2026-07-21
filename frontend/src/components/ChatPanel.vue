@@ -1544,12 +1544,15 @@ function handleAction(act, sourceMessage = null) {
 
 async function acceptRewrite(act) {
   try {
-    await fetch('/api/final-doc/selection-apply', {
+    const proposed = await fetch('/api/final-doc/selection-apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ new_text: act.newText }),
-    })
-    addMessage('system', `第 ${act.lineNumber} 行改写已确认，Word 正在重建。`, [
+    }).then(r => r.json())
+    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '改写失败')
+    addMessage('system', `第 ${act.lineNumber} 行改写已确认，Word 已重建。`, [
       { type: 'undo_rewrite', label: '撤销' },
     ])
     emit('rewrite-done')
@@ -1558,8 +1561,11 @@ async function acceptRewrite(act) {
 
 async function undoRewrite() {
   try {
-    const r = await fetch('/api/final-doc/undo-rewrite', { method: 'POST' }).then(r => r.json())
-    addMessage('system', r.message || '已撤销')
+    const proposed = await fetch('/api/final-doc/undo-rewrite', { method: 'POST' }).then(r => r.json())
+    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '撤销失败')
+    addMessage('system', '已撤销并重新生成 Word。')
     emit('rewrite-done')
   } catch (e) { addMessage('system', '撤销失败') }
 }

@@ -113,6 +113,7 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
+import { confirmWorkspaceAction } from '../api'
 
 const props = defineProps({ runId: { type: String, required: true } })
 const emit = defineEmits(['add-to-chat', 'add-annotation', 'update-page-count', 'rewrite-applied', 'rewrite-discarded'])
@@ -226,13 +227,21 @@ async function saveBlock(event, block) {
   const el = event.target
   const newText = el.innerText || el.textContent || ''
   if (newText === block.text) return
+  if (!window.confirm('确认修改该终稿段落并重新生成 Word？')) {
+    el.innerText = block.text
+    return
+  }
   try {
-    await fetch('/api/final-doc/block-edit', {
+    const proposed = await fetch('/api/final-doc/block-edit', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ block_id: block.block_id, new_text: newText, instruction: '' }),
-    })
+    }).then(r => r.json())
+    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '修改失败')
     block.text = newText
-  } catch (e) { /* */ }
+    emit('rewrite-applied')
+  } catch (e) { el.innerText = block.text }
 }
 
 function onMouseUp() {
@@ -263,7 +272,10 @@ async function confirmPending() {
   if (!pendingDocEdit.value) return
   const ep = pendingDocEdit.value.kind === 'chat_edit' ? '/api/final-doc/chat-apply' : '/api/final-doc/selection-apply'
   try {
-    await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_text: pendingDocEdit.value.new_text, instruction: pendingDocEdit.value.instruction || '' }) })
+    const proposed = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_text: pendingDocEdit.value.new_text, instruction: pendingDocEdit.value.instruction || '' }) }).then(r => r.json())
+    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '改写失败')
     pendingDocEdit.value = null; await loadDoc()
     emit('rewrite-applied')
   } catch (e) { /* */ }
