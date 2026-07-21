@@ -7723,9 +7723,10 @@ def _overwrite_final_md(root: Path, new_md: str, instruction: str, source: str) 
     return {"review": review, "review_path": str(review_path.relative_to(root)).replace("\\", "/")}
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/documents/final/render")
 @app.get("/api/final-doc/render")
-def api_final_doc_render() -> JSONResponse:
-    root = _active_root()
+def api_final_doc_render(workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     path = _final_md_path(root)
     if not path.exists():
         return JSONResponse({
@@ -7774,9 +7775,10 @@ async def api_final_doc_block_edit(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/documents/final/selection-rewrite")
 @app.post("/api/final-doc/selection-rewrite")
-async def api_final_doc_selection_rewrite(request: Request) -> JSONResponse:
-    root = _active_root()
+async def api_final_doc_selection_rewrite(request: Request, workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     path = _final_md_path(root)
     if not path.exists():
         return JSONResponse({"ok": False, "message": "final.md 不存在，请先执行 build-md。"}, status_code=404)
@@ -7875,18 +7877,20 @@ async def api_final_doc_selection_apply(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/documents/final/selection-discard")
 @app.post("/api/final-doc/selection-discard")
-async def api_final_doc_selection_discard() -> JSONResponse:
-    root = _active_root()
+async def api_final_doc_selection_discard(workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     removed = _PENDING_DOC_EDIT.pop(root.resolve(), None)
     if removed:
         _append_log(f"[WYSIWYG] 块 {removed['block_id']} 的选区改写预览已放弃。")
     return JSONResponse({"ok": True, "discarded": bool(removed)})
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/documents/final/chat-edit")
 @app.post("/api/final-doc/chat-edit")
-async def api_final_doc_chat_edit(request: Request) -> JSONResponse:
-    root = _active_root()
+async def api_final_doc_chat_edit(request: Request, workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     path = _final_md_path(root)
     if not path.exists():
         return JSONResponse({"ok": False, "message": "final.md 不存在，请先执行 build-md。"}, status_code=404)
@@ -7972,9 +7976,10 @@ async def api_final_doc_chat_apply(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/documents/final/chat-discard")
 @app.post("/api/final-doc/chat-discard")
-async def api_final_doc_chat_discard() -> JSONResponse:
-    root = _active_root()
+async def api_final_doc_chat_discard(workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     key = root.resolve()
     pending = _PENDING_DOC_EDIT.pop(key, None) or {}
     if pending.get("kind") == "chat_edit":
@@ -7990,9 +7995,10 @@ def api_final_doc_pending() -> JSONResponse:
     return JSONResponse({"ok": True, "pending": pending})
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/documents/final/undo")
 @app.post("/api/final-doc/undo-rewrite")
-def api_final_doc_undo_rewrite(request: Request) -> JSONResponse:
-    root = _active_root()
+def api_final_doc_undo_rewrite(request: Request, workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     key = root.resolve()
     backup_path = _LAST_BACKUP.get(key)
     if not backup_path or not backup_path.exists():
@@ -8019,9 +8025,10 @@ def _sse_error(message: str):
     return _gen()
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/documents/final/rewrite-block/stream")
 @app.post("/api/final-doc/rewrite-block/stream")
-async def api_final_doc_rewrite_block_stream(request: Request) -> StreamingResponse:
-    root = _active_root()
+async def api_final_doc_rewrite_block_stream(request: Request, workspace_id: str = "") -> StreamingResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     path = _final_md_path(root)
     if not path.exists():
         return StreamingResponse(

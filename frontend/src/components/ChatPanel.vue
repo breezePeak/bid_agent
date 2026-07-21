@@ -1254,7 +1254,8 @@ async function doRewriteBlock(lineNumber, instruction) {
   let reasoningText = ''
   let finalNewText = ''
   try {
-    const resp = await fetch('/api/final-doc/rewrite-block/stream', {
+    const workspace = encodeURIComponent(props.runId)
+    const resp = await fetch(`/api/v2/workspaces/${workspace}/documents/final/rewrite-block/stream`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ line_number: lineNumber, instruction }),
@@ -1568,7 +1569,8 @@ async function acceptRewrite(act) {
 
 async function undoRewrite() {
   try {
-    const proposed = await fetch('/api/final-doc/undo-rewrite', { method: 'POST' }).then(r => r.json())
+    const workspace = encodeURIComponent(props.runId)
+    const proposed = await fetch(`/api/v2/workspaces/${workspace}/documents/final/undo`, { method: 'POST' }).then(r => r.json())
     if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
     const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
     if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '撤销失败')
@@ -1579,7 +1581,8 @@ async function undoRewrite() {
 
 async function discardRewrite() {
   try {
-    await fetch('/api/final-doc/selection-discard', { method: 'POST' })
+    const workspace = encodeURIComponent(props.runId)
+    await fetch(`/api/v2/workspaces/${workspace}/documents/final/selection-discard`, { method: 'POST' })
     addMessage('system', '已放弃改写。')
   } catch (e) { /* */ }
 }

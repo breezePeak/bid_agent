@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import sqlite3
@@ -1651,6 +1652,28 @@ class V2WebControlTests(unittest.TestCase):
             self.assertIn("id: 2\n", chunk)
             self.assertIn("event: WorkspaceEvent\n", chunk)
             self.assertIn('"kind": "GoalStateChanged"', chunk)
+
+    def test_v2_document_render_uses_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            (alpha / "outputs").mkdir(parents=True)
+            (beta / "outputs").mkdir(parents=True)
+            (alpha / "outputs" / "final.md").write_text("# Alpha document", encoding="utf-8")
+            (beta / "outputs" / "final.md").write_text("# Beta document", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_final_doc_render("alpha"))
+
+            self.assertTrue(payload["final_md_exists"])
+            self.assertEqual(payload["blocks"][0]["text"], "Alpha document")
+            self.assertEqual(
+                payload["base_sha256"],
+                hashlib.sha256((alpha / "outputs" / "final.md").read_bytes()).hexdigest(),
+            )
 
 
 if __name__ == "__main__":

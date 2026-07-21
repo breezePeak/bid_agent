@@ -214,13 +214,11 @@ const pendingNew = computed(() => pendingDocEdit.value?.new_text || '')
 async function loadDoc() {
   loading.value = true
   try {
-    const [renderRes, pendingRes] = await Promise.all([
-      fetch('/api/final-doc/render').then(r => r.json()),
-      fetch('/api/final-doc/pending').then(r => r.json()),
-    ])
+    const workspace = encodeURIComponent(props.runId)
+    const renderRes = await fetch(`/api/v2/workspaces/${workspace}/documents/final/render`).then(r => r.json())
     blocks.value = renderRes.blocks || []
     baseSha256.value = String(renderRes.base_sha256 || '')
-    if (pendingRes.pending) pendingDocEdit.value = pendingRes.pending
+    if (renderRes.pending) pendingDocEdit.value = renderRes.pending
   } catch (e) { /* ignore */ }
   loading.value = false
 }
@@ -264,7 +262,8 @@ function onMouseUp() {
 async function submitRewrite() {
   selSubmitting.value = true
   try {
-    const r = await fetch('/api/final-doc/selection-rewrite', {
+    const workspace = encodeURIComponent(props.runId)
+    const r = await fetch(`/api/v2/workspaces/${workspace}/documents/final/selection-rewrite`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ block_id: selectedBlockId.value, selected_text: selectedText.value, instruction: rewriteInstruction.value }),
     }).then(r => r.json())
@@ -305,7 +304,10 @@ async function confirmPending() {
 
 async function discardPending() {
   if (!pendingDocEdit.value) return
-  const ep = pendingDocEdit.value.kind === 'chat_edit' ? '/api/final-doc/chat-discard' : '/api/final-doc/selection-discard'
+  const workspace = encodeURIComponent(props.runId)
+  const ep = pendingDocEdit.value.kind === 'chat_edit'
+    ? `/api/v2/workspaces/${workspace}/documents/final/chat-discard`
+    : `/api/v2/workspaces/${workspace}/documents/final/selection-discard`
   try { await fetch(ep, { method: 'POST' }); pendingDocEdit.value = null; emit('rewrite-discarded') } catch (e) { /* */ }
 }
 
@@ -367,7 +369,8 @@ async function submitFullRewrite() {
   if (!fullRewriteInstruction.value.trim()) { fullRewriteError.value = '请输入改写指令'; return }
   fullRewriteSubmitting.value = true
   try {
-    const r = await fetch('/api/final-doc/chat-edit', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: fullRewriteInstruction.value }) }).then(r => r.json())
+    const workspace = encodeURIComponent(props.runId)
+    const r = await fetch(`/api/v2/workspaces/${workspace}/documents/final/chat-edit`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ instruction: fullRewriteInstruction.value }) }).then(r => r.json())
     if (r.ok && r.new_md) { pendingDocEdit.value = { kind: 'chat_edit', new_text: r.new_md }; fullRewriteVisible.value = false; await loadDoc() }
     else fullRewriteError.value = r.message || '改写失败'
   } catch (e) { fullRewriteError.value = '请求失败' }
