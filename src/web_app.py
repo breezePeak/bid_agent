@@ -5293,6 +5293,12 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     return gate
 
 
+def _record_v2_stage_artifacts(context: WorkspaceContext, command: str, disposition: str) -> None:
+    from artifact_manifest import record_stage_artifacts
+
+    record_stage_artifacts(context, command, disposition=disposition)
+
+
 _FORMAL_GATE_RULES_VERSION = "v2-formal-control-2026-07-21"
 _FORMAL_GATE_INPUTS = (
     "outputs/final.md",
@@ -5464,6 +5470,11 @@ def _handle_pipeline_start(
         fencing_token=fencing_token,
         single_command=envelope.kind == "pipeline.run_stage",
         gate_evaluator=lambda _root, command: _v2_gate_can_proceed(context, command),
+        artifact_recorder=lambda _root, command, disposition: _record_v2_stage_artifacts(
+            context,
+            command,
+            disposition,
+        ),
     )
     if not started:
         raise ControlPlaneError("LEASE_CONFLICT", "流水线未启动，已有调度线程正在运行。")
@@ -8579,6 +8590,11 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
         context.root,
         _run_sync,
         gate_evaluator=lambda _root, command: _v2_gate_can_proceed(context, command),
+        artifact_recorder=lambda _root, command, disposition: _record_v2_stage_artifacts(
+            context,
+            command,
+            disposition,
+        ),
     )
 
 

@@ -14,6 +14,7 @@ from pipeline_registry import auto_run_commands, stage_outputs_ready, stage_spec
 RunStage = Callable[[str, str, Path], int]
 StatusListener = Callable[[Path, dict[str, Any]], None]
 GateEvaluator = Callable[[Path, str], dict[str, Any]]
+ArtifactRecorder = Callable[[Path, str, str], None]
 
 
 def _now() -> str:
@@ -175,6 +176,7 @@ class PipelineSupervisor:
         fencing_token: int = 0,
         single_command: bool = False,
         gate_evaluator: GateEvaluator | None = None,
+        artifact_recorder: ArtifactRecorder | None = None,
     ) -> bool:
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -204,7 +206,7 @@ class PipelineSupervisor:
             )
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(run_id, root, runner, start_command, single_command, gate_evaluator),
+                args=(run_id, root, runner, start_command, single_command, gate_evaluator, artifact_recorder),
                 daemon=True,
                 name=f"pipeline-{run_id}",
             )
@@ -231,6 +233,7 @@ class PipelineSupervisor:
         start_command: str,
         single_command: bool = False,
         gate_evaluator: GateEvaluator | None = None,
+        artifact_recorder: ArtifactRecorder | None = None,
     ) -> None:
         commands = auto_run_commands()
         if single_command and start_command in commands:
@@ -282,6 +285,20 @@ class PipelineSupervisor:
                     return
                 spec = stage_spec_by_command(command)
                 if stage_outputs_ready(root, spec.id):
+                    if artifact_recorder is not None:
+                        try:
+                            artifact_recorder(root, command, "reused")
+                        except Exception as exc:
+                            self._save(
+                                root,
+                                {
+                                    "status": "failed",
+                                    "current_stage": command,
+                                    "worker_pid": 0,
+                                    "error": f"Artifact manifest 记录失败: {exc}",
+                                },
+                            )
+                            return
                     self._save(
                         root,
                         {
@@ -333,6 +350,20 @@ class PipelineSupervisor:
                         },
                     )
                     return
+                if artifact_recorder is not None:
+                    try:
+                        artifact_recorder(root, command, "produced")
+                    except Exception as exc:
+                        self._save(
+                            root,
+                            {
+                                "status": "failed",
+                                "current_stage": command,
+                                "worker_pid": 0,
+                                "error": f"Artifact manifest 记录失败: {exc}",
+                            },
+                        )
+                        return
             self._save(
                 root,
                 {
@@ -361,6 +392,7 @@ class PipelineSupervisor:
         runner: RunStage,
         *,
         gate_evaluator: GateEvaluator | None = None,
+        artifact_recorder: ArtifactRecorder | None = None,
     ) -> bool:
         control = self.load(root)
         operation_id = str(control.get("operation_id") or "")
@@ -393,7 +425,7 @@ class PipelineSupervisor:
                 self._fencing_token = fencing_token
                 self._thread = threading.Thread(
                     target=self._monitor_then_resume,
-                    args=(pid, run_id, root, runner, command, operation_id, fencing_token, single_command, gate_evaluator),
+                    args=(pid, run_id, root, runner, command, operation_id, fencing_token, single_command, gate_evaluator, artifact_recorder),
                     daemon=True,
                     name=f"pipeline-reconcile-{run_id}",
                 )
@@ -409,6 +441,7 @@ class PipelineSupervisor:
             fencing_token=fencing_token,
             single_command=single_command,
             gate_evaluator=gate_evaluator,
+            artifact_recorder=artifact_recorder,
         )
 
     def _monitor_then_resume(
@@ -422,6 +455,7 @@ class PipelineSupervisor:
         fencing_token: int = 0,
         single_command: bool = False,
         gate_evaluator: GateEvaluator | None = None,
+        artifact_recorder: ArtifactRecorder | None = None,
     ) -> None:
         self._save(root, {"status": "running", "message": f"重新接管仍在运行的进程 {pid}"})
         while _pid_alive(pid) and not self._pause.wait(5) and not self._cancel.is_set():
@@ -443,4 +477,5 @@ class PipelineSupervisor:
             fencing_token=fencing_token,
             single_command=single_command,
             gate_evaluator=gate_evaluator,
+            artifact_recorder=artifact_recorder,
         )

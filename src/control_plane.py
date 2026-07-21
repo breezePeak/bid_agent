@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 10
+    SCHEMA_VERSION = 11
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -327,6 +327,18 @@ class ControlStore:
                         actor_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS artifact_states (
+                        artifact_key TEXT PRIMARY KEY,
+                        artifact_path TEXT NOT NULL,
+                        artifact_kind TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        producer TEXT NOT NULL,
+                        input_fingerprint TEXT NOT NULL,
+                        manifest_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS goal_state (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         goal_id TEXT NOT NULL,
@@ -382,6 +394,7 @@ class ControlStore:
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
                     CREATE INDEX IF NOT EXISTS idx_policy_decisions_issue ON policy_decisions(issue_id, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_artifact_states_status ON artifact_states(status, producer);
                     """
                 )
                 connection.execute(
@@ -928,6 +941,114 @@ class ControlStore:
             value["actor"] = _decode(value.pop("actor_json", ""), {})
             result.append(value)
         return result
+
+    def upsert_artifact_state(self, manifest: dict[str, Any]) -> dict[str, Any]:
+        stored = self.upsert_artifact_states([manifest])
+        return stored[0] if stored else {}
+
+    def upsert_artifact_states(self, manifests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        for manifest in manifests:
+            artifact_key = str(manifest.get("artifact_key") or manifest.get("path") or "").strip()
+            status = str(manifest.get("status") or "").strip()
+            if not artifact_key or status not in {"ready", "stale", "missing"}:
+                raise ControlPlaneError("STATE_UNAVAILABLE", "Artifact manifest 无效。", status_code=503)
+            payload = dict(manifest)
+            payload["artifact_key"] = artifact_key
+            payloads.append(payload)
+        if not payloads:
+            return []
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                revision = self._bump_revision(connection)
+                for payload in payloads:
+                    artifact_key = str(payload["artifact_key"])
+                    status = str(payload["status"])
+                    existing = connection.execute(
+                        "SELECT created_at FROM artifact_states WHERE artifact_key = ?",
+                        (artifact_key,),
+                    ).fetchone()
+                    created_at = str(existing["created_at"]) if existing else now
+                    connection.execute(
+                        """
+                        INSERT INTO artifact_states(
+                            artifact_key, artifact_path, artifact_kind, status, sha256,
+                            producer, input_fingerprint, manifest_json, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(artifact_key) DO UPDATE SET
+                            artifact_path = excluded.artifact_path,
+                            artifact_kind = excluded.artifact_kind,
+                            status = excluded.status,
+                            sha256 = excluded.sha256,
+                            producer = excluded.producer,
+                            input_fingerprint = excluded.input_fingerprint,
+                            manifest_json = excluded.manifest_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            artifact_key,
+                            str(payload.get("path") or artifact_key),
+                            str(payload.get("kind") or "file"),
+                            status,
+                            str(payload.get("sha256") or ""),
+                            str(payload.get("producer") or ""),
+                            str(payload.get("input_fingerprint") or ""),
+                            _json(payload),
+                            created_at,
+                            now,
+                        ),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "ArtifactStateChanged",
+                        "Artifact",
+                        artifact_key,
+                        {"status": status, "producer": str(payload.get("producer") or "")},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        states = {item["artifact_key"]: item for item in self.artifact_states()}
+        return [states[str(payload["artifact_key"])] for payload in payloads]
+
+    def artifact_state(self, artifact_key: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM artifact_states WHERE artifact_key = ?",
+                (artifact_key,),
+            ).fetchone()
+        return self._artifact_row(row) if row else None
+
+    def artifact_states(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM artifact_states ORDER BY artifact_key"
+            ).fetchall()
+        return [self._artifact_row(row) for row in rows]
+
+    @staticmethod
+    def _artifact_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        payload = _decode(value.pop("manifest_json", ""), {})
+        item = dict(payload) if isinstance(payload, dict) else {}
+        item.update(
+            {
+                "artifact_key": value["artifact_key"],
+                "path": value["artifact_path"],
+                "kind": value["artifact_kind"],
+                "status": value["status"],
+                "sha256": value["sha256"],
+                "producer": value["producer"],
+                "input_fingerprint": value["input_fingerprint"],
+                "created_at": value["created_at"],
+                "updated_at": value["updated_at"],
+            }
+        )
+        return item
 
     def ensure_goal_state(self, goal: dict[str, Any] | None) -> int:
         """Import the V1 Goal once; absence is also recorded to prevent later stale-file takeover."""
@@ -1879,6 +2000,9 @@ class ControlStore:
                 "FROM confirmations WHERE status = 'pending' ORDER BY created_at"
             ).fetchall()]
             lease_row = connection.execute("SELECT * FROM workspace_lease WHERE singleton = 1").fetchone()
+            artifact_rows = connection.execute(
+                "SELECT * FROM artifact_states ORDER BY artifact_key"
+            ).fetchall()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         return {
@@ -1889,6 +2013,7 @@ class ControlStore:
             "commands": commands,
             "confirmations": confirmations,
             "lease": dict(lease_row) if lease_row else None,
+            "artifacts": [self._artifact_row(row) for row in artifact_rows],
         }
 
     def operation(self, operation_id: str) -> dict[str, Any] | None:

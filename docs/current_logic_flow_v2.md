@@ -530,3 +530,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B44 | 2026-07-21 | 终稿选区、全文和流式块改写提案的忙碌判断改为读取路径工作区的 SQLite Operation 与 Supervisor 状态，不再因其他工作区的进程级 RUNNING 被误阻断；控制状态异常仍按忙碌处理并拒绝提案。 |
 | V2.0-B45 | 2026-07-21 | 正式 GateReceipt 指纹升级为直接纳入 `control.db` 的 Material、Issue 和 PolicyDecision 权威状态，不再把材料清单、Issue 或政策决定的 V1 文件投影视为第二权威源；旧投影变化不会误使凭据失效，SQLite 控制状态变化必定使凭据 stale。 |
 | V2.0-B46 | 2026-07-21 | 修复 Windows 下 Pipeline checkpoint 原子替换偶发被短暂文件占用而令流水线失败的问题；临时文件替换增加有界退避重试，最终仍失败时保持 fail-closed 并由 Supervisor 记录失败状态。 |
+| V2.0-B47 | 2026-07-21 | 建立首版 SQLite Artifact manifest：记录规范化 key、kind、hash、producer、输入 fingerprint、`ready/missing` 和 produced/reused disposition；V2 Snapshot 开始暴露 Artifact 列表，阶段成功但必需产物缺失或 manifest 写入失败时按执行失败处理。stale 依赖传播仍待下一切片完成。 |

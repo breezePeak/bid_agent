@@ -222,6 +222,60 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertEqual(calls, [])
             self.assertIn("control.db locked", payload["error"])
 
+    def test_v2_artifact_recorder_marks_reused_and_produced_stages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            completed = {"a"}
+            recorded: list[tuple[str, str]] = []
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                completed.add(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", side_effect=lambda r, stage: stage in completed),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        artifact_recorder=lambda run_root, command, disposition: recorded.append(
+                            (command, disposition)
+                        ),
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(recorded, [("a", "reused"), ("b", "produced")])
+
+    def test_v2_artifact_recorder_failure_stops_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.stage_spec_by_command", return_value=SimpleNamespace(id="a", validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", return_value=True),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        lambda command, run_id, run_root: 0,
+                        artifact_recorder=lambda run_root, command, disposition: (_ for _ in ()).throw(
+                            RuntimeError("manifest locked")
+                        ),
+                    )
+                )
+                payload = _wait_for_status(supervisor, root, "failed")
+
+            self.assertIn("manifest locked", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()
