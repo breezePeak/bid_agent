@@ -6,6 +6,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -450,6 +451,61 @@ class V2WebControlTests(unittest.TestCase):
                         current = gateway.store.operation(receipt.operation_id or "") or {}
             self.assertEqual(current.get("status"), "succeeded")
             self.assertFalse(web_app.RUNNING)
+
+    def test_rewrite_worker_fails_closed_when_control_state_is_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"rewrite.chapters": lambda ctx, envelope, operation_id: {
+                    "accepted": True,
+                    "operation_status": "running",
+                }},
+            )
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "rewrite.chapters",
+                    "payload": {"chapter_ids": ["1.1"]},
+                    "expected_revision": 0,
+                    "idempotency_key": "rewrite-state-unavailable",
+                },
+                workspace_id="alpha",
+            )
+            action = gateway.propose(envelope, label="confirm rewrite", risk="high")
+            receipt = gateway.confirm(action["confirmation_id"])
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            sync_attempted = threading.Event()
+            worker_done = threading.Event()
+
+            def unavailable(*args, **kwargs):
+                sync_attempted.set()
+                raise RuntimeError("control db unavailable")
+
+            def capture_log(message: str) -> None:
+                if "终态回写失败" in message:
+                    worker_done.set()
+
+            web_app.RUNNING = False
+            web_app.CURRENT_RUN_ROOT = None
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(ControlStore, "sync_operation", side_effect=unavailable):
+                    with mock.patch.object(web_app, "_append_log", side_effect=capture_log):
+                        with mock.patch("subagent_runner.run_rewrite_all") as rewrite:
+                            started = web_app._trigger_rewrite_targets_inline(
+                                [{"chapter_id": "1.1"}],
+                                root=context.root,
+                                run_id="alpha",
+                                control_operation_id=receipt.operation_id or "",
+                                control_fencing_token=int(operation.get("fencing_token") or 0),
+                            )
+                            self.assertTrue(started["ok"])
+                            self.assertTrue(sync_attempted.wait(2))
+                            self.assertTrue(worker_done.wait(2))
+                            self.assertFalse(web_app.RUNNING)
+                            rewrite.assert_not_called()
 
     def test_material_ready_requires_verification_before_confirmed_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

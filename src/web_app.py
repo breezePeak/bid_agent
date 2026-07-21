@@ -2317,8 +2317,8 @@ def _trigger_repair_job(
                     message=message,
                     fencing_token=control_fencing_token,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"repair control state sync failed: {exc}") from exc
 
     def _run() -> None:
         global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
@@ -2535,17 +2535,14 @@ def _trigger_rewrite_targets_inline(
     def _sync_control(status: str, message: str, error: Any = None) -> None:
         if not control_operation_id:
             return
-        try:
-            context = _workspace_context(run_root.name)
-            ControlStore(context).sync_operation(
-                control_operation_id,
-                status,
-                message=message,
-                error=error,
-                fencing_token=control_fencing_token,
-            )
-        except Exception as exc:
-            _append_log(f"[警告] 改稿 Operation 状态回写失败: {exc}")
+        context = _workspace_context(run_root.name)
+        ControlStore(context).sync_operation(
+            control_operation_id,
+            status,
+            message=message,
+            error=error,
+            fencing_token=control_fencing_token,
+        )
 
     def _run_rewrite_sync(chapters: list[str], worker_root: Path) -> None:
         global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
@@ -2554,17 +2551,21 @@ def _trigger_rewrite_targets_inline(
         CURRENT_RUN_ID = resolved_run_id
         CURRENT_RUN_ROOT = worker_root
         PAUSE_REQUESTED = False
-        save_run_state(
-            worker_root,
-            {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
-            stage="review-fix-all",
-            status="running",
-            message=f"定向改稿: {chapters}",
-        )
-        _sync_control("running", f"正在定向改稿: {chapters}")
         operation_status = "failed"
         operation_error: dict[str, Any] | None = None
+        state_status = "error"
+        state_message = "定向改稿未启动。"
         try:
+            save_run_state(
+                worker_root,
+                {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
+                stage="review-fix-all",
+                status="running",
+                message=f"定向改稿: {chapters}",
+            )
+            # The authoritative Operation must be writable before any artifact
+            # mutation starts; otherwise the worker fails closed.
+            _sync_control("running", f"正在定向改稿: {chapters}")
             _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
             from subagent_runner import run_rewrite_all
 
@@ -2582,20 +2583,30 @@ def _trigger_rewrite_targets_inline(
             state_message = f"定向改稿失败: {exc}"
             operation_error = {"message": str(exc)}
             _append_log(f"[错误] 定向改稿异常: {exc}")
-        save_run_state(
-            worker_root,
-            {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
-            stage="review-fix-all",
-            status=state_status,
-            message=state_message,
-        )
-        # Publish the terminal Operation only after the in-process worker state
-        # is terminal too, so snapshot observers never see succeeded + RUNNING.
-        RUNNING = False
-        CURRENT_TASK = ""
-        CURRENT_RUN_ID = ""
-        CURRENT_RUN_ROOT = None
-        _sync_control(operation_status, state_message, operation_error)
+        try:
+            save_run_state(
+                worker_root,
+                {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
+                stage="review-fix-all",
+                status=state_status,
+                message=state_message,
+            )
+        except Exception as exc:
+            operation_status = "failed"
+            operation_error = {"message": f"run state write failed: {exc}"}
+            state_message = f"定向改稿终态保存失败: {exc}"
+            _append_log(f"[错误] {state_message}")
+        finally:
+            # Publish the terminal Operation only after the in-process worker
+            # state is terminal too, so observers never see succeeded + RUNNING.
+            RUNNING = False
+            CURRENT_TASK = ""
+            CURRENT_RUN_ID = ""
+            CURRENT_RUN_ROOT = None
+        try:
+            _sync_control(operation_status, state_message, operation_error)
+        except Exception as exc:
+            _append_log(f"[警告] 改稿 Operation 终态回写失败: {exc}")
 
     threading.Thread(target=_run_rewrite_sync, args=(chapter_ids, run_root), daemon=True).start()
     return {"ok": True, "message": f"定向改稿已启动: {chapter_ids}"}
