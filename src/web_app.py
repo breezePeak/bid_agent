@@ -7117,15 +7117,27 @@ def download_final_md() -> FileResponse | JSONResponse:
 
 
 @app.get("/api/download/final-docx", response_model=None)
-def download_final_docx() -> FileResponse | JSONResponse:
-    path = _active_root() / "outputs" / "final.docx"
-    if not path.exists():
-        return JSONResponse({"ok": False, "message": "final.docx 不存在，请先执行 build-docx"}, status_code=404)
-    return FileResponse(
-        str(path),
-        filename="final.docx",
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    )
+def download_final_docx(
+    gate_receipt_id: str = Query(""),
+) -> FileResponse | JSONResponse:
+    try:
+        context = _workspace_context(ACTIVE_RUN_ID)
+        _, path = _validate_formal_gate_receipt(context, gate_receipt_id)
+        return FileResponse(
+            str(path),
+            filename="final.docx",
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Deprecation": "true",
+                "Link": f'</api/v2/workspaces/{context.workspace_id}/exports/final>; rel="successor-version"',
+            },
+        )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"正式稿下载校验失败: {exc}", status_code=503)
+        )
 
 
 # ---------------------------------------------------------------

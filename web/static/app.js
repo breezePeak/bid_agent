@@ -1992,8 +1992,44 @@ function downloadFinalMd() {
   window.open("/api/download/final-md", "_blank");
 }
 
-function downloadFinalDocx() {
-  window.open("/api/download/final-docx", "_blank");
+async function downloadFinalDocx() {
+  const runId = currentStatus?.active_run?.id || "";
+  if (!runId) {
+    alert("缺少活动工作空间，无法下载正式稿");
+    return;
+  }
+  const target = window.open("", "_blank");
+  try {
+    const workspace = encodeURIComponent(runId);
+    const snapshotResponse = await fetch(`/api/v2/workspaces/${workspace}/snapshot`);
+    const snapshotData = await snapshotResponse.json();
+    if (!snapshotData.ok) throw new Error(snapshotData.message || "读取控制状态失败");
+    const commandId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    const gateResponse = await fetch(`/api/v2/workspaces/${workspace}/commands`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        command_id: commandId,
+        kind: "gate.revalidate",
+        payload: {},
+        expected_revision: Number(snapshotData.snapshot?.revision || 0),
+        idempotency_key: commandId,
+        actor: { type: "legacy_web", id: "current-user" },
+      }),
+    });
+    const gate = await gateResponse.json();
+    if (!gate.ok) throw new Error(gate.message || gate.receipt?.error?.message || "正式稿门禁未通过");
+    const latestResponse = await fetch(`/api/v2/workspaces/${workspace}/gates/latest`);
+    const latest = await latestResponse.json();
+    const receiptId = latest.gate_receipt?.receipt_id || "";
+    if (!latest.ok || !receiptId) throw new Error(latest.message || "未取得 GateReceipt");
+    const url = `/api/v2/workspaces/${workspace}/exports/final?gate_receipt_id=${encodeURIComponent(receiptId)}`;
+    if (target) target.location.href = url;
+    else window.open(url, "_blank");
+  } catch (error) {
+    if (target) target.close();
+    alert("正式稿下载失败: " + error);
+  }
 }
 
 async function viewGlobalReview() {

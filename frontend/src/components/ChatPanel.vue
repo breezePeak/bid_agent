@@ -243,6 +243,7 @@ import UploadTile from './UploadTile.vue'
 import {
   confirmWorkspaceAction,
   declineWorkspaceAction,
+  downloadFinalDocx,
   fetchChatMessages,
   fetchCurrentRepairJob,
   fetchExportPreflight,
@@ -1001,7 +1002,7 @@ function connectSSE() {
 function closeSSE() { if (sseSource) { sseSource.close(); sseSource = null } }
 
 // ---- chat ----
-function handleQuick(btn) {
+async function handleQuick(btn) {
   if (interactionBusy.value) return
   if (btn && btn.text) { send(btn.text); return }
 
@@ -1016,8 +1017,13 @@ function handleQuick(btn) {
     return
   }
   if (btn.action === 'download-docx') {
-    window.open('/api/download/final-docx', '_blank')
-    addMessage('system', '正在下载 Word 文档...')
+    addMessage('system', '正在复核正式稿门禁...')
+    try {
+      await downloadFinalDocx(props.runId)
+      addMessage('system', '正式稿门禁已通过，正在下载 Word 文档。')
+    } catch (error) {
+      addMessage('system', error?.response?.data?.message || error?.message || '正式稿门禁未通过，下载已阻止。')
+    }
     return
   }
   if (btn.action === 'doc-editor') {

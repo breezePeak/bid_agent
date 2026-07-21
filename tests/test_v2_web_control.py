@@ -751,6 +751,10 @@ class V2WebControlTests(unittest.TestCase):
                 latest = _body(web_app.api_v2_latest_gate_receipt("alpha"))["gate_receipt"]
                 allowed = web_app.api_v2_download_final("alpha", latest["receipt_id"])
                 self.assertEqual(Path(allowed.path).read_bytes(), b"formal-docx-v1")
+                legacy_missing = _body(web_app.download_final_docx(""))
+                self.assertEqual(legacy_missing["error"]["code"], "GATE_RECEIPT_REQUIRED")
+                legacy_allowed = web_app.download_final_docx(latest["receipt_id"])
+                self.assertEqual(Path(legacy_allowed.path).read_bytes(), b"formal-docx-v1")
 
                 (outputs / "final.docx").write_bytes(b"formal-docx-v2")
                 stale = _body(web_app.api_v2_download_final("alpha", latest["receipt_id"]))

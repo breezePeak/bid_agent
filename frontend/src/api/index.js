@@ -82,8 +82,24 @@ export function downloadFinalMd() {
   window.open('/api/download/final-md', '_blank')
 }
 
-export function downloadFinalDocx() {
-  window.open('/api/download/final-docx', '_blank')
+export async function downloadFinalDocx(runId) {
+  if (!runId) throw new Error('缺少工作空间 ID，无法下载正式稿')
+  const target = window.open('', '_blank')
+  try {
+    await revalidateFormalGate(runId)
+    const response = await fetchLatestGateReceipt(runId)
+    const receipt = response?.data?.gate_receipt
+    if (!receipt?.receipt_id) throw new Error('正式稿门禁未返回有效凭据')
+    const workspace = encodeURIComponent(runId)
+    const receiptId = encodeURIComponent(receipt.receipt_id)
+    const url = `/api/v2/workspaces/${workspace}/exports/final?gate_receipt_id=${receiptId}`
+    if (target) target.location.href = url
+    else window.open(url, '_blank')
+    return receipt
+  } catch (error) {
+    if (target) target.close()
+    throw error
+  }
 }
 
 export function deleteRun(runId) {

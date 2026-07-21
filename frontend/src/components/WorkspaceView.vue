@@ -75,6 +75,7 @@ import ChatPanel from './ChatPanel.vue'
 import DocEditor from './DocEditor.vue'
 import StepDetailView from './StepDetailView.vue'
 import IssuesPanel from './IssuesPanel.vue'
+import { downloadFinalDocx } from '../api'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -186,7 +187,13 @@ function rerunStage(command) {
 function previewFile(path) {
   previewFileName.value = path
 }
-function downloadDocx() { window.open('/api/download/final-docx', '_blank') }
+async function downloadDocx() {
+  try {
+    await downloadFinalDocx(props.runId)
+  } catch (error) {
+    window.alert(error?.response?.data?.message || error?.message || '正式稿门禁未通过，无法下载 Word。')
+  }
+}
 function downloadMd() { window.open('/api/download/final-md', '_blank') }
 
 function onRewriteDone() {
