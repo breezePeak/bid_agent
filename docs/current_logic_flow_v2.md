@@ -508,3 +508,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B22 | 2026-07-21 | 主 Vue 控制台的共享状态总线从 V1 `/api/status` 切换到工作区 V2 Snapshot；Goal、AgentActivity、RepairJob、Materials、Issues 和 Operation 由 Snapshot 的 SQLite 权威字段提供，workflow/合规展示暂放在显式 `presentation` 兼容区。材料导入增加一次性空集合标记，SQLite 空状态也不再回退读取后来出现的 V1 项，避免兼容投影重新成为隐性权威。 |
 | V2.0-B23 | 2026-07-21 | ChatPanel 的流程状态与 RepairJob 跟踪统一复用工作区 V2 Snapshot 状态总线，删除 `/api/status` fallback、`/repair-jobs/current` 和 AgentActivity 独立轮询入口；聊天、Goal 面板和 Agent 工位不再各自选择不同控制状态源。状态总线在工作区切换期间丢弃迟到响应并补发新工作区刷新，避免跨工作区 UI 污染。 |
 | V2.0-B24 | 2026-07-21 | 主控制台接入工作区 WorkspaceEvent SSE，在 Command、Operation 和领域状态事件后合并刷新 V2 Snapshot，并保留定时轮询作为断线兜底。SSE 统一使用 `WorkspaceEvent` 类型、payload 内 `kind` 区分领域事件，支持 `Last-Event-ID`/`after_seq` 续传和客户端 seq 去重。 |
+| V2.0-B25 | 2026-07-21 | ChatPanel 的非流水线维护命令改为直接提交 V2 `workspace.run_utility`，不再调用 `/api/run-command` 兼容适配器；高风险确认仍由统一 Action 接口完成。主 Vue 控制面的执行入口至此不再依赖旧命令分发 API。 |

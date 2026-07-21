@@ -60,14 +60,6 @@ export function uploadFile(category, file) {
   })
 }
 
-export function runCommand(command) {
-  return api.post('/run-command', { command })
-}
-
-export function startPipeline(runId, startCommand = '') {
-  return api.post('/start-pipeline', { run_id: runId, start_command: startCommand })
-}
-
 export function fetchLogs(lines = 200) {
   return api.get('/logs', { params: { lines } })
 }

@@ -918,7 +918,8 @@ async function skipFailedStage(failedCmd) {
 }
 async function runCommand(cmd) {
   try {
-    const r = await fetch('/api/run-command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: cmd, run_id: props.runId }) }).then(r => r.json())
+    const response = await submitWorkspaceCommand(props.runId, 'workspace.run_utility', { command: cmd })
+    const r = response?.data || {}
     if (r.ok && r.action?.confirmation_id) {
       if (!window.confirm(r.action.label || `确认执行 ${cmd}？`)) return
       const confirmed = await confirmWorkspaceAction(props.runId, r.action.confirmation_id)
