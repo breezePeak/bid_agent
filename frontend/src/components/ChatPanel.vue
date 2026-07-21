@@ -537,7 +537,7 @@ function addMessage(role, content, actions = [], opts = {}) {
     goal_id: opts.goal_id || (opts.goal && opts.goal.goal_id) || '',
   })
   if (persist) {
-    saveChatMessage(role, content, { actions, kind }).catch(e => console.error('保存消息失败', e))
+    saveChatMessage(props.runId, role, content, { actions, kind }).catch(e => console.error('保存消息失败', e))
   }
   nextTick(scrollBottom)
 }
@@ -1306,13 +1306,13 @@ async function doRewriteBlock(lineNumber, instruction) {
                 },
                 { type: 'discard_rewrite', label: '放弃' },
               ]
-              saveChatMessage('assistant', streamedText, { thinking: reasoningText, actions: messages.value[msgIndex].actions }).catch(() => {})
+              saveChatMessage(props.runId, 'assistant', streamedText, { thinking: reasoningText, actions: messages.value[msgIndex].actions }).catch(() => {})
               emit('rewrite-done')
             } else if (currentEvent === 'error') {
               streamingIdx.value = -1
               isStreamingEmpty.value = false
               messages.value[msgIndex].content = '改写失败: ' + (data.message || '')
-              saveChatMessage('assistant', messages.value[msgIndex].content, { kind: 'message' }).catch(() => {})
+              saveChatMessage(props.runId, 'assistant', messages.value[msgIndex].content, { kind: 'message' }).catch(() => {})
             }
           } catch (e) { /* skip */ }
           currentEvent = ''
@@ -1615,7 +1615,7 @@ defineExpose({ addInputText, notifyRewriteApplied, notifyRewriteDiscarded, start
 
 async function loadChatHistory() {
   try {
-    const resp = await fetchChatMessages()
+    const resp = await fetchChatMessages(props.runId)
     const body = resp && resp.data
     if (body && body.ok && Array.isArray(body.messages) && body.messages.length) {
       messages.value = body.messages.map(m => {

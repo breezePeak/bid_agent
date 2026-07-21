@@ -1789,6 +1789,32 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(explained["ok"])
             self.assertTrue(batch_result["ok"])
 
+    def test_v2_chat_history_uses_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "load_messages", return_value=[{"content": "alpha"}]) as load:
+                    loaded = _body(web_app.api_chat_messages_get("alpha"))
+                with mock.patch.object(web_app, "save_message", return_value={"content": "saved"}) as save:
+                    saved = _body(asyncio.run(web_app.api_chat_messages_post(_Request({"role": "user", "content": "hello"}), "alpha")))
+                with mock.patch.object(web_app, "clear_messages", return_value=2) as clear:
+                    cleared = _body(web_app.api_chat_messages_delete("alpha"))
+
+            resolved = alpha.resolve()
+            load.assert_called_once_with(resolved, "alpha")
+            save.assert_called_once_with(resolved, "alpha", "user", "hello", "", [], "message")
+            clear.assert_called_once_with(resolved, "alpha")
+            self.assertEqual(loaded["run_id"], "alpha")
+            self.assertEqual(saved["message"]["content"], "saved")
+            self.assertEqual(cleared["removed"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

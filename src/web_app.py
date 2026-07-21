@@ -3756,18 +3756,22 @@ async def api_agent_tools_invoke(request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/chat/messages")
 @app.get("/api/chat/messages")
-def api_chat_messages_get() -> JSONResponse:
-    root = _active_root()
-    run_id = ACTIVE_RUN_ID or root.name
+def api_chat_messages_get(workspace_id: str = "") -> JSONResponse:
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
+    run_id = context.workspace_id if context else ACTIVE_RUN_ID or root.name
     messages = load_messages(root, run_id)
     return JSONResponse({"ok": True, "run_id": run_id, "messages": messages})
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/chat/messages")
 @app.post("/api/chat/messages")
-async def api_chat_messages_post(request: Request) -> JSONResponse:
-    root = _active_root()
-    run_id = ACTIVE_RUN_ID or root.name
+async def api_chat_messages_post(request: Request, workspace_id: str = "") -> JSONResponse:
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
+    run_id = context.workspace_id if context else ACTIVE_RUN_ID or root.name
     try:
         body = await request.json()
     except Exception:
@@ -3783,10 +3787,12 @@ async def api_chat_messages_post(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "message": saved})
 
 
+@app.delete("/api/v2/workspaces/{workspace_id}/chat/messages")
 @app.delete("/api/chat/messages")
-def api_chat_messages_delete() -> JSONResponse:
-    root = _active_root()
-    run_id = ACTIVE_RUN_ID or root.name
+def api_chat_messages_delete(workspace_id: str = "") -> JSONResponse:
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context else _active_root()
+    run_id = context.workspace_id if context else ACTIVE_RUN_ID or root.name
     removed = clear_messages(root, run_id)
     return JSONResponse({"ok": True, "removed": removed})
 

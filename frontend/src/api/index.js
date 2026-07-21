@@ -131,16 +131,16 @@ export function testLlmModel(model, { useActive = false } = {}) {
   return api.post('/llm-settings/test', { model, use_active: useActive }, { timeout: 90000 })
 }
 
-export function fetchChatMessages() {
-  return api.get('/chat/messages')
+export function fetchChatMessages(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/chat/messages`)
 }
 
-export function saveChatMessage(role, content, { thinking = '', actions = [], kind = 'message' } = {}) {
-  return api.post('/chat/messages', { role, content, thinking, actions, kind })
+export function saveChatMessage(runId, role, content, { thinking = '', actions = [], kind = 'message' } = {}) {
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/chat/messages`, { role, content, thinking, actions, kind })
 }
 
-export function clearChatMessages() {
-  return api.delete('/chat/messages')
+export function clearChatMessages(runId) {
+  return api.delete(`/v2/workspaces/${encodeURIComponent(runId)}/chat/messages`)
 }
 
 export function orchestrateChat(message, { runId = '', selectedCommand = '', action = null } = {}) {
