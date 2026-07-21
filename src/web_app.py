@@ -5461,6 +5461,7 @@ def _handle_pipeline_start(
         operation_id=operation_id,
         fencing_token=fencing_token,
         single_command=envelope.kind == "pipeline.run_stage",
+        gate_evaluator=lambda _root, command: _v2_gate_can_proceed(context, command),
     )
     if not started:
         raise ControlPlaneError("LEASE_CONFLICT", "流水线未启动，已有调度线程正在运行。")
@@ -8559,7 +8560,12 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
                 "message": "control.db 指示 Operation 仍在运行，准备断点恢复",
             },
         )
-    return SUPERVISOR.reconcile(context.workspace_id, context.root, _run_sync)
+    return SUPERVISOR.reconcile(
+        context.workspace_id,
+        context.root,
+        _run_sync,
+        gate_evaluator=lambda _root, command: _v2_gate_can_proceed(context, command),
+    )
 
 
 def _startup_reconcile() -> None:

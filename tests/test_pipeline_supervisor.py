@@ -176,6 +176,52 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertTrue(any(item.get("status") == "cancelling" for item in events))
             self.assertTrue(any(item.get("status") == "cancelled" for item in events))
 
+    def test_injected_v2_gate_blocks_stage_before_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            calls: list[str] = []
+
+            with patch("pipeline_supervisor.auto_run_commands", return_value=["a"]):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        lambda command, run_id, run_root: calls.append(command) or 0,
+                        gate_evaluator=lambda run_root, command: {
+                            "can_proceed": False,
+                            "message": "sqlite gate blocked",
+                        },
+                    )
+                )
+                payload = _wait_for_status(supervisor, root, "failed")
+
+            self.assertEqual(calls, [])
+            self.assertEqual(payload["error"], "sqlite gate blocked")
+
+    def test_injected_v2_gate_fails_closed_when_evaluator_raises(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            calls: list[str] = []
+
+            def unavailable(run_root: Path, command: str) -> dict:
+                raise RuntimeError("control.db locked")
+
+            with patch("pipeline_supervisor.auto_run_commands", return_value=["a"]):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        lambda command, run_id, run_root: calls.append(command) or 0,
+                        gate_evaluator=unavailable,
+                    )
+                )
+                payload = _wait_for_status(supervisor, root, "failed")
+
+            self.assertEqual(calls, [])
+            self.assertIn("control.db locked", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

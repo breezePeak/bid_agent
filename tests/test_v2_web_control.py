@@ -1666,7 +1666,9 @@ class V2WebControlTests(unittest.TestCase):
                     resumed = web_app._reconcile_pipeline_from_control(context)
 
             self.assertTrue(resumed)
-            reconcile.assert_called_once_with("alpha", context.root, web_app._run_sync)
+            self.assertEqual(reconcile.call_args.args, ("alpha", context.root, web_app._run_sync))
+            evaluator = reconcile.call_args.kwargs.get("gate_evaluator")
+            self.assertTrue(callable(evaluator))
 
     def test_v2_snapshot_uses_sqlite_authority_for_control_domains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

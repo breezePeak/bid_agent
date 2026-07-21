@@ -13,6 +13,7 @@ from pipeline_registry import auto_run_commands, stage_outputs_ready, stage_spec
 
 RunStage = Callable[[str, str, Path], int]
 StatusListener = Callable[[Path, dict[str, Any]], None]
+GateEvaluator = Callable[[Path, str], dict[str, Any]]
 
 
 def _now() -> str:
@@ -166,6 +167,7 @@ class PipelineSupervisor:
         operation_id: str = "",
         fencing_token: int = 0,
         single_command: bool = False,
+        gate_evaluator: GateEvaluator | None = None,
     ) -> bool:
         with self._lock:
             if self._thread and self._thread.is_alive():
@@ -195,7 +197,7 @@ class PipelineSupervisor:
             )
             self._thread = threading.Thread(
                 target=self._loop,
-                args=(run_id, root, runner, start_command, single_command),
+                args=(run_id, root, runner, start_command, single_command, gate_evaluator),
                 daemon=True,
                 name=f"pipeline-{run_id}",
             )
@@ -221,6 +223,7 @@ class PipelineSupervisor:
         runner: RunStage,
         start_command: str,
         single_command: bool = False,
+        gate_evaluator: GateEvaluator | None = None,
     ) -> None:
         commands = auto_run_commands()
         if single_command and start_command in commands:
@@ -237,23 +240,39 @@ class PipelineSupervisor:
                     return
                 # quality gate: open block issues stop progression before next stage
                 try:
-                    from agent.issues import can_proceed
+                    if gate_evaluator is not None:
+                        gate = gate_evaluator(root, command)
+                    else:
+                        from agent.issues import can_proceed
 
-                    gate = can_proceed(root, next_command=command)
-                    if not gate.get("can_proceed", True):
+                        gate = can_proceed(root, next_command=command)
+                except Exception as exc:
+                    if gate_evaluator is None:
+                        gate = {"can_proceed": True}
+                    else:
                         self._save(
                             root,
                             {
                                 "status": "failed",
                                 "current_stage": command,
                                 "worker_pid": 0,
-                                "error": gate.get("message") or f"质量门禁阻断，禁止执行 {command}",
-                                "message": gate.get("message") or "质量门禁阻断",
+                                "error": f"质量门禁状态不可用，已拒绝执行: {exc}",
+                                "message": "质量门禁状态不可用，已拒绝执行",
                             },
                         )
                         return
-                except Exception:
-                    pass
+                if not gate.get("can_proceed", gate_evaluator is None):
+                    self._save(
+                        root,
+                        {
+                            "status": "failed",
+                            "current_stage": command,
+                            "worker_pid": 0,
+                            "error": gate.get("message") or f"质量门禁阻断，禁止执行 {command}",
+                            "message": gate.get("message") or "质量门禁阻断",
+                        },
+                    )
+                    return
                 spec = stage_spec_by_command(command)
                 if stage_outputs_ready(root, spec.id):
                     self._save(
@@ -328,7 +347,14 @@ class PipelineSupervisor:
                 self._operation_id = ""
                 self._fencing_token = 0
 
-    def reconcile(self, run_id: str, root: Path, runner: RunStage) -> bool:
+    def reconcile(
+        self,
+        run_id: str,
+        root: Path,
+        runner: RunStage,
+        *,
+        gate_evaluator: GateEvaluator | None = None,
+    ) -> bool:
         control = self.load(root)
         operation_id = str(control.get("operation_id") or "")
         fencing_token = int(control.get("fencing_token") or 0)
@@ -360,7 +386,7 @@ class PipelineSupervisor:
                 self._fencing_token = fencing_token
                 self._thread = threading.Thread(
                     target=self._monitor_then_resume,
-                    args=(pid, run_id, root, runner, command, operation_id, fencing_token, single_command),
+                    args=(pid, run_id, root, runner, command, operation_id, fencing_token, single_command, gate_evaluator),
                     daemon=True,
                     name=f"pipeline-reconcile-{run_id}",
                 )
@@ -375,6 +401,7 @@ class PipelineSupervisor:
             operation_id=operation_id,
             fencing_token=fencing_token,
             single_command=single_command,
+            gate_evaluator=gate_evaluator,
         )
 
     def _monitor_then_resume(
@@ -387,6 +414,7 @@ class PipelineSupervisor:
         operation_id: str = "",
         fencing_token: int = 0,
         single_command: bool = False,
+        gate_evaluator: GateEvaluator | None = None,
     ) -> None:
         self._save(root, {"status": "running", "message": f"重新接管仍在运行的进程 {pid}"})
         while _pid_alive(pid) and not self._pause.wait(5) and not self._cancel.is_set():
@@ -407,4 +435,5 @@ class PipelineSupervisor:
             operation_id=operation_id,
             fencing_token=fencing_token,
             single_command=single_command,
+            gate_evaluator=gate_evaluator,
         )
