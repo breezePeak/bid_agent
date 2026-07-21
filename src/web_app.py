@@ -5366,6 +5366,56 @@ def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
     return store
 
 
+def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
+    """Inventory legacy control files without mutating SQLite or compatibility files."""
+    domains: dict[str, Any] = {}
+    unrecognized: list[dict[str, Any]] = []
+    sources = {
+        "goal": context.root / "workspace" / "agent" / "goal_state.json",
+        "materials": context.root / "workspace" / "materials_checklist.json",
+        "issues": context.root / "workspace" / "issues" / "open.json",
+    }
+    for domain, path in sources.items():
+        if not path.exists():
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if domain == "materials":
+                payload = payload.get("items") if isinstance(payload, dict) else payload
+            elif domain == "issues":
+                payload = payload.get("issues") if isinstance(payload, dict) else payload
+            valid = isinstance(payload, dict) if domain == "goal" else isinstance(payload, list)
+            if not valid:
+                raise ValueError("unexpected JSON shape")
+            domains[domain] = payload
+        except Exception as exc:
+            unrecognized.append(
+                {"path": path.relative_to(context.root).as_posix(), "reason": str(exc)}
+            )
+    orphans: list[dict[str, Any]] = []
+    for name in ("goal_state.json", "decision_trace.json", "decision_trace.jsonl"):
+        path = context.root / name
+        if path.exists() and path.is_file():
+            orphans.append(
+                {
+                    "path": path.relative_to(context.root).as_posix(),
+                    "kind": "root_legacy_control_state",
+                    "reason": "根目录旧状态未绑定到工作区 Agent，不自动导入。",
+                }
+            )
+    result = ControlStore(context).migration_dry_run(
+        domains,
+        orphans=orphans,
+        unrecognized=unrecognized,
+    )
+    result["sources"] = {
+        domain: path.relative_to(context.root).as_posix()
+        for domain, path in sources.items()
+        if path.exists()
+    }
+    return result
+
+
 def _request_actor(request: Request, *, source: str) -> dict[str, str]:
     """Bind Command actors on the server; never trust actor fields in JSON payloads."""
     state = getattr(request, "state", None)
@@ -7655,6 +7705,23 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
     except Exception as exc:
         return _command_error_response(
             ControlPlaneError("STATE_UNAVAILABLE", f"快照读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/migration/dry-run")
+def api_v2_migration_dry_run(workspace_id: str) -> JSONResponse:
+    try:
+        return JSONResponse({"ok": True, **_v1_migration_dry_run(_workspace_context(workspace_id))})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                f"迁移预检失败: {exc}",
+                status_code=503,
+                retryable=True,
+            )
         )
 
 

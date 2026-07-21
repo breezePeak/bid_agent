@@ -172,6 +172,29 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(migration["conflicts"][0]["domain"], "goal")
             self.assertEqual(migration["conflicts"][0]["legacy"]["goal_id"], "goal-v1")
 
+    def test_migration_dry_run_classifies_inventory_without_changing_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.upsert_goal_state({"goal_id": "g2", "status": "in_progress"}, source="test")
+            revision = store.revision()
+            result = store.migration_dry_run(
+                {
+                    "goal": {"goal_id": "g1", "status": "succeeded"},
+                    "materials": [{"item_id": "m1", "response_status": "deferred"}],
+                    "unknown": {"value": 1},
+                },
+                orphans=[{"path": "goal_state.json"}],
+            )
+            self.assertTrue(result["dry_run"])
+            self.assertEqual(result["status"], "needs_reconciliation")
+            self.assertEqual(result["counts"]["conflicts"], 1)
+            self.assertEqual(result["counts"]["importable"], 1)
+            self.assertEqual(result["counts"]["orphans"], 1)
+            self.assertEqual(result["counts"]["unrecognized"], 1)
+            self.assertEqual(store.revision(), revision)
+            self.assertEqual(store.migration_conflicts(), [])
+
     def test_command_is_durable_idempotent_and_emits_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

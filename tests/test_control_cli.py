@@ -108,6 +108,25 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         client.submit.assert_not_called()
 
+    def test_reconcile_creates_confirmable_admin_action(self) -> None:
+        client = mock.Mock()
+        client.login.return_value = {"ok": True}
+        client.snapshot.return_value = {"ok": True, "snapshot": {"revision": 9}}
+        client.submit.return_value = {"ok": True, "action": {"action_id": "a1"}}
+        with mock.patch.object(control_cli, "ControlApiClient", return_value=client):
+            with mock.patch("sys.stdout", io.StringIO()):
+                exit_code = control_cli.main(
+                    [
+                        "--password", "secret", "reconcile", "--workspace", "alpha",
+                        "--conflict-id", "c1", "--resolution", "keep_orphan",
+                        "--reason", "preserve sqlite authority",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(client.submit.call_args.kwargs["kind"], "migration.reconcile")
+        self.assertEqual(client.submit.call_args.kwargs["expected_revision"], 9)
+        self.assertEqual(client.submit.call_args.kwargs["payload"]["conflict_id"], "c1")
+
 
 if __name__ == "__main__":
     unittest.main()

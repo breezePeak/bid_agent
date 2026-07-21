@@ -2765,6 +2765,28 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(result["accepted"])
             self.assertEqual(store.migration_state()["status"], "ready")
 
+    def test_migration_dry_run_inventories_legacy_files_without_importing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "workspace" / "agent").mkdir(parents=True)
+            (root / "workspace" / "agent" / "goal_state.json").write_text(
+                json.dumps({"goal_id": "legacy", "status": "in_progress"}),
+                encoding="utf-8",
+            )
+            (root / "goal_state.json").write_text("{}", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            revision = store.revision()
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                response = _body(web_app.api_v2_migration_dry_run("alpha"))
+            self.assertTrue(response["ok"])
+            self.assertTrue(response["dry_run"])
+            self.assertEqual(response["counts"]["importable"], 1)
+            self.assertEqual(response["counts"]["orphans"], 1)
+            self.assertEqual(store.revision(), revision)
+            self.assertIsNone(store.goal_state())
+
 
 if __name__ == "__main__":
     unittest.main()

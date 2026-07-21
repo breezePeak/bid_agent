@@ -464,6 +464,72 @@ class ControlStore:
             "conflicts": conflicts,
         }
 
+    def migration_dry_run(
+        self,
+        legacy_domains: dict[str, Any],
+        *,
+        orphans: list[dict[str, Any]] | None = None,
+        unrecognized: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Compare V1 candidates with SQLite without importing or changing revision."""
+        authoritative = {
+            "goal": self.goal_state(),
+            "materials": self.material_states(),
+            "issues": self.issue_states(),
+        }
+
+        def projection(domain: str, value: Any) -> Any:
+            if domain == "goal":
+                item = value if isinstance(value, dict) else {}
+                return (str(item.get("goal_id") or item.get("id") or ""), str(item.get("status") or "pending"))
+            rows = value if isinstance(value, list) else []
+            if domain == "materials":
+                return sorted(
+                    (
+                        str(item.get("item_id") or ""),
+                        str(item.get("response_status") or "deferred"),
+                        str(item.get("lifecycle_status") or "missing"),
+                        str(item.get("evidence_status") or "missing"),
+                    )
+                    for item in rows if isinstance(item, dict)
+                )
+            return sorted(
+                (
+                    str(item.get("id") or ""),
+                    str(item.get("status") or "open"),
+                    str(item.get("severity") or "warn"),
+                )
+                for item in rows if isinstance(item, dict)
+            )
+
+        inventory: dict[str, list[dict[str, Any]]] = {
+            "importable": [],
+            "aligned": [],
+            "conflicts": [],
+            "orphans": list(orphans or []),
+            "unrecognized": list(unrecognized or []),
+        }
+        for domain, candidate in legacy_domains.items():
+            if domain not in authoritative:
+                inventory["unrecognized"].append({"domain": domain, "value": candidate})
+                continue
+            current = authoritative[domain]
+            current_empty = current is None if domain == "goal" else not current
+            item = {"domain": domain, "legacy": candidate, "authoritative": current}
+            if current_empty:
+                inventory["importable"].append(item)
+            elif projection(domain, candidate) == projection(domain, current):
+                inventory["aligned"].append(item)
+            else:
+                inventory["conflicts"].append(item)
+        return {
+            "status": "needs_reconciliation" if inventory["conflicts"] or inventory["orphans"] else "ready",
+            "dry_run": True,
+            "inventory": inventory,
+            "counts": {key: len(value) for key, value in inventory.items()},
+            "workspace_revision": self.revision(),
+        }
+
     def assert_migration_ready(self) -> None:
         state = self.migration_state()
         if state["open_count"]:
