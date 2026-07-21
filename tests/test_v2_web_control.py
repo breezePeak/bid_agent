@@ -2364,6 +2364,33 @@ class V2WebControlTests(unittest.TestCase):
             sync_review.assert_not_called()
             write_register.assert_not_called()
 
+    def test_v2_export_preflight_fails_closed_on_malformed_quality_reports(self) -> None:
+        for filename, content in (
+            ("global_review.json", "{broken"),
+            ("compliance_report.json", json.dumps({"summary": {}})),
+        ):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as tmp:
+                runs = Path(tmp) / "runs"
+                root = runs / "alpha"
+                workspace = root / "workspace"
+                outputs = root / "outputs"
+                workspace.mkdir(parents=True)
+                outputs.mkdir(parents=True)
+                (workspace / "global_review.json").write_text(
+                    json.dumps({"blocking": False}), encoding="utf-8"
+                )
+                (workspace / "compliance_report.json").write_text(
+                    json.dumps({"blocking": False}), encoding="utf-8"
+                )
+                (workspace / filename).write_text(content, encoding="utf-8")
+                (outputs / "final.md").write_text("formal draft", encoding="utf-8")
+                with mock.patch.object(web_app, "RUNS_DIR", runs):
+                    response = web_app.api_export_preflight("alpha")
+                payload = _body(response)
+                self.assertEqual(response.status_code, 503)
+                self.assertFalse(payload["ok"])
+                self.assertEqual(payload["error"]["code"], "STATE_UNAVAILABLE")
+
     def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

@@ -3259,6 +3259,8 @@ def api_export_preflight(workspace_id: str = "") -> JSONResponse:
         from agent.issues import export_preflight
 
         return JSONResponse(export_preflight(_active_root()))
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
@@ -5446,6 +5448,15 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
 
     global_path = context.root / "workspace" / "global_review.json"
     global_review = _read_json_file(global_path) if global_path.exists() else {}
+    if global_path.exists() and (
+        not isinstance(global_review, dict)
+        or not isinstance(global_review.get("blocking"), bool)
+    ):
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            "global_review.json 无效或缺少 blocking 布尔值，已拒绝正式出稿。",
+            status_code=503,
+        )
     global_blocks = [item for item in blocks if str(item.get("stage_id") or "") == "global_review"]
     global_blocking = bool(isinstance(global_review, dict) and global_review.get("blocking"))
     checks.append(
@@ -5470,6 +5481,18 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
         if isinstance(compliance, dict) and isinstance(compliance.get("summary"), dict)
         else {}
     )
+    if compliance_path.exists() and (
+        not isinstance(compliance, dict)
+        or not (
+            isinstance(compliance.get("blocking"), bool)
+            or isinstance(compliance_summary.get("blocking"), bool)
+        )
+    ):
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            "compliance_report.json 无效或缺少 blocking 布尔值，已拒绝正式出稿。",
+            status_code=503,
+        )
     compliance_blocking = bool(
         isinstance(compliance, dict)
         and (compliance.get("blocking") or compliance_summary.get("blocking"))
