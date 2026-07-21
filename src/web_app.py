@@ -2698,7 +2698,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                         "payload": {},
                         "expected_revision": store.revision(),
                         "idempotency_key": str(body.get("idempotency_key") or f"chat-control:{uuid.uuid4()}"),
-                        "actor": {"type": "chat", "id": "current-user"},
+                        "actor": _request_actor(request, source="chat"),
                     },
                     workspace_id=run_id,
                 )
@@ -2794,7 +2794,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                         },
                         "expected_revision": gateway.store.revision(),
                         "idempotency_key": str(body.get("idempotency_key") or f"chat-repair:{uuid.uuid4()}"),
-                        "actor": {"type": "chat", "id": "current-user"},
+                        "actor": _request_actor(request, source="chat"),
                     },
                     workspace_id=run_id,
                 )
@@ -2920,7 +2920,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                         "payload": payload,
                         "expected_revision": int(snapshot.get("revision") or 0),
                         "idempotency_key": str(body.get("idempotency_key") or f"chat-continue:{uuid.uuid4()}"),
-                        "actor": {"type": "chat", "id": "current-user"},
+                        "actor": _request_actor(request, source="chat"),
                     },
                     workspace_id=run_id,
                 )
@@ -3000,7 +3000,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                             "payload": {"start_command": trigger_command},
                             "expected_revision": gateway.store.revision(),
                             "idempotency_key": str(body.get("idempotency_key") or f"chat-stage:{uuid.uuid4()}"),
-                            "actor": {"type": "chat", "id": "current-user"},
+                            "actor": _request_actor(request, source="chat"),
                         },
                         workspace_id=run_id,
                     )
@@ -3038,7 +3038,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                         "payload": {"targets": trigger_rewrite_targets},
                         "expected_revision": gateway.store.revision(),
                         "idempotency_key": str(body.get("idempotency_key") or f"chat-rewrite:{uuid.uuid4()}"),
-                        "actor": {"type": "chat", "id": "current-user"},
+                        "actor": _request_actor(request, source="chat"),
                     },
                     workspace_id=run_id,
                 )
@@ -3203,7 +3203,7 @@ async def api_materials_verify(request: Request) -> JSONResponse:
                 "payload": body if isinstance(body, dict) else {},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-material-verify:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3235,7 +3235,7 @@ async def api_materials_confirm_verify(request: Request) -> JSONResponse:
                 "payload": payload,
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-material-confirm:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3342,7 +3342,7 @@ async def api_execute_repair(issue_id: str, request: Request) -> JSONResponse:
                 "payload": {"issue_ids": [issue_id]},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-repair-issue:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3371,7 +3371,7 @@ async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse
                 "payload": {"issue_id": issue_id, "reason": reason},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-accept-risk:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3437,7 +3437,7 @@ async def api_batch_execute_repair(request: Request) -> JSONResponse:
                 "payload": {"issue_ids": [str(x) for x in ids]},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-repair-batch:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3465,7 +3465,7 @@ async def api_revalidate_gate(request: Request) -> JSONResponse:
                 "payload": {"command": command},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-quality-revalidate:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3619,7 +3619,7 @@ async def api_agent_goal_resume(request: Request) -> JSONResponse:
                 "payload": {"note": note},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-goal-resume:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3786,7 +3786,7 @@ async def api_materials_checklist_update(request: Request) -> JSONResponse:
                 "payload": body,
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-material-update:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3801,7 +3801,7 @@ async def api_materials_checklist_update(request: Request) -> JSONResponse:
 
 
 @app.post("/api/materials-checklist/rebuild")
-def api_materials_checklist_rebuild() -> JSONResponse:
+def api_materials_checklist_rebuild(request: Request) -> JSONResponse:
     try:
         context = _workspace_context(ACTIVE_RUN_ID)
         gateway = _command_gateway(context)
@@ -3811,7 +3811,7 @@ def api_materials_checklist_rebuild() -> JSONResponse:
                 "payload": {},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-material-rebuild:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3841,7 +3841,7 @@ async def api_materials_checklist_refill(request: Request) -> JSONResponse:
                 "payload": body if isinstance(body, dict) else {},
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-material-refill:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -3877,7 +3877,7 @@ async def api_materials_checklist_upload(request: Request) -> JSONResponse:
                 "payload": body,
                 "expected_revision": gateway.store.revision(),
                 "idempotency_key": f"legacy-material-upload:{uuid.uuid4()}",
-                "actor": {"type": "legacy_web", "id": "current-user"},
+                "actor": _request_actor(request, source="legacy_web"),
             },
             workspace_id=context.workspace_id,
         )
@@ -6949,7 +6949,7 @@ async def api_run_command(request: Request) -> JSONResponse:
                     "payload": {"start_command": command},
                     "expected_revision": store.revision(),
                     "idempotency_key": str(body.get("idempotency_key") or f"legacy-run-stage:{uuid.uuid4()}"),
-                    "actor": {"type": "legacy_api", "id": "run-command"},
+                    "actor": _request_actor(request, source="legacy_api"),
                 },
                 workspace_id=run_id,
             )
@@ -7025,7 +7025,7 @@ async def api_start_pipeline(request: Request) -> JSONResponse:
                 "payload": {"start_command": start_command},
                 "expected_revision": store.revision(),
                 "idempotency_key": str(body.get("idempotency_key") or f"legacy-start:{uuid.uuid4()}"),
-                "actor": {"type": "legacy_api", "id": "start-pipeline"},
+                "actor": _request_actor(request, source="legacy_api"),
             },
             workspace_id=context.workspace_id,
         )
@@ -7039,7 +7039,7 @@ async def api_start_pipeline(request: Request) -> JSONResponse:
 
 
 @app.post("/api/pause-run")
-def api_pause_run() -> JSONResponse:
+def api_pause_run(request: Request) -> JSONResponse:
     if not ACTIVE_RUN_ID:
         return JSONResponse({"ok": False, "message": "请先选择工作空间。"}, status_code=409)
     try:
@@ -7051,7 +7051,7 @@ def api_pause_run() -> JSONResponse:
                 "payload": {},
                 "expected_revision": store.revision(),
                 "idempotency_key": f"legacy-pause:{uuid.uuid4()}",
-                "actor": {"type": "legacy_api", "id": "pause-run"},
+                "actor": _request_actor(request, source="legacy_api"),
             },
             workspace_id=context.workspace_id,
         )

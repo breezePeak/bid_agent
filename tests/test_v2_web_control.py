@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import sqlite3
 import sys
 import tempfile
 import time
@@ -10,6 +11,7 @@ import unittest
 import uuid
 from http.cookies import SimpleCookie
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -24,8 +26,9 @@ from control_plane import CommandEnvelope, CommandGateway, ControlStore, Workspa
 
 
 class _Request:
-    def __init__(self, body: dict) -> None:
+    def __init__(self, body: dict, *, principal: dict | None = None) -> None:
         self.body = body
+        self.state = SimpleNamespace(principal=principal) if principal is not None else SimpleNamespace()
 
     async def json(self) -> dict:
         return self.body
@@ -818,13 +821,25 @@ class V2WebControlTests(unittest.TestCase):
                     ):
                         (root / "workspace").mkdir(parents=True)
                         (root / "workspace" / "materials_checklist.json").write_text("{}", encoding="utf-8")
-                        response = web_app.api_materials_checklist_rebuild()
+                        response = web_app.api_materials_checklist_rebuild(
+                            _Request({}, principal={"type": "user", "id": "legacy-owner"})
+                        )
             payload = _body(response)
             self.assertEqual(response.status_code, 202)
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["receipt"]["status"], "accepted")
             rebuild.assert_called_once()
             self.assertTrue(web_app._same_path(rebuild.call_args.args[0], root))
+            connection = sqlite3.connect(root / "workspace" / "control.db")
+            try:
+                row = connection.execute(
+                    "SELECT actor_json FROM commands WHERE command_id = ?",
+                    (payload["receipt"]["command_id"],),
+                ).fetchone()
+            finally:
+                connection.close()
+            actor = json.loads(str(row[0] if row else "{}"))
+            self.assertEqual(actor, {"type": "user", "id": "legacy-owner"})
 
     def test_formal_export_requires_current_gate_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
