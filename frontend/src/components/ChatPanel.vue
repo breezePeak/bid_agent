@@ -976,7 +976,8 @@ function pushValuableLog(line, kind = 'log') {
 function connectSSE() {
 
   closeSSE()
-  sseSource = new EventSource('/api/logs/stream')
+  const workspace = encodeURIComponent(props.runId)
+  sseSource = new EventSource(`/api/v2/workspaces/${workspace}/logs/stream`)
   sseSource.onmessage = (e) => {
     try {
       const d = JSON.parse(e.data)

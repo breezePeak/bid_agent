@@ -1854,6 +1854,45 @@ class V2WebControlTests(unittest.TestCase):
             load.assert_called_once_with(alpha.resolve(), tail=8)
             self.assertEqual(payload["decisions"][0]["id"], "alpha-decision")
 
+    def test_v2_logs_use_path_workspace_not_process_global_log(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            (alpha / "workspace").mkdir(parents=True)
+            (beta / "workspace").mkdir(parents=True)
+            (alpha / "workspace" / "runtime_logs.jsonl").write_text(
+                json.dumps({"line": "alpha-log"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            (beta / "workspace" / "runtime_logs.jsonl").write_text(
+                json.dumps({"line": "beta-log"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+            previous_logs = list(web_app.LOG_LINES)
+            web_app._LOG_CONTEXT.run_root = alpha
+            try:
+                web_app._append_log("alpha-appended")
+            finally:
+                del web_app._LOG_CONTEXT.run_root
+                web_app.LOG_LINES[:] = previous_logs
+
+            async def first_chunk() -> str:
+                response = await web_app.api_logs_stream(_EventRequest(), "alpha")
+                chunk = await anext(response.body_iterator)
+                await response.body_iterator.aclose()
+                return chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_logs(200, "alpha"))
+                chunk = asyncio.run(first_chunk())
+
+            self.assertEqual(payload["lines"], ["alpha-log", "alpha-appended"])
+            self.assertIn("alpha-log", chunk)
+            self.assertNotIn("beta-log", chunk)
+
 
 if __name__ == "__main__":
     unittest.main()

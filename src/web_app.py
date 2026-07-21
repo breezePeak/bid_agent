@@ -199,6 +199,8 @@ def api_auth_me(request: Request) -> JSONResponse:
 
 LOG_LINES: list[str] = []
 LOG_MAX = 2000
+_LOG_CONTEXT = threading.local()
+_WORKSPACE_LOG_LOCK = threading.Lock()
 RUNNING = False
 CURRENT_TASK = ""
 _REPAIR_START_LOCK = threading.RLock()
@@ -238,6 +240,34 @@ def _append_log(line: str) -> None:
     LOG_LINES.append(line)
     if len(LOG_LINES) > LOG_MAX:
         LOG_LINES = LOG_LINES[-LOG_MAX:]
+    run_root = getattr(_LOG_CONTEXT, "run_root", None)
+    if isinstance(run_root, Path):
+        try:
+            path = run_root / "workspace" / "runtime_logs.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            record = json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "line": line}, ensure_ascii=False)
+            with _WORKSPACE_LOG_LOCK, path.open("a", encoding="utf-8") as handle:
+                handle.write(record + "\n")
+        except Exception:
+            pass
+
+
+def _workspace_log_lines(root: Path, limit: int = LOG_MAX) -> list[str]:
+    path = root / "workspace" / "runtime_logs.jsonl"
+    if not path.exists():
+        return []
+    rows: list[str] = []
+    try:
+        raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, limit):]
+        for raw in raw_lines:
+            try:
+                record = json.loads(raw)
+                rows.append(str(record.get("line") or "") if isinstance(record, dict) else str(record))
+            except json.JSONDecodeError:
+                rows.append(raw)
+    except OSError:
+        return []
+    return rows
 
 
 def _decode_log_bytes(data: bytes) -> str:
@@ -5069,6 +5099,7 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     CURRENT_RUN_ID = run_id
     CURRENT_RUN_ROOT = run_root
     PAUSE_REQUESTED = False
+    _LOG_CONTEXT.run_root = run_root
 
     log_start = len(LOG_LINES)
     args = ["src/main.py", command, *COMMANDS.get(command, [])]
@@ -5132,6 +5163,8 @@ def _run_sync(command: str, run_id: str, run_root: Path) -> int:
     CURRENT_RUN_ID = ""
     CURRENT_RUN_ROOT = None
     PAUSE_REQUESTED = False
+    if hasattr(_LOG_CONTEXT, "run_root"):
+        del _LOG_CONTEXT.run_root
     return exit_code
 
 
@@ -7208,23 +7241,31 @@ def api_pause_run(request: Request) -> JSONResponse:
 #  Logs
 # ---------------------------------------------------------------
 
+@app.get("/api/v2/workspaces/{workspace_id}/logs")
 @app.get("/api/logs")
-def api_logs(lines: int = Query(200, ge=1, le=2000)) -> JSONResponse:
+def api_logs(lines: int = Query(200, ge=1, le=2000), workspace_id: str = "") -> JSONResponse:
+    if workspace_id:
+        workspace_lines = _workspace_log_lines(_workspace_context(workspace_id).root, LOG_MAX)
+        return JSONResponse({"lines": workspace_lines[-lines:], "total": len(workspace_lines)})
     return JSONResponse({"lines": LOG_LINES[-lines:], "total": len(LOG_LINES)})
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/logs/stream")
 @app.get("/api/logs/stream")
-async def api_logs_stream(request: Request) -> StreamingResponse:
+async def api_logs_stream(request: Request, workspace_id: str = "") -> StreamingResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else None
+
     async def stream():
         last = 0
         last_event = 0
         while True:
             if await request.is_disconnected():
                 break
-            while last < len(LOG_LINES):
-                yield f"data: {json.dumps({'type': 'log', 'line': LOG_LINES[last]}, ensure_ascii=False)}\n\n"
+            available_lines = _workspace_log_lines(root, LOG_MAX) if root else LOG_LINES
+            while last < len(available_lines):
+                yield f"data: {json.dumps({'type': 'log', 'line': available_lines[last]}, ensure_ascii=False)}\n\n"
                 last += 1
-            events = load_run_events(_active_root())
+            events = load_run_events(root or _active_root())
             while last_event < len(events):
                 event = events[last_event]
                 event_line = f"[{event.get('stage', '')}] {event.get('event_type', '')} {event.get('message', '')}".strip()

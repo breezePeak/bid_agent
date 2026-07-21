@@ -51,10 +51,6 @@ export function fetchProjectProfileChoices() {
   return api.get('/project-profile')
 }
 
-export function fetchLogs(lines = 200) {
-  return api.get('/logs', { params: { lines } })
-}
-
 export function fetchWorkflowStepDetail(runId, command) {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/workflow-step-detail`, { params: { command } })
 }
