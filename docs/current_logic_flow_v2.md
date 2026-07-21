@@ -534,3 +534,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B48 | 2026-07-21 | V2 Pipeline 阶段复用开始同时校验磁盘产物、SQLite manifest 状态、内容 hash 与输入 fingerprint；上游重跑导致产物或输入变化时，按 StageSpec 依赖图传递标记已有下游 Artifact 为 stale，Supervisor 不再仅因旧文件仍存在就跳过重建。旧 V1 产物允许在一个兼容版本内首次复用时补建 manifest。 |
 | V2.0-B49 | 2026-07-21 | 正式 GateReceipt 签发开始检查 SQLite Artifact readiness：正式依赖存在 stale/missing、磁盘 hash 与 manifest 不一致或 final.docx 输入 fingerprint 过期时一律阻断；Artifact 权威状态同时纳入 GateReceipt 指纹，签发后状态变化会令凭据失效。无 manifest 的 V1 旧产物仅在一个兼容版本内继续允许验收。 |
 | V2.0-B50 | 2026-07-21 | 修复 V2 Snapshot 将 SQLite Artifact manifest 被旧文件摘要覆盖的问题：`artifacts` 固定返回权威 manifest 数组，V1 文件展示摘要迁至 `artifact_files` 兼容字段；主前端适配器同步采用稳定数组契约，避免 UI 把兼容投影视为 Artifact 权威状态。 |
+| V2.0-B51 | 2026-07-21 | V2 Snapshot 的工作流展示状态开始由 SQLite Artifact manifest 覆盖旧文件存在性判断：已记录阶段只有全部 manifest ready 才显示完成，stale/missing 阶段回到可执行并提示重建；尚未迁移 manifest 的 V1 阶段继续沿用一个版本的兼容展示。 |

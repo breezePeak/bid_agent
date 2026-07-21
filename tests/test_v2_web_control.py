@@ -1789,7 +1789,7 @@ class V2WebControlTests(unittest.TestCase):
                 "materials_summary": {"total": 99, "ready": 0},
                 "issues_summary": {"total": 99, "open": 0},
                 "pipeline": {},
-                "workflow": [],
+                "workflow": [{"command": "build-docx", "done": False, "state": "blocked"}],
                 "outputs": {"final_docx": True},
             }
 
@@ -1809,6 +1809,21 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(snapshot["findings"]["issues_summary"]["source"], "control.db")
             self.assertEqual(snapshot["artifacts"][0]["artifact_key"], "outputs/final.docx")
             self.assertEqual(snapshot["artifact_files"]["outputs"]["final_docx"], True)
+            self.assertTrue(snapshot["presentation"]["workflow"][0]["done"])
+            self.assertEqual(snapshot["presentation"]["workflow"][0]["artifact_source"], "control.db")
+
+            store.mark_artifact_states_stale(
+                ["outputs/final.docx"],
+                reason="upstream changed",
+                source_command="build-md",
+            )
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    stale_payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+            stale_step = stale_payload["snapshot"]["presentation"]["workflow"][0]
+            self.assertFalse(stale_step["done"])
+            self.assertEqual(stale_step["state"], "ready")
+            self.assertIn("已过期", stale_step["message"])
 
     def test_workspace_event_stream_uses_stable_type_and_last_event_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

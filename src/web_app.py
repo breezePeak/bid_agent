@@ -7049,6 +7049,22 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
             "source": "control.db",
         }
+        artifact_states = snapshot.get("artifacts") or []
+        workflow = []
+        for raw_step in compatibility.get("workflow") or []:
+            step = dict(raw_step) if isinstance(raw_step, dict) else {}
+            command = str(step.get("command") or "")
+            manifests = [item for item in artifact_states if str(item.get("producer") or "") == command]
+            if manifests and not bool(compatibility.get("running") and compatibility.get("current_task") == command):
+                ready = all(str(item.get("status") or "") == "ready" for item in manifests)
+                step["done"] = ready
+                step["ready"] = True
+                step["state"] = "done" if ready else "ready"
+                if not ready:
+                    stale_count = sum(1 for item in manifests if item.get("status") == "stale")
+                    step["message"] = f"SQLite Artifact 已过期（{stale_count or len(manifests)} 项），需重新执行"
+                step["artifact_source"] = "control.db"
+            workflow.append(step)
         snapshot.update(
             {
                 "goal": {
@@ -7109,7 +7125,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 # Presentation-only projections remain file-derived during the
                 # one-version adapter window; control fields above are SQLite-first.
                 "presentation": {
-                    "workflow": compatibility.get("workflow") or [],
+                    "workflow": workflow,
                     "running": bool(compatibility.get("running")),
                     "current_task": compatibility.get("current_task") or "",
                     "run_state": compatibility.get("run_state") or {},
