@@ -2583,28 +2583,6 @@ async def api_chat(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, **payload})
 
 
-def _trigger_command_inline(command: str) -> dict[str, Any]:
-    global RUNNING
-    if not command:
-        return {"ok": False, "message": "没有可执行的命令。"}
-    if RUNNING or SUPERVISOR.is_running():
-        return {"ok": False, "message": "当前已有任务正在运行，请等待完成。"}
-    if command not in COMMANDS:
-        return {"ok": False, "message": f"未知命令: {command}"}
-    if command in auto_run_commands():
-        started = SUPERVISOR.start(ACTIVE_RUN_ID, _active_root(), _run_sync, start_command=command)
-        return {
-            "ok": started,
-            "message": f"已从 {command} 启动后端自动流水线" if started else "当前已有流水线正在运行",
-        }
-    if ACTIVE_RUN_ROOT is None:
-        return {"ok": False, "message": "请先创建本次运行工作空间。"}
-    run_id = ACTIVE_RUN_ID
-    run_root = _active_root()
-    threading.Thread(target=_run_sync, args=(command, run_id, run_root), daemon=True).start()
-    return {"ok": True, "message": f"命令已启动: {command}"}
-
-
 def _load_review_context(root: Path, limit: int = 50) -> list[dict[str, Any]]:
     """加载各章 review 摘要，供编排器综合改稿目标。"""
     reviews_dir = root / "workspace" / "reviews"
@@ -2649,6 +2627,8 @@ def _trigger_rewrite_targets_inline(
     global RUNNING
     if not targets:
         return {"ok": False, "message": "没有定向改稿目标。"}
+    if not str(control_operation_id or "").strip() or int(control_fencing_token or 0) <= 0:
+        return {"ok": False, "message": "定向改稿缺少权威 Operation/fencing token，已拒绝执行。"}
     if RUNNING:
         return {"ok": False, "message": "当前已有任务正在运行，请等待完成。"}
     if root is None and ACTIVE_RUN_ROOT is None:

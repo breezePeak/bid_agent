@@ -633,6 +633,21 @@ class V2WebControlTests(unittest.TestCase):
                             self.assertFalse(web_app.RUNNING)
                             rewrite.assert_not_called()
 
+    def test_rewrite_worker_rejects_execution_without_control_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runs" / "alpha"
+            root.mkdir(parents=True)
+            web_app.RUNNING = False
+            with mock.patch("subagent_runner.run_rewrite_all") as rewrite:
+                result = web_app._trigger_rewrite_targets_inline(
+                    [{"chapter_id": "1.1"}],
+                    root=root,
+                    run_id="alpha",
+                )
+            self.assertFalse(result["ok"])
+            self.assertIn("Operation/fencing token", result["message"])
+            rewrite.assert_not_called()
+
     def test_material_ready_requires_verification_before_confirmed_update(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
