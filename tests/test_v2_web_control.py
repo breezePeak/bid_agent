@@ -297,6 +297,132 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(current.get("status"), "succeeded")
             resume.assert_not_called()
 
+    def test_v2_rewrite_requires_confirmation_and_passes_workspace_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            web_app.RUNNING = False
+            web_app.CURRENT_RUN_ROOT = None
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposal_response = asyncio.run(
+                    web_app.api_v2_submit_command(
+                        "alpha",
+                        _Request(
+                            {
+                                "kind": "rewrite.chapters",
+                                "payload": {"chapter_ids": ["1.1", "2.3"]},
+                                "expected_revision": 0,
+                                "idempotency_key": "rewrite-once",
+                            }
+                        ),
+                    )
+                )
+            proposal = _body(proposal_response)
+            self.assertEqual(proposal["receipt"]["status"], "requires_confirmation")
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(
+                    web_app,
+                    "_trigger_rewrite_targets_inline",
+                    return_value={"ok": True, "message": "rewrite started"},
+                ) as trigger:
+                    confirmed = web_app.api_v2_confirm_action(
+                        "alpha",
+                        proposal["action"]["action_id"],
+                    )
+            confirmed_body = _body(confirmed)
+            self.assertTrue(confirmed_body["ok"])
+            operation_id = confirmed_body["receipt"]["operation_id"]
+            self.assertTrue(web_app._same_path(trigger.call_args.kwargs["root"], root))
+            self.assertEqual(trigger.call_args.kwargs["run_id"], "alpha")
+            self.assertEqual(trigger.call_args.kwargs["control_operation_id"], operation_id)
+
+    def test_chat_rewrite_proposes_v2_action_without_starting_worker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+            web_app.RUNNING = False
+            web_app.CURRENT_RUN_ROOT = None
+            plan = {
+                "reply": "ready to rewrite",
+                "actions": [],
+                "trigger_rewrite_targets": [{"chapter_id": "1.1"}],
+            }
+
+            try:
+                with mock.patch.object(web_app, "RUNS_DIR", runs):
+                    with mock.patch.object(web_app, "_minimal_repair_candidates", return_value=[]):
+                        with mock.patch.object(web_app, "orchestrator_plan", return_value=plan):
+                            with mock.patch.object(web_app, "orchestrator_resolve", return_value=plan):
+                                with mock.patch.object(web_app, "_trigger_rewrite_targets_inline") as worker:
+                                    response = asyncio.run(
+                                        web_app.api_chat_orchestrate(
+                                            _Request({"run_id": "alpha", "message": "重写 1.1"})
+                                        )
+                                    )
+                payload = _body(response)
+                self.assertTrue(payload["rewrite_proposed"])
+                self.assertFalse(payload["triggered_rewrite"])
+                self.assertEqual(payload["actions"][0]["type"], "confirm_v2_command")
+                worker.assert_not_called()
+            finally:
+                web_app.close_chat_store(WorkspaceContext.resolve(runs, "alpha").root)
+
+    def test_rewrite_worker_closes_v2_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "rewrite.chapters": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "running",
+                    }
+                },
+            )
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "rewrite.chapters",
+                    "payload": {"chapter_ids": ["1.1"]},
+                    "expected_revision": 0,
+                    "idempotency_key": "rewrite-worker",
+                },
+                workspace_id="alpha",
+            )
+            action = gateway.propose(envelope, label="confirm rewrite", risk="high")
+            receipt = gateway.confirm(action["confirmation_id"])
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            web_app.RUNNING = False
+            web_app.CURRENT_RUN_ROOT = None
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("subagent_runner.run_rewrite_all", return_value={"completed": ["1.1"], "failed": []}):
+                    started = web_app._trigger_rewrite_targets_inline(
+                        [{"chapter_id": "1.1"}],
+                        root=context.root,
+                        run_id="alpha",
+                        control_operation_id=receipt.operation_id or "",
+                        control_fencing_token=int(operation.get("fencing_token") or 0),
+                    )
+                    self.assertTrue(started["ok"])
+                    deadline = time.monotonic() + 2
+                    current = gateway.store.operation(receipt.operation_id or "") or {}
+                    while time.monotonic() < deadline and current.get("status") != "succeeded":
+                        time.sleep(0.01)
+                        current = gateway.store.operation(receipt.operation_id or "") or {}
+            self.assertEqual(current.get("status"), "succeeded")
+            self.assertFalse(web_app.RUNNING)
+
 
 if __name__ == "__main__":
     unittest.main()

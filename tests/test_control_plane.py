@@ -201,6 +201,28 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(after["status"], "running")
             self.assertEqual(after["fencing_token"], before["fencing_token"] + 1)
 
+    def test_rewrite_requires_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "running",
+            }
+            gateway = CommandGateway(context, {"rewrite.chapters": handler})
+            envelope = _envelope(
+                context,
+                gateway.store,
+                "rewrite.chapters",
+                payload={"chapter_ids": ["1.1"]},
+            )
+
+            with self.assertRaises(ControlPlaneError) as unconfirmed:
+                gateway.submit(envelope)
+            self.assertEqual(unconfirmed.exception.code, "CONFIRMATION_REQUIRED")
+            action = gateway.propose(envelope, label="confirm rewrite", risk="high")
+            receipt = gateway.confirm(action["confirmation_id"])
+            self.assertEqual(receipt.status, "accepted")
+
     def test_workspaces_have_independent_databases_and_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

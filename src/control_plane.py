@@ -173,6 +173,7 @@ class ControlStore:
         "pipeline.cancel",
         "pipeline.skip_stage",
         "repair.start",
+        "rewrite.chapters",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -379,8 +380,8 @@ class ControlStore:
                     )
 
                 active = self._current_operation(connection)
-                repair_retry = (
-                    envelope.kind == "repair.start"
+                blocked_mutation_retry = (
+                    envelope.kind in {"repair.start", "rewrite.chapters"}
                     and active is not None
                     and str(active["status"]) == "blocked"
                 )
@@ -389,7 +390,7 @@ class ControlStore:
                     "pipeline.resume",
                     "pipeline.cancel",
                     "pipeline.skip_stage",
-                } or repair_retry
+                } or blocked_mutation_retry
                 operation_id = ""
                 previous_status = ""
                 fencing_token = 0
@@ -411,6 +412,7 @@ class ControlStore:
                         "pipeline.cancel": {"queued", "running", "pausing", "paused", "blocked"},
                         "pipeline.skip_stage": {"paused", "blocked"},
                         "repair.start": {"blocked"},
+                        "rewrite.chapters": {"blocked"},
                     }
                     if previous_status not in allowed[envelope.kind]:
                         raise ControlPlaneError(
@@ -424,8 +426,9 @@ class ControlStore:
                         "pipeline.cancel": "cancelling",
                         "pipeline.skip_stage": previous_status,
                         "repair.start": "queued",
+                        "rewrite.chapters": "queued",
                     }[envelope.kind]
-                    if envelope.kind in {"pipeline.resume", "repair.start"}:
+                    if envelope.kind in {"pipeline.resume", "repair.start", "rewrite.chapters"}:
                         fencing_token += 1
                     connection.execute(
                         "UPDATE operations SET status = ?, fencing_token = ?, updated_at = ? WHERE operation_id = ?",
