@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from http.cookies import SimpleCookie
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 import web_app  # noqa: E402
+import httpx  # noqa: E402
 from fastapi import UploadFile  # noqa: E402
 from agent.repair_jobs import create_confirmation  # noqa: E402
 from control_plane import CommandEnvelope, CommandGateway, ControlStore, WorkspaceContext  # noqa: E402
@@ -1112,6 +1114,76 @@ class V2WebControlTests(unittest.TestCase):
             denied_payload = _body(denied)
             self.assertEqual(denied.status_code, 410)
             self.assertEqual(denied_payload["error"]["code"], "POLICY_DENIED")
+
+    def test_server_login_session_and_workspace_acl(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app._AUTH_SESSIONS.clear()
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.dict("os.environ", {"BID_AGENT_AUTH_PASSWORD": ""}, clear=False):
+                    unconfigured = asyncio.run(
+                        web_app.api_auth_login(_Request({"username": "admin", "password": ""}))
+                    )
+                self.assertEqual(unconfigured.status_code, 503)
+                with mock.patch.dict(
+                    "os.environ",
+                    {"BID_AGENT_AUTH_USER": "tester", "BID_AGENT_AUTH_PASSWORD": "secret-pass"},
+                ):
+                    denied = asyncio.run(
+                        web_app.api_auth_login(_Request({"username": "tester", "password": "wrong"}))
+                    )
+                    accepted = asyncio.run(
+                        web_app.api_auth_login(_Request({"username": "tester", "password": "secret-pass"}))
+                    )
+                self.assertEqual(denied.status_code, 401)
+                cookie = SimpleCookie()
+                cookie.load(accepted.headers["set-cookie"])
+                token = cookie[web_app._AUTH_COOKIE].value
+                principal = web_app._session_principal(token)
+                self.assertEqual(principal["id"], "tester")
+                context = WorkspaceContext.resolve(runs, "alpha")
+                web_app._ensure_workspace_acl(context, principal, write=True)
+                self.assertEqual(ControlStore(context).workspace_acl()[0]["principal_id"], "tester")
+                with self.assertRaises(Exception) as forbidden:
+                    web_app._ensure_workspace_acl(
+                        context,
+                        {"id": "intruder", "role": "admin"},
+                        write=False,
+                    )
+                self.assertEqual(getattr(forbidden.exception, "code", ""), "WORKSPACE_FORBIDDEN")
+
+    def test_auth_middleware_enforces_session_and_workspace_acl(self) -> None:
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as tmp:
+                runs = Path(tmp) / "runs"
+                root = runs / "alpha"
+                root.mkdir(parents=True)
+                context = WorkspaceContext.resolve(runs, "alpha")
+                ControlStore(context).grant_workspace_access("owner-only", role="owner")
+                web_app._AUTH_SESSIONS.clear()
+                transport = httpx.ASGITransport(app=web_app.app)
+                with mock.patch.object(web_app, "RUNS_DIR", runs):
+                    with mock.patch.dict(
+                        "os.environ",
+                        {"BID_AGENT_AUTH_USER": "tester", "BID_AGENT_AUTH_PASSWORD": "secret-pass"},
+                    ):
+                        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+                            anonymous = await client.get("/api/runs")
+                            self.assertEqual(anonymous.status_code, 401)
+                            login = await client.post(
+                                "/api/auth/login",
+                                json={"username": "tester", "password": "secret-pass"},
+                            )
+                            self.assertEqual(login.status_code, 200)
+                            runs_response = await client.get("/api/runs")
+                            self.assertEqual(runs_response.status_code, 200)
+                            forbidden = await client.get("/api/v2/workspaces/alpha/snapshot")
+                            self.assertEqual(forbidden.status_code, 403)
+                            self.assertEqual(forbidden.json()["error"]["code"], "WORKSPACE_FORBIDDEN")
+
+        asyncio.run(scenario())
 
 
 if __name__ == "__main__":

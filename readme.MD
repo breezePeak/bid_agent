@@ -25,6 +25,8 @@ pip install -r requirements.txt
 OPENAI_BASE_URL=https://api.openai.com/v1
 OPENAI_API_KEY=your-api-key
 OPENAI_MODEL=gpt-4.1-mini
+BID_AGENT_AUTH_USER=admin
+BID_AGENT_AUTH_PASSWORD=请替换为高强度随机密码
 ```
 
 可参考 `.env.example`。
@@ -40,6 +42,8 @@ python src/web_app.py
 ```
 
 打开 [http://127.0.0.1:7860](http://127.0.0.1:7860)
+
+Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V2 和兼容 API 请求都会校验会话及工作区权限。
 
 建议顺序：
 

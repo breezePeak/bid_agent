@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import queue
 import re
 import shutil
+import secrets
 import subprocess
 import sys
 import threading
@@ -73,6 +75,126 @@ from prompt_registry import AGENT_SPECS
 from utils import read_json
 
 app = FastAPI(title="标书 Agent 控制台", docs_url=None, redoc_url=None)
+
+_AUTH_COOKIE = "bid_agent_session"
+_AUTH_SESSION_SECONDS = 12 * 60 * 60
+_AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
+_AUTH_LOCK = threading.Lock()
+
+
+def _auth_credentials() -> tuple[str, str]:
+    return (
+        str(os.environ.get("BID_AGENT_AUTH_USER") or "admin"),
+        str(os.environ.get("BID_AGENT_AUTH_PASSWORD") or ""),
+    )
+
+
+def _session_principal(token: str) -> dict[str, Any] | None:
+    value = str(token or "").strip()
+    if not value:
+        return None
+    now = time.time()
+    with _AUTH_LOCK:
+        session = _AUTH_SESSIONS.get(value)
+        if not session:
+            return None
+        if float(session.get("expires_at") or 0) <= now:
+            _AUTH_SESSIONS.pop(value, None)
+            return None
+        return dict(session.get("principal") or {})
+
+
+def _ensure_workspace_acl(context: WorkspaceContext, principal: dict[str, Any], *, write: bool) -> None:
+    principal_id = str(principal.get("id") or "").strip()
+    store = ControlStore(context)
+    acl = store.workspace_acl()
+    if not acl:
+        if str(principal.get("role") or "") != "admin":
+            raise ControlPlaneError("WORKSPACE_FORBIDDEN", "工作区尚未分配所有者。", status_code=403)
+        store.grant_workspace_access(principal_id, role="owner")
+    store.require_workspace_access(principal_id, write=write)
+
+
+@app.middleware("http")
+async def api_auth_and_workspace_acl(request: Request, call_next):
+    path = request.url.path
+    if not path.startswith("/api/") or path == "/api/auth/login":
+        return await call_next(request)
+    principal = _session_principal(request.cookies.get(_AUTH_COOKIE, ""))
+    if not principal:
+        return JSONResponse(
+            {"ok": False, "error": {"code": "AUTH_REQUIRED", "message": "请先登录。"}, "message": "请先登录。"},
+            status_code=401,
+        )
+    request.state.principal = principal
+    try:
+        workspace_id = ""
+        prefix = "/api/v2/workspaces/"
+        if path.startswith(prefix):
+            workspace_id = path[len(prefix):].split("/", 1)[0]
+        elif ACTIVE_RUN_ID and path not in {"/api/runs", "/api/start-run", "/api/select-run"}:
+            workspace_id = ACTIVE_RUN_ID
+        if workspace_id:
+            context = _workspace_context(workspace_id)
+            _ensure_workspace_acl(
+                context,
+                principal,
+                write=request.method.upper() not in {"GET", "HEAD", "OPTIONS"},
+            )
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    return await call_next(request)
+
+
+@app.post("/api/auth/login")
+async def api_auth_login(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    username = str((body or {}).get("username") or "")
+    password = str((body or {}).get("password") or "")
+    expected_user, expected_password = _auth_credentials()
+    if not expected_password:
+        return JSONResponse(
+            {"ok": False, "message": "服务端尚未配置 BID_AGENT_AUTH_PASSWORD。"},
+            status_code=503,
+        )
+    if not (hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)):
+        return JSONResponse({"ok": False, "message": "用户名或密码错误。"}, status_code=401)
+    token = secrets.token_urlsafe(32)
+    principal = {"type": "user", "id": username[:128], "role": "admin"}
+    with _AUTH_LOCK:
+        _AUTH_SESSIONS[token] = {
+            "principal": principal,
+            "expires_at": time.time() + _AUTH_SESSION_SECONDS,
+        }
+    response = JSONResponse({"ok": True, "principal": principal})
+    response.set_cookie(
+        _AUTH_COOKIE,
+        token,
+        max_age=_AUTH_SESSION_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"},
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/logout")
+def api_auth_logout(request: Request) -> JSONResponse:
+    token = request.cookies.get(_AUTH_COOKIE, "")
+    with _AUTH_LOCK:
+        _AUTH_SESSIONS.pop(token, None)
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(_AUTH_COOKIE, path="/")
+    return response
+
+
+@app.get("/api/auth/me")
+def api_auth_me(request: Request) -> JSONResponse:
+    return JSONResponse({"ok": True, "principal": getattr(request.state, "principal", {})})
 
 LOG_LINES: list[str] = []
 LOG_MAX = 2000

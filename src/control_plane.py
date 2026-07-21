@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 4
+    SCHEMA_VERSION = 5
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -282,6 +282,11 @@ class ControlStore:
                         source TEXT NOT NULL,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS workspace_acl (
+                        principal_id TEXT PRIMARY KEY,
+                        role TEXT NOT NULL,
+                        created_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS confirmations (
                         confirmation_id TEXT PRIMARY KEY,
@@ -638,6 +643,60 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.material_state(item_id) or {}
+
+    def workspace_acl(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT principal_id, role, created_at FROM workspace_acl ORDER BY principal_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def grant_workspace_access(self, principal_id: str, *, role: str = "owner") -> dict[str, Any]:
+        principal = str(principal_id or "").strip()
+        if not principal:
+            raise ControlPlaneError("AUTH_REQUIRED", "缺少服务端认证主体。", status_code=401)
+        if role not in {"owner", "editor", "viewer"}:
+            raise ControlPlaneError("COMMAND_INVALID", f"无效工作区角色: {role}", status_code=400)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT role FROM workspace_acl WHERE principal_id = ?",
+                    (principal,),
+                ).fetchone()
+                if existing is None:
+                    revision = self._bump_revision(connection)
+                    connection.execute(
+                        "INSERT INTO workspace_acl(principal_id, role, created_at) VALUES (?, ?, ?)",
+                        (principal, role, _now()),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "WorkspaceAccessGranted",
+                        "Workspace",
+                        self.context.workspace_id,
+                        {"principal_id": principal, "role": role},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {"principal_id": principal, "role": role}
+
+    def require_workspace_access(self, principal_id: str, *, write: bool = False) -> dict[str, Any]:
+        principal = str(principal_id or "").strip()
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT principal_id, role, created_at FROM workspace_acl WHERE principal_id = ?",
+                (principal,),
+            ).fetchone()
+        if row is None:
+            raise ControlPlaneError("WORKSPACE_FORBIDDEN", "无权访问此工作区。", status_code=403)
+        result = dict(row)
+        if write and result["role"] == "viewer":
+            raise ControlPlaneError("WORKSPACE_FORBIDDEN", "当前主体只有只读权限。", status_code=403)
+        return result
 
     @staticmethod
     def _revision(connection: sqlite3.Connection) -> int:

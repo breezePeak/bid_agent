@@ -30,7 +30,7 @@
           {{ loading ? '登录中...' : '登 录' }}
         </button>
         <p v-if="error" class="login-error">{{ error }}</p>
-        <p class="login-hint">默认账号：admin / admin123</p>
+        <p class="login-hint">账号由服务端环境变量 BID_AGENT_AUTH_USER / BID_AGENT_AUTH_PASSWORD 配置。</p>
       </form>
     </div>
   </div>
@@ -39,31 +39,29 @@
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { login } from '../api'
 
 const router = useRouter()
 
-const DEFAULT_USER = 'admin'
-const DEFAULT_PASS = 'admin123'
-
-const username = ref(DEFAULT_USER)
-const password = ref(DEFAULT_PASS)
+const username = ref('')
+const password = ref('')
 const loading = ref(false)
 const error = ref('')
 
-function handleLogin() {
+async function handleLogin() {
   error.value = ''
   if (!username.value.trim() || !password.value.trim()) {
     error.value = '请输入用户名和密码'
     return
   }
-  if (username.value.trim() !== DEFAULT_USER || password.value !== DEFAULT_PASS) {
-    error.value = '用户名或密码错误'
-    return
-  }
   loading.value = true
-  setTimeout(() => {
+  try {
+    await login(username.value.trim(), password.value)
+    await router.push('/business')
+  } catch (requestError) {
+    error.value = requestError?.response?.data?.message || requestError?.message || '登录失败'
+  } finally {
     loading.value = false
-    router.push('/business')
-  }, 600)
+  }
 }
 </script>

@@ -335,6 +335,22 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(current["lifecycle_status"], "verified")
             self.assertEqual(current["control_source"], "v2_command")
 
+    def test_workspace_acl_denies_unassigned_and_read_only_writes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            with self.assertRaises(ControlPlaneError) as missing:
+                store.require_workspace_access("other-user")
+            self.assertEqual(missing.exception.code, "WORKSPACE_FORBIDDEN")
+
+            store.grant_workspace_access("owner", role="owner")
+            store.grant_workspace_access("reader", role="viewer")
+            self.assertEqual(store.require_workspace_access("owner", write=True)["role"], "owner")
+            self.assertEqual(store.require_workspace_access("reader", write=False)["role"], "viewer")
+            with self.assertRaises(ControlPlaneError) as read_only:
+                store.require_workspace_access("reader", write=True)
+            self.assertEqual(read_only.exception.code, "WORKSPACE_FORBIDDEN")
+
     def test_gate_rejection_keeps_operation_blocked_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

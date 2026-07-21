@@ -5,6 +5,28 @@ const api = axios.create({
   timeout: 30000,
 })
 
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error?.response?.status === 401 && !window.location.pathname.startsWith('/login')) {
+      window.location.assign('/login')
+    }
+    return Promise.reject(error)
+  },
+)
+
+export function login(username, password) {
+  return api.post('/auth/login', { username, password })
+}
+
+export function logout() {
+  return api.post('/auth/logout')
+}
+
+export function fetchCurrentUser() {
+  return api.get('/auth/me')
+}
+
 export function fetchRuns() {
   return api.get('/runs')
 }

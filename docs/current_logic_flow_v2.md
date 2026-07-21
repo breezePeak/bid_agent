@@ -489,3 +489,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B3 | 2026-07-21 | 单条/批量问题修复与风险接受迁入 `repair.issues` / `issues.accept_risk` Command，并强制持久化 Action 确认；旧 API 只生成提案，不再直接执行 mutation。风险接受忽略客户端 actor、admin 和二次确认标志，fatal、资格材料及未经服务端授权的 critical 风险均 fail-closed。Issue/Policy 权威表和正式角色授权仍待迁移。 |
 | V2.0-B4 | 2026-07-21 | 质量门禁重验迁入 `quality.revalidate` Command，并使用显式 WorkspaceContext；高级 Tool 调试接口仅允许只读 analysis 工具或 dry-run，mutation/export 调用返回 `POLICY_DENIED`，关闭绕过 CommandGateway 的通用执行入口。Goal 兼容接口、Issue/Policy 权威表和 ACL 仍待处理。 |
 | V2.0-B5 | 2026-07-21 | Goal 恢复迁入 `goal.resume` Command；旧 Goal 批量 mutation 授权接口返回 `POLICY_DENIED`，V2 只接受逐个持久化 Action 的风险确认，不再保留 `all_mutations` 全局放行能力。Goal 权威状态仍为兼容文件，后续需迁入控制库。 |
+| V2.0-B6 | 2026-07-21 | Web 登录改为服务端校验和 HttpOnly/SameSite 会话 cookie，未配置密码时 fail-closed；所有 `/api` 请求经过认证中间件。`control.db.workspace_acl` 保存工作区 owner/editor/viewer，V2 路径按主体和读写类型校验，旧工作区仅允许管理员首次认领。当前为单管理员账号模型，后续可接入组织身份源和多用户授权管理。 |
