@@ -1524,6 +1524,32 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertEqual(decisions[0]["decision"]["status"], "accepted")
                 self.assertEqual(decisions[0]["actor"]["id"], "anonymous")
 
+    def test_v2_manual_review_read_uses_latest_sqlite_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.record_policy_decision(
+                issue_id="manual-review:score_coverage:score-1",
+                decision_type="manual_review",
+                decision={"payload": {"item_id": "score-1", "status": "accepted"}},
+                actor={"type": "user", "id": "reviewer"},
+            )
+            compatibility = [
+                {
+                    "item_id": "score-1",
+                    "override": {"status": "pending", "operator_instruction": "legacy"},
+                }
+            ]
+            with mock.patch.object(web_app, "manual_review_items", return_value=compatibility):
+                closed = web_app._v2_manual_review_items(context, "score_coverage")
+                all_items = web_app._v2_manual_review_items(context, "score_coverage", include_closed=True)
+
+            self.assertEqual(closed, [])
+            self.assertEqual(all_items[0]["override"]["status"], "accepted")
+            self.assertEqual(all_items[0]["control_source"], "control.db")
+
     def test_final_md_edit_requires_confirmation_and_rebuilds_in_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -2140,9 +2166,9 @@ class V2WebControlTests(unittest.TestCase):
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.object(web_app, "_status_payload", return_value={"workflow": [], "timings": {}}) as status:
                     detail = _body(web_app.api_workflow_step_detail(command, "alpha"))
-                with mock.patch.object(web_app, "manual_review_summary", return_value={"alpha": True}) as review_summary:
+                with mock.patch.object(web_app, "_v2_manual_review_summary", return_value={"alpha": True}) as review_summary:
                     summary = _body(web_app.api_manual_review_summary("alpha"))
-                with mock.patch.object(web_app, "manual_review_items", return_value=[{"id": "alpha-review"}]) as review_items:
+                with mock.patch.object(web_app, "_v2_manual_review_items", return_value=[{"id": "alpha-review"}]) as review_items:
                     items = _body(web_app.api_manual_review_items("score_coverage", "alpha"))
                 with mock.patch("agent.repair.build_repair_plan", return_value={"ok": True}) as build_plan:
                     preview = _body(web_app.api_preview_repair("issue-1", "alpha"))
@@ -2155,8 +2181,11 @@ class V2WebControlTests(unittest.TestCase):
             resolved = alpha.resolve()
             status.assert_called_once_with(resolved, "alpha")
             self.assertEqual(Path(detail["run_root"]), resolved)
-            review_summary.assert_called_once_with(resolved)
-            review_items.assert_called_once_with(resolved, "score_coverage")
+            review_summary.assert_called_once()
+            self.assertEqual(review_summary.call_args.args[0].root, resolved)
+            review_items.assert_called_once()
+            self.assertEqual(review_items.call_args.args[0].root, resolved)
+            self.assertEqual(review_items.call_args.args[1], "score_coverage")
             plan_issue = build_plan.call_args.kwargs["issue"]
             self.assertEqual(plan_issue["id"], "issue-1")
             build_plan.assert_called_once_with(resolved, "issue-1", issue=plan_issue)

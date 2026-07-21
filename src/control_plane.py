@@ -941,11 +941,11 @@ class ControlStore:
         with self._connection() as connection:
             if issue_id:
                 rows = connection.execute(
-                    "SELECT * FROM policy_decisions WHERE issue_id = ? ORDER BY created_at",
+                    "SELECT * FROM policy_decisions WHERE issue_id = ? ORDER BY created_at, rowid",
                     (issue_id,),
                 ).fetchall()
             else:
-                rows = connection.execute("SELECT * FROM policy_decisions ORDER BY created_at").fetchall()
+                rows = connection.execute("SELECT * FROM policy_decisions ORDER BY created_at, rowid").fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
             value = dict(row)

@@ -546,3 +546,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B60 | 2026-07-21 | 定向改稿、Issue 最小修复和材料回填等非 Pipeline 章节写入接入 SQLite Artifact 图：章节集合成功存在时刷新 write-all manifest，并按 StageSpec 传递 stale 到审核、摘要、来源追溯、评分覆盖、合规及最终文档链；外部 Worker 不再只写 V1 `stale_artifacts.json` 而让 V2 误判旧终稿 ready。 |
 | V2.0-B61 | 2026-07-21 | `review.update` 除写入一个版本的人工复核兼容投影外，同时追加不可变 SQLite PolicyDecision，记录 category、item、结论、操作说明与服务端 actor；人工复核变化因此进入 GateReceipt 的权威 Policy 指纹，既有正式凭据会失效，不再因只改了复核文件而继续有效。 |
 | V2.0-B62 | 2026-07-21 | `workspace.set_profile` 在项目类型实际变化后将当前 SQLite Artifact manifest 全部标记 stale；项目类型影响提示词、结构、篇幅和生成策略，后续 Pipeline 必须按新配置重建，不能继续复用旧项目类型下仅因文件存在而显示 ready 的产物。相同类型的幂等设置不触发失效。 |
+| V2.0-B63 | 2026-07-21 | V2 人工复核列表与摘要改为以 SQLite `manual_review` PolicyDecision 覆盖兼容文件结论；同一 category/item 的最新不可变决定控制 pending/closed 展示，响应标注 `control.db` 或 `v1_projection` 来源。V2 摘要读取不再调用会写 `summary.json` 的 V1 聚合函数，消除查询时修改状态的副作用。 |

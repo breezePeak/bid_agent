@@ -4038,18 +4038,80 @@ async def api_materials_checklist_upload(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+_MANUAL_REVIEW_CLOSED = {"accepted", "resolved", "dismissed", "confirmed"}
+
+
+def _v2_manual_review_items(
+    context: WorkspaceContext,
+    category: str,
+    *,
+    include_closed: bool = False,
+) -> list[dict[str, Any]]:
+    rows = manual_review_items(context.root, category, include_closed=True)
+    prefix = f"manual-review:{category}:"
+    decisions: dict[str, dict[str, Any]] = {}
+    for decision in ControlStore(context).policy_decisions():
+        issue_id = str(decision.get("issue_id") or "")
+        if decision.get("decision_type") == "manual_review" and issue_id.startswith(prefix):
+            decisions[issue_id[len(prefix) :]] = decision
+    result: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw) if isinstance(raw, dict) else {}
+        item_id = str(row.get("item_id") or "")
+        decision = decisions.get(item_id)
+        if decision:
+            value = decision.get("decision") if isinstance(decision.get("decision"), dict) else {}
+            effective = value.get("payload") if isinstance(value.get("payload"), dict) else value
+            row["override"] = dict(effective)
+            row["control_source"] = "control.db"
+            row["policy_decision_id"] = decision.get("decision_id")
+        else:
+            effective = row.get("override") if isinstance(row.get("override"), dict) else {}
+            row["control_source"] = "v1_projection"
+        if not include_closed and str(effective.get("status") or "").lower() in _MANUAL_REVIEW_CLOSED:
+            continue
+        result.append(row)
+    return result
+
+
+def _v2_manual_review_summary(context: WorkspaceContext) -> dict[str, Any]:
+    path = context.root / "workspace" / "manual_review" / "summary.json"
+    base = _read_json_file(path) if path.exists() else {}
+    summary = dict(base) if isinstance(base, dict) else {}
+    counts = {
+        category: len(_v2_manual_review_items(context, category))
+        for category in ("template_evidence", "score_coverage", "chapter_review", "global_review")
+    }
+    summary.update(
+        {
+            "project_type": load_project_profile(context.root).get("project_type", "general"),
+            "template_evidence_pending": counts["template_evidence"],
+            "score_coverage_pending": counts["score_coverage"],
+            "chapter_review_pending": counts["chapter_review"],
+            "global_review_pending": counts["global_review"],
+            "total_pending": sum(counts.values()) + int(summary.get("compliance_pending") or 0),
+            "source": "control.db",
+        }
+    )
+    return summary
+
+
 @app.get("/api/v2/workspaces/{workspace_id}/manual-review/summary")
 @app.get("/api/manual-review/summary")
 def api_manual_review_summary(workspace_id: str = "") -> JSONResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
-    return JSONResponse({"ok": True, "summary": manual_review_summary(root)})
+    if workspace_id:
+        context = _workspace_context(workspace_id)
+        return JSONResponse({"ok": True, "summary": _v2_manual_review_summary(context)})
+    return JSONResponse({"ok": True, "summary": manual_review_summary(_active_root())})
 
 
 @app.get("/api/v2/workspaces/{workspace_id}/manual-review/items")
 @app.get("/api/manual-review/items")
 def api_manual_review_items(category: str = Query(..., min_length=1), workspace_id: str = "") -> JSONResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
-    return JSONResponse({"ok": True, "category": category, "items": manual_review_items(root, category)})
+    if workspace_id:
+        context = _workspace_context(workspace_id)
+        return JSONResponse({"ok": True, "category": category, "items": _v2_manual_review_items(context, category)})
+    return JSONResponse({"ok": True, "category": category, "items": manual_review_items(_active_root(), category)})
 
 
 @app.post("/api/manual-review/update")
@@ -5898,6 +5960,7 @@ def _handle_review_update(
             "item_id": item_id,
             "status": str(payload.get("status") or ""),
             "operator_instruction": str(payload.get("operator_instruction") or payload.get("note") or "")[:2000],
+            "payload": dict(payload),
         },
         actor={
             "type": str(actor.get("type") or "user"),
