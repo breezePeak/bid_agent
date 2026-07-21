@@ -3306,7 +3306,7 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
         if context:
             from agent.issues import quality_gate_mode
 
-            all_issues = ControlStore(context).issue_states()
+            all_issues = _ensure_v2_issue_import(context).issue_states()
             open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
             blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
             warns = [i for i in open_issues if str(i.get("severity")) == "warn"]
@@ -3385,7 +3385,7 @@ def api_preview_repair(issue_id: str, workspace_id: str = "") -> JSONResponse:
         from agent.repair import build_repair_plan
 
         if context:
-            issue = next((item for item in ControlStore(context).issue_states() if str(item.get("id")) == issue_id), None)
+            issue = next((item for item in _ensure_v2_issue_import(context).issue_states() if str(item.get("id")) == issue_id), None)
             plan = build_repair_plan(root, issue_id, issue=issue) if issue else {"ok": False, "message": f"未找到问题: {issue_id}"}
         else:
             plan = build_repair_plan(root, issue_id)
@@ -3469,7 +3469,7 @@ async def api_explain_issue_cause(issue_id: str, request: Request, workspace_id:
         from agent.issues import load_open_issues
         from agent.root_cause import refine_issue_cause_with_llm
 
-        source = ControlStore(context).issue_states() if context else load_open_issues(root)
+        source = _ensure_v2_issue_import(context).issue_states() if context else load_open_issues(root)
         issue = next((i for i in source if str(i.get("id")) == issue_id), None)
         if not issue:
             return JSONResponse({"ok": False, "message": "未找到问题"}, status_code=404)
@@ -3494,7 +3494,7 @@ async def api_batch_preview_repair(request: Request, workspace_id: str = "") -> 
     try:
         from agent.repair import execute_repair_batch
 
-        issue_snapshot = ControlStore(context).issue_states() if context else None
+        issue_snapshot = _ensure_v2_issue_import(context).issue_states() if context else None
         result = execute_repair_batch(
             root,
             [str(x) for x in ids],
@@ -5187,6 +5187,34 @@ def _workspace_context(workspace_id: str) -> WorkspaceContext:
     return WorkspaceContext.resolve(RUNS_DIR, workspace_id)
 
 
+def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
+    """Import a V1 Issue snapshot exactly once before V2 treats SQLite as authority."""
+    store = ControlStore(context)
+    if not store.issue_v1_import_pending():
+        return store
+    path = context.root / "workspace" / "issues" / "open.json"
+    issues: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                f"旧 Issue 状态无法导入，已拒绝继续: {exc}",
+                status_code=503,
+            ) from exc
+        rows = payload.get("issues") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "旧 Issue 状态格式无效，已拒绝继续。",
+                status_code=503,
+            )
+        issues = [dict(item) for item in rows if isinstance(item, dict)]
+    store.ensure_issue_states(issues)
+    return store
+
+
 def _request_actor(request: Request, *, source: str) -> dict[str, str]:
     """Bind Command actors on the server; never trust actor fields in JSON payloads."""
     state = getattr(request, "state", None)
@@ -5212,7 +5240,7 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     try:
         from agent.issues import quality_gate_mode
 
-        issues = ControlStore(context).issue_states()
+        issues = _ensure_v2_issue_import(context).issue_states()
         open_issues = [
             item for item in issues
             if str(item.get("status") or "") in {"open", "in_progress"}
@@ -6959,6 +6987,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         goal_state = store.goal_state()
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
+        _ensure_v2_issue_import(context)
         issue_states = store.issue_states()
         material_items = _material_items(context)
         material_summary = {

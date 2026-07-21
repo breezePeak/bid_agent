@@ -525,3 +525,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B39 | 2026-07-21 | 工作区创建新增 V2 Catalog POST，创建与 ACL owner 分配不再改写进程级 ACTIVE_RUN 或 `.active_run`；主创建对话框切换到新接口，旧 `/api/start-run` 继续保留选择 active workspace 的 V1 兼容语义。 |
 | V2.0-B40 | 2026-07-21 | 新建工作区所需的项目类型选项拆为无工作区状态的 V2 Catalog 接口，创建对话框不再通过 `/api/project-profile` 隐式读取 ACTIVE_RUN 的当前项目配置；旧接口继续服务 V1 当前工作区视图。 |
 | V2.0-B41 | 2026-07-21 | V2 Pipeline/Utility 前置质量门禁改为直接读取 `control.db` Issue 状态，不再在门禁查询中同步或改写旧报告文件；保留发现门禁阶段重验语义，fatal 与资格/废标风险即使 soft 模式也不可绕过，状态读取异常继续 fail-closed。 |
+| V2.0-B42 | 2026-07-21 | 增加 V1 Issue 到 `control.db` 的显式一次性导入边界：首次 V2 Snapshot、Issue 查询/提案或门禁读取前导入 `workspace/issues/open.json`，之后永不由文件隐式覆盖 SQLite；旧文件缺失按空快照迁移，格式损坏则 fail-closed。 |

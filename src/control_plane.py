@@ -797,6 +797,13 @@ class ControlStore:
                 connection.rollback()
                 raise
 
+    def issue_v1_import_pending(self) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'issue_v1_imported'"
+            ).fetchone()
+        return row is None
+
     def issue_states(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute("SELECT * FROM issue_states ORDER BY created_at, issue_id").fetchall()
