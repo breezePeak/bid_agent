@@ -1837,6 +1837,23 @@ class V2WebControlTests(unittest.TestCase):
             )
             self.assertFalse((beta / "sources" / "company" / "company.txt").exists())
 
+    def test_v2_agent_decisions_use_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("agent.trace.load_decisions", return_value=[{"id": "alpha-decision"}]) as load:
+                    payload = _body(web_app.api_agent_decisions(8, "alpha"))
+
+            load.assert_called_once_with(alpha.resolve(), tail=8)
+            self.assertEqual(payload["decisions"][0]["id"], "alpha-decision")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -3700,9 +3700,10 @@ async def api_agent_goal_confirm(request: Request) -> JSONResponse:
     )
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/agent/decisions")
 @app.get("/api/agent/decisions")
-def api_agent_decisions(tail: int = 20) -> JSONResponse:
-    root = _active_root()
+def api_agent_decisions(tail: int = 20, workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
         from agent.trace import load_decisions
 

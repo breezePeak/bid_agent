@@ -117,7 +117,7 @@ const isTerminal = computed(() => TERMINAL.has(String(goal.value?.status || ''))
 async function refreshDecisions() {
   if (!props.enabled) return
   try {
-    const dResp = await fetchAgentDecisions(8)
+    const dResp = await fetchAgentDecisions(props.runId, 8)
     const dBody = dResp?.data || {}
     decisions.value = Array.isArray(dBody.decisions) ? dBody.decisions.slice().reverse() : []
     error.value = ''

@@ -203,8 +203,8 @@ export function fetchAgentGoal() {
   return api.get('/agent/goal')
 }
 
-export function fetchAgentDecisions(tail = 20) {
-  return api.get('/agent/decisions', { params: { tail } })
+export function fetchAgentDecisions(runId, tail = 20) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/agent/decisions`, { params: { tail } })
 }
 
 export function fetchAgentTools() {
