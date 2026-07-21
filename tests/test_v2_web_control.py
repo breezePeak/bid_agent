@@ -1765,6 +1765,63 @@ class V2WebControlTests(unittest.TestCase):
                 hashlib.sha256((alpha / "outputs" / "final.md").read_bytes()).hexdigest(),
             )
 
+    def test_v2_document_proposal_busy_state_is_workspace_scoped(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            (alpha / "outputs").mkdir(parents=True)
+            beta.mkdir(parents=True)
+            (alpha / "outputs" / "final.md").write_text("# Alpha", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+            web_app.RUNNING = True
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("llm_client.chat", return_value="# Alpha revised") as chat:
+                    allowed = _body(
+                        asyncio.run(
+                            web_app.api_final_doc_chat_edit(
+                                _Request({"instruction": "revise"}),
+                                "alpha",
+                            )
+                        )
+                    )
+
+                context = WorkspaceContext.resolve(runs, "alpha")
+                gateway = CommandGateway(
+                    context,
+                    {
+                        "pipeline.start": lambda ctx, envelope, operation_id: {
+                            "accepted": True,
+                            "operation_status": "running",
+                        }
+                    },
+                )
+                gateway.submit(
+                    CommandEnvelope.from_mapping(
+                        {
+                            "kind": "pipeline.start",
+                            "expected_revision": gateway.store.revision(),
+                            "idempotency_key": "document-busy",
+                        },
+                        workspace_id="alpha",
+                    )
+                )
+                web_app.RUNNING = False
+                with mock.patch("llm_client.chat") as blocked_chat:
+                    blocked_response = asyncio.run(
+                        web_app.api_final_doc_chat_edit(_Request({"instruction": "revise again"}), "alpha")
+                    )
+                    blocked = _body(blocked_response)
+
+            web_app._PENDING_DOC_EDIT.pop(alpha.resolve(), None)
+            self.assertTrue(allowed["ok"])
+            chat.assert_called_once()
+            self.assertEqual(blocked_response.status_code, 409)
+            self.assertFalse(blocked["ok"])
+            blocked_chat.assert_not_called()
+
     def test_v2_file_preview_uses_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

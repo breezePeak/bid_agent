@@ -527,3 +527,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B41 | 2026-07-21 | V2 Pipeline/Utility 前置质量门禁改为直接读取 `control.db` Issue 状态，不再在门禁查询中同步或改写旧报告文件；保留发现门禁阶段重验语义，fatal 与资格/废标风险即使 soft 模式也不可绕过，状态读取异常继续 fail-closed。 |
 | V2.0-B42 | 2026-07-21 | 增加 V1 Issue 到 `control.db` 的显式一次性导入边界：首次 V2 Snapshot、Issue 查询/提案或门禁读取前导入 `workspace/issues/open.json`，之后永不由文件隐式覆盖 SQLite；旧文件缺失按空快照迁移，格式损坏则 fail-closed。 |
 | V2.0-B43 | 2026-07-21 | PipelineSupervisor 支持由 V2 注入 SQLite Gate evaluator，启动、逐阶段推进和重启恢复统一使用同一门禁语义；V2 evaluator 异常时 Supervisor 写入失败状态并停止，消除内部旧门禁异常后 fail-open 的旁路。 |
+| V2.0-B44 | 2026-07-21 | 终稿选区、全文和流式块改写提案的忙碌判断改为读取路径工作区的 SQLite Operation 与 Supervisor 状态，不再因其他工作区的进程级 RUNNING 被误阻断；控制状态异常仍按忙碌处理并拒绝提案。 |

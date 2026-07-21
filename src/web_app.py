@@ -7836,6 +7836,18 @@ def _final_md_path(root: Path) -> Path:
     return root / "outputs" / "final.md"
 
 
+def _workspace_execution_active(workspace_id: str) -> bool:
+    if not workspace_id:
+        return RUNNING
+    try:
+        context = _workspace_context(workspace_id)
+        operation = ControlStore(context).snapshot().get("operation")
+        status = str(operation.get("status") or "") if isinstance(operation, dict) else ""
+        return status in {"queued", "running", "pausing", "cancelling"} or SUPERVISOR.is_running(context.root)
+    except Exception:
+        return True
+
+
 def _final_docx_path(root: Path) -> Path:
     return root / "outputs" / "final.docx"
 
@@ -7990,7 +8002,7 @@ async def api_final_doc_selection_rewrite(request: Request, workspace_id: str = 
     path = _final_md_path(root)
     if not path.exists():
         return JSONResponse({"ok": False, "message": "final.md 不存在，请先执行 build-md。"}, status_code=404)
-    if RUNNING:
+    if _workspace_execution_active(workspace_id):
         return JSONResponse({"ok": False, "message": "当前已有任务正在运行，请稍后再改写。"}, status_code=409)
     try:
         body = await request.json()
@@ -8102,7 +8114,7 @@ async def api_final_doc_chat_edit(request: Request, workspace_id: str = "") -> J
     path = _final_md_path(root)
     if not path.exists():
         return JSONResponse({"ok": False, "message": "final.md 不存在，请先执行 build-md。"}, status_code=404)
-    if RUNNING:
+    if _workspace_execution_active(workspace_id):
         return JSONResponse({"ok": False, "message": "当前已有任务正在运行，请稍后再改写。"}, status_code=409)
     try:
         body = await request.json()
@@ -8243,7 +8255,7 @@ async def api_final_doc_rewrite_block_stream(request: Request, workspace_id: str
             _sse_error("final.md 不存在，请先执行 build-md。"),
             media_type="text/event-stream",
         )
-    if RUNNING:
+    if _workspace_execution_active(workspace_id):
         return StreamingResponse(
             _sse_error("当前已有任务正在运行。"),
             media_type="text/event-stream",
