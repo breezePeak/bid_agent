@@ -13,6 +13,8 @@ describe('statusFromV2Snapshot', () => {
       repair_job: { job_id: 'repair-v2', status: 'partial' },
       materials: { total: 1, ready: 1, source: 'control.db' },
       findings: { issues_summary: { open: 1, source: 'control.db' } },
+      artifacts: [{ artifact_key: 'outputs/final.docx', status: 'ready' }],
+      artifact_files: { outputs: { final_docx: true } },
       presentation: {
         running: false,
         goal: { goal_id: 'goal-v1' },
@@ -28,6 +30,8 @@ describe('statusFromV2Snapshot', () => {
     assert.equal(status.materials_summary.source, 'control.db')
     assert.equal(status.issues_summary.source, 'control.db')
     assert.deepEqual(status.workflow, [{ command: 'write-all' }])
+    assert.equal(status.artifacts[0].artifact_key, 'outputs/final.docx')
+    assert.equal(status.artifact_files.outputs.final_docx, true)
     assert.equal(status.control_source, 'control.db')
   })
 

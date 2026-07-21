@@ -7100,7 +7100,8 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                     },
                     "issues": issue_states,
                 },
-                "artifacts": {
+                "artifacts": snapshot.get("artifacts") or [],
+                "artifact_files": {
                     "inputs": compatibility.get("inputs") or {},
                     "workspace": compatibility.get("workspace") or {},
                     "outputs": compatibility.get("outputs") or {},

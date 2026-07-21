@@ -1770,6 +1770,17 @@ class V2WebControlTests(unittest.TestCase):
                 [{"id": "issue-v2", "status": "open", "severity": "block"}],
                 source="test",
             )
+            store.upsert_artifact_state(
+                {
+                    "artifact_key": "outputs/final.docx",
+                    "path": "outputs/final.docx",
+                    "kind": "file",
+                    "status": "ready",
+                    "producer": "build-docx",
+                    "sha256": "abc",
+                    "input_fingerprint": "inputs",
+                }
+            )
             compatibility = {
                 "goal": {"goal_id": "goal-v1", "status": "failed", "summary": "compat summary"},
                 "goal_full": {"goal_id": "goal-v1", "status": "failed"},
@@ -1779,6 +1790,7 @@ class V2WebControlTests(unittest.TestCase):
                 "issues_summary": {"total": 99, "open": 0},
                 "pipeline": {},
                 "workflow": [],
+                "outputs": {"final_docx": True},
             }
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
@@ -1795,6 +1807,8 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(snapshot["findings"]["issues_summary"]["block_count"], 1)
             self.assertFalse(snapshot["findings"]["issues_summary"]["can_proceed"])
             self.assertEqual(snapshot["findings"]["issues_summary"]["source"], "control.db")
+            self.assertEqual(snapshot["artifacts"][0]["artifact_key"], "outputs/final.docx")
+            self.assertEqual(snapshot["artifact_files"]["outputs"]["final_docx"], True)
 
     def test_workspace_event_stream_uses_stable_type_and_last_event_id(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -23,7 +23,10 @@ export function statusFromV2Snapshot(snapshot) {
     repair_job: snapshot.repair_job || null,
     materials_summary: materials,
     issues_summary: findings.issues_summary || {},
-    artifacts: snapshot.artifacts || {},
+    artifacts: Array.isArray(snapshot.artifacts) ? snapshot.artifacts : [],
+    artifact_files: snapshot.artifact_files && typeof snapshot.artifact_files === 'object'
+      ? snapshot.artifact_files
+      : {},
     control_source: 'control.db',
   }
 }
