@@ -532,3 +532,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B46 | 2026-07-21 | 修复 Windows 下 Pipeline checkpoint 原子替换偶发被短暂文件占用而令流水线失败的问题；临时文件替换增加有界退避重试，最终仍失败时保持 fail-closed 并由 Supervisor 记录失败状态。 |
 | V2.0-B47 | 2026-07-21 | 建立首版 SQLite Artifact manifest：记录规范化 key、kind、hash、producer、输入 fingerprint、`ready/missing` 和 produced/reused disposition；V2 Snapshot 开始暴露 Artifact 列表，阶段成功但必需产物缺失或 manifest 写入失败时按执行失败处理。stale 依赖传播仍待下一切片完成。 |
 | V2.0-B48 | 2026-07-21 | V2 Pipeline 阶段复用开始同时校验磁盘产物、SQLite manifest 状态、内容 hash 与输入 fingerprint；上游重跑导致产物或输入变化时，按 StageSpec 依赖图传递标记已有下游 Artifact 为 stale，Supervisor 不再仅因旧文件仍存在就跳过重建。旧 V1 产物允许在一个兼容版本内首次复用时补建 manifest。 |
+| V2.0-B49 | 2026-07-21 | 正式 GateReceipt 签发开始检查 SQLite Artifact readiness：正式依赖存在 stale/missing、磁盘 hash 与 manifest 不一致或 final.docx 输入 fingerprint 过期时一律阻断；Artifact 权威状态同时纳入 GateReceipt 指纹，签发后状态变化会令凭据失效。无 manifest 的 V1 旧产物仅在一个兼容版本内继续允许验收。 |

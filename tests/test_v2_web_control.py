@@ -24,7 +24,7 @@ import web_app  # noqa: E402
 import httpx  # noqa: E402
 from fastapi import UploadFile  # noqa: E402
 from agent.repair_jobs import create_confirmation  # noqa: E402
-from control_plane import CommandEnvelope, CommandGateway, ControlStore, WorkspaceContext  # noqa: E402
+from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext  # noqa: E402
 
 
 class _Request:
@@ -1090,10 +1090,48 @@ class V2WebControlTests(unittest.TestCase):
                 actor={"type": "user", "id": "owner"},
             )
             changed_policy, _ = web_app._formal_gate_fingerprint(context)
+            store.upsert_artifact_state(
+                {
+                    "artifact_key": "outputs/final.docx",
+                    "path": "outputs/final.docx",
+                    "kind": "file",
+                    "status": "stale",
+                    "producer": "build-docx",
+                    "sha256": "old",
+                    "input_fingerprint": "old-input",
+                }
+            )
+            changed_artifact, _ = web_app._formal_gate_fingerprint(context)
 
             self.assertEqual(first, projected)
             self.assertNotEqual(projected, changed_issue)
             self.assertNotEqual(changed_issue, changed_policy)
+            self.assertNotEqual(changed_policy, changed_artifact)
+
+    def test_formal_gate_blocks_stale_sqlite_artifact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            (root / "outputs" / "final.docx").write_bytes(b"docx")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).upsert_artifact_state(
+                {
+                    "artifact_key": "outputs/final.docx",
+                    "path": "outputs/final.docx",
+                    "kind": "file",
+                    "status": "stale",
+                    "producer": "build-docx",
+                    "sha256": "old",
+                    "input_fingerprint": "old-input",
+                }
+            )
+
+            with self.assertRaises(ControlPlaneError) as raised:
+                web_app._assert_formal_artifacts_ready(context)
+
+            self.assertEqual(raised.exception.code, "GATE_BLOCKED")
+            self.assertEqual(raised.exception.details["artifacts"][0]["reason"], "stale")
 
     def test_formal_gate_fails_closed_without_docx(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

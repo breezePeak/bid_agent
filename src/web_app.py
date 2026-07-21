@@ -62,6 +62,7 @@ from session_orchestrator import plan as orchestrator_plan, resolve_execution as
 from graph.state_recorder import load_run_events, load_stage_metrics, save_run_state
 from manual_review import apply_manual_review_update, manual_review_items, manual_review_summary
 from pipeline_registry import (
+    RunArtifact,
     auto_run_commands,
     artifact_exists,
     stage_command_map,
@@ -5327,6 +5328,7 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
         "material_states": store.material_states(),
         "issue_states": store.issue_states(),
         "policy_decisions": store.policy_decisions(),
+        "artifact_states": store.artifact_states(),
     }
     for domain, value in control_domains.items():
         digest.update(f"control.db:{domain}\0".encode("utf-8"))
@@ -5378,6 +5380,33 @@ def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
             "GATE_BLOCKED",
             "正式稿存在未验证的必交/资格材料或异常 ready 状态，已拒绝签发 GateReceipt。",
             details={"item_ids": unsafe[:50]},
+        )
+
+
+def _assert_formal_artifacts_ready(context: WorkspaceContext) -> None:
+    from artifact_manifest import describe_artifact, stage_artifacts_reusable
+
+    store = ControlStore(context)
+    states = {item["artifact_key"]: item for item in store.artifact_states()}
+    blocked: list[dict[str, str]] = []
+    for relative in _FORMAL_GATE_INPUTS:
+        state = states.get(relative)
+        # During the one-version V1 compatibility window, missing manifests are
+        # accepted and will be bootstrapped by the V2 Pipeline on first reuse.
+        if state is None:
+            continue
+        current = describe_artifact(context.root, RunArtifact(relative))
+        if state.get("status") != "ready":
+            blocked.append({"path": relative, "reason": str(state.get("status") or "unknown")})
+        elif current.get("status") != "ready" or current.get("sha256") != state.get("sha256"):
+            blocked.append({"path": relative, "reason": "manifest_mismatch"})
+    if states.get("outputs/final.docx") is not None and not stage_artifacts_reusable(context, "build-docx"):
+        blocked.append({"path": "outputs/final.docx", "reason": "stale_inputs"})
+    if blocked:
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            "正式稿依赖的 Artifact 已 stale、缺失或与 SQLite manifest 不一致。",
+            details={"artifacts": blocked},
         )
 
 
@@ -6512,6 +6541,7 @@ def _handle_gate_revalidate(
             details={"blocks": gate.get("blocks") or []},
         )
     _assert_formal_materials_verified(context)
+    _assert_formal_artifacts_ready(context)
     try:
         preflight = export_preflight(context.root)
     except Exception as exc:
