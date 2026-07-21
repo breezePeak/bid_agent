@@ -31,6 +31,13 @@ def activity_path(root: Path | None = None) -> Path:
     return root / "workspace" / "agent" / "activity.json"
 
 
+def _activity_control_store(root: Path):
+    from control_plane import ControlStore, WorkspaceContext
+
+    root = root.resolve()
+    return ControlStore(WorkspaceContext.resolve(root.parent, root.name))
+
+
 def _empty() -> dict[str, Any]:
     return {
         "updated_at": _now(),
@@ -43,21 +50,25 @@ def _empty() -> dict[str, Any]:
 
 
 def load_activity(root: Path | None = None) -> dict[str, Any]:
+    root = (root or project_root()).resolve()
     path = activity_path(root)
-    if not path.exists():
-        return _empty()
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return _empty()
-    if not isinstance(data, dict):
-        return _empty()
+    imported: dict[str, Any] | None = None
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = None
+        imported = data if isinstance(data, dict) else None
+    store = _activity_control_store(root)
+    store.ensure_agent_activity_state(imported)
+    data = store.agent_activity_state() or _empty()
     data.setdefault("agents", [])
     data.setdefault("summary", _empty()["summary"])
     return data
 
 
 def _save(root: Path, data: dict[str, Any]) -> None:
+    root = root.resolve()
     path = activity_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     agents = data.get("agents") if isinstance(data.get("agents"), list) else []
@@ -72,6 +83,7 @@ def _save(root: Path, data: dict[str, Any]) -> None:
             summary["running"] += 1
     data["summary"] = summary
     data["updated_at"] = _now()
+    _activity_control_store(root).upsert_agent_activity_state(data)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)

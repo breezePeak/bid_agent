@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 8
+    SCHEMA_VERSION = 9
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -326,6 +326,15 @@ class ControlStore:
                         status TEXT NOT NULL,
                         phase TEXT NOT NULL,
                         job_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS agent_activity_state (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        status TEXT NOT NULL,
+                        phase TEXT NOT NULL,
+                        activity_json TEXT NOT NULL,
                         source TEXT NOT NULL,
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
@@ -1133,6 +1142,129 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.repair_job_state()
+
+    def ensure_agent_activity_state(self, activity: dict[str, Any] | None) -> int:
+        value = dict(activity) if isinstance(activity, dict) and activity else None
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                imported = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'agent_activity_v1_imported'"
+                ).fetchone()
+                if imported is not None:
+                    connection.commit()
+                    return 0
+                inserted = 0
+                if value is not None:
+                    connection.execute(
+                        """
+                        INSERT INTO agent_activity_state(
+                            singleton, status, phase, activity_json, source, created_at, updated_at
+                        ) VALUES (1, ?, ?, ?, 'v1_import', ?, ?)
+                        """,
+                        (
+                            str(value.get("status") or "idle"),
+                            str(value.get("phase") or ""),
+                            _json(value),
+                            str(value.get("created_at") or value.get("updated_at") or now),
+                            str(value.get("updated_at") or now),
+                        ),
+                    )
+                    inserted = 1
+                connection.execute("INSERT INTO control_meta(key, value) VALUES ('agent_activity_v1_imported', '1')")
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "AgentActivityImported",
+                    "AgentActivity",
+                    self.context.workspace_id,
+                    {"count": inserted, "source": "v1_import"},
+                )
+                connection.commit()
+                return inserted
+            except Exception:
+                connection.rollback()
+                raise
+
+    def agent_activity_state(self) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM agent_activity_state WHERE singleton = 1").fetchone()
+        if row is None:
+            return None
+        value = dict(row)
+        activity = _decode(value.pop("activity_json", ""), {})
+        if not isinstance(activity, dict):
+            raise ControlPlaneError("STATE_UNAVAILABLE", "AgentActivity 控制状态损坏。", status_code=503)
+        activity.update(
+            {
+                "status": value["status"],
+                "phase": value["phase"],
+                "control_source": value["source"],
+                "control_updated_at": value["updated_at"],
+            }
+        )
+        return activity
+
+    def upsert_agent_activity_state(
+        self,
+        activity: dict[str, Any],
+        *,
+        source: str = "v2_projection",
+    ) -> dict[str, Any]:
+        value = dict(activity)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT created_at FROM agent_activity_state WHERE singleton = 1"
+                ).fetchone()
+                created_at = str(existing["created_at"]) if existing is not None else str(value.get("created_at") or now)
+                connection.execute(
+                    """
+                    INSERT INTO agent_activity_state(
+                        singleton, status, phase, activity_json, source, created_at, updated_at
+                    ) VALUES (1, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(singleton) DO UPDATE SET
+                        status = excluded.status,
+                        phase = excluded.phase,
+                        activity_json = excluded.activity_json,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        str(value.get("status") or "idle"),
+                        str(value.get("phase") or ""),
+                        _json(value),
+                        source,
+                        created_at,
+                        str(value.get("updated_at") or now),
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('agent_activity_v1_imported', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "AgentActivityChanged",
+                    "AgentActivity",
+                    self.context.workspace_id,
+                    {
+                        "status": str(value.get("status") or "idle"),
+                        "phase": str(value.get("phase") or ""),
+                        "source": source,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.agent_activity_state() or {}
 
     def workspace_acl(self) -> list[dict[str, Any]]:
         with self._connection() as connection:

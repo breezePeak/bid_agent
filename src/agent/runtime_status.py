@@ -359,16 +359,16 @@ def build_runtime_status(root: Path | None = None, *, reevaluate_goal: bool = Fa
         "stores": slices,
         "truth": {
             "note": (
-                "权威源：Goal/Materials/Issues/Policy/RepairJob=control.db；工位=activity.json；"
+                "权威源：Goal/Materials/Issues/Policy/RepairJob/AgentActivity=control.db；"
                 "流水线控制=control.db（V1 投影为 run_state/pipeline_control）；"
                 "聊天消息仅为历史快照，不参与 live 状态。"
             ),
             "live_sources": [
                 "workspace/control.db",
-                "workspace/agent/activity.json",
             ],
             "compatibility_projections": [
                 "workspace/agent/goal_state.json",
+                "workspace/agent/activity.json",
                 "workspace/materials_checklist.json",
                 "workspace/issues/open.json",
                 "workspace/repair_job.json",
