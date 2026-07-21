@@ -38,6 +38,12 @@ def issues_log_path(root: Path | None = None) -> Path:
     return issues_dir(root) / "issues.jsonl"
 
 
+def _issue_control_store(root: Path):
+    from control_plane import ControlStore, WorkspaceContext
+
+    return ControlStore(WorkspaceContext.resolve(root.parent, root.name))
+
+
 def new_issue_id() -> str:
     return "iss_" + uuid4().hex[:10]
 
@@ -89,28 +95,33 @@ def make_issue(
 
 
 def load_open_issues(root: Path | None = None) -> list[dict[str, Any]]:
+    root = (root or project_root()).resolve()
     path = open_issues_path(root)
-    if not path.exists():
-        return []
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-    if isinstance(data, dict) and isinstance(data.get("issues"), list):
-        return [i for i in data["issues"] if isinstance(i, dict)]
-    if isinstance(data, list):
-        return [i for i in data if isinstance(i, dict)]
-    return []
+    imported: list[dict[str, Any]] = []
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            data = {}
+        if isinstance(data, dict) and isinstance(data.get("issues"), list):
+            imported = [i for i in data["issues"] if isinstance(i, dict)]
+        elif isinstance(data, list):
+            imported = [i for i in data if isinstance(i, dict)]
+    store = _issue_control_store(root)
+    store.ensure_issue_states(imported)
+    return store.issue_states()
 
 
 def save_open_issues(root: Path | None, issues: list[dict[str, Any]]) -> Path:
-    root = root or project_root()
+    root = (root or project_root()).resolve()
+    normalized = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
+    _issue_control_store(root).replace_issue_states(normalized)
     path = open_issues_path(root)
     payload = {
         "updated_at": _now(),
-        "count": len(issues),
-        "block_count": sum(1 for i in issues if i.get("severity") == "block" and i.get("status") == "open"),
-        "issues": issues,
+        "count": len(normalized),
+        "block_count": sum(1 for i in normalized if i.get("severity") == "block" and i.get("status") == "open"),
+        "issues": normalized,
     }
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -465,6 +476,17 @@ def accept_issue_risk(
         found["risk_class"] = risk_class
         append_issue_log(root, found)
         save_open_issues(root, issues)
+        _issue_control_store(root).record_policy_decision(
+            issue_id=issue_id,
+            decision_type="accept_risk",
+            decision={
+                "risk_class": risk_class,
+                "reason": reason[:500],
+                "accepted_at": found.get("accepted_at"),
+                "evidence": evidence,
+            },
+            actor={"type": "authenticated_user", "id": actor},
+        )
         try:
             record_issue_metric(
                 root,

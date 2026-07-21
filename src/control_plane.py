@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 5
+    SCHEMA_VERSION = 6
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -294,6 +294,23 @@ class ControlStore:
                         role TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS issue_states (
+                        issue_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        severity TEXT NOT NULL,
+                        issue_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS policy_decisions (
+                        decision_id TEXT PRIMARY KEY,
+                        issue_id TEXT NOT NULL,
+                        decision_type TEXT NOT NULL,
+                        decision_json TEXT NOT NULL,
+                        actor_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
                     CREATE TABLE IF NOT EXISTS confirmations (
                         confirmation_id TEXT PRIMARY KEY,
                         command_json TEXT NOT NULL,
@@ -319,6 +336,8 @@ class ControlStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_events_revision ON workspace_events(workspace_revision);
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
+                    CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
+                    CREATE INDEX IF NOT EXISTS idx_policy_decisions_issue ON policy_decisions(issue_id, created_at);
                     """
                 )
                 connection.execute(
@@ -649,6 +668,207 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.material_state(item_id) or {}
+
+    def ensure_issue_states(self, issues: list[dict[str, Any]]) -> int:
+        """One-time V1 import; later file projections can never overwrite V2 state implicitly."""
+        rows = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                imported = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'issue_v1_imported'"
+                ).fetchone()
+                if imported is not None:
+                    connection.commit()
+                    return 0
+                for item in rows:
+                    issue_id = str(item.get("id") or "").strip()
+                    connection.execute(
+                        """
+                        INSERT INTO issue_states(
+                            issue_id, status, severity, issue_json, source, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, 'v1_import', ?, ?)
+                        """,
+                        (
+                            issue_id,
+                            str(item.get("status") or "open"),
+                            str(item.get("severity") or "warn"),
+                            _json(item),
+                            str(item.get("created_at") or now),
+                            str(item.get("updated_at") or now),
+                        ),
+                    )
+                    if str(item.get("status") or "") == "accepted":
+                        decision_id = str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                f"{self.context.workspace_id}:v1-accepted-risk:{issue_id}",
+                            )
+                        )
+                        connection.execute(
+                            """
+                            INSERT OR IGNORE INTO policy_decisions(
+                                decision_id, issue_id, decision_type, decision_json, actor_json, created_at
+                            ) VALUES (?, ?, 'accept_risk', ?, ?, ?)
+                            """,
+                            (
+                                decision_id,
+                                issue_id,
+                                _json(
+                                    {
+                                        "risk_class": item.get("risk_class"),
+                                        "reason": item.get("accept_reason"),
+                                        "accepted_at": item.get("accepted_at"),
+                                        "source": "v1_import",
+                                    }
+                                ),
+                                _json({"type": "legacy", "id": item.get("accepted_by") or "unknown"}),
+                                str(item.get("accepted_at") or item.get("updated_at") or now),
+                            ),
+                        )
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('issue_v1_imported', '1')"
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "IssueStateImported",
+                    "Issues",
+                    self.context.workspace_id,
+                    {"count": len(rows), "source": "v1_import"},
+                )
+                connection.commit()
+                return len(rows)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def issue_states(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM issue_states ORDER BY created_at, issue_id").fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            value = dict(row)
+            item = _decode(value.pop("issue_json", ""), {})
+            if not isinstance(item, dict):
+                item = {}
+            item.update(
+                {
+                    "id": value["issue_id"],
+                    "status": value["status"],
+                    "severity": value["severity"],
+                    "control_source": value["source"],
+                    "control_updated_at": value["updated_at"],
+                }
+            )
+            result.append(item)
+        return result
+
+    def replace_issue_states(self, issues: list[dict[str, Any]], *, source: str = "v2_projection") -> int:
+        rows = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute("DELETE FROM issue_states")
+                for item in rows:
+                    issue_id = str(item.get("id") or "").strip()
+                    connection.execute(
+                        """
+                        INSERT INTO issue_states(
+                            issue_id, status, severity, issue_json, source, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            issue_id,
+                            str(item.get("status") or "open"),
+                            str(item.get("severity") or "warn"),
+                            _json(item),
+                            source,
+                            str(item.get("created_at") or now),
+                            str(item.get("updated_at") or now),
+                        ),
+                    )
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('issue_v1_imported', '1') "
+                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "IssueStateProjected",
+                    "Issues",
+                    self.context.workspace_id,
+                    {"count": len(rows), "source": source},
+                )
+                connection.commit()
+                return len(rows)
+            except Exception:
+                connection.rollback()
+                raise
+
+    def record_policy_decision(
+        self,
+        *,
+        issue_id: str,
+        decision_type: str,
+        decision: dict[str, Any],
+        actor: dict[str, Any],
+    ) -> dict[str, Any]:
+        decision_id = str(uuid.uuid4())
+        created_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO policy_decisions(
+                        decision_id, issue_id, decision_type, decision_json, actor_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (decision_id, issue_id, decision_type, _json(decision), _json(actor), created_at),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "PolicyDecisionRecorded",
+                    "PolicyDecision",
+                    decision_id,
+                    {"issue_id": issue_id, "decision_type": decision_type},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "decision_id": decision_id,
+            "issue_id": issue_id,
+            "decision_type": decision_type,
+            "decision": dict(decision),
+            "actor": dict(actor),
+            "created_at": created_at,
+        }
+
+    def policy_decisions(self, *, issue_id: str = "") -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            if issue_id:
+                rows = connection.execute(
+                    "SELECT * FROM policy_decisions WHERE issue_id = ? ORDER BY created_at",
+                    (issue_id,),
+                ).fetchall()
+            else:
+                rows = connection.execute("SELECT * FROM policy_decisions ORDER BY created_at").fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            value = dict(row)
+            value["decision"] = _decode(value.pop("decision_json", ""), {})
+            value["actor"] = _decode(value.pop("actor_json", ""), {})
+            result.append(value)
+        return result
 
     def workspace_acl(self) -> list[dict[str, Any]]:
         with self._connection() as connection:

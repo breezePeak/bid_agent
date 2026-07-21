@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from agent.issues import (
+    accept_issue_risk,
     assert_can_proceed,
     can_proceed,
     load_open_issues,
@@ -19,6 +20,7 @@ from agent.issues import (
     open_block_issues,
     upsert_issues,
 )
+from control_plane import ControlStore, WorkspaceContext
 from agent.root_cause import (
     issues_from_compliance_report,
     issues_from_global_review,
@@ -27,6 +29,45 @@ from agent.root_cause import (
 
 
 class IssuesModelTests(unittest.TestCase):
+    def test_v1_file_import_is_one_time_and_sqlite_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue_path = root / "workspace" / "issues" / "open.json"
+            issue_path.parent.mkdir(parents=True)
+            issue_path.write_text(
+                json.dumps({"issues": [{"id": "iss-legacy", "status": "open", "severity": "block", "title": "original"}]}),
+                encoding="utf-8",
+            )
+            self.assertEqual(load_open_issues(root)[0]["title"], "original")
+            issue_path.write_text(
+                json.dumps({"issues": [{"id": "iss-legacy", "status": "accepted", "severity": "warn", "title": "stale file"}]}),
+                encoding="utf-8",
+            )
+            current = load_open_issues(root)[0]
+            self.assertEqual(current["title"], "original")
+            self.assertEqual(current["status"], "open")
+
+    def test_accept_risk_records_policy_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workspace").mkdir(parents=True)
+            issue = make_issue(
+                stage_id="global_review",
+                command="global-review",
+                severity="warn",
+                code="REVIEW_WARNING",
+                title="需要披露的风险",
+            )
+            upsert_issues(root, [issue])
+            with mock.patch.dict(os.environ, {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
+                result = accept_issue_risk(root, issue["id"], reason="已经完成充分评估并接受风险", actor="owner")
+            self.assertTrue(result["ok"])
+            store = ControlStore(WorkspaceContext.resolve(root.parent, root.name))
+            decisions = store.policy_decisions(issue_id=issue["id"])
+            self.assertEqual(len(decisions), 1)
+            self.assertEqual(decisions[0]["decision_type"], "accept_risk")
+            self.assertEqual(decisions[0]["actor"]["id"], "owner")
+
     def test_upsert_and_can_proceed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -335,6 +335,62 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(current["lifecycle_status"], "verified")
             self.assertEqual(current["control_source"], "v2_command")
 
+    def test_issue_v1_import_does_not_overwrite_authoritative_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            legacy = {
+                "id": "iss-1",
+                "status": "open",
+                "severity": "block",
+                "code": "LEGACY",
+                "title": "legacy issue",
+            }
+            accepted = {
+                "id": "iss-2",
+                "status": "accepted",
+                "severity": "warn",
+                "code": "LEGACY_ACCEPTED",
+                "title": "accepted legacy issue",
+                "accept_reason": "legacy decision",
+                "accepted_by": "reviewer",
+            }
+            self.assertEqual(store.ensure_issue_states([legacy, accepted]), 2)
+            changed = {**legacy, "status": "accepted", "title": "file overwrite"}
+            self.assertEqual(store.ensure_issue_states([changed]), 0)
+            current = next(item for item in store.issue_states() if item["id"] == "iss-1")
+            self.assertEqual(current["status"], "open")
+            self.assertEqual(current["title"], "legacy issue")
+            imported_decisions = store.policy_decisions(issue_id="iss-2")
+            self.assertEqual(len(imported_decisions), 1)
+            self.assertEqual(imported_decisions[0]["actor"]["id"], "reviewer")
+
+            authoritative = {**legacy, "status": "fixed", "title": "v2 state"}
+            self.assertEqual(store.replace_issue_states([authoritative], source="test"), 1)
+            current = store.issue_states()[0]
+            self.assertEqual(current["status"], "fixed")
+            self.assertEqual(current["control_source"], "test")
+
+    def test_policy_decisions_are_append_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            first = store.record_policy_decision(
+                issue_id="iss-1",
+                decision_type="accept_risk",
+                decision={"reason": "documented exception"},
+                actor={"id": "reviewer"},
+            )
+            second = store.record_policy_decision(
+                issue_id="iss-1",
+                decision_type="accept_risk",
+                decision={"reason": "second review"},
+                actor={"id": "owner"},
+            )
+            decisions = store.policy_decisions(issue_id="iss-1")
+            self.assertEqual([item["decision_id"] for item in decisions], [first["decision_id"], second["decision_id"]])
+            self.assertEqual(decisions[0]["actor"]["id"], "reviewer")
+
     def test_workspace_acl_denies_unassigned_and_read_only_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

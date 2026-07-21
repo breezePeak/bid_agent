@@ -6333,7 +6333,7 @@ def _handle_gate_revalidate(
         artifact_sha256=artifact_sha256,
         rules_version=_FORMAL_GATE_RULES_VERSION,
         findings=preflight.get("block_issues") or [],
-        policy_decisions=preflight.get("accepted_risks") or [],
+        policy_decisions=ControlStore(context).policy_decisions(),
     )
     return {
         "accepted": True,
