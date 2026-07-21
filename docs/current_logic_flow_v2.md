@@ -511,3 +511,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B25 | 2026-07-21 | ChatPanel 的非流水线维护命令改为直接提交 V2 `workspace.run_utility`，不再调用 `/api/run-command` 兼容适配器；高风险确认仍由统一 Action 接口完成。主 Vue 控制面的执行入口至此不再依赖旧命令分发 API。 |
 | V2.0-B26 | 2026-07-21 | DocEditor 与 ChatPanel 的手工块修改、选区/流式 AI 预览应用和全文 AI 预览应用改为直接提交 `document.apply_edit`，并携带服务端返回的 final.md SHA 做乐观并发校验；旧文档端点只继续承担只读渲染、AI 内容提案、预览放弃和兼容撤销，不再负责这些正式写入。 |
 | V2.0-B27 | 2026-07-21 | 终稿渲染、选区/全文 AI 提案、流式块改写、预览放弃与撤销提案新增显式 workspace_id 的 V2 路径，主 Vue 控制台停止依赖进程级 ACTIVE_RUN 选择文档工作区；旧路径继续作为一个版本的兼容别名。 |
+| V2.0-B28 | 2026-07-21 | 工作区文件树和安全预览新增显式 workspace_id 的 V2 只读接口，FileExplorer 切换到新路径；文件浏览不再受全局 ACTIVE_RUN 切换影响，ACL 由 V2 路径中间件统一校验，旧接口保留为兼容别名。 |

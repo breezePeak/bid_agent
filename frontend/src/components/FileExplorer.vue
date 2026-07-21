@@ -90,7 +90,8 @@ const defaultSections = () => ([
 async function refresh() {
   loading.value = true
   try {
-    const data = await fetch('/api/workspace-files').then(r => r.json())
+    const workspace = encodeURIComponent(props.runId)
+    const data = await fetch(`/api/v2/workspaces/${workspace}/files`).then(r => r.json())
     if (data?.ok && Array.isArray(data.sections)) {
       const prevOpen = Object.fromEntries((sections.value || []).map(s => [s.key, s.open]))
       sections.value = data.sections.map(section => ({
@@ -138,7 +139,8 @@ async function preview(item) {
   previewItems.value = []
   previewKind.value = 'text'
   try {
-    const data = await fetch(`/api/file-preview?path=${encodeURIComponent(path)}`).then(r => r.json())
+    const workspace = encodeURIComponent(props.runId)
+    const data = await fetch(`/api/v2/workspaces/${workspace}/files/preview?path=${encodeURIComponent(path)}`).then(r => r.json())
     if (!data?.ok) {
       previewContent.value = data?.message || '预览失败'
       return

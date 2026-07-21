@@ -1675,6 +1675,24 @@ class V2WebControlTests(unittest.TestCase):
                 hashlib.sha256((alpha / "outputs" / "final.md").read_bytes()).hexdigest(),
             )
 
+    def test_v2_file_preview_uses_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            (alpha / "outputs").mkdir(parents=True)
+            (beta / "outputs").mkdir(parents=True)
+            (alpha / "outputs" / "report.txt").write_text("alpha report", encoding="utf-8")
+            (beta / "outputs" / "report.txt").write_text("beta report", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_file_preview("outputs/report.txt", "alpha"))
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["content"], "alpha report")
+
 
 if __name__ == "__main__":
     unittest.main()

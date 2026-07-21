@@ -4541,15 +4541,17 @@ async def api_test_llm_settings(request: Request) -> JSONResponse:
 
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/files")
 @app.get("/api/workspace-files")
-def api_workspace_files() -> JSONResponse:
-    root = _active_root().resolve()
+def api_workspace_files(workspace_id: str = "") -> JSONResponse:
+    root = (_workspace_context(workspace_id).root if workspace_id else _active_root()).resolve()
     return JSONResponse(build_workspace_file_tree(root))
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/files/preview")
 @app.get("/api/file-preview")
-def api_file_preview(path: str = Query(..., min_length=1)) -> JSONResponse:
-    root = _active_root().resolve()
+def api_file_preview(path: str = Query(..., min_length=1), workspace_id: str = "") -> JSONResponse:
+    root = (_workspace_context(workspace_id).root if workspace_id else _active_root()).resolve()
     relative = path.strip().replace("\\", "/")
     if not relative or relative.startswith("/") or ".." in Path(relative).parts:
         return JSONResponse({"ok": False, "message": "无效文件路径。"}, status_code=400)

@@ -80,14 +80,6 @@ export function updateManualReview(runId, category, payload) {
   return submitWorkspaceCommand(runId, 'review.update', { category, payload })
 }
 
-export function fetchFilePreview(path) {
-  return api.get('/file-preview', { params: { path } })
-}
-
-export function fetchWorkspaceFiles() {
-  return api.get('/workspace-files')
-}
-
 export function downloadFinalMd() {
   window.open('/api/download/final-md', '_blank')
 }
