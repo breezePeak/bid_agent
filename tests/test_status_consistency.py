@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -82,6 +83,25 @@ class StatusConsistencyTests(unittest.TestCase):
             goal2 = reevaluate_goal(root, goal)
             self.assertEqual(goal2.get("status"), "succeeded")
             self.assertTrue(goal2.get("all_criteria_ok"))
+
+    def test_goal_success_fails_closed_when_control_domains_are_unavailable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            goal = {"normalized_objectives": [], "constraints": {}}
+            with mock.patch("agent.issues.open_block_issues", side_effect=RuntimeError("issue db offline")):
+                issue_block = runtime_blocks_success(root, goal)
+            self.assertIn("Issue 状态读取失败", issue_block)
+
+            with mock.patch("agent.issues.open_block_issues", return_value=[]):
+                with mock.patch("agent.activity.has_active_workers", side_effect=RuntimeError("activity db offline")):
+                    activity_block = runtime_blocks_success(root, goal)
+            self.assertIn("AgentActivity 状态读取失败", activity_block)
+
+            with mock.patch("agent.issues.open_block_issues", return_value=[]):
+                with mock.patch("agent.activity.has_active_workers", return_value=False):
+                    with mock.patch("agent.repair_jobs.load_repair_job", side_effect=RuntimeError("repair db offline")):
+                        repair_block = runtime_blocks_success(root, goal)
+            self.assertIn("RepairJob 状态读取失败", repair_block)
 
 
 if __name__ == "__main__":

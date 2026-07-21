@@ -540,16 +540,16 @@ def runtime_blocks_success(root: Path | None, goal: dict[str, Any] | None = None
         blocks = open_block_issues(root) or []
         if blocks:
             return f"仍有 {len(blocks)} 个开放阻断问题"
-    except Exception:
-        pass
+    except Exception as exc:
+        return f"质量 Issue 状态读取失败，禁止宣告 Goal 成功: {exc}"
     # active chapter workers
     try:
         from agent.activity import has_active_workers
 
         if has_active_workers(root):
             return "章节工位仍有在岗/排队任务"
-    except Exception:
-        pass
+    except Exception as exc:
+        return f"AgentActivity 状态读取失败，禁止宣告 Goal 成功: {exc}"
     # active repair job
     try:
         from agent.repair_jobs import ACTIVE_REPAIR_STATUSES, load_repair_job
@@ -557,8 +557,8 @@ def runtime_blocks_success(root: Path | None, goal: dict[str, Any] | None = None
         job = load_repair_job(root)
         if str(job.get("status") or "") in ACTIVE_REPAIR_STATUSES:
             return f"最小修复任务进行中（{job.get('status')}）"
-    except Exception:
-        pass
+    except Exception as exc:
+        return f"RepairJob 状态读取失败，禁止宣告 Goal 成功: {exc}"
     # hard materials for actionable goals
     if goal:
         objectives = [
@@ -900,32 +900,8 @@ def detect_human_block(root: Path, goal: dict[str, Any] | None = None) -> str:
 
         snap = build_snapshot(root, goal=goal, for_llm=False)
         return human_blocking_reason(snap, goal)
-    except Exception:
-        pass
-    # fallback materials
-    try:
-        from materials_checklist import load_materials_checklist
-
-        data = load_materials_checklist(root)
-        items = data.get("items") if isinstance(data.get("items"), list) else []
-        hard = []
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            sev = str(item.get("severity") or "").lower()
-            resp = str(item.get("response_status") or "")
-            evidence = str(item.get("evidence_status") or "")
-            if sev in {"block", "fatal", "critical", "blocker"} and resp in {"deferred", "missing", ""} and evidence in {
-                "missing",
-                "weak",
-                "",
-            }:
-                hard.append(str(item.get("requirement") or item.get("item_id")))
-        if hard:
-            return "缺少不可自动补齐的材料: " + "；".join(hard[:5])
-    except Exception:
-        pass
-    return ""
+    except Exception as exc:
+        return f"人工阻断状态读取失败，禁止继续: {exc}"
 
 
 def resume_goal_after_materials(

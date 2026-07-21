@@ -559,3 +559,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B73 | 2026-07-21 | 新增 V2 控制面 CLI：通过正在运行的 HTTP 应用完成登录、CSRF、Snapshot、Command 提交和持久化 Action 确认/拒绝，服务端绑定 actor 并执行同一 ACL、revision、Policy、Gate、lease 与审计逻辑；CLI 不再需要为 V2 操作直接导入阶段 runner。旧阶段 CLI 暂保留为 V1 兼容入口。 |
 | V2.0-B74 | 2026-07-21 | 关闭受管 `runs/<workspace>` 的旧阶段 CLI mutation 旁路：交互式 CLI 只能使用 V2 `control` 客户端，直接阶段命令返回拒绝；PipelineSupervisor 启动的受 fencing/lease 控制 ExecutionWorker 使用专用环境标记才可调用 runner。只读 `validate` 和仓库根 V1 兼容工作流暂不受影响。 |
 | V2.0-B75 | 2026-07-21 | 删除已无调用方的 Web 内联阶段启动 fast-path，并要求定向改稿 Worker 必须携带有效 Operation ID 与 fencing token 才能启动；内部函数或未来适配器不能脱离 CommandGateway/lease 直接创建章节 mutation。 |
+| V2.0-B76 | 2026-07-21 | Goal 成功判定改为对 Issue、AgentActivity、RepairJob 和人工阻断状态读取异常 fail-closed；任一权威控制域不可用都会返回明确阻断原因，禁止因旧代码吞掉异常而把 criteria 已满足误判为 Goal succeeded。 |
