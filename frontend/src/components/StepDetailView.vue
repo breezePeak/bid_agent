@@ -581,7 +581,7 @@ async function loadIssues() {
 async function previewRepair(iss) {
   repairMsg.value = ''
   try {
-    const { data } = await previewIssueRepair(iss.id)
+    const { data } = await previewIssueRepair(props.runId, iss.id)
     if (data && data.ok) {
       iss._plan = data
       repairDialog.value = { kind: 'preview', title: '最小修复计划', description: '以下仅为预览，不会修改文件。', plans: [data] }
@@ -596,7 +596,7 @@ async function previewRepair(iss) {
 async function runRepair(iss) {
   try {
     if (!iss._plan) {
-      const { data } = await previewIssueRepair(iss.id)
+      const { data } = await previewIssueRepair(props.runId, iss.id)
       if (!data?.ok) throw new Error(data?.message || '无法生成修复计划')
       iss._plan = data
     }
@@ -610,7 +610,7 @@ async function runRepair(iss) {
 async function explainCause(iss) {
   repairMsg.value = '正在归因…'
   try {
-    const { data } = await explainIssueCause(iss.id)
+    const { data } = await explainIssueCause(props.runId, iss.id)
     if (data && data.ok) {
       iss.likely_cause_stage = data.likely_cause_stage
       iss.cause_reason = data.reason
@@ -635,7 +635,7 @@ async function batchPreview() {
   if (!ids.length) return
   repairMsg.value = '批量预览中…'
   try {
-    const { data } = await batchPreviewRepairs(ids)
+    const { data } = await batchPreviewRepairs(props.runId, ids)
     if (!data?.ok) throw new Error(data?.message || '批量预览失败')
     const plannedIds = data.issue_ids || ids
     repairDialog.value = {
@@ -653,7 +653,7 @@ async function batchRepair() {
   const ids = stageIssues.value.map(i => i.id).filter(Boolean)
   if (!ids.length) return
   try {
-    const { data } = await batchPreviewRepairs(ids)
+    const { data } = await batchPreviewRepairs(props.runId, ids)
     if (!data?.ok) throw new Error(data?.message || '无法生成批量修复计划')
     const plannedIds = data.issue_ids || ids
     repairDialog.value = {
@@ -745,8 +745,8 @@ async function loadManualReview() {
   const cat = parseMrCategory()
   mrCategory.value = cat
   const [sumRes, itemsRes] = await Promise.all([
-    fetchManualReviewSummary(),
-    fetchManualReviewItems(cat),
+    fetchManualReviewSummary(props.runId),
+    fetchManualReviewItems(props.runId, cat),
   ])
   if (!sumRes.data?.ok) throw new Error(sumRes.data?.message || '加载人工复核摘要失败')
   if (!itemsRes.data?.ok) throw new Error(itemsRes.data?.message || '加载人工复核项失败')
@@ -765,12 +765,12 @@ async function switchMrCategory(cat, { keepMsg = false } = {}) {
   error.value = ''
   if (!keepMsg) actionMsg.value = ''
   try {
-    const { data } = await fetchManualReviewItems(cat)
+    const { data } = await fetchManualReviewItems(props.runId, cat)
     if (!data?.ok) throw new Error(data?.message || '加载失败')
     mrItems.value = data.items || []
     notes.value = {}
     subtitle.value = mrCategories.find(x => x.key === cat)?.label || cat
-    const sum = await fetchManualReviewSummary()
+    const sum = await fetchManualReviewSummary(props.runId)
     if (sum.data?.ok) summary.value = sum.data.summary || {}
     hasLoadedOnce.value = true
   } catch (e) {
@@ -844,7 +844,7 @@ async function refresh() {
       summary.value = null
       mrItems.value = []
       const cmd = workflowCommand.value || props.command
-      const { data } = await fetchWorkflowStepDetail(cmd)
+      const { data } = await fetchWorkflowStepDetail(props.runId, cmd)
       if (!data?.ok) throw new Error(data?.message || '加载失败')
       detail.value = data
       title.value = data.step?.label || cmd

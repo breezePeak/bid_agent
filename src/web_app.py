@@ -2018,14 +2018,15 @@ def api_status() -> dict[str, Any]:
     return _status_payload(root, ACTIVE_RUN_ID or root.name)
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/workflow-step-detail")
 @app.get("/api/workflow-step-detail")
-def api_workflow_step_detail(command: str = Query(..., min_length=1)) -> JSONResponse:
-    root = _active_root()
+def api_workflow_step_detail(command: str = Query(..., min_length=1), workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     step = next((item for item in WORKFLOW_STEPS if item.get("command") == command), None)
     if step is None:
         return JSONResponse({"ok": False, "message": f"未知流程节点: {command}"}, status_code=404)
 
-    status = api_status()
+    status = _status_payload(root, workspace_id or ACTIVE_RUN_ID or root.name)
     workflow = status.get("workflow", []) if isinstance(status, dict) else []
     step_status = next((item for item in workflow if isinstance(item, dict) and item.get("command") == command), {})
     timings = status.get("timings", {}) if isinstance(status.get("timings"), dict) else {}
@@ -3317,9 +3318,10 @@ def api_get_issue(issue_id: str) -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/issues/{issue_id}/actions/preview")
 @app.post("/api/issues/{issue_id}/actions/preview")
-def api_preview_repair(issue_id: str) -> JSONResponse:
-    root = _active_root()
+def api_preview_repair(issue_id: str, workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
         from agent.repair import build_repair_plan
 
@@ -3394,10 +3396,11 @@ async def api_accept_issue_risk(issue_id: str, request: Request) -> JSONResponse
         return _command_error_response(exc)
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/issues/{issue_id}/actions/explain")
 @app.post("/api/issues/{issue_id}/actions/explain")
-async def api_explain_issue_cause(issue_id: str, request: Request) -> JSONResponse:
+async def api_explain_issue_cause(issue_id: str, request: Request, workspace_id: str = "") -> JSONResponse:
     """Rule + optional LLM whitelist root-cause refinement."""
-    root = _active_root()
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
         from agent.issues import load_open_issues
         from agent.root_cause import refine_issue_cause_with_llm
@@ -3411,9 +3414,10 @@ async def api_explain_issue_cause(issue_id: str, request: Request) -> JSONRespon
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/issues/actions/batch-preview")
 @app.post("/api/issues/actions/batch-preview")
-async def api_batch_preview_repair(request: Request) -> JSONResponse:
-    root = _active_root()
+async def api_batch_preview_repair(request: Request, workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
         body = await request.json()
     except Exception:
@@ -3906,15 +3910,17 @@ async def api_materials_checklist_upload(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/manual-review/summary")
 @app.get("/api/manual-review/summary")
-def api_manual_review_summary() -> JSONResponse:
-    root = _active_root()
+def api_manual_review_summary(workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     return JSONResponse({"ok": True, "summary": manual_review_summary(root)})
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/manual-review/items")
 @app.get("/api/manual-review/items")
-def api_manual_review_items(category: str = Query(..., min_length=1)) -> JSONResponse:
-    root = _active_root()
+def api_manual_review_items(category: str = Query(..., min_length=1), workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     return JSONResponse({"ok": True, "category": category, "items": manual_review_items(root, category)})
 
 

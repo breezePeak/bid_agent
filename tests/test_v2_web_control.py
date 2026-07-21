@@ -1730,6 +1730,46 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(all(call.args == (alpha.resolve(),) for call in load_issues.call_args_list))
             self.assertEqual(issues["issues"][0]["id"], "alpha-issue")
 
+    def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+            command = str(web_app.WORKFLOW_STEPS[0]["command"])
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value={"workflow": [], "timings": {}}) as status:
+                    detail = _body(web_app.api_workflow_step_detail(command, "alpha"))
+                with mock.patch.object(web_app, "manual_review_summary", return_value={"alpha": True}) as review_summary:
+                    summary = _body(web_app.api_manual_review_summary("alpha"))
+                with mock.patch.object(web_app, "manual_review_items", return_value=[{"id": "alpha-review"}]) as review_items:
+                    items = _body(web_app.api_manual_review_items("score_coverage", "alpha"))
+                with mock.patch("agent.repair.build_repair_plan", return_value={"ok": True}) as build_plan:
+                    preview = _body(web_app.api_preview_repair("issue-1", "alpha"))
+                with mock.patch("agent.issues.load_open_issues", return_value=[{"id": "issue-1"}]):
+                    with mock.patch("agent.root_cause.refine_issue_cause_with_llm", return_value={"ok": True}) as explain:
+                        explained = _body(asyncio.run(web_app.api_explain_issue_cause("issue-1", _Request({}), "alpha")))
+                with mock.patch("agent.repair.execute_repair_batch", return_value={"ok": True}) as batch:
+                    batch_result = _body(asyncio.run(web_app.api_batch_preview_repair(_Request({"issue_ids": ["issue-1"]}), "alpha")))
+
+            resolved = alpha.resolve()
+            status.assert_called_once_with(resolved, "alpha")
+            self.assertEqual(Path(detail["run_root"]), resolved)
+            review_summary.assert_called_once_with(resolved)
+            review_items.assert_called_once_with(resolved, "score_coverage")
+            build_plan.assert_called_once_with(resolved, "issue-1")
+            explain.assert_called_once_with(resolved, {"id": "issue-1"})
+            batch.assert_called_once_with(resolved, ["issue-1"], confirm=False, dry_run=True)
+            self.assertEqual(summary["summary"], {"alpha": True})
+            self.assertEqual(items["items"][0]["id"], "alpha-review")
+            self.assertTrue(preview["ok"])
+            self.assertTrue(explained["ok"])
+            self.assertTrue(batch_result["ok"])
+
 
 if __name__ == "__main__":
     unittest.main()

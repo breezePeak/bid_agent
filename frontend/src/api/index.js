@@ -64,16 +64,16 @@ export function fetchLogs(lines = 200) {
   return api.get('/logs', { params: { lines } })
 }
 
-export function fetchWorkflowStepDetail(command) {
-  return api.get('/workflow-step-detail', { params: { command } })
+export function fetchWorkflowStepDetail(runId, command) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/workflow-step-detail`, { params: { command } })
 }
 
-export function fetchManualReviewSummary() {
-  return api.get('/manual-review/summary')
+export function fetchManualReviewSummary(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/manual-review/summary`)
 }
 
-export function fetchManualReviewItems(category) {
-  return api.get('/manual-review/items', { params: { category } })
+export function fetchManualReviewItems(runId, category) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/manual-review/items`, { params: { category } })
 }
 
 export function updateManualReview(runId, category, payload) {
@@ -237,8 +237,8 @@ export function fetchIssues(runId, status = 'open') {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/issues`, { params: { status } })
 }
 
-export function previewIssueRepair(issueId) {
-  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/preview`)
+export function previewIssueRepair(runId, issueId) {
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/issues/${encodeURIComponent(issueId)}/actions/preview`)
 }
 
 export function executeIssueRepair(runId, issueId, { dryRun = false } = {}) {
@@ -256,12 +256,12 @@ export function acceptIssueRisk(runId, issueId, reason) {
   return submitWorkspaceCommand(runId, 'issues.accept_risk', { issue_id: issueId, reason })
 }
 
-export function explainIssueCause(issueId) {
-  return api.post(`/issues/${encodeURIComponent(issueId)}/actions/explain`, {})
+export function explainIssueCause(runId, issueId) {
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/issues/${encodeURIComponent(issueId)}/actions/explain`, {})
 }
 
-export function batchPreviewRepairs(issueIds) {
-  return api.post('/issues/actions/batch-preview', { issue_ids: issueIds })
+export function batchPreviewRepairs(runId, issueIds) {
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/issues/actions/batch-preview`, { issue_ids: issueIds })
 }
 
 export function batchExecuteRepairs(runId, issueIds) {
