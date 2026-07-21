@@ -2,88 +2,272 @@ import * as THREE from 'three'
 import { roleMeta, agentStatusColor } from '../config/stages.js'
 import { createAgentLabel, createBossLabel } from './labels.js'
 
-const bodyGeo = new THREE.CapsuleGeometry(0.16, 0.34, 4, 8)
-const bossBodyGeo = new THREE.CapsuleGeometry(0.28, 0.55, 4, 8)
-const headGeo = new THREE.SphereGeometry(0.14, 10, 10)
-const bossHeadGeo = new THREE.SphereGeometry(0.22, 10, 10)
-const ringGeo = new THREE.TorusGeometry(0.36, 0.025, 6, 20)
-const bossRingGeo = new THREE.TorusGeometry(0.55, 0.03, 6, 20)
-const hitGeo = new THREE.SphereGeometry(0.55, 8, 8)
+const hitGeo = new THREE.SphereGeometry(0.7, 8, 8)
 
+function makeMat(hex, opts = {}) {
+  return new THREE.MeshStandardMaterial({
+    color: hex,
+    metalness: opts.metalness ?? 0.12,
+    roughness: opts.roughness ?? 0.55,
+    emissive: opts.emissive ?? 0x000000,
+    emissiveIntensity: opts.emissiveIntensity ?? 0,
+  })
+}
+
+/** 唐风道士 / 掌炉真人 — 有脸有袖有冠 */
 function makeAgentMesh(colorHex, isBoss = false) {
   const g = new THREE.Group()
   const color = new THREE.Color(colorHex)
+  const s = isBoss ? 1.35 : 1
 
-  // 道袍：朱 / 金
-  const robeColor = isBoss ? 0xb82820 : 0x8a5030
-  const body = new THREE.Mesh(
-    isBoss ? bossBodyGeo : bodyGeo,
-    new THREE.MeshStandardMaterial({
-      color: robeColor,
-      metalness: 0.25,
-      roughness: 0.5,
-      emissive: color,
-      emissiveIntensity: isBoss ? 0.45 : 0.32,
-    }),
-  )
-  body.position.y = isBoss ? 0.72 : 0.5
-  g.add(body)
+  const robeHex = isBoss ? 0xc42820 : 0x9a4830
+  const robeDeep = isBoss ? 0x7a1410 : 0x5a2818
+  const trimHex = isBoss ? 0xe8c050 : 0xd0a040
+  const skinHex = 0xffe0b8
+  const hairHex = 0x1a1410
 
-  // 衣摆
+  const robeMat = makeMat(robeHex, {
+    emissive: color,
+    emissiveIntensity: isBoss ? 0.28 : 0.18,
+    roughness: 0.52,
+    metalness: 0.1,
+  })
+  const robeDeepMat = makeMat(robeDeep, {
+    emissive: color,
+    emissiveIntensity: 0.1,
+    roughness: 0.58,
+  })
+  const trimMat = makeMat(trimHex, {
+    metalness: 0.62,
+    roughness: 0.32,
+    emissive: 0x6a4010,
+    emissiveIntensity: 0.28,
+  })
+  const skinMat = makeMat(skinHex, { roughness: 0.62, metalness: 0.04 })
+  const hairMat = makeMat(hairHex, { roughness: 0.75 })
+  const inkMat = makeMat(0x1a1010, { roughness: 0.55 })
+  const lipMat = makeMat(0xc05048, { roughness: 0.5, emissive: 0x401010, emissiveIntensity: 0.15 })
+
+  // —— 下摆宽袍 ——
   const skirt = new THREE.Mesh(
-    new THREE.CylinderGeometry(isBoss ? 0.32 : 0.2, isBoss ? 0.38 : 0.24, 0.35, 8),
-    new THREE.MeshStandardMaterial({
-      color: isBoss ? 0x8a1810 : 0x6a3820,
-      roughness: 0.55,
-      metalness: 0.15,
-      emissive: color,
-      emissiveIntensity: 0.15,
-    }),
+    new THREE.CylinderGeometry(0.22 * s, 0.34 * s, 0.55 * s, 12),
+    robeDeepMat,
   )
-  skirt.position.y = isBoss ? 0.28 : 0.22
+  skirt.position.y = 0.28 * s
   g.add(skirt)
 
-  const head = new THREE.Mesh(
-    isBoss ? bossHeadGeo : headGeo,
-    new THREE.MeshStandardMaterial({
-      color: 0xffe8c8,
-      metalness: 0.08,
-      roughness: 0.5,
-      emissive: color,
-      emissiveIntensity: 0.15,
-    }),
-  )
-  head.position.y = isBoss ? 1.3 : 0.9
-  g.add(head)
+  // 袍摆金边
+  const hem = new THREE.Mesh(new THREE.TorusGeometry(0.33 * s, 0.02 * s, 6, 20), trimMat)
+  hem.rotation.x = Math.PI / 2
+  hem.position.y = 0.04 * s
+  g.add(hem)
 
-  // 道冠
+  // —— 上身道袍 ——
+  const body = new THREE.Mesh(
+    new THREE.CapsuleGeometry(0.18 * s, 0.38 * s, 5, 10),
+    robeMat,
+  )
+  body.position.y = 0.68 * s
+  g.add(body)
+
+  // 交领
+  for (const side of [-1, 1]) {
+    const collar = new THREE.Mesh(new THREE.BoxGeometry(0.08 * s, 0.28 * s, 0.06 * s), trimMat)
+    collar.position.set(side * 0.08 * s, 0.92 * s, 0.14 * s)
+    collar.rotation.z = side * 0.35
+    collar.rotation.x = -0.15
+    g.add(collar)
+  }
+
+  // 腰带
+  const belt = new THREE.Mesh(new THREE.CylinderGeometry(0.2 * s, 0.2 * s, 0.07 * s, 12), trimMat)
+  belt.position.y = 0.48 * s
+  g.add(belt)
+  const buckle = new THREE.Mesh(new THREE.BoxGeometry(0.1 * s, 0.08 * s, 0.06 * s), trimMat)
+  buckle.position.set(0, 0.48 * s, 0.2 * s)
+  g.add(buckle)
+
+  // —— 双袖（略张） ——
+  const arms = new THREE.Group()
+  arms.name = 'arms'
+  for (const side of [-1, 1]) {
+    const armG = new THREE.Group()
+    const upper = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.055 * s, 0.16 * s, 3, 6),
+      robeMat,
+    )
+    upper.position.set(0, -0.08 * s, 0)
+    upper.rotation.z = side * 0.55
+    armG.add(upper)
+    const sleeve = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.07 * s, 0.1 * s, 0.22 * s, 8),
+      robeDeepMat,
+    )
+    sleeve.position.set(side * 0.12 * s, -0.22 * s, 0.02 * s)
+    sleeve.rotation.z = side * 0.35
+    armG.add(sleeve)
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.045 * s, 6, 6), skinMat)
+    hand.position.set(side * 0.16 * s, -0.34 * s, 0.04 * s)
+    armG.add(hand)
+    armG.position.set(side * 0.22 * s, 0.82 * s, 0)
+    arms.add(armG)
+  }
+  g.add(arms)
+
+  // —— 头 ——
+  const headG = new THREE.Group()
+  headG.name = 'head'
+  headG.position.y = 1.12 * s
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.145 * s, 14, 12), skinMat)
+  head.scale.set(1, 1.08, 0.95)
+  headG.add(head)
+
+  // 耳
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Mesh(new THREE.SphereGeometry(0.035 * s, 6, 6), skinMat)
+    ear.scale.set(0.55, 1, 0.7)
+    ear.position.set(side * 0.14 * s, 0, 0)
+    headG.add(ear)
+  }
+
+  // 眉
+  for (const side of [-1, 1]) {
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.055 * s, 0.012 * s, 0.012 * s), hairMat)
+    brow.position.set(side * 0.05 * s, 0.045 * s, 0.12 * s)
+    brow.rotation.z = side * -0.15
+    headG.add(brow)
+  }
+
+  // 眼白 + 瞳
+  for (const side of [-1, 1]) {
+    const eyeW = new THREE.Mesh(new THREE.SphereGeometry(0.028 * s, 6, 6), makeMat(0xf8f0e8, { roughness: 0.4 }))
+    eyeW.scale.set(1.1, 0.7, 0.5)
+    eyeW.position.set(side * 0.048 * s, 0.015 * s, 0.125 * s)
+    headG.add(eyeW)
+    const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.014 * s, 6, 6), inkMat)
+    pupil.position.set(side * 0.048 * s, 0.015 * s, 0.145 * s)
+    headG.add(pupil)
+    const shine = new THREE.Mesh(
+      new THREE.SphereGeometry(0.005 * s, 4, 4),
+      new THREE.MeshBasicMaterial({ color: 0xffffff }),
+    )
+    shine.position.set(side * 0.052 * s, 0.02 * s, 0.155 * s)
+    headG.add(shine)
+  }
+
+  // 鼻
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.022 * s, 6, 6), skinMat)
+  nose.scale.set(0.7, 1, 0.9)
+  nose.position.set(0, -0.01 * s, 0.14 * s)
+  headG.add(nose)
+
+  // 嘴
+  const mouth = new THREE.Mesh(new THREE.BoxGeometry(0.04 * s, 0.01 * s, 0.012 * s), lipMat)
+  mouth.position.set(0, -0.05 * s, 0.13 * s)
+  headG.add(mouth)
+
+  // 颊红
+  for (const side of [-1, 1]) {
+    const blush = new THREE.Mesh(
+      new THREE.SphereGeometry(0.03 * s, 6, 6),
+      new THREE.MeshStandardMaterial({
+        color: 0xff9a88,
+        transparent: true,
+        opacity: 0.35,
+        roughness: 0.7,
+        depthWrite: false,
+      }),
+    )
+    blush.scale.set(1, 0.7, 0.4)
+    blush.position.set(side * 0.09 * s, -0.02 * s, 0.1 * s)
+    headG.add(blush)
+  }
+
+  // 发髻 + 道冠
+  const hair = new THREE.Mesh(new THREE.SphereGeometry(0.15 * s, 12, 10), hairMat)
+  hair.scale.set(1.05, 0.7, 1.05)
+  hair.position.y = 0.06 * s
+  headG.add(hair)
+
+  const bun = new THREE.Mesh(new THREE.SphereGeometry(0.07 * s, 10, 8), hairMat)
+  bun.position.y = 0.16 * s
+  headG.add(bun)
+
+  const crownBase = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.09 * s, 0.12 * s, 0.06 * s, 10),
+    trimMat,
+  )
+  crownBase.position.y = 0.18 * s
+  headG.add(crownBase)
+
   const crown = new THREE.Mesh(
-    new THREE.CylinderGeometry(isBoss ? 0.12 : 0.08, isBoss ? 0.16 : 0.11, isBoss ? 0.18 : 0.12, 8),
-    new THREE.MeshStandardMaterial({
-      color: isBoss ? 0xe8c050 : 0xd4a840,
-      metalness: 0.6,
-      roughness: 0.35,
-      emissive: 0x6a4010,
-      emissiveIntensity: 0.25,
-    }),
+    new THREE.ConeGeometry(0.07 * s, 0.14 * s, 8),
+    trimMat,
   )
-  crown.position.y = isBoss ? 1.52 : 1.05
-  g.add(crown)
+  crown.position.y = 0.28 * s
+  headG.add(crown)
 
+  if (isBoss) {
+    // 掌炉：如意冠顶珠 + 长须
+    const jewel = new THREE.Mesh(
+      new THREE.SphereGeometry(0.04 * s, 8, 8),
+      makeMat(0xff6040, {
+        metalness: 0.3,
+        roughness: 0.25,
+        emissive: 0xff3010,
+        emissiveIntensity: 0.7,
+      }),
+    )
+    jewel.position.y = 0.36 * s
+    headG.add(jewel)
+
+    const beard = new THREE.Mesh(
+      new THREE.ConeGeometry(0.08 * s, 0.28 * s, 8),
+      makeMat(0xe8e0d0, { roughness: 0.7 }),
+    )
+    beard.position.set(0, -0.18 * s, 0.1 * s)
+    beard.rotation.x = 0.25
+    headG.add(beard)
+
+    // 肩帔
+    const cape = new THREE.Mesh(
+      new THREE.TorusGeometry(0.28 * s, 0.05 * s, 6, 16, Math.PI),
+      trimMat,
+    )
+    cape.rotation.x = Math.PI / 2
+    cape.rotation.z = Math.PI
+    cape.position.set(0, 0.95 * s, 0.02 * s)
+    g.add(cape)
+  }
+
+  g.add(headG)
+
+  // 足尖微露
+  for (const side of [-1, 1]) {
+    const shoe = new THREE.Mesh(
+      new THREE.BoxGeometry(0.08 * s, 0.04 * s, 0.14 * s),
+      makeMat(0x2a1810, { roughness: 0.7 }),
+    )
+    shoe.position.set(side * 0.08 * s, 0.02 * s, 0.04 * s)
+    g.add(shoe)
+  }
+
+  // 脚底灵光环
   const ring = new THREE.Mesh(
-    isBoss ? bossRingGeo : ringGeo,
+    new THREE.TorusGeometry(isBoss ? 0.48 : 0.34, isBoss ? 0.028 : 0.022, 6, 24),
     new THREE.MeshBasicMaterial({
       color,
       transparent: true,
-      opacity: 0.65,
+      opacity: 0.7,
       depthWrite: false,
     }),
   )
   ring.rotation.x = Math.PI / 2
-  ring.position.y = 0.04
+  ring.position.y = 0.03
   g.add(ring)
 
-  g.userData = { body, head, ring, color, light: null }
+  g.userData = { body, head, headG, arms, ring, color, light: null }
   return g
 }
 
@@ -99,6 +283,7 @@ export function createAgentField(scene, layout = {}) {
   scene.add(root)
 
   const bossStand = layout.bossStand || new THREE.Vector3(0, 0.98, 2.6)
+  const furnacePos = layout.furnacePos || layout.hallCenter || new THREE.Vector3(0, 1.2, -2)
   const workSlots = layout.workSlots || [
     new THREE.Vector3(-2.6, 0.98, -0.2),
     new THREE.Vector3(2.6, 0.98, -0.2),
@@ -109,9 +294,18 @@ export function createAgentField(scene, layout = {}) {
   const loungeSlots = layout.loungeSlots || []
   const queueOrigin = layout.queueOrigin || new THREE.Vector3(0, 0.12, 20)
 
-  // 掌炉真人 — 殿内金台
+  // 面朝目标（模型正面为本地 +Z）
+  function faceToward(obj, from, to) {
+    const dx = to.x - from.x
+    const dz = to.z - from.z
+    if (dx * dx + dz * dz < 1e-6) return
+    obj.rotation.y = Math.atan2(dx, dz)
+  }
+
+  // 掌炉真人 — 殿内金台，面向丹炉
   const bossPad = new THREE.Group()
   bossPad.position.copy(bossStand)
+  faceToward(bossPad, bossStand, furnacePos)
   bossPad.add(
     new THREE.Mesh(
       new THREE.CylinderGeometry(0.95, 1.05, 0.14, 18),
@@ -258,9 +452,9 @@ export function createAgentField(scene, layout = {}) {
           entry.mesh.userData.ring.material.color.set(sc)
           entry.mesh.userData.body.material.emissiveIntensity = status === 'running' ? 0.7 : 0.28
 
-          // 朝向：排队面朝大殿，阁内面朝丹炉
+          // 朝向：阁内面朝丹炉，排队/退朝面朝大殿
           if (status === 'running' || status === 'failed') {
-            entry.group.rotation.y = 0
+            faceToward(entry.group, entry.target, furnacePos)
           } else {
             entry.group.rotation.y = Math.PI
           }
@@ -280,11 +474,37 @@ export function createAgentField(scene, layout = {}) {
     },
     update(t) {
       boss.position.y = 0.08 + Math.sin(t * 1.8) * 0.03
+      // 身已朝丹炉；头微俯视炉口，略有观火动
+      if (boss.userData.headG) {
+        boss.userData.headG.rotation.y = Math.sin(t * 0.7) * 0.08
+        boss.userData.headG.rotation.x = 0.18 + Math.sin(t * 1.2) * 0.04
+      }
+      if (boss.userData.arms) {
+        boss.userData.arms.rotation.z = Math.sin(t * 1.6) * 0.05
+        boss.userData.arms.rotation.x = -0.12 + Math.sin(t * 1.1) * 0.04
+      }
+      boss.userData.ring.scale.setScalar(1 + Math.sin(t * 2.2) * 0.05)
+
       for (const entry of agentMeshes.values()) {
         entry.group.position.lerp(entry.target, 0.07)
+        const ud = entry.mesh.userData
+        const phase = t + entry.id.length * 0.7
+        if (ud.headG) {
+          ud.headG.rotation.y = Math.sin(phase * 1.1) * 0.15
+          ud.headG.rotation.x = Math.sin(phase * 1.5) * 0.05
+        }
+        if (ud.arms) {
+          ud.arms.rotation.z = Math.sin(phase * 2.1) * 0.08
+        }
         if (entry.status === 'running') {
           entry.group.position.y = entry.target.y + Math.sin(t * 5 + entry.id.length) * 0.04
-          entry.mesh.userData.ring.scale.setScalar(1 + Math.sin(t * 4) * 0.06)
+          ud.ring.scale.setScalar(1 + Math.sin(t * 4) * 0.08)
+          if (ud.arms) ud.arms.rotation.x = Math.sin(t * 6) * 0.12
+        } else if (entry.status === 'queued') {
+          entry.group.position.y = entry.target.y + Math.sin(phase * 1.8) * 0.015
+          ud.ring.scale.setScalar(1 + Math.sin(phase * 1.5) * 0.03)
+        } else {
+          ud.ring.scale.setScalar(1)
         }
       }
     },

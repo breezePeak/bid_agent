@@ -6,6 +6,7 @@ import { createStageTrack } from './stageTrack.js'
 import { createAgentField } from './agentField.js'
 import { createDataFlow } from './dataFlow.js'
 import { createDanFx } from './danFx.js'
+import { createSoundscape } from '../audio/soundscape.js'
 
 export class App3D {
   constructor(canvas) {
@@ -100,6 +101,8 @@ export class App3D {
     const pav = this.env.pavilion
     this.agentField = createAgentField(this.scene, {
       bossStand: pav.bossStand,
+      furnacePos: pav.hallCenter,
+      hallCenter: pav.hallCenter,
       workSlots: pav.workSlots,
       queueOrigin: pav.queueOrigin,
       doorPos: pav.doorPos,
@@ -112,9 +115,11 @@ export class App3D {
       ? this.env.pedestal.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 2.2, 0))
       : new THREE.Vector3(0, 4, -6)
     this.danFx = createDanFx(this.scene, furnacePos)
+    this.audio = createSoundscape()
     this.onStageComplete = null
     this._completedIds = new Set()
     this._allDoneFired = false
+    this._lastFailSig = ''
 
     this._rebuildPickables()
 
@@ -217,8 +222,24 @@ export class App3D {
         label: d.label,
         flyFrom: furnaceMouth,
       })
+      this.audio?.playStageDone?.()
       this.onStageComplete?.(d)
     }
+
+    // 炸炉 / 失败（新出现时响一次）
+    const failIds = (snap.stages || [])
+      .filter((s) => s.state === 'error' || s.state === 'failed')
+      .map((s) => s.id)
+      .join('|')
+    if (failIds && failIds !== this._lastFailSig) {
+      this.audio?.playFail?.()
+    }
+    this._lastFailSig = failIds
+
+    // 炉火声势随进度
+    const runningN = (snap.stages || []).filter((s) => s.state === 'running').length
+    const prog = Number(snap.progress || 0)
+    this.audio?.setFireIntensity?.(0.28 + prog * 0.55 + Math.min(0.2, runningN * 0.08))
 
     // 全流程完成 → 节点飞出旋合 → 黄金标书
     const allDone =
@@ -236,6 +257,7 @@ export class App3D {
       this.danFx.setRoofCenter(center)
       this.stageTrack.setOrbitMode(true, center)
       this.danFx.startFinaleAscend()
+      this.audio?.playFinaleRise?.()
       // 镜头推向中央，看清旋合
       this._animateCamera(new THREE.Vector3(0, 8, 28), center.clone().add(new THREE.Vector3(0, 0, 2)))
       this.onStageComplete?.({ id: '__all__', label: '全流程', all: true })
@@ -589,6 +611,7 @@ export class App3D {
     this.agentField.update(t)
     this.dataFlow.update(t)
     this.danFx?.update(dt)
+    this.audio?.update?.(dt)
     // 旋合结束后弹出黄金标书
     if (this._allDoneFired && !this._finaleBookShown && this.stageTrack.getOrbitPhase?.() === 'done') {
       this._finaleBookShown = true
@@ -596,6 +619,7 @@ export class App3D {
         ? this.env.pedestal.getWorldPosition(new THREE.Vector3()).add(new THREE.Vector3(0, 5, 12))
         : new THREE.Vector3(0, 6, 14)
       this.danFx.showGoldenBook?.(c)
+      this.audio?.playBookReveal?.()
       this.onFinaleBook?.(c)
     }
 

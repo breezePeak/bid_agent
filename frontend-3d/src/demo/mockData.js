@@ -196,7 +196,7 @@ export function createDemoController(store) {
       run_state: {
         stage: current?.id || 'idle',
         status: running ? 'running' : 'ok',
-        message: running ? `Demo 执行 ${phaseLabel}` : '演示流程已完成，即将循环',
+        message: running ? `Demo 执行 ${phaseLabel}` : '演示已成丹 · 静候重新炼制',
         updated_at: nowIso(),
       },
       workflow,
@@ -240,15 +240,30 @@ export function createDemoController(store) {
     }
   }
 
+  const endTick = STAGE_DEFS.length * 8 + 4
+
   function step() {
+    // 完成后停住，不自动重开；等用户点「重新炼制」
+    if (tick >= endTick) {
+      store.applyStatus(buildStatus(), { demo: true, connected: false })
+      if (timer) {
+        clearInterval(timer)
+        timer = null
+      }
+      return
+    }
     tick += 1
-    if (tick > STAGE_DEFS.length * 8 + 12) tick = 0
     store.applyStatus(buildStatus(), { demo: true, connected: false })
+    if (tick >= endTick && timer) {
+      clearInterval(timer)
+      timer = null
+    }
   }
 
   return {
     start(intervalMs = 900) {
       this.stop()
+      tick = 0
       step()
       timer = setInterval(step, intervalMs)
     },

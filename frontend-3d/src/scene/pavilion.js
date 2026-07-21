@@ -37,12 +37,13 @@ export function createPavilion(scene) {
       emissive: 0x5a3810,
       emissiveIntensity: 0.15,
     }),
+    // 唐风青灰瓦（黛色），非明清琉璃绿
     tile: new THREE.MeshStandardMaterial({
-      color: 0x3a6a58,
-      roughness: 0.45,
-      metalness: 0.2,
-      emissive: 0x0a2018,
-      emissiveIntensity: 0.08,
+      color: 0x4a5058,
+      roughness: 0.62,
+      metalness: 0.12,
+      emissive: 0x101418,
+      emissiveIntensity: 0.06,
     }),
     plaster: new THREE.MeshStandardMaterial({ color: 0xf0e6d4, roughness: 0.88, metalness: 0.02 }),
     stone: new THREE.MeshStandardMaterial({ color: 0xc8c0b0, roughness: 0.82, metalness: 0.05 }),
@@ -280,69 +281,69 @@ export function createPavilion(scene) {
     root.add(pilGold)
   }
 
-  // ——— 左右侧墙：格扇 + 窗花 + 挂轴（唐风） ———
+  // ——— 左右侧墙：内外双侧格扇窗（唐风） ———
+  const sidePaperMat = new THREE.MeshStandardMaterial({
+    color: 0xf5ead0,
+    roughness: 0.85,
+    metalness: 0.02,
+    emissive: 0x403020,
+    emissiveIntensity: 0.1,
+    transparent: true,
+    opacity: 0.88,
+    side: THREE.DoubleSide,
+  })
   for (const side of [-1, 1]) {
     const x = side * 8.7
     // 主墙板
     const wall = new THREE.Mesh(new THREE.BoxGeometry(0.35, 4.6, 10.5), mat.plaster)
     wall.position.set(x, hallY + 2.3, -2.2)
     root.add(wall)
-    // 墙裙
-    const dadoS = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.1, 10.3), mat.redDeep)
-    dadoS.position.set(x + side * 0.02, hallY + 0.65, -2.2)
-    root.add(dadoS)
-    // 金线
-    const lineS = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.07, 10.0), mat.gold)
-    lineS.position.set(x + side * 0.03, hallY + 1.25, -2.2)
-    root.add(lineS)
-    // 三扇窗格
+    // 墙裙（内外都有）
+    for (const face of [-1, 1]) {
+      const dadoS = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 10.3), mat.redDeep)
+      dadoS.position.set(x + face * 0.2, hallY + 0.65, -2.2)
+      root.add(dadoS)
+      const lineS = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.07, 10.0), mat.gold)
+      lineS.position.set(x + face * 0.22, hallY + 1.25, -2.2)
+      root.add(lineS)
+    }
+    // 三扇窗格：外侧 + 内侧各一套
     for (let w = 0; w < 3; w++) {
       const wz = -5.5 + w * 3.2
-      const frame = new THREE.Mesh(new THREE.BoxGeometry(0.18, 2.4, 2.4), mat.woodDark)
-      frame.position.set(x + side * 0.12, hallY + 2.9, wz)
-      root.add(frame)
-      const goldF = new THREE.Mesh(new THREE.BoxGeometry(0.12, 2.15, 2.15), mat.goldSoft)
-      goldF.position.set(x + side * 0.18, hallY + 2.9, wz)
-      root.add(goldF)
-      // 窗纸
-      const paper = new THREE.Mesh(
-        new THREE.BoxGeometry(0.06, 1.9, 1.9),
-        new THREE.MeshStandardMaterial({
-          color: 0xf5ead0,
-          roughness: 0.85,
-          metalness: 0.02,
-          emissive: 0x403020,
-          emissiveIntensity: 0.08,
-          transparent: true,
-          opacity: 0.9,
-        }),
-      )
-      paper.position.set(x + side * 0.22, hallY + 2.9, wz)
-      root.add(paper)
-      // 窗棂十字
-      const barV = new THREE.Mesh(new THREE.BoxGeometry(0.05, 1.85, 0.06), mat.woodDark)
-      barV.position.set(x + side * 0.24, hallY + 2.9, wz)
-      root.add(barV)
-      const barH = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.06, 1.85), mat.woodDark)
-      barH.position.set(x + side * 0.24, hallY + 2.9, wz)
-      root.add(barH)
-      // 菱花简化
-      for (let g = 0; g < 4; g++) {
-        const diamond = new THREE.Mesh(
-          new THREE.BoxGeometry(0.04, 0.35, 0.35),
-          mat.woodDark,
-        )
-        diamond.rotation.x = Math.PI / 4
-        const gx = ((g % 2) - 0.5) * 0.7
-        const gy = (Math.floor(g / 2) - 0.5) * 0.7
-        diamond.position.set(x + side * 0.25, hallY + 2.9 + gy, wz + gx)
-        root.add(diamond)
+      for (const face of [-1, 1]) {
+        // face 与 side 同号=外侧，异号=内侧（朝向殿内）
+        const ox = x + face * 0.22
+        const frame = new THREE.Mesh(new THREE.BoxGeometry(0.1, 2.4, 2.4), mat.woodDark)
+        frame.position.set(ox, hallY + 2.9, wz)
+        root.add(frame)
+        const goldF = new THREE.Mesh(new THREE.BoxGeometry(0.06, 2.15, 2.15), mat.goldSoft)
+        goldF.position.set(ox + face * 0.04, hallY + 2.9, wz)
+        root.add(goldF)
+        const paper = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.9, 1.9), sidePaperMat)
+        paper.position.set(ox + face * 0.06, hallY + 2.9, wz)
+        root.add(paper)
+        // 窗棂十字
+        const barV = new THREE.Mesh(new THREE.BoxGeometry(0.04, 1.85, 0.06), mat.woodDark)
+        barV.position.set(ox + face * 0.08, hallY + 2.9, wz)
+        root.add(barV)
+        const barH = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.06, 1.85), mat.woodDark)
+        barH.position.set(ox + face * 0.08, hallY + 2.9, wz)
+        root.add(barH)
+        // 菱花
+        for (let g = 0; g < 4; g++) {
+          const diamond = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.35, 0.35), mat.woodDark)
+          diamond.rotation.x = Math.PI / 4
+          const gz = ((g % 2) - 0.5) * 0.7
+          const gy = (Math.floor(g / 2) - 0.5) * 0.7
+          diamond.position.set(ox + face * 0.09, hallY + 2.9 + gy, wz + gz)
+          root.add(diamond)
+        }
       }
     }
-    // 侧挂灯笼
+    // 殿内侧挂灯笼（可见）
     for (const wz of [-4.5, 0.5]) {
       const chain = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 4), mat.goldSoft)
-      chain.position.set(x + side * 0.5, hallY + 4.3, wz)
+      chain.position.set(x - side * 0.55, hallY + 4.3, wz)
       root.add(chain)
       const lan = new THREE.Mesh(
         new THREE.SphereGeometry(0.28, 8, 8),
@@ -354,10 +355,10 @@ export function createPavilion(scene) {
         }),
       )
       lan.scale.set(1, 1.25, 1)
-      lan.position.set(x + side * 0.5, hallY + 3.85, wz)
+      lan.position.set(x - side * 0.55, hallY + 3.85, wz)
       root.add(lan)
-      const light = new THREE.PointLight(0xff8040, 0.4, 6, 2)
-      light.position.set(x + side * 0.5, hallY + 3.85, wz)
+      const light = new THREE.PointLight(0xff8040, 0.45, 7, 2)
+      light.position.set(x - side * 0.55, hallY + 3.85, wz)
       root.add(light)
     }
     // 顶梁
@@ -374,6 +375,14 @@ export function createPavilion(scene) {
   for (const x of colXs) {
     for (const z of colZs) {
       if (z > 1.5 && Math.abs(x) < 2.5) continue
+      // 殿心丹炉位
+      if (Math.abs(x) < 0.1 && Math.abs(z + 2) < 0.1) continue
+      // 左右中列（丹炉两侧）
+      if (Math.abs(Math.abs(x) - 3.75) < 0.1 && Math.abs(z + 2) < 0.1) continue
+      // 左右最外列中间
+      if (Math.abs(Math.abs(x) - 7.5) < 0.1 && Math.abs(z + 2) < 0.1) continue
+      // 后排正中
+      if (Math.abs(x) < 0.1 && Math.abs(z + 6.5) < 0.1) continue
       const thick = Math.abs(x) > 6 || Math.abs(z + 2) < 0.5
       const r = thick ? 0.32 : 0.24
       const col = new THREE.Mesh(new THREE.CylinderGeometry(r, r * 1.08, colH, 12), mat.red)

@@ -188,119 +188,16 @@ export function createEnvironment(scene) {
   pavilion.queueSlots = pavilion.queueSlots.map((v) => sx(v))
   pavilion.loungeSlots = pavilion.loungeSlots.map((v) => sx(v))
 
-  // 丹炉
-  const pedestal = new THREE.Group()
+  // 八卦炉
+  const pedestal = createBaguaFurnace()
   pedestal.position.copy(pavilion.hallCenter)
   pedestal.scale.setScalar(HALL_SCALE * 0.75)
-
-  pedestal.add(
-    new THREE.Mesh(
-      new THREE.CylinderGeometry(1.9, 2.2, 0.22, 20),
-      new THREE.MeshStandardMaterial({
-        color: 0x8b6238,
-        metalness: 0.55,
-        roughness: 0.4,
-        emissive: 0x5a3010,
-        emissiveIntensity: 0.15,
-      }),
-    ),
-  )
-
-  const pot = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.05, 1.3, 1.25, 18),
-    new THREE.MeshStandardMaterial({
-      color: 0x9a6a38,
-      metalness: 0.65,
-      roughness: 0.35,
-      emissive: 0x6a2808,
-      emissiveIntensity: 0.22,
-    }),
-  )
-  pot.position.y = 0.75
-  pedestal.add(pot)
-
-  const potTop = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.62, 1.05, 0.4, 18),
-    new THREE.MeshStandardMaterial({
-      color: 0xb07a40,
-      metalness: 0.6,
-      roughness: 0.38,
-      emissive: 0x4a1808,
-      emissiveIntensity: 0.15,
-    }),
-  )
-  potTop.position.y = 1.5
-  pedestal.add(potTop)
-
-  const lid = new THREE.Mesh(
-    new THREE.SphereGeometry(0.68, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.5),
-    new THREE.MeshStandardMaterial({
-      color: 0xc48a48,
-      metalness: 0.55,
-      roughness: 0.4,
-      emissive: 0xd44a32,
-      emissiveIntensity: 0.15,
-    }),
-  )
-  lid.position.y = 1.72
-  pedestal.add(lid)
-
-  const crystal = new THREE.Mesh(
-    new THREE.SphereGeometry(0.26, 12, 12),
-    new THREE.MeshStandardMaterial({
-      color: 0xff6a40,
-      metalness: 0.2,
-      roughness: 0.18,
-      emissive: 0xff4a18,
-      emissiveIntensity: 1.0,
-      transparent: true,
-      opacity: 0.95,
-    }),
-  )
-  crystal.position.y = 2.15
-  pedestal.add(crystal)
-
-  for (let i = 0; i < 3; i++) {
-    const a = (i / 3) * Math.PI * 2 + Math.PI / 6
-    const leg = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.09, 0.14, 0.45, 6),
-      new THREE.MeshStandardMaterial({ color: 0x7a4a22, metalness: 0.55, roughness: 0.45 }),
-    )
-    leg.position.set(Math.sin(a) * 0.95, 0.15, Math.cos(a) * 0.95)
-    pedestal.add(leg)
-  }
-
-  const coreLight = new THREE.PointLight(0xff8040, 2.6, 30, 2)
-  coreLight.position.set(0, 2.0, 0)
-  pedestal.add(coreLight)
-
-  const beam = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.1, 1.3, 7, 14, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0xffa050,
-      transparent: true,
-      opacity: 0.1,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
-  )
-  beam.position.y = 5.0
-  pedestal.add(beam)
-
-  const flame = new THREE.Mesh(
-    new THREE.ConeGeometry(0.42, 0.85, 10, 1, true),
-    new THREE.MeshBasicMaterial({
-      color: 0xffd060,
-      transparent: true,
-      opacity: 0.45,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    }),
-  )
-  flame.position.y = 1.15
-  pedestal.add(flame)
-
   scene.add(pedestal)
+
+  const crystal = pedestal.userData.crystal
+  const coreLight = pedestal.userData.coreLight
+  const flame = pedestal.userData.flame
+  const baguaRing = pedestal.userData.baguaRing
 
   // 灵尘
   const dustCount = 160
@@ -418,17 +315,32 @@ export function createEnvironment(scene) {
     ring,
     ring2,
     flame,
+    baguaRing,
     pavilion,
     meteors,
     update(t, progress = 0) {
       crystal.rotation.y = t * 0.5
-      crystal.position.y = 2.15 + Math.sin(t * 1.3) * 0.05
+      crystal.position.y = 2.55 + Math.sin(t * 1.3) * 0.05
       crystal.scale.setScalar(0.85 + progress * 0.5)
       coreLight.intensity = 1.8 + progress * 1.5 + Math.sin(t * 2.8) * 0.25
       if (flame) {
         flame.scale.y = 0.9 + Math.sin(t * 5) * 0.15 + progress * 0.3
         flame.scale.x = 0.85 + Math.sin(t * 4.2) * 0.1
-        flame.material.opacity = 0.35 + progress * 0.25 + Math.sin(t * 3) * 0.08
+        flame.scale.z = flame.scale.x
+        flame.traverse((ch) => {
+          if (ch.material?.opacity != null && ch.material.transparent) {
+            const base = ch.userData.baseOpacity ?? ch.material.opacity
+            ch.userData.baseOpacity = base
+            ch.material.opacity = base * (0.85 + progress * 0.35 + Math.sin(t * 3) * 0.12)
+          }
+        })
+      }
+      if (pedestal.userData.floorBagua) {
+        pedestal.userData.floorBagua.rotation.z = -t * 0.12
+        pedestal.userData.floorBagua.material.opacity = 0.28 + progress * 0.2 + Math.sin(t * 1.5) * 0.05
+      }
+      if (baguaRing) {
+        baguaRing.rotation.y = t * 0.35
       }
       ring.rotation.z = t * 0.02
       ring2.rotation.z = -t * 0.015
@@ -461,6 +373,481 @@ export function createEnvironment(scene) {
       }
     },
   }
+}
+
+/** 八卦纹贴图（太极 + 八门爻线） */
+function makeBaguaTexture() {
+  const size = 512
+  const c = document.createElement('canvas')
+  c.width = size
+  c.height = size
+  const ctx = c.getContext('2d')
+  const mid = size / 2
+
+  ctx.clearRect(0, 0, size, size)
+
+  // 外盘底
+  const bg = ctx.createRadialGradient(mid, mid, mid * 0.2, mid, mid, mid * 0.98)
+  bg.addColorStop(0, '#3a2410')
+  bg.addColorStop(0.55, '#5a3818')
+  bg.addColorStop(1, '#2a1808')
+  ctx.fillStyle = bg
+  ctx.beginPath()
+  ctx.arc(mid, mid, mid * 0.98, 0, Math.PI * 2)
+  ctx.fill()
+
+  // 金边双环
+  ctx.strokeStyle = '#e0b44a'
+  ctx.lineWidth = 8
+  ctx.beginPath()
+  ctx.arc(mid, mid, mid * 0.94, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.lineWidth = 3
+  ctx.beginPath()
+  ctx.arc(mid, mid, mid * 0.86, 0, Math.PI * 2)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(mid, mid, mid * 0.42, 0, Math.PI * 2)
+  ctx.stroke()
+
+  // 太极
+  const r = mid * 0.34
+  ctx.save()
+  ctx.translate(mid, mid)
+  ctx.beginPath()
+  ctx.arc(0, 0, r, 0, Math.PI * 2)
+  ctx.fillStyle = '#f0e8d0'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(0, 0, r, -Math.PI / 2, Math.PI / 2)
+  ctx.fillStyle = '#1a1010'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(0, -r / 2, r / 2, 0, Math.PI * 2)
+  ctx.fillStyle = '#1a1010'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(0, r / 2, r / 2, 0, Math.PI * 2)
+  ctx.fillStyle = '#f0e8d0'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(0, -r / 2, r * 0.12, 0, Math.PI * 2)
+  ctx.fillStyle = '#f0e8d0'
+  ctx.fill()
+  ctx.beginPath()
+  ctx.arc(0, r / 2, r * 0.12, 0, Math.PI * 2)
+  ctx.fillStyle = '#1a1010'
+  ctx.fill()
+  ctx.restore()
+
+  // 八卦爻：1=阳实线，0=阴断线；顺序：乾坤震巽坎离艮兑
+  const trigrams = [
+    [1, 1, 1],
+    [0, 0, 0],
+    [0, 0, 1],
+    [1, 1, 0],
+    [0, 1, 0],
+    [1, 0, 1],
+    [1, 0, 0],
+    [0, 1, 1],
+  ]
+  const names = ['乾', '坤', '震', '巽', '坎', '离', '艮', '兑']
+  ctx.strokeStyle = '#ffd878'
+  ctx.fillStyle = '#ffd878'
+  ctx.font = 'bold 28px serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 - Math.PI / 2
+    const cx = mid + Math.cos(a) * mid * 0.64
+    const cy = mid + Math.sin(a) * mid * 0.64
+    ctx.save()
+    ctx.translate(cx, cy)
+    ctx.rotate(a + Math.PI / 2)
+    const lines = trigrams[i]
+    const w = 36
+    const gap = 10
+    ctx.lineWidth = 5
+    ctx.lineCap = 'butt'
+    for (let L = 0; L < 3; L++) {
+      const y = (L - 1) * gap
+      if (lines[L]) {
+        ctx.beginPath()
+        ctx.moveTo(-w / 2, y)
+        ctx.lineTo(w / 2, y)
+        ctx.stroke()
+      } else {
+        ctx.beginPath()
+        ctx.moveTo(-w / 2, y)
+        ctx.lineTo(-4, y)
+        ctx.stroke()
+        ctx.beginPath()
+        ctx.moveTo(4, y)
+        ctx.lineTo(w / 2, y)
+        ctx.stroke()
+      }
+    }
+    ctx.restore()
+
+    // 卦名
+    const nx = mid + Math.cos(a) * mid * 0.78
+    const ny = mid + Math.sin(a) * mid * 0.78
+    ctx.fillStyle = '#e8c868'
+    ctx.fillText(names[i], nx, ny)
+  }
+
+  // 八向分隔短线
+  ctx.strokeStyle = 'rgba(224,180,74,0.55)'
+  ctx.lineWidth = 2
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2 - Math.PI / 2 + Math.PI / 8
+    ctx.beginPath()
+    ctx.moveTo(mid + Math.cos(a) * mid * 0.44, mid + Math.sin(a) * mid * 0.44)
+    ctx.lineTo(mid + Math.cos(a) * mid * 0.9, mid + Math.sin(a) * mid * 0.9)
+    ctx.stroke()
+  }
+
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.needsUpdate = true
+  return tex
+}
+
+/** 炉身竖纹（云纹 / 雷纹带） */
+function makeFurnaceBodyTexture() {
+  const w = 512
+  const h = 256
+  const c = document.createElement('canvas')
+  c.width = w
+  c.height = h
+  const ctx = c.getContext('2d')
+
+  const g = ctx.createLinearGradient(0, 0, 0, h)
+  g.addColorStop(0, '#6a4420')
+  g.addColorStop(0.35, '#8a5a28')
+  g.addColorStop(0.7, '#5a3818')
+  g.addColorStop(1, '#3a2410')
+  ctx.fillStyle = g
+  ctx.fillRect(0, 0, w, h)
+
+  // 横箍
+  ctx.strokeStyle = '#d4a84a'
+  ctx.lineWidth = 6
+  for (const y of [28, h / 2, h - 28]) {
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(w, y)
+    ctx.stroke()
+  }
+  ctx.lineWidth = 2
+  ctx.strokeStyle = 'rgba(255,220,120,0.45)'
+  for (const y of [36, h / 2 + 8, h - 36]) {
+    ctx.beginPath()
+    ctx.moveTo(0, y)
+    ctx.lineTo(w, y)
+    ctx.stroke()
+  }
+
+  // 雷云纹单元
+  ctx.strokeStyle = 'rgba(232,200,100,0.55)'
+  ctx.lineWidth = 2.5
+  for (let i = 0; i < 8; i++) {
+    const x0 = i * (w / 8) + 18
+    const y0 = h * 0.28
+    ctx.beginPath()
+    ctx.moveTo(x0, y0)
+    ctx.lineTo(x0 + 18, y0)
+    ctx.lineTo(x0 + 18, y0 + 14)
+    ctx.lineTo(x0 + 36, y0 + 14)
+    ctx.lineTo(x0 + 36, y0 + 28)
+    ctx.lineTo(x0 + 14, y0 + 28)
+    ctx.lineTo(x0 + 14, y0 + 42)
+    ctx.stroke()
+
+    const y1 = h * 0.62
+    ctx.beginPath()
+    ctx.arc(x0 + 20, y1, 12, 0.2, Math.PI * 1.6)
+    ctx.stroke()
+  }
+
+  // 竖棱高光
+  for (let i = 0; i < 16; i++) {
+    const x = (i / 16) * w
+    ctx.fillStyle = i % 2 ? 'rgba(255,200,80,0.06)' : 'rgba(0,0,0,0.12)'
+    ctx.fillRect(x, 0, w / 32, h)
+  }
+
+  const tex = new THREE.CanvasTexture(c)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.wrapS = THREE.RepeatWrapping
+  tex.wrapT = THREE.ClampToEdgeWrapping
+  tex.needsUpdate = true
+  return tex
+}
+
+/** 经典八卦炉：三足 · 双耳 · 八卦盘 · 穹盖 · 炉火 */
+function createBaguaFurnace() {
+  const root = new THREE.Group()
+  root.name = 'baguaFurnace'
+
+  const bronze = new THREE.MeshStandardMaterial({
+    color: 0x8a5a28,
+    metalness: 0.72,
+    roughness: 0.32,
+    emissive: 0x3a1808,
+    emissiveIntensity: 0.18,
+  })
+  const bronzeDark = new THREE.MeshStandardMaterial({
+    color: 0x5a3818,
+    metalness: 0.68,
+    roughness: 0.4,
+    emissive: 0x2a1008,
+    emissiveIntensity: 0.12,
+  })
+  const gold = new THREE.MeshStandardMaterial({
+    color: 0xd4a84a,
+    metalness: 0.82,
+    roughness: 0.28,
+    emissive: 0x6a4010,
+    emissiveIntensity: 0.35,
+  })
+  const goldBright = new THREE.MeshStandardMaterial({
+    color: 0xffe080,
+    metalness: 0.85,
+    roughness: 0.22,
+    emissive: 0xaa7018,
+    emissiveIntensity: 0.45,
+  })
+
+  const bodyTex = makeFurnaceBodyTexture()
+  const baguaTex = makeBaguaTexture()
+
+  // 底座圆台
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(2.05, 2.35, 0.28, 32), bronzeDark)
+  base.position.y = 0.08
+  root.add(base)
+
+  const baseRim = new THREE.Mesh(new THREE.TorusGeometry(2.15, 0.06, 8, 40), gold)
+  baseRim.rotation.x = Math.PI / 2
+  baseRim.position.y = 0.22
+  root.add(baseRim)
+
+  // 三足（鼎足外撇）
+  for (let i = 0; i < 3; i++) {
+    const a = (i / 3) * Math.PI * 2 + Math.PI / 6
+    const legG = new THREE.Group()
+    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, 0.55, 8), bronzeDark)
+    foot.position.y = 0.22
+    foot.rotation.z = 0.18
+    legG.add(foot)
+    const pad = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), gold)
+    pad.scale.set(1.2, 0.45, 1.2)
+    pad.position.set(0.08, 0.02, 0)
+    legG.add(pad)
+    const claw = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.08, 0.28), bronze)
+    claw.position.set(0.16, 0.04, 0)
+    legG.add(claw)
+    legG.position.set(Math.sin(a) * 1.05, 0, Math.cos(a) * 1.05)
+    legG.rotation.y = a
+    root.add(legG)
+  }
+
+  // 炉腹（鼓腹）
+  const bellyMat = bronze.clone()
+  bellyMat.map = bodyTex
+  bellyMat.color = new THREE.Color(0xffffff)
+  const belly = new THREE.Mesh(new THREE.SphereGeometry(1.15, 28, 20, 0, Math.PI * 2, 0, Math.PI * 0.62), bellyMat)
+  belly.position.y = 1.05
+  belly.scale.set(1.05, 1.15, 1.05)
+  root.add(belly)
+
+  // 腹中横箍
+  for (const [y, r] of [
+    [0.72, 1.18],
+    [1.15, 1.22],
+    [1.55, 1.05],
+  ]) {
+    const band = new THREE.Mesh(new THREE.TorusGeometry(r, 0.045, 8, 40), gold)
+    band.rotation.x = Math.PI / 2
+    band.position.y = y
+    root.add(band)
+  }
+
+  // 八卦盘（腰部旋转）
+  const baguaRing = new THREE.Group()
+  baguaRing.name = 'baguaRing'
+  baguaRing.position.y = 1.35
+  const disc = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.55, 1.55, 0.08, 48),
+    new THREE.MeshStandardMaterial({
+      map: baguaTex,
+      color: 0xffffff,
+      metalness: 0.55,
+      roughness: 0.35,
+      emissive: 0x4a3010,
+      emissiveIntensity: 0.25,
+    }),
+  )
+  baguaRing.add(disc)
+  const discRim = new THREE.Mesh(new THREE.TorusGeometry(1.55, 0.05, 8, 48), goldBright)
+  discRim.rotation.x = Math.PI / 2
+  baguaRing.add(discRim)
+  // 盘上立起八卦短柱装饰
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2
+    const peg = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.18, 6), gold)
+    peg.position.set(Math.cos(a) * 1.48, 0.12, Math.sin(a) * 1.48)
+    baguaRing.add(peg)
+  }
+  root.add(baguaRing)
+
+  // 炉颈 / 炉口
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 1.0, 0.45, 24), bronze)
+  neck.position.y = 1.95
+  root.add(neck)
+  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.08, 10, 32), gold)
+  mouth.rotation.x = Math.PI / 2
+  mouth.position.y = 2.18
+  root.add(mouth)
+  const mouthInner = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.62, 0.62, 0.12, 24),
+    new THREE.MeshStandardMaterial({
+      color: 0x1a0800,
+      metalness: 0.3,
+      roughness: 0.7,
+      emissive: 0xff4a10,
+      emissiveIntensity: 0.55,
+    }),
+  )
+  mouthInner.position.y = 2.12
+  root.add(mouthInner)
+
+  // 双耳（兽环耳）
+  for (const side of [-1, 1]) {
+    const ear = new THREE.Group()
+    const arm = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.07, 8, 20, Math.PI), bronze)
+    arm.rotation.z = side > 0 ? -Math.PI / 2 : Math.PI / 2
+    arm.rotation.y = Math.PI / 2
+    arm.position.set(side * 1.22, 1.55, 0)
+    ear.add(arm)
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.04, 8, 16), gold)
+    ring.position.set(side * 1.48, 1.35, 0)
+    ring.rotation.y = Math.PI / 2
+    ear.add(ring)
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), goldBright)
+    knob.position.set(side * 1.22, 1.78, 0)
+    ear.add(knob)
+    root.add(ear)
+  }
+
+  // 穹盖
+  const lid = new THREE.Mesh(
+    new THREE.SphereGeometry(0.85, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.48),
+    bronze.clone(),
+  )
+  lid.material.map = bodyTex
+  lid.material.color = new THREE.Color(0xffffff)
+  lid.position.y = 2.22
+  root.add(lid)
+
+  // 盖棱（八瓣）
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2
+    const rib = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.72), gold)
+    rib.position.set(Math.cos(a) * 0.38, 2.48, Math.sin(a) * 0.38)
+    rib.rotation.y = -a
+    rib.rotation.x = 0.55
+    root.add(rib)
+  }
+
+  // 盖钮 + 宝珠
+  const finial = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 0.22, 10), gold)
+  finial.position.y = 2.78
+  root.add(finial)
+
+  const crystal = new THREE.Mesh(
+    new THREE.SphereGeometry(0.28, 16, 16),
+    new THREE.MeshStandardMaterial({
+      color: 0xff6a40,
+      metalness: 0.25,
+      roughness: 0.15,
+      emissive: 0xff4a18,
+      emissiveIntensity: 1.15,
+      transparent: true,
+      opacity: 0.95,
+    }),
+  )
+  crystal.position.y = 2.55
+  root.add(crystal)
+
+  // 盖顶小八卦盘
+  const topDisc = new THREE.Mesh(
+    new THREE.CircleGeometry(0.32, 24),
+    new THREE.MeshStandardMaterial({
+      map: baguaTex,
+      color: 0xffffff,
+      metalness: 0.5,
+      roughness: 0.35,
+      emissive: 0x503010,
+      emissiveIntensity: 0.3,
+      side: THREE.DoubleSide,
+    }),
+  )
+  topDisc.rotation.x = -Math.PI / 2
+  topDisc.position.y = 2.95
+  root.add(topDisc)
+
+  const coreLight = new THREE.PointLight(0xff8040, 2.8, 32, 2)
+  coreLight.position.set(0, 2.2, 0)
+  root.add(coreLight)
+
+  // 炉内火苗（多层）
+  const flame = new THREE.Group()
+  flame.position.y = 1.35
+  const flameMats = [
+    { color: 0xffd060, opacity: 0.5, s: 1, y: 0 },
+    { color: 0xff8020, opacity: 0.4, s: 0.72, y: 0.15 },
+    { color: 0xfff0a0, opacity: 0.35, s: 0.45, y: 0.28 },
+  ]
+  for (const f of flameMats) {
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(0.48 * f.s, 0.95 * f.s, 10, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: f.color,
+        transparent: true,
+        opacity: f.opacity,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+      }),
+    )
+    cone.position.y = f.y
+    flame.add(cone)
+  }
+  root.add(flame)
+
+  // 地面八卦阵纹（微光）
+  const floorBagua = new THREE.Mesh(
+    new THREE.CircleGeometry(2.6, 48),
+    new THREE.MeshBasicMaterial({
+      map: baguaTex,
+      transparent: true,
+      opacity: 0.35,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+    }),
+  )
+  floorBagua.rotation.x = -Math.PI / 2
+  floorBagua.position.y = 0.02
+  root.add(floorBagua)
+
+  root.userData.crystal = crystal
+  root.userData.coreLight = coreLight
+  root.userData.flame = flame
+  root.userData.baguaRing = baguaRing
+  root.userData.floorBagua = floorBagua
+
+  return root
 }
 
 /** 建筑外围：假山 · 小溪 · 绿植（长方形庭院） */

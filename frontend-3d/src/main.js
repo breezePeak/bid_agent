@@ -101,6 +101,18 @@ function handleHudAction(act) {
   if (!act || !app) return
   console.info('[3d] action', act)
   try {
+    if (act === 'mute') {
+      const muted = app.audio?.toggleMute?.()
+      buttonState.mute = !!muted
+      const muteBtn = document.querySelector('[data-act="mute"]')
+      if (muteBtn) {
+        muteBtn.textContent = muted ? '开声' : '静音'
+        muteBtn.classList.toggle('active', muted)
+      }
+      scheduleUi()
+      return
+    }
+    app.audio?.playUiTap?.()
     if (VIEW_ACTIONS[act]) {
       stopAutoOrbit()
       VIEW_ACTIONS[act]()
@@ -124,6 +136,7 @@ function handleHudAction(act) {
     if (act === 'wave') {
       // 强制播放水平灵力波；俯视才能看清圆环扩张
       app.danFx?.debugPulse?.()
+      app.audio?.playSpiritWave?.()
       app.focusTop?.()
     }
   } catch (err) {
