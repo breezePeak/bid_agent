@@ -201,6 +201,38 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(after["status"], "running")
             self.assertEqual(after["fencing_token"], before["fencing_token"] + 1)
 
+    def test_confirmed_remediation_can_reuse_blocked_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "blocked",
+                    },
+                    "issues.accept_risk": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "succeeded",
+                    },
+                },
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            before = gateway.store.operation(started.operation_id or "") or {}
+            remediation = _envelope(
+                context,
+                gateway.store,
+                "issues.accept_risk",
+                payload={"issue_id": "issue-1", "reason": "documented acceptance"},
+            )
+            action = gateway.propose(remediation, label="accept risk", risk="high")
+            accepted = gateway.confirm(action["confirmation_id"])
+            after = gateway.store.operation(accepted.operation_id or "") or {}
+
+            self.assertEqual(accepted.operation_id, started.operation_id)
+            self.assertEqual(after["status"], "succeeded")
+            self.assertEqual(after["fencing_token"], before["fencing_token"] + 1)
+
     def test_rewrite_requires_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

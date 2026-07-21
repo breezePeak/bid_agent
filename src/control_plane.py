@@ -187,6 +187,22 @@ class ControlStore:
         "workspace.archive",
         "workspace.clean",
     }
+    BLOCKED_REMEDIATION_KINDS = {
+        "repair.start",
+        "repair.issues",
+        "issues.accept_risk",
+        "rewrite.chapters",
+        "materials.update",
+        "materials.refill",
+        "materials.upload",
+        "materials.confirm_verification",
+        "review.update",
+        "document.apply_edit",
+        "workspace.set_profile",
+        "workspace.run_utility",
+        "workspace.archive",
+        "workspace.clean",
+    }
 
     def __init__(self, context: WorkspaceContext) -> None:
         self.context = context
@@ -1423,22 +1439,7 @@ class ControlStore:
 
                 active = self._current_operation(connection)
                 blocked_mutation_retry = (
-                    envelope.kind in {
-                        "repair.start",
-                        "repair.issues",
-                        "issues.accept_risk",
-                        "rewrite.chapters",
-                        "materials.update",
-                        "materials.refill",
-                        "materials.upload",
-                        "materials.confirm_verification",
-                        "review.update",
-                        "document.apply_edit",
-                        "workspace.set_profile",
-                        "workspace.run_utility",
-                        "workspace.archive",
-                        "workspace.clean",
-                    }
+                    envelope.kind in self.BLOCKED_REMEDIATION_KINDS
                     and active is not None
                     and str(active["status"]) == "blocked"
                 )
@@ -1473,29 +1474,20 @@ class ControlStore:
                         "materials.update": {"blocked"},
                         "materials.refill": {"blocked"},
                     }
-                    if previous_status not in allowed[envelope.kind]:
+                    allowed_statuses = {"blocked"} if blocked_mutation_retry else allowed[envelope.kind]
+                    if previous_status not in allowed_statuses:
                         raise ControlPlaneError(
                             "OPERATION_STATE_CONFLICT",
                             f"Operation 当前状态为 {previous_status}，不能执行 {envelope.kind}。",
                             details={"operation_id": operation_id, "status": previous_status},
                         )
-                    prepared_status = {
+                    prepared_status = "queued" if blocked_mutation_retry else {
                         "pipeline.pause": "pausing",
                         "pipeline.resume": "queued",
                         "pipeline.cancel": "cancelling",
                         "pipeline.skip_stage": previous_status,
-                        "repair.start": "queued",
-                        "rewrite.chapters": "queued",
-                        "materials.update": "queued",
-                        "materials.refill": "queued",
                     }[envelope.kind]
-                    if envelope.kind in {
-                        "pipeline.resume",
-                        "repair.start",
-                        "rewrite.chapters",
-                        "materials.update",
-                        "materials.refill",
-                    }:
+                    if envelope.kind == "pipeline.resume" or blocked_mutation_retry:
                         fencing_token += 1
                     connection.execute(
                         "UPDATE operations SET status = ?, fencing_token = ?, updated_at = ? WHERE operation_id = ?",
