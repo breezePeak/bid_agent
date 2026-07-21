@@ -6,6 +6,20 @@ from typing import Any, Literal
 
 RiskLevel = Literal["low", "medium", "high", "critical"]
 ToolKind = Literal["core", "utility", "analysis", "mutation", "export", "human_gate", "meta"]
+ToolOutcome = Literal[
+    "completed",
+    "partial_completed",
+    "blocked",
+    "failed",
+    "waiting_human",
+]
+
+# Outcomes that mean the tool ran without hard failure (step may still need re-eval).
+TOOL_OUTCOME_OK = frozenset({"completed", "partial_completed", "blocked", "waiting_human"})
+# Outcomes that mark a plan step as finished (not open).
+TOOL_OUTCOME_STEP_DONE = frozenset({"completed", "partial_completed"})
+# Outcomes that leave the step open / blocked for human or retry.
+TOOL_OUTCOME_STEP_OPEN = frozenset({"blocked", "waiting_human", "failed"})
 
 
 @dataclass(frozen=True)
@@ -85,6 +99,40 @@ class ToolResult:
     raw_refs: list[str] = field(default_factory=list)
     gate_results: list[dict[str, Any]] = field(default_factory=list)
     skipped: bool = False
+    # Layer-1: action outcome. Tool success must NOT imply Goal success.
+    # Empty string → derived from ok in __post_init__ (backward compatible).
+    outcome: str = ""
+    summary: str = ""
+    affected_items: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Backward compat: derive outcome from ok when caller only set ok/error.
+        raw = str(self.outcome or "").strip()
+        allowed = {
+            "completed",
+            "partial_completed",
+            "blocked",
+            "failed",
+            "waiting_human",
+        }
+        if raw not in allowed:
+            if self.skipped or self.ok:
+                self.outcome = "completed"
+            else:
+                self.outcome = "failed"
+        if not self.summary and self.summary_for_llm:
+            self.summary = str(self.summary_for_llm)[:500]
+        # Keep ok aligned with non-failure outcomes for legacy consumers.
+        if self.outcome in {"completed", "partial_completed"} and not self.ok and not self.error:
+            self.ok = True
+        if self.outcome == "failed" and self.ok:
+            self.ok = False
+
+    def step_done(self) -> bool:
+        """Whether plan step may be marked done (action finished, not goal)."""
+        return self.outcome in TOOL_OUTCOME_STEP_DONE or (
+            self.skipped and self.outcome != "failed"
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -100,4 +148,7 @@ class ToolResult:
             "raw_refs": list(self.raw_refs),
             "gate_results": list(self.gate_results),
             "skipped": self.skipped,
+            "outcome": self.outcome,
+            "summary": self.summary or self.summary_for_llm,
+            "affected_items": list(self.affected_items),
         }

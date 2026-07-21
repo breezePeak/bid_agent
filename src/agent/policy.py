@@ -49,9 +49,8 @@ def evaluate_tool_call(
     if spec.human_confirm_required and not user_confirmed:
         return PolicyDecision(False, f"{name} 需要人工确认", ask_human=True)
 
-    # Mutations: allow selection, but auto_execute false unless caller opts in
-    if not auto_execute and name in {"run_stage", "build_docx", "build-docx"}:
-        # still allow invoke only if dry_run; otherwise deny silent mutate from supervisor auto loop
+    # Mutations: block silent auto-loop, but honor explicit user confirmation
+    if not auto_execute and not user_confirmed and name in {"run_stage", "build_docx", "build-docx"}:
         return PolicyDecision(
             False,
             "变更类 tool 默认不自动执行，请用户确认后执行",

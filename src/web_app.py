@@ -2195,14 +2195,19 @@ def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool 
 
         resume_command = str(job.get("resume_command") or "")
         resume_started = False
-        if resume_command:
+        # Only auto-resume when fully clear — partial/failed jobs would hit the same gate again
+        should_resume = bool(resume_command) and terminal_status == "completed" and remaining_count == 0 and failed_count == 0
+        if should_resume:
             try:
+                # Prefer gate-aware API path when available so 409 messages surface in logs
                 resume_started = SUPERVISOR.start(
                     job_run_id,
                     root,
                     _run_sync,
                     start_command=resume_command,
                 )
+                if not resume_started:
+                    result["resume_error"] = "流水线已在运行或未能启动"
             except Exception as exc:
                 result["resume_error"] = str(exc)
         result["resume_command"] = resume_command
@@ -2212,8 +2217,15 @@ def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool 
             f"最小修复结束：已解决 {resolved_count} 项，仍存在 {remaining_count} 项，"
             f"需人工 {manual_count} 项，失败 {failed_count} 项。"
         )
-        if resume_command:
-            summary += f" 已从 {resume_command} 尝试恢复流水线一次。"
+        if should_resume:
+            if resume_started:
+                summary += f" 已从 {resume_command} 尝试恢复流水线一次。"
+            else:
+                summary += f" 未能自动从 {resume_command} 恢复流水线，请点击「继续流水线」。"
+                if result.get("resume_error"):
+                    summary += f"（{result['resume_error']}）"
+        elif resume_command and terminal_status != "completed":
+            summary += " 仍有未关闭问题，未自动恢复流水线。"
         if result_message and result_message not in summary:
             summary = f"{summary}\n{result_message}"
         try:
@@ -2230,7 +2242,7 @@ def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool 
             manual_count=manual_count,
             failed_count=failed_count,
             progress_percent=100,
-            resume_attempted=bool(resume_command),
+            resume_attempted=bool(should_resume),
             message=summary,
             result=result,
         )
@@ -2523,6 +2535,13 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
         confirmed_tools: list[str] = []
         if tool_name:
             confirmed_tools.append(tool_name)
+        # Also accept tool name from args when action.command is a stage command
+        stage_from_action = str(
+            action.get("command")
+            or (action.get("args") or {}).get("command")
+            or (action.get("args") or {}).get("start_command")
+            or ""
+        ).strip()
         user_confirmed = bool(action.get("user_confirmed")) or action_type in {
             "confirm_tool",
             "confirm_execute",
@@ -2533,6 +2552,105 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             label = str(action.get("label") or message or "")
             if not any(k in label for k in ("全部剩余", "全部操作", "所有剩余", "确认执行全部")):
                 user_confirmed = False
+
+        # Fast path: confirm run_stage / continue whole pipeline → start backend pipeline
+        # instead of re-entering supervisor confirm loop (product control, not chat).
+        resume_phrases = (
+            "继续",
+            "继续啊",
+            "继续吧",
+            "继续执行",
+            "继续进行",
+            "继续整个",
+            "继续整个流程",
+            "整体推进",
+            "一键跑完",
+            "跑完剩余",
+            "接着跑",
+            "继续流程",
+            "启动流水线",
+        )
+        msg_compact = re.sub(r"\s+", "", message or "")
+        phrase_continue = (
+            msg_compact in resume_phrases
+            or (
+                len(msg_compact) <= 20
+                and any(msg_compact == p or msg_compact.startswith(p) for p in resume_phrases)
+            )
+        )
+        confirm_run_stage = (
+            action_type == "confirm_tool"
+            and tool_name in {"run_stage", "run_pipeline_remaining", ""}
+        ) or (
+            action_type == "confirm_tool"
+            and stage_from_action in set(auto_run_commands())
+        )
+        take_pipeline_fast_path = (
+            confirm_run_stage
+            or action_type in {"auto_run", "start_pipeline"}
+            or (phrase_continue and action_type in {"", "confirm_tool", "auto_run"})
+            or (user_confirmed and tool_name in {"run_stage", "run_pipeline_remaining"})
+        )
+        if take_pipeline_fast_path:
+            auto_cmds = set(auto_run_commands())
+            start_cmd = stage_from_action if stage_from_action in auto_cmds else ""
+            if not start_cmd:
+                try:
+                    start_cmd = _minimal_repair_resume_command(root)
+                    if start_cmd not in auto_cmds:
+                        start_cmd = ""
+                except Exception:
+                    start_cmd = ""
+            if RUNNING or SUPERVISOR.is_running():
+                return _chat_response(
+                    root,
+                    run_id,
+                    "流水线已在运行，请稍候查看进度。",
+                    actions=[],
+                    intent="pipeline_control",
+                    triggered_auto_run=False,
+                    pipeline_already_running=True,
+                )
+            gate = _gate_can_proceed(start_cmd or "auto_run")
+            if not gate.get("can_proceed", True):
+                reply = str(gate.get("message") or "质量门禁阻断，禁止启动流水线")
+                repair_prompt, repair_actions = _persistent_minimal_repair_prompt(root)
+                if repair_prompt:
+                    reply = f"{reply}\n\n{repair_prompt}"
+                return _chat_response(
+                    root,
+                    run_id,
+                    reply,
+                    actions=repair_actions
+                    or [{"type": "auto_run", "label": "一键跑完剩余步骤"}],
+                    intent="pipeline_blocked",
+                    gate=gate,
+                )
+            started = SUPERVISOR.start(
+                run_id,
+                root,
+                _run_sync,
+                start_command=start_cmd or "",
+            )
+            if started:
+                stage_label = WORKFLOW_COMMAND_LABELS.get(start_cmd, start_cmd) if start_cmd else "当前进度"
+                return _chat_response(
+                    root,
+                    run_id,
+                    f"已启动后端流水线（从「{stage_label}」继续）。进度见下方执行计划。",
+                    actions=[],
+                    intent="pipeline_control",
+                    triggered_auto_run=True,
+                    triggered_command=start_cmd or "",
+                )
+            return _chat_response(
+                root,
+                run_id,
+                "流水线未能启动（可能已有调度线程）。请点「继续整个流程」重试。",
+                actions=[{"type": "auto_run", "label": "继续整个流程"}],
+                intent="pipeline_control",
+            )
+
         try:
             plan_result = await run_in_threadpool(
                 orchestrator_plan,

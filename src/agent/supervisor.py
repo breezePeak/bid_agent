@@ -435,10 +435,31 @@ def run_supervisor_turn(
         for k in ("补料完成", "材料已上传", "材料已补", "材料齐备", "继续上一个任务", "恢复刚才的任务")
     )
     confirm_all = bool(
-        user_confirmed
-        and not confirmed_tools
-        and any(k in (message or "") for k in ("确认执行全部", "确认全部剩余", "确认执行所有", "全部确认"))
+        (
+            user_confirmed
+            and not confirmed_tools
+            and any(k in (message or "") for k in ("确认执行全部", "确认全部剩余", "确认执行所有", "全部确认"))
+        )
+        or any(
+            k in (message or "")
+            for k in ("继续整个流程", "一键跑完", "跑完剩余", "继续全部", "确认执行全部")
+        )
     )
+    # Chat phrases like「继续」「继续进行」while waiting for confirm → grant next plan step tool
+    confirmed_tools = list(confirmed_tools or [])
+    if goal and resume_requested and not confirmed_tools:
+        goal_status_pre = str((goal or {}).get("status") or "")
+        if goal_status_pre in {"awaiting_confirmation", "in_progress", "pending"}:
+            try:
+                nxt = next_plan_step(root, goal)
+                nxt_tool = str((nxt or {}).get("tool") or "").strip()
+                if nxt_tool and not is_readonly_tool(nxt_tool):
+                    confirmed_tools.append(nxt_tool)
+                    user_confirmed = True
+            except Exception:
+                pass
+        if confirm_all:
+            user_confirmed = True
 
     # PR-1: tool_scope vs all_mutations — never expand single-tool confirm to all_mutations
     if goal and (confirmed_tools or user_confirmed):
@@ -683,22 +704,53 @@ def run_supervisor_turn(
                 err_retryable = (
                     bool(tool_result.error.retryable) if tool_result.error is not None else None
                 )
+                tool_outcome = str(getattr(tool_result, "outcome", "") or "")
+                if tool_outcome not in {
+                    "completed",
+                    "partial_completed",
+                    "blocked",
+                    "failed",
+                    "waiting_human",
+                }:
+                    tool_outcome = "completed" if tool_result.ok else "failed"
                 last_tool_result_dict = {
                     "tool": tool,
                     "ok": tool_result.ok,
                     "summary": observation[:500],
                     "error": err_code,
+                    "outcome": tool_outcome,
                 }
+                # tool_once empty-plan goals: mark that a tool actually ran
+                if str(goal.get("completion_mode") or "") == "tool_once":
+                    try:
+                        goal["tool_once_executed"] = True
+                        progress = dict(goal.get("progress") or {})
+                        progress["tools_executed"] = int(progress.get("tools_executed") or 0) + 1
+                        goal["progress"] = progress
+                        from agent.goal import save_goal
+
+                        save_goal(root, goal)
+                    except Exception:
+                        pass
                 if plan_step_id:
                     try:
+                        # Layer-2: outcome drives step; never promote Goal from tool.ok alone
+                        step_ok = tool_outcome in {"completed", "partial_completed"}
                         goal = handle_plan_step_result(
                             root,
                             goal,
                             plan_step_id,
-                            ok=bool(tool_result.ok),
-                            error="" if tool_result.ok else observation,
-                            error_code=err_code,
+                            ok=step_ok,
+                            error=(
+                                ""
+                                if step_ok
+                                else (observation or err_code or tool_outcome)
+                            ),
+                            error_code=err_code or (
+                                "blocked" if tool_outcome in {"blocked", "waiting_human"} else ""
+                            ),
                             retryable=err_retryable,
+                            outcome=tool_outcome,
                         )
                     except Exception:
                         pass
@@ -851,7 +903,7 @@ def run_supervisor_turn(
         if not executed and not is_readonly_tool(tool or "x"):
             break
 
-        # plan_completed / tool_once: stop after plan exhausted
+        # plan_completed / tool_once: stop after plan exhausted — only if evaluation says so
         if str(goal.get("completion_mode") or "") in {"plan_completed", "tool_once"}:
             nxt_after = next_plan_step(root, goal)
             if nxt_after is None and str(goal.get("status")) != "failed":
@@ -859,11 +911,23 @@ def run_supervisor_turn(
                     goal = reevaluate_goal(root, goal)
                 except Exception:
                     pass
-                if str(goal.get("status")) == "succeeded" or not plan_has_open_steps(goal):
-                    set_goal_status(root, "succeeded", goal=goal)
-                    goal = load_goal(root) or goal
+                # Never: plan empty ⇒ succeeded. Only reevaluate / set_goal_status (guarded).
+                if str(goal.get("status")) == "succeeded":
                     terminal_status = "succeeded"
                     break
+                if str(goal.get("status")) == "blocked_human":
+                    terminal_status = "blocked_human"
+                    break
+                if not plan_has_open_steps(goal):
+                    # Attempt guarded promotion; set_goal_status refuses without evaluation
+                    set_goal_status(root, "succeeded", goal=goal)
+                    goal = load_goal(root) or goal
+                    if str(goal.get("status")) == "succeeded":
+                        terminal_status = "succeeded"
+                        break
+                    terminal_status = str(goal.get("status") or "in_progress")
+                    if terminal_status in {"blocked_human", "failed"}:
+                        break
 
         if not budget.allow_next_step():
             terminal_status = "budget_exceeded"
@@ -904,7 +968,9 @@ def run_supervisor_turn(
             terminal_status = "succeeded"
         elif str(goal.get("status")) == "failed" and terminal_status == "in_progress":
             terminal_status = "failed"
-        # plan_completed safety net
+        elif str(goal.get("status")) == "blocked_human" and terminal_status == "in_progress":
+            terminal_status = "blocked_human"
+        # plan_completed safety net — still requires evaluate_goal_success via set_goal_status
         if (
             terminal_status == "in_progress"
             and str(goal.get("completion_mode") or "") in {"plan_completed", "tool_once"}
@@ -912,7 +978,16 @@ def run_supervisor_turn(
         ):
             set_goal_status(root, "succeeded", goal=goal)
             goal = load_goal(root) or goal
-            terminal_status = "succeeded"
+            terminal_status = str(goal.get("status") or terminal_status)
+            if terminal_status not in {
+                "succeeded",
+                "blocked_human",
+                "failed",
+                "budget_exceeded",
+                "blocked_policy",
+                "awaiting_confirmation",
+            }:
+                terminal_status = "in_progress"
         goal_id = str(goal.get("goal_id") or goal_id)
     except Exception:
         goal = load_goal(root)

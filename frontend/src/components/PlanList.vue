@@ -1,6 +1,6 @@
 <template>
   <div class="plan-list" :class="{ collapsed: planCollapsed }">
-    <div class="plan-list-header" @click="planCollapsed = !planCollapsed">
+    <div class="plan-list-header" @click="togglePlan" :title="planCollapsed ? '展开执行计划' : '折叠执行计划'">
       <span class="plan-list-arrow">{{ planCollapsed ? '▸' : '▾' }}</span>
       <span class="plan-list-title">执行计划</span>
       <span v-if="activeStep" class="plan-list-current" :class="'status-' + activeStep.status">
@@ -14,7 +14,8 @@
         <button v-if="running" class="btn btn-sm" @click="$emit('pause')">暂停</button>
       </div>
     </div>
-    <div v-if="recovery || (compliance && compliance.exists)" class="plan-list-summary">
+    <!-- summary only when expanded — collapsed must stay a single row -->
+    <div v-if="!planCollapsed && (recovery || (compliance && compliance.exists))" class="plan-list-summary">
       <div class="plan-summary-recovery" v-if="recovery">
         正在尝试修复：{{ recovery.reason || '分析失败原因' }} · {{ recovery.action || '自动重试' }}（{{ recovery.attempt || 0 }}/{{ recovery.max_attempts || 2 }}）
       </div>
@@ -96,9 +97,29 @@ const complianceTopHint = computed(() => {
   return '专项合规检查已完成'
 })
 
-const planCollapsed = ref(true)
-watch(() => props.forceExpand, (v) => { if (v) planCollapsed.value = false })
-watch(() => props.running || props.executing, (v) => { if (v) planCollapsed.value = false })
+const planCollapsed = ref(!(props.forceExpand || props.running || props.executing))
+const userPinnedCollapse = ref(false)
+
+function togglePlan() {
+  planCollapsed.value = !planCollapsed.value
+  // While running, remember user preference so forceExpand won't reopen it
+  if (props.running || props.executing || props.forceExpand) {
+    userPinnedCollapse.value = planCollapsed.value
+  }
+}
+
+watch(() => props.forceExpand, (v) => {
+  if (v && !userPinnedCollapse.value) planCollapsed.value = false
+})
+watch(() => props.running || props.executing, (v) => {
+  if (v) {
+    if (!userPinnedCollapse.value) planCollapsed.value = false
+  } else {
+    // Idle: always one-line bar
+    planCollapsed.value = true
+    userPinnedCollapse.value = false
+  }
+}, { immediate: true })
 
 const bodyRef = ref(null)
 const doneCount = computed(() => props.steps.filter(s => s.status === 'done').length)

@@ -108,47 +108,80 @@
     </div>
 
     <section
-      v-if="repairJob || repairExecuting"
+      v-if="showRepairCard"
       class="chat-repair-card"
-      :class="`repair-${repairStatus}`"
+      :class="[`repair-${repairStatus}`, { collapsed: repairCardCollapsed }]"
       aria-live="polite"
     >
-      <div class="chat-repair-header">
+      <div class="chat-repair-header" @click="repairCardCollapsed = !repairCardCollapsed">
         <div>
-          <div class="chat-repair-title">最小修复</div>
-          <div class="chat-repair-phase">{{ repairPhaseText }}</div>
+          <div class="chat-repair-title">
+            <span class="chat-repair-arrow">{{ repairCardCollapsed ? '▸' : '▾' }}</span>
+            最小修复
+          </div>
+          <div v-if="!repairCardCollapsed" class="chat-repair-phase">{{ repairPhaseText }}</div>
         </div>
-        <span class="chat-repair-status">{{ repairStatusText }}</span>
+        <div class="chat-repair-header-right" @click.stop>
+          <span class="chat-repair-status">{{ repairStatusText }}</span>
+          <button
+            v-if="repairCardCollapsed && repairStatus === 'completed' && repairJob && repairJob.resume_command"
+            type="button"
+            class="btn btn-sm btn-primary"
+            :disabled="interactionBusy || running || autoExecuting"
+            @click="continueAfterRepair"
+          >继续</button>
+          <button
+            v-if="canDismissRepairCard"
+            type="button"
+            class="chat-repair-close"
+            title="关闭"
+            :disabled="interactionBusy"
+            @click="dismissRepairCard"
+          >×</button>
+        </div>
       </div>
-      <div class="chat-repair-progress" role="progressbar" :aria-valuenow="repairProgress" aria-valuemin="0" aria-valuemax="100">
-        <span :style="{ width: `${repairProgress}%` }"></span>
-      </div>
-      <div class="chat-repair-counts">
-        <span>共 {{ repairCount('total_count') }} 项</span>
-        <span>自动 {{ repairCount('auto_count') }}</span>
-        <span>需人工 {{ repairCount('manual_count') }}</span>
-        <span class="ok">已解决 {{ repairCount('resolved_count') }}</span>
-        <span>剩余 {{ repairCount('remaining_count') }}</span>
-        <span v-if="repairCount('failed_count')" class="bad">失败 {{ repairCount('failed_count') }}</span>
-      </div>
-      <div v-if="repairJob && repairJob.message" class="chat-repair-message">{{ repairJob.message }}</div>
-      <div v-if="repairJob && repairJob.resume_command" class="chat-repair-resume">
-        后续节点：{{ stepLabel(repairJob.resume_command) }} · {{ repairJob.resume_attempted ? '已尝试恢复' : '等待恢复' }}
-      </div>
-      <div v-if="repairInterrupted" class="chat-repair-hint">
-        与上方聊天历史中的「目标已完成」可能不是同一时刻状态：修复任务在服务重启后被标记中断，请重新发起修复或继续流水线。
-      </div>
-      <div v-if="repairResultText || repairResultItems.length" class="chat-repair-result">
-        <strong>修复结果</strong>
-        <div v-if="repairResultText">{{ repairResultText }}</div>
-        <ul v-if="repairResultItems.length">
-          <li v-for="(item, ri) in repairResultItems" :key="item.issue_id || item.id || ri">{{ repairResultItemText(item, ri) }}</li>
-        </ul>
-      </div>
-      <div v-if="repairInterrupted || repairStatus === 'failed'" class="chat-repair-actions">
-        <button class="btn btn-sm btn-primary" :disabled="interactionBusy" @click="retryMinimalRepair">重新发起最小修复</button>
-        <button class="btn btn-sm" :disabled="interactionBusy" @click="dismissRepairCard">收起</button>
-      </div>
+      <template v-if="!repairCardCollapsed">
+        <div class="chat-repair-progress" role="progressbar" :aria-valuenow="repairProgress" aria-valuemin="0" aria-valuemax="100">
+          <span :style="{ width: `${repairProgress}%` }"></span>
+        </div>
+        <div class="chat-repair-counts">
+          <span>共 {{ repairCount('total_count') }} 项</span>
+          <span>自动 {{ repairCount('auto_count') }}</span>
+          <span>需人工 {{ repairCount('manual_count') }}</span>
+          <span class="ok">已解决 {{ repairCount('resolved_count') }}</span>
+          <span>剩余 {{ repairCount('remaining_count') }}</span>
+          <span v-if="repairCount('failed_count')" class="bad">失败 {{ repairCount('failed_count') }}</span>
+        </div>
+        <div v-if="repairJob && repairJob.message" class="chat-repair-message">{{ repairJob.message }}</div>
+        <div v-if="repairJob && repairJob.resume_command" class="chat-repair-resume">
+          后续节点：{{ stepLabel(repairJob.resume_command) }} · {{ repairJob.resume_attempted ? '已尝试恢复' : '等待恢复' }}
+        </div>
+        <div v-if="repairInterrupted" class="chat-repair-hint">
+          与上方聊天历史中的「目标已完成」可能不是同一时刻状态：修复任务在服务重启后被标记中断，请重新发起修复或继续流水线。
+        </div>
+        <div v-if="repairResultText || repairResultItems.length" class="chat-repair-result">
+          <strong>修复结果</strong>
+          <div v-if="repairResultText">{{ repairResultText }}</div>
+          <ul v-if="repairResultItems.length">
+            <li v-for="(item, ri) in repairResultItems" :key="item.issue_id || item.id || ri">{{ repairResultItemText(item, ri) }}</li>
+          </ul>
+        </div>
+        <div v-if="canDismissRepairCard || repairInterrupted || repairStatus === 'failed'" class="chat-repair-actions">
+          <button
+            v-if="repairInterrupted || repairStatus === 'failed' || repairStatus === 'partial'"
+            class="btn btn-sm btn-primary"
+            :disabled="interactionBusy"
+            @click="retryMinimalRepair"
+          >重新发起最小修复</button>
+          <button
+            v-if="repairStatus === 'completed' && repairJob && repairJob.resume_command"
+            class="btn btn-sm btn-primary"
+            :disabled="interactionBusy || running || autoExecuting"
+            @click="continueAfterRepair"
+          >继续流水线</button>
+          <button class="btn btn-sm" :disabled="interactionBusy" @click="dismissRepairCard">关闭</button>
+        </div>
+      </template>
     </section>
 
     <!-- quick actions -->
@@ -297,11 +330,14 @@ let tagSeq = 0
 
 const repairExecuting = ref(false)
 const repairJob = ref(null)
+const repairCardCollapsed = ref(false)
 let repairTimer = null
+let repairAutoHideTimer = null
 let repairPollInFlight = false
 let repairPollStarting = null
 let activeRepairJobId = ''
 let terminalRepairHandledId = ''
+let dismissedRepairJobId = ''
 
 const tags = ref([])
 const streamingIdx = ref(-1)
@@ -325,7 +361,6 @@ let lastMaterialsNotifyKey = ''
 const interactionBusy = computed(() => sending.value || repairExecuting.value)
 const ACTIVE_REPAIR_STATUSES = new Set(['running', 'revalidating'])
 const TERMINAL_REPAIR_STATUSES = new Set(['completed', 'partial', 'failed'])
-
 const repairStatus = computed(() => {
   const status = String(repairJob.value?.status || '').trim()
   return status || (repairExecuting.value ? 'running' : 'awaiting_confirmation')
@@ -342,6 +377,18 @@ const repairInterrupted = computed(() => {
   const phase = String(repairJob.value?.phase || '').trim()
   const msg = String(repairJob.value?.message || '')
   return phase === 'interrupted' || msg.includes('服务重启中断')
+})
+const showRepairCard = computed(() => {
+  if (repairExecuting.value) return true
+  if (!repairJob.value) return false
+  const id = String(repairJob.value.job_id || '').trim()
+  if (id && id === dismissedRepairJobId) return false
+  return true
+})
+const canDismissRepairCard = computed(() => {
+  if (!repairJob.value && !repairExecuting.value) return false
+  if (repairExecuting.value) return false
+  return TERMINAL_REPAIR_STATUSES.has(repairStatus.value) || repairInterrupted.value
 })
 const repairPhaseText = computed(() => {
   const phase = String(repairJob.value?.phase || '').trim()
@@ -451,8 +498,12 @@ const quickBtns = computed(() => {
       btns.push({ label: '定向改稿', type: 'dispatch_rewrite' })
       btns.push({ label: '全文审核', type: 'global_review' })
     } else {
+      // Prefer pipeline auto-run so "继续" actually advances the workflow
       btns.push({ label: `执行 ${nextPending.label}`, type: 'run_command', command: nextPending.command })
     }
+  }
+  if (!running.value && !autoExecuting.value && !planDone.value) {
+    btns.unshift({ label: '继续整个流程', type: 'auto_run' })
   }
   btns.push({ label: '评分覆盖', action: 'chat' })
   return btns
@@ -518,11 +569,30 @@ function stopRepairPolling() {
   repairTimer = null
 }
 
+function clearRepairAutoHide() {
+  if (repairAutoHideTimer) clearTimeout(repairAutoHideTimer)
+  repairAutoHideTimer = null
+}
+
 function dismissRepairCard() {
   stopRepairPolling()
+  clearRepairAutoHide()
+  const id = String(repairJob.value?.job_id || activeRepairJobId || '').trim()
+  if (id) dismissedRepairJobId = id
   repairJob.value = null
   repairExecuting.value = false
+  repairCardCollapsed.value = false
   activeRepairJobId = ''
+}
+
+function continueAfterRepair() {
+  const cmd = String(repairJob.value?.resume_command || '').trim()
+  dismissRepairCard()
+  if (cmd) {
+    nextTick(() => startAutoRun(cmd))
+  } else {
+    nextTick(() => startAutoRun())
+  }
 }
 
 function retryMinimalRepair() {
@@ -533,9 +603,28 @@ function retryMinimalRepair() {
   })
 }
 
+function scheduleRepairAutoHide(jobId) {
+  clearRepairAutoHide()
+  const id = String(jobId || '').trim()
+  if (!id) return
+  repairAutoHideTimer = setTimeout(() => {
+    if (String(repairJob.value?.job_id || '') === id && TERMINAL_REPAIR_STATUSES.has(String(repairJob.value?.status || ''))) {
+      dismissRepairCard()
+    }
+  }, 12000)
+}
+
 function applyRepairJob(job) {
   if (!job || typeof job !== 'object' || Array.isArray(job)) return false
   const incomingId = String(job.job_id || '').trim()
+  const status = String(job.status || '').trim()
+  // User closed a finished job — do not reopen from status poll
+  if (incomingId && incomingId === dismissedRepairJobId && !ACTIVE_REPAIR_STATUSES.has(status)) {
+    return false
+  }
+  if (incomingId && incomingId !== dismissedRepairJobId && ACTIVE_REPAIR_STATUSES.has(status)) {
+    dismissedRepairJobId = ''
+  }
   const previous = repairJob.value
   const previousId = String(previous?.job_id || '').trim()
   repairJob.value = previous && (!incomingId || !previousId || incomingId === previousId)
@@ -544,9 +633,18 @@ function applyRepairJob(job) {
   activeRepairJobId = incomingId || previousId || activeRepairJobId
   autoStarted.value = true
 
-  const status = String(repairJob.value?.status || '').trim()
-  repairExecuting.value = ACTIVE_REPAIR_STATUSES.has(status)
-  if (TERMINAL_REPAIR_STATUSES.has(status)) stopRepairPolling()
+  const nextStatus = String(repairJob.value?.status || '').trim()
+  repairExecuting.value = ACTIVE_REPAIR_STATUSES.has(nextStatus)
+  if (ACTIVE_REPAIR_STATUSES.has(nextStatus)) {
+    repairCardCollapsed.value = false
+    clearRepairAutoHide()
+  }
+  if (TERMINAL_REPAIR_STATUSES.has(nextStatus)) {
+    stopRepairPolling()
+    // Collapse detail after success so chat stays usable; allow close
+    if (nextStatus === 'completed') repairCardCollapsed.value = true
+    scheduleRepairAutoHide(activeRepairJobId)
+  }
   nextTick(scrollBottom)
   return true
 }
@@ -565,10 +663,24 @@ async function refreshCurrentRepairJob(expectedJobId = '') {
         terminalRepairHandledId = returnedId
         await loadChatHistory()
         await loadStatus()
-        if (running.value && !autoExecuting.value && !repairExecuting.value) {
-          autoExecuting.value = true
-          autoStarted.value = true
-          watchLiveRun()
+        // After successful repair, follow pipeline resume (backend may have started it)
+        const remaining = Number(job.remaining_count || 0)
+        const resumeCmd = String(job.resume_command || '').trim()
+        const resumeStarted = job.result?.resume_started
+        if (!repairExecuting.value && !autoExecuting.value) {
+          if (running.value) {
+            autoExecuting.value = true
+            autoStarted.value = true
+            watchLiveRun()
+          } else if (
+            String(job.status || '') === 'completed'
+            && remaining === 0
+            && resumeCmd
+            && resumeStarted === false
+          ) {
+            // Backend resume failed — offer automatic one-shot retry via start-pipeline
+            nextTick(() => startAutoRun(resumeCmd))
+          }
         }
       }
     }
@@ -899,10 +1011,65 @@ function isRewriteRequest(text) {
   return /@L\d+\s/.test(String(text || ''))
 }
 
+function isPipelineControlIntent(text) {
+  const t = String(text || '').replace(/\s+/g, '').trim()
+  if (!t) return false
+  // Explicit continue / run-all phrases — bypass chat confirm loop
+  if (/^(继续|继续啊|继续吧|继续执行|继续进行|继续进行啊|接着做|接着跑|继续跑|继续流程|继续整个|继续整个流程|整体推进|一键跑完|一键跑完剩余|跑完剩余|启动流水线|继续流水线)$/.test(t)) {
+    return true
+  }
+  if (t.length <= 16 && (t.startsWith('继续') || t.startsWith('接着'))) return true
+  if (/一键跑|跑完剩余|继续整个|整体推进|启动流水线/.test(t) && t.length <= 20) return true
+  return false
+}
+
+function isRetryFailedWriteIntent(text) {
+  const t = String(text || '').trim()
+  if (!t) return false
+  return /写作失败|失败的重新写|重写失败|重试写作|失败章节|将写作失败|补写失败|重新写失败/.test(t)
+    || (/重新写|再写一遍|重写/.test(t) && /失败|章节/.test(t))
+}
+
 function send(msg, { action = null } = {}) {
   if (interactionBusy.value) return false
   const text = String(msg || '').trim()
   if (!text && !action) return false
+
+  // Confirm / pipeline control: drive real pipeline, never re-enter confirm chat loop
+  if (!action && isPipelineControlIntent(text)) {
+    addMessage('user', text)
+    const nextPending = planSteps.value.find(s => s.status !== 'done')
+    const from = nextPending?.command || ''
+    if (autoExecuting.value || running.value) {
+      addMessage('system', '流水线已在运行，请稍候…')
+    } else {
+      addMessage('system', from ? `收到「${text}」，从 ${stepLabel(from)} 继续后端流水线…` : `收到「${text}」，启动后端流水线…`)
+      startAutoRun(from || null)
+    }
+    return true
+  }
+  // "将写作失败的重新写" → re-run write-all (not a fake goal success)
+  if (!action && isRetryFailedWriteIntent(text)) {
+    addMessage('user', text)
+    if (autoExecuting.value || running.value || repairExecuting.value) {
+      addMessage('system', '当前已有任务在运行，请稍候再重试失败章节。')
+      return true
+    }
+    addMessage('system', '收到重写失败章节请求：从「生成章节」阶段重跑（write-all）…')
+    // Prefer pipeline stage write-all; gate may still block — then prompt minimal repair
+    startAutoRun('write-all')
+    return true
+  }
+  if (action && (action.type === 'confirm_tool' || action.type === 'auto_run')) {
+    // Prefer direct pipeline for run_stage-like confirms that still come via send()
+    const tool = String(action.tool || '').trim()
+    if (tool === 'run_stage' || tool === 'run_pipeline_remaining' || action.type === 'auto_run') {
+      addMessage('user', text || action.label || '确认执行')
+      confirmSupervisorAction(action)
+      return true
+    }
+  }
+
   // The orchestrator persists both sides atomically. Direct block rewrites still use the legacy chat store.
   addMessage('user', text, [], { persist: !action && isRewriteRequest(text) })
   void doChat(text, { action })
@@ -1160,16 +1327,63 @@ function triggerAndAutoAdvance(cmd, label) {
     addMessage('system', '缺少可执行命令')
     return
   }
+  // Tool names are not pipeline stages — resume remaining pipeline instead
+  if (command === 'run_stage' || command === 'run_pipeline_remaining') {
+    addMessage('system', `${label || '继续'}：启动后端流水线…`)
+    if (!autoExecuting.value) startAutoRun()
+    return
+  }
   addMessage('system', `${label || ''}：${stepLabel(command)}`)
-  runCommand(command)
   if (!autoExecuting.value) startAutoRun(command)
 }
 
-/** Supervisor confirm buttons carry tool/args; re-enter orchestrator with user_confirmed. */
+function resolvePipelineCommand(act) {
+  const args = (act?.args && typeof act.args === 'object') ? act.args : {}
+  const candidates = [
+    args.command,
+    args.start_command,
+    act?.command,
+    act?.params?.command,
+  ].map(v => String(v || '').trim()).filter(Boolean)
+  const stages = new Set(workflowCommands())
+  for (const c of candidates) {
+    if (stages.has(c)) return c
+  }
+  // Fall back to first unfinished plan step
+  const nextPending = planSteps.value.find(s => s.status !== 'done' && s.status !== 'running')
+  if (nextPending?.command) return nextPending.command
+  return ''
+}
+
+/**
+ * Confirm buttons from Supervisor: prefer real pipeline APIs over chat re-entry.
+ * Chat re-entry was stuck in awaiting_confirmation loops for run_stage.
+ */
 function confirmSupervisorAction(act) {
   const tool = String(act.tool || '').trim()
+  const stageCmd = resolvePipelineCommand(act)
+  const label = act.label || (stageCmd ? `确认执行 ${stageCmd}` : '确认执行')
+
+  // Pipeline mutations → start backend pipeline directly (user already clicked confirm)
+  if (
+    tool === 'run_stage'
+    || tool === 'run_pipeline_remaining'
+    || stageCmd
+    || String(act.command || '') === 'run_stage'
+    || String(label).includes('确认执行 run_stage')
+  ) {
+    if (stageCmd) {
+      triggerAndAutoAdvance(stageCmd, label)
+    } else if (!autoExecuting.value) {
+      addMessage('system', `${label}：启动后端自动流水线…`)
+      startAutoRun()
+    }
+    return
+  }
+
+  // Other mutation tools still go through orchestrator with explicit confirm scope
   const command = String(act.command || act.args?.command || '').trim()
-  const text = act.label || (command ? `确认执行 ${command}` : '确认执行')
+  const text = label || (command ? `确认执行 ${command}` : '确认执行')
   send(text, {
     action: {
       type: 'confirm_tool',
@@ -1225,15 +1439,15 @@ function handleAction(act, sourceMessage = null) {
   }
   else if (act.type === 'confirm_tool') confirmSupervisorAction(act)
   else if (act.type === 'run_command') {
-    // Confirm buttons carry tool / user_confirmed; pipeline stage buttons only have command
+    // Always drive real pipeline for stage commands; never re-enter confirm loop
+    const cmd = resolvePipelineCommand(act) || String(act.command || '').trim()
     const tool = String(act.tool || '').trim()
-    const cmd = String(act.command || '').trim()
-    const needsConfirm = act.user_confirmed === true || Boolean(tool)
-      || String(act.label || '').includes('确认执行')
-    if (needsConfirm) {
+    if (tool === 'run_stage' || tool === 'run_pipeline_remaining' || String(act.label || '').includes('确认执行')) {
       confirmSupervisorAction(act)
-    } else {
-      triggerAndAutoAdvance(cmd, '执行')
+    } else if (cmd) {
+      triggerAndAutoAdvance(cmd, act.label || '执行')
+    } else if (!autoExecuting.value) {
+      startAutoRun()
     }
   }
   else if (act.type === 'retry_stage' || act.type === 'rerun_stage') {

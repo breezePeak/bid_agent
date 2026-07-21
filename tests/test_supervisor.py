@@ -32,6 +32,15 @@ class PolicyTests(unittest.TestCase):
         self.assertFalse(decision.allow)
         self.assertTrue(decision.ask_human)
 
+    def test_mutation_allowed_after_user_confirm(self) -> None:
+        decision = evaluate_tool_call(
+            "run_stage",
+            {"command": "parse-score"},
+            auto_execute=False,
+            user_confirmed=True,
+        )
+        self.assertTrue(decision.allow)
+
 
 class SupervisorTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -86,12 +95,46 @@ class SupervisorTests(unittest.TestCase):
                 status=status,
                 use_llm=False,
             )
-            # should not auto-execute mutation
+            # should not auto-execute mutation without prior goal confirmation scope
             executed_mutate = any(
                 s.get("executed") and s.get("tool") == "run_stage" for s in result.get("steps", [])
             )
             self.assertFalse(executed_mutate)
-            self.assertTrue(any(a.get("type") == "run_command" for a in result.get("actions", [])))
+            action_types = {a.get("type") for a in result.get("actions", [])}
+            self.assertTrue(action_types & {"run_command", "confirm_tool", "auto_run"})
+
+    def test_confirm_tool_executes_run_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            status = {
+                "next_step": {"command": "parse-score", "label": "解析评分"},
+                "workflow": [],
+            }
+            with mock.patch("agent.tool_runtime.invoke") as mocked_invoke:
+                from agent.types import ToolResult
+                from datetime import datetime, timezone
+
+                now = datetime.now(timezone.utc).isoformat()
+                mocked_invoke.return_value = ToolResult(
+                    ok=True,
+                    tool="run_stage",
+                    args={"command": "parse-score"},
+                    started_at=now,
+                    ended_at=now,
+                    summary_for_llm="parse-score done",
+                )
+                result = run_supervisor_turn(
+                    "确认执行 parse-score",
+                    root=root,
+                    status=status,
+                    use_llm=False,
+                    user_confirmed=True,
+                    confirmed_tools=["run_stage"],
+                )
+            executed = any(
+                s.get("executed") and s.get("tool") == "run_stage" for s in result.get("steps", [])
+            )
+            self.assertTrue(executed)
 
     def test_plan_with_supervisor_respects_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

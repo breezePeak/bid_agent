@@ -410,16 +410,23 @@ def soft_heal_inconsistencies(root: Path | None = None) -> dict[str, Any]:
     repair = stores.get("repair") or {}
     pipeline = stores.get("pipeline") or {}
 
-    # False goal success while workers / repair / pipeline still active
+    # False goal success while workers / repair / pipeline still active OR open blockers remain
+    open_blocks = int((stores.get("issues") or {}).get("open_blocks") or 0)
     if goal.get("status") == "succeeded" and (
-        activity.get("workers_active") or repair.get("active") or pipeline.get("busy")
+        activity.get("workers_active")
+        or repair.get("active")
+        or pipeline.get("busy")
+        or open_blocks > 0
     ):
         try:
             from agent.goal import load_goal, set_goal_status
 
             g = load_goal(root)
             if g:
-                reason = "运行时状态不一致：工位/修复/流水线仍活跃"
+                if open_blocks > 0:
+                    reason = f"运行时状态不一致：仍有 {open_blocks} 个开放阻断问题，目标不应为已完成"
+                else:
+                    reason = "运行时状态不一致：工位/修复/流水线仍活跃"
                 set_goal_status(root, "in_progress", blocked_reason=reason, goal=g)
                 actions.append("demote_goal_succeeded_to_in_progress")
         except Exception:

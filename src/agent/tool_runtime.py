@@ -32,6 +32,8 @@ def _fail(
     message: str,
     retryable: bool = False,
     suggested_tools: list[str] | None = None,
+    outcome: str = "failed",
+    affected_items: list[str] | None = None,
 ) -> ToolResult:
     return ToolResult(
         ok=False,
@@ -46,6 +48,11 @@ def _fail(
             suggested_tools=list(suggested_tools or []),
         ),
         summary_for_llm=f"{code}: {message}",
+        summary=f"{code}: {message}",
+        outcome=outcome if outcome in {
+            "completed", "partial_completed", "blocked", "failed", "waiting_human"
+        } else "failed",
+        affected_items=list(affected_items or []),
     )
 
 
@@ -490,22 +497,40 @@ def _execute_run_pipeline_remaining(root: Path, args: dict[str, Any], *, dry_run
             status = "complete"
             next_command = "export_preflight"
 
-    ok = status in {"complete", "paused", "blocked"}
+    # Layer-1 outcome: blocked is NOT step success; do not mark plan step done.
+    if status == "failed":
+        outcome = "failed"
+        ok = False
+    elif status == "blocked":
+        outcome = "blocked"
+        ok = True  # action observed block; not a hard crash
+    elif status == "paused":
+        outcome = "partial_completed"
+        ok = True
+    else:
+        outcome = "completed"
+        ok = True
     summary = (
         f"续跑状态={status} 起点={started_from} 完成={len(completed)} "
         f"原因={blocked_reason or '无'} 下一步={next_command or '无'}"
     )
     return ToolResult(
-        ok=ok if status != "failed" else False,
+        ok=ok,
         tool="run_pipeline_remaining",
         args=args,
         started_at=started,
         ended_at=_now(),
         summary_for_llm=summary[:2000],
+        summary=summary[:500],
+        outcome=outcome,
         error=(
             ToolError(code="runner_failed", message=last_error, retryable=True)
             if status == "failed"
-            else None
+            else (
+                ToolError(code="blocked", message=blocked_reason or "blocked", retryable=False)
+                if status == "blocked"
+                else None
+            )
         ),
         metrics={
             "status": status,
@@ -513,6 +538,7 @@ def _execute_run_pipeline_remaining(root: Path, args: dict[str, Any], *, dry_run
             "completed_stages": completed,
             "blocked_reason": blocked_reason,
             "next_command": next_command,
+            "outcome": outcome,
         },
     )
 
@@ -803,10 +829,30 @@ def _execute_chapter_tool(
         )
 
     touched = chapter_ids
+    failed_ids: list[str] = []
+    completed_ids: list[str] = []
     if isinstance(result, dict):
         touched = result.get("chapter_ids") or result.get("selected") or chapter_ids
         if not touched and result.get("ok_ids"):
             touched = result.get("ok_ids")
+        raw_failed = result.get("failed") or []
+        if isinstance(raw_failed, list):
+            for item in raw_failed:
+                if isinstance(item, dict):
+                    cid = str(item.get("chapter_id") or item.get("id") or "").strip()
+                else:
+                    cid = str(item or "").strip()
+                if cid:
+                    failed_ids.append(cid)
+        raw_completed = result.get("completed") or result.get("ok_ids") or []
+        if isinstance(raw_completed, list):
+            for item in raw_completed:
+                if isinstance(item, dict):
+                    cid = str(item.get("chapter_id") or item.get("id") or "").strip()
+                else:
+                    cid = str(item or "").strip()
+                if cid:
+                    completed_ids.append(cid)
 
     from agent.invalidation import mark_invalidated, stale_summary
 
@@ -817,22 +863,57 @@ def _execute_chapter_tool(
         source_stage=source_stage,
     )
 
-    summary = f"{tool_name} 完成。"
+    # Mutation chapter tools: action may finish while quality issues remain.
+    # rewrite/review → partial_completed so Goal must re-evaluate criteria.
+    if failed_ids and not completed_ids:
+        outcome = "failed"
+        ok = False
+        summary = f"{tool_name} 失败：{len(failed_ids)} 章失败。"
+    elif failed_ids:
+        outcome = "partial_completed"
+        ok = True
+        summary = f"{tool_name} 部分完成：成功 {len(completed_ids)}，失败 {len(failed_ids)}。"
+    elif tool_name in {"rewrite_chapters", "write_chapters"}:
+        # Local mutation only — never treat as goal success by itself.
+        outcome = "partial_completed"
+        ok = True
+        summary = f"{tool_name} 动作完成，需重新审核与评估目标。"
+    else:
+        outcome = "completed"
+        ok = True
+        summary = f"{tool_name} 完成。"
     if isinstance(result, dict):
         summary += f" result_keys={list(result.keys())[:8]}"
     summary += " " + stale_summary(root)
 
+    affected = [str(x) for x in (touched if isinstance(touched, list) else chapter_ids or [])]
     return ToolResult(
-        ok=True,
+        ok=ok,
         tool=tool_name,
         args=call_args,
         started_at=started,
         ended_at=_now(),
         summary_for_llm=summary[:2000],
+        summary=summary[:500],
+        outcome=outcome,
+        affected_items=affected or failed_ids or completed_ids,
+        error=(
+            ToolError(
+                code="chapter_partial_failed" if completed_ids else "runner_failed",
+                message=summary[:500],
+                retryable=True,
+                suggested_tools=["diagnose_failure", "review_chapters"],
+            )
+            if outcome == "failed"
+            else None
+        ),
         metrics={
             "chapter_ids": touched,
             "stale_count": len((stale.get("items") or {})),
             "runner_result": result if isinstance(result, dict) else {"raw": str(result)[:200]},
+            "failed_ids": failed_ids,
+            "completed_ids": completed_ids,
+            "outcome": outcome,
         },
         artifacts_written=["workspace/chapters"] if tool_name != "review_chapters" else ["workspace/reviews"],
     )

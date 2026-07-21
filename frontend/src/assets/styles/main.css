@@ -762,11 +762,15 @@ body {
   flex-shrink: 0; 
   border-top: 1px solid var(--color-border); 
   background: #f8fafc; 
-  padding: 12px; 
+  padding: 8px 12px; 
   max-height: 240px; 
   border-radius: var(--radius-lg);
   margin-bottom: 8px;
   box-shadow: inset 0 2px 4px rgba(0,0,0,0.02);
+}
+.chat-plan-area:has(.plan-list.collapsed) {
+  max-height: none;
+  padding: 6px 12px;
 }
 .plan-list { 
   display: flex; 
@@ -782,6 +786,7 @@ body {
   flex-shrink: 0; 
   cursor: pointer; 
   user-select: none; 
+  min-height: 28px;
 }
 .plan-list-header:hover { 
   opacity: 0.85; 
@@ -795,9 +800,14 @@ body {
 }
 .plan-list.collapsed { 
   height: auto; 
+  min-height: 0;
 }
 .plan-list.collapsed .plan-list-header { 
   margin-bottom: 0; 
+}
+.plan-list.collapsed .plan-list-body,
+.plan-list.collapsed .plan-list-summary {
+  display: none !important;
 }
 .plan-list-title { 
   font-size: 12px; 
@@ -1466,6 +1476,9 @@ body {
   color: #1e3a8a;
   box-shadow: 0 6px 18px rgba(37, 99, 235, 0.08);
 }
+.chat-repair-card.collapsed {
+  padding: 8px 12px;
+}
 .chat-repair-card.repair-completed {
   border-color: #bbf7d0;
   background: linear-gradient(135deg, #f0fdf4 0%, #f8fafc 100%);
@@ -1486,10 +1499,46 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.chat-repair-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.chat-repair-close {
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  color: inherit;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.75;
+}
+.chat-repair-close:hover:not(:disabled) {
+  opacity: 1;
+  background: rgba(15, 23, 42, 0.14);
+}
+.chat-repair-close:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 .chat-repair-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 700;
+}
+.chat-repair-arrow {
+  font-size: 10px;
+  opacity: 0.7;
+  width: 10px;
 }
 .chat-repair-phase {
   margin-top: 2px;

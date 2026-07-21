@@ -415,14 +415,26 @@ def handle_plan_step_result(
     error: str = "",
     error_code: str = "",
     retryable: bool | None = None,
+    outcome: str = "",
 ) -> dict[str, Any]:
-    """Record plan step outcome with retry policy (PR-4)."""
+    """Record plan step outcome with retry policy (PR-4).
+
+    Layer-2: Tool outcome drives step status. Tool success ≠ Goal success.
+    - completed / partial_completed → step done (goal still needs reevaluate)
+    - blocked / waiting_human → step blocked (goal may become blocked_human)
+    - failed → retry or step failed
+    """
     root = root or project_root()
     goal = goal or load_goal(root)
     if not goal:
         raise FileNotFoundError("no active goal")
     plan = goal.get("plan") if isinstance(goal.get("plan"), list) else []
     failed_hard = False
+    step_blocked = False
+    # Normalize outcome from ok when not provided
+    oc = str(outcome or "").strip()
+    if oc not in {"completed", "partial_completed", "blocked", "failed", "waiting_human"}:
+        oc = "completed" if ok else "failed"
     for step in plan:
         if not isinstance(step, dict):
             continue
@@ -434,11 +446,19 @@ def handle_plan_step_result(
             attempts += 1
             step["attempts"] = attempts
         max_attempts = max(1, int(step.get("max_attempts") or 2))
-        if ok:
+        step["last_outcome"] = oc
+        if oc in {"completed", "partial_completed"}:
             step["status"] = "done"
             step["completed_at"] = _now()
             step["last_error"] = ""
+        elif oc in {"blocked", "waiting_human"}:
+            step["status"] = "blocked"
+            step["last_error"] = (error or error_code or oc)[:500]
+            step["last_failed_at"] = _now()
+            step["last_error_code"] = str(error_code or oc)
+            step_blocked = True
         else:
+            # failed
             step["last_error"] = (error or error_code or "failed")[:500]
             step["last_failed_at"] = _now()
             step["last_error_code"] = str(error_code or "")
@@ -453,14 +473,25 @@ def handle_plan_step_result(
         break
     goal["plan"] = plan
     if failed_hard:
-        goal["status"] = "failed"
-        goal["blocked_reason"] = f"计划步骤失败: {step_id}"
-        goal["failed_step_id"] = str(step_id)
-        goal["recommended_actions"] = [
-            "查看失败详情",
-            "人工重试该步骤",
-            "修改配置后恢复",
-        ]
+        old_status = str(goal.get("status") or "pending")
+        if validate_goal_transition(old_status, "failed", context={"reason": "plan_step_failed"}):
+            goal["status"] = "failed"
+            goal["blocked_reason"] = f"计划步骤失败: {step_id}"
+            goal["failed_step_id"] = str(step_id)
+            goal["recommended_actions"] = [
+                "查看失败详情",
+                "人工重试该步骤",
+                "修改配置后恢复",
+            ]
+    elif step_blocked:
+        old_status = str(goal.get("status") or "pending")
+        if old_status not in {"cancelled", "failed", "budget_exceeded", "blocked_policy"}:
+            # Do not mark goal succeeded; leave for reevaluate / material path
+            if validate_goal_transition(
+                old_status, "blocked_human", context={"reason": error or "step_blocked"}
+            ):
+                goal["status"] = "blocked_human"
+                goal["blocked_reason"] = (error or f"计划步骤阻断: {step_id}")[:500]
     goal = refresh_plan_statuses(root, goal)
     save_goal(root, goal)
     return goal
@@ -491,6 +522,15 @@ def runtime_blocks_success(root: Path | None, goal: dict[str, Any] | None = None
     plan is only an execution guide (artifacts may already satisfy criteria).
     """
     root = root or project_root()
+    # open quality blockers — never declare success while pipeline is gate-blocked
+    try:
+        from agent.issues import open_block_issues
+
+        blocks = open_block_issues(root) or []
+        if blocks:
+            return f"仍有 {len(blocks)} 个开放阻断问题"
+    except Exception:
+        pass
     # active chapter workers
     try:
         from agent.activity import has_active_workers
@@ -527,21 +567,246 @@ def runtime_blocks_success(root: Path | None, goal: dict[str, Any] | None = None
     return ""
 
 
+def validate_goal_transition(
+    old_status: str,
+    new_status: str,
+    context: dict[str, Any] | None = None,
+) -> bool:
+    """Guard illegal Goal transitions. Tool success alone cannot force succeeded.
+
+    Layer-3 protection:
+    - in_progress → succeeded only when goal_success_evaluation is True
+    - blocked_human → succeeded only when materials/issues revalidated
+    """
+    old = str(old_status or "pending")
+    new = str(new_status or "")
+    ctx = context if isinstance(context, dict) else {}
+    if old == new:
+        return True
+    if new not in (
+        GOAL_TERMINAL
+        | GOAL_ACTIVE
+        | frozenset({"pending", "in_progress", "awaiting_confirmation"})
+    ):
+        return False
+    # Always allow demotion / non-success terminals from active states
+    if new in {"failed", "cancelled", "budget_exceeded", "blocked_policy", "blocked_human"}:
+        return True
+    if new in GOAL_ACTIVE or new == "pending":
+        return True
+    # Succeeded requires explicit evaluation
+    if new == "succeeded":
+        if old in {"cancelled", "failed", "budget_exceeded"}:
+            return False
+        if not bool(ctx.get("goal_success_evaluation")):
+            return False
+        if old == "blocked_human":
+            # Must re-validate materials/issues
+            if ctx.get("materials_revalidated") is False:
+                return False
+            if ctx.get("issues_revalidated") is False:
+                return False
+        return True
+    return True
+
+
+def evaluate_goal_success(
+    root: Path | None,
+    goal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Strict Layer-3 success evaluation. Never trusts Tool.ok alone.
+
+    Succeeds only when:
+    - all success_criteria pass (for criteria mode), OR plan-only modes meet plan+gates
+    - no open block issues
+    - no mandatory material missing (actionable goals)
+    - required plan steps are not failed (blocked steps prevent success)
+    """
+    root = root or project_root()
+    goal = goal or load_goal(root)
+    if not goal:
+        return {
+            "ok": False,
+            "reason": "no_goal",
+            "all_criteria_ok": False,
+            "runtime_block": "no_goal",
+            "plan_all_done": False,
+        }
+    criteria = goal.get("success_criteria") if isinstance(goal.get("success_criteria"), list) else []
+    results = evaluate_criteria(root, criteria)
+    all_ok = all(bool(r.get("ok")) for r in results) if results else False
+    completion_mode = str(goal.get("completion_mode") or "criteria")
+    plan = goal.get("plan") if isinstance(goal.get("plan"), list) else []
+    plan_steps = [s for s in plan if isinstance(s, dict)]
+    # Non-empty plan: all steps done/skipped. Empty plan is NOT auto-done
+    # (tool_once empty plan succeeds only after a tool executed — see below).
+    plan_all_done = bool(plan_steps) and all(
+        str(s.get("status") or "pending") in {"done", "skipped"} for s in plan_steps
+    )
+    plan_has_failed = any(str(s.get("status") or "") == "failed" for s in plan_steps)
+    plan_has_blocked = any(str(s.get("status") or "") == "blocked" for s in plan_steps)
+    runtime_block = runtime_blocks_success(root, goal)
+
+    objectives = [
+        str(o.get("type") or "")
+        for o in (goal.get("normalized_objectives") or [])
+        if isinstance(o, dict)
+    ]
+    types = set(objectives)
+    # status/diagnose/chat goals report issues; open blocks must not block their completion
+    diagnostic_only = (not types) or types.issubset({"status", "diagnose", "chat"})
+    actionable = any(
+        t in types
+        for t in ("fix_coverage", "fix_compliance", "export", "full_generate", "fix_chapter")
+    )
+
+    open_blocks_reason = ""
+    blocks: list[Any] = []
+    try:
+        from agent.issues import open_block_issues
+
+        blocks = open_block_issues(root) or []
+        if blocks and not diagnostic_only:
+            open_blocks_reason = f"仍有 {len(blocks)} 个开放阻断问题"
+    except Exception:
+        blocks = []
+
+    material_reason = ""
+    constraints = goal.get("constraints") if isinstance(goal.get("constraints"), dict) else {}
+    if actionable and constraints.get("block_on_missing_materials", True):
+        material_reason = detect_human_block(root, goal) or ""
+
+    # runtime_blocks_success already covers open blocks / workers / materials
+    # For diagnostic-only goals, ignore open-block portion of runtime_block
+    effective_runtime_block = runtime_block
+    if diagnostic_only and runtime_block and "开放阻断" in runtime_block:
+        effective_runtime_block = ""
+
+    tool_once_executed = bool(goal.get("tool_once_executed")) or int(
+        (goal.get("progress") or {}).get("tools_executed") or 0
+    ) > 0
+
+    ok = False
+    reason = ""
+    if plan_has_failed and not diagnostic_only:
+        ok = False
+        reason = "plan_step_failed"
+    elif plan_has_blocked and not diagnostic_only:
+        ok = False
+        reason = "plan_step_blocked"
+    elif open_blocks_reason:
+        ok = False
+        reason = open_blocks_reason
+    elif material_reason:
+        ok = False
+        reason = material_reason
+    elif effective_runtime_block and not diagnostic_only:
+        ok = False
+        reason = effective_runtime_block
+    elif completion_mode == "criteria":
+        # Empty criteria: never auto-succeed on tool alone
+        if not criteria:
+            ok = False
+            reason = "no_success_criteria"
+        elif all_ok and not open_blocks_reason and not material_reason and not effective_runtime_block:
+            ok = True
+            reason = "criteria_met"
+        else:
+            ok = False
+            reason = (
+                open_blocks_reason
+                or material_reason
+                or effective_runtime_block
+                or "criteria_not_met"
+            )
+    elif completion_mode in {"plan_completed", "tool_once"}:
+        if plan_steps:
+            steps_ok = plan_all_done
+        else:
+            # Empty plan: only after a real tool ran (status/diagnose one-shot).
+            # Prevents create_goal → immediate succeeded before any tool.
+            steps_ok = completion_mode == "tool_once" and tool_once_executed
+        if steps_ok and not open_blocks_reason and not material_reason:
+            if diagnostic_only or not effective_runtime_block:
+                ok = True
+                reason = "plan_completed"
+            else:
+                ok = False
+                reason = effective_runtime_block
+        else:
+            ok = False
+            reason = "plan_not_complete" if not steps_ok else (open_blocks_reason or material_reason)
+    else:
+        ok = False
+        reason = "unknown_completion_mode"
+
+    return {
+        "ok": bool(ok),
+        "reason": reason,
+        "all_criteria_ok": bool(all_ok),
+        "criteria_results": results,
+        "runtime_block": runtime_block or open_blocks_reason or material_reason,
+        "plan_all_done": plan_all_done,
+        "plan_has_failed": plan_has_failed,
+        "plan_has_blocked": plan_has_blocked,
+        "open_block_count": len(blocks) if isinstance(blocks, list) else 0,
+        "material_block": material_reason,
+        "completion_mode": completion_mode,
+        "goal_success_evaluation": bool(ok),
+        "materials_revalidated": True,
+        "issues_revalidated": True,
+    }
+
+
 def set_goal_status(
     root: Path | None,
     status: str,
     *,
     blocked_reason: str = "",
     goal: dict[str, Any] | None = None,
+    context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     root = root or project_root()
     goal = goal or load_goal(root)
     if not goal:
         raise FileNotFoundError("no active goal")
-    goal["status"] = status
+    old_status = str(goal.get("status") or "pending")
+    new_status = str(status or "")
+    ctx = dict(context or {})
+    # Succeeded must go through evaluate_goal_success unless caller already proved it
+    if new_status == "succeeded" and not ctx.get("goal_success_evaluation"):
+        evaluation = evaluate_goal_success(root, goal)
+        ctx.update(evaluation)
+        if not evaluation.get("ok"):
+            # Refuse illegal promotion; keep / set non-success status
+            if evaluation.get("material_block") or (
+                "材料" in str(evaluation.get("reason") or "")
+                or "缺少" in str(evaluation.get("reason") or "")
+            ):
+                new_status = "blocked_human"
+                blocked_reason = blocked_reason or str(evaluation.get("reason") or "")
+            elif evaluation.get("open_block_count"):
+                new_status = "in_progress"
+                blocked_reason = blocked_reason or str(evaluation.get("reason") or "")
+            elif evaluation.get("plan_has_failed"):
+                new_status = "failed"
+                blocked_reason = blocked_reason or str(evaluation.get("reason") or "")
+            else:
+                new_status = "in_progress" if old_status != "blocked_human" else old_status
+                blocked_reason = blocked_reason or str(evaluation.get("reason") or "")
+            goal["status"] = new_status
+            if blocked_reason:
+                goal["blocked_reason"] = blocked_reason
+            goal["last_success_evaluation"] = evaluation
+            save_goal(root, goal)
+            return goal
+    if not validate_goal_transition(old_status, new_status, context=ctx):
+        # Illegal transition: do not apply
+        return goal
+    goal["status"] = new_status
     if blocked_reason:
         goal["blocked_reason"] = blocked_reason
-    elif status not in {"blocked_human", "blocked_policy", "budget_exceeded", "failed"}:
+    elif new_status not in {"blocked_human", "blocked_policy", "budget_exceeded", "failed"}:
         goal["blocked_reason"] = ""
     save_goal(root, goal)
     return goal
@@ -722,11 +987,22 @@ def explicit_resume_intent(message: str) -> bool:
         "恢复任务",
         "继续剩余",
         "材料齐备",
+        "继续整个流程",
+        "继续整个",
+        "继续流程",
+        "继续进行",
+        "继续跑",
+        "接着跑",
+        "一键跑完",
+        "跑完剩余",
     )
     if any(k in text for k in keywords):
         return True
     # short resume cues when not clearly a new intent
-    if text in {"继续", "恢复", "接着做", "接着跑", "继续执行"}:
+    if text in {"继续", "恢复", "接着做", "接着跑", "继续执行", "继续啊", "继续吧", "继续进行啊"}:
+        return True
+    # "继续…" / "继续xxx" short free-form (avoid matching unrelated long questions)
+    if len(text) <= 16 and text.startswith("继续"):
         return True
     return False
 
@@ -763,14 +1039,15 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
         goal["success_criteria"] = normalized_criteria
         criteria = normalized_criteria
 
-    results = evaluate_criteria(root, criteria)
-    all_ok = all(bool(r.get("ok")) for r in results) if results else False
-    status = str(goal.get("status") or "pending")
-    completion_mode = str(goal.get("completion_mode") or "criteria")
-
     # refresh plan progress first
     if isinstance(goal.get("plan"), list) and goal.get("plan"):
         goal = refresh_plan_statuses(root, goal)
+
+    results = evaluate_criteria(root, criteria)
+    all_ok = all(bool(r.get("ok")) for r in results) if results else False
+    old_status = str(goal.get("status") or "pending")
+    status = old_status
+    completion_mode = str(goal.get("completion_mode") or "criteria")
 
     plan = goal.get("plan") if isinstance(goal.get("plan"), list) else []
     plan_all_done = bool(plan) and all(
@@ -781,8 +1058,12 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
     plan_has_failed = any(
         isinstance(s, dict) and str(s.get("status") or "") == "failed" for s in plan
     )
+    plan_has_blocked = any(
+        isinstance(s, dict) and str(s.get("status") or "") == "blocked" for s in plan
+    )
 
     runtime_block = runtime_blocks_success(root, goal)
+    success_eval = evaluate_goal_success(root, goal)
 
     # PR-7: one-shot resume_context — re-evaluate materials and clear after one pass
     resume_ctx = goal.get("resume_context") if isinstance(goal.get("resume_context"), dict) else None
@@ -791,7 +1072,7 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
 
     if status in {"cancelled", "failed", "budget_exceeded", "blocked_policy"}:
         pass
-    elif plan_has_failed and completion_mode in {"plan_completed", "criteria"}:
+    elif plan_has_failed and completion_mode in {"plan_completed", "criteria", "tool_once"}:
         status = "failed"
         failed_steps = [
             str(s.get("step_id") or "")
@@ -801,17 +1082,24 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
         goal["blocked_reason"] = f"计划步骤失败: {','.join(failed_steps[:5])}"
         if failed_steps:
             goal["failed_step_id"] = failed_steps[0]
-    elif completion_mode == "plan_completed" and plan_all_done:
+    elif plan_has_blocked:
+        # Material / quality block on a step — not success
+        block_reason = (
+            str(success_eval.get("material_block") or "")
+            or str(success_eval.get("runtime_block") or "")
+            or "计划步骤被阻断"
+        )
+        status = "blocked_human"
+        goal["blocked_reason"] = block_reason
+    elif success_eval.get("ok") and validate_goal_transition(
+        old_status,
+        "succeeded",
+        context=success_eval,
+    ):
+        # Only path to succeeded: strict evaluate_goal_success
         status = "succeeded"
         goal["blocked_reason"] = ""
         all_ok = True
-    elif completion_mode == "tool_once" and plan_all_done:
-        status = "succeeded"
-        goal["blocked_reason"] = ""
-        all_ok = True
-    elif completion_mode == "criteria" and all_ok and not runtime_block:
-        status = "succeeded"
-        goal["blocked_reason"] = ""
     elif completion_mode == "criteria" and all_ok and runtime_block:
         if "材料" in runtime_block or "缺少" in runtime_block:
             status = "blocked_human"
@@ -823,11 +1111,18 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
         pass
     elif status == "blocked_human":
         mat = detect_human_block(root, goal)
-        if not mat:
-            status = "in_progress"
-            goal["blocked_reason"] = runtime_block if runtime_block else ""
+        if not mat and not success_eval.get("open_block_count"):
+            # May leave blocked_human only after materials cleared; success still needs eval
+            if success_eval.get("ok") and validate_goal_transition(
+                "blocked_human", "succeeded", context=success_eval
+            ):
+                status = "succeeded"
+                goal["blocked_reason"] = ""
+            else:
+                status = "in_progress"
+                goal["blocked_reason"] = runtime_block if runtime_block else ""
         else:
-            goal["blocked_reason"] = mat
+            goal["blocked_reason"] = mat or str(success_eval.get("reason") or goal.get("blocked_reason") or "")
     else:
         objectives = [
             str(o.get("type") or "")
@@ -855,26 +1150,42 @@ def reevaluate_goal(root: Path | None, goal: dict[str, Any] | None = None) -> di
             status = "in_progress"
             if runtime_block:
                 goal["blocked_reason"] = runtime_block
+            elif success_eval.get("open_block_count"):
+                goal["blocked_reason"] = str(success_eval.get("reason") or "")
 
     # clear one-shot resume context after reevaluation
     if resume_ctx is not None:
         goal.pop("resume_context", None)
 
-    # plan_completed success without criteria list
+    # Final guard: never keep succeeded if evaluation fails
+    if status == "succeeded" and not success_eval.get("ok"):
+        if success_eval.get("material_block") or "材料" in str(success_eval.get("reason") or ""):
+            status = "blocked_human"
+        elif success_eval.get("plan_has_failed"):
+            status = "failed"
+        else:
+            status = "in_progress"
+        goal["blocked_reason"] = str(success_eval.get("reason") or goal.get("blocked_reason") or "")
+
     if completion_mode in {"plan_completed", "tool_once"} and status == "succeeded":
         all_ok = True
 
     goal["status"] = status
     goal["criteria_results"] = results
+    goal["last_success_evaluation"] = {
+        "ok": bool(success_eval.get("ok")),
+        "reason": success_eval.get("reason"),
+        "open_block_count": success_eval.get("open_block_count"),
+    }
     goal["all_criteria_ok"] = bool(
-        (all_ok and not runtime_block)
+        (all_ok and not runtime_block and not success_eval.get("open_block_count"))
         if completion_mode == "criteria"
         else (status == "succeeded")
     )
     goal["criteria_ok_raw"] = all_ok if completion_mode == "criteria" else (status == "succeeded")
-    if runtime_block and status != "succeeded":
+    if (runtime_block or success_eval.get("runtime_block")) and status != "succeeded":
         progress = dict(goal.get("progress") or {})
-        progress["runtime_block"] = runtime_block
+        progress["runtime_block"] = runtime_block or success_eval.get("runtime_block")
         goal["progress"] = progress
     if results:
         ok_n = sum(1 for r in results if r.get("ok"))
@@ -1105,9 +1416,29 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
     }
 
     wants_export = any(k in text for k in ("出 Word", "生成 Word", "导出", "final.docx", "出稿", "生成docx", "生成 docx"))
-    wants_rewrite = any(k in text for k in ("改第", "重写", "改稿", "只修", "定向"))
+    wants_rewrite = any(k in text for k in ("改第", "重写", "改稿", "只修", "定向", "重新写", "再写一遍", "重新生成"))
+    # Retry failed chapter writing — must win over bare "失败" status/diagnose heuristics
+    wants_retry_failed_write = any(
+        k in text
+        for k in (
+            "写作失败",
+            "写失败",
+            "章节失败",
+            "失败的重新写",
+            "失败章节",
+            "重新写失败",
+            "重写失败",
+            "失败的重新",
+            "将写作失败",
+            "写作失败的",
+            "重试写作",
+            "补写失败",
+        )
+    )
     wants_full = any(k in text for k in ("一键生成", "全部跑完", "全量生成", "从头生成"))
-    wants_status = any(k in text for k in ("状态", "进度", "诊断", "失败"))
+    # Do NOT treat bare "失败" as status — it appears in "写作失败" repair requests
+    wants_status = any(k in text for k in ("状态", "进度", "诊断", "当前进度", "怎么样了")) and not wants_retry_failed_write
+    wants_diagnose = any(k in text for k in ("诊断", "为啥挂", "怎么挂的", "失败原因", "错误原因")) and not wants_retry_failed_write
     wants_coverage = any(k in text for k in ("覆盖率", "评分点", "未覆盖", "补齐评分", "覆盖缺口", "补齐所有可自动", "补齐评分点"))
     wants_compliance = any(k in text for k in ("合规", "废标", "blocking"))
     no_price = any(
@@ -1157,10 +1488,84 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
                 {"check": "no_stale", "paths": ["outputs/final.md", "outputs/final.docx"]},
             ]
         )
-    elif wants_rewrite and chapter_ids:
-        objectives.append({"type": "fix_chapter", "chapter_ids": chapter_ids})
-        constraints["chapter_ids"] = chapter_ids
-        criteria.append({"check": "chapters_written", "chapter_ids": chapter_ids})
+    elif wants_retry_failed_write or (wants_rewrite and (chapter_ids or "失败" in text or "全部" in text)):
+        # Resolve failed chapter ids from open block issues / activity when user did not list them
+        resolved_ids = list(chapter_ids)
+        if not resolved_ids or wants_retry_failed_write:
+            try:
+                from agent.issues import open_block_issues
+                from utils import project_root as _pr
+
+                for iss in open_block_issues(_pr()) or []:
+                    if not isinstance(iss, dict):
+                        continue
+                    code = str(iss.get("code") or "")
+                    if code not in {
+                        "WRITE_CHAPTER_FAILED",
+                        "CHAPTER_REVIEW_BLOCKER",
+                        "MISSING_CHAPTER",
+                        "CHAPTER_CONFLICT",
+                    } and "写作失败" not in str(iss.get("title") or ""):
+                        # still accept write/review related blocks with chapter targets
+                        if str(iss.get("stage_id") or "") not in {
+                            "write_chapters",
+                            "review_fix_chapters",
+                        }:
+                            continue
+                    for tid in iss.get("target_ids") or []:
+                        cid = str(tid or "").strip()
+                        if cid and cid not in resolved_ids:
+                            resolved_ids.append(cid)
+                    title = str(iss.get("title") or "")
+                    for m in re.findall(r"章节\s*([0-9]+(?:\.[0-9]+)*)", title):
+                        if m and m not in resolved_ids:
+                            resolved_ids.append(m)
+            except Exception:
+                pass
+            try:
+                from agent.activity import failed_chapter_ids
+                from utils import project_root as _pr2
+
+                for cid in failed_chapter_ids(_pr2()) or []:
+                    c = str(cid or "").strip()
+                    if c and c not in resolved_ids:
+                        resolved_ids.append(c)
+            except Exception:
+                pass
+        if not resolved_ids:
+            # Fall back to re-running write-all stage via full-ish plan
+            objectives.append({"type": "full_generate"})
+            criteria.extend(
+                [
+                    {"check": "no_open_blocks"},
+                    {"check": "artifact_exists", "path": "workspace/chapters"},
+                ]
+            )
+            plan = [
+                {
+                    "step_id": "write_chapters",
+                    "tool": "write_chapters",
+                    "args": {},
+                    "depends_on": [],
+                    "run_if": {},
+                    "status": "pending",
+                    "attempts": 0,
+                    "max_attempts": 2,
+                    "label": "重试章节写作",
+                }
+            ]
+            return {
+                "objectives": objectives,
+                "success_criteria": criteria,
+                "constraints": constraints,
+                "chapter_ids": [],
+                "plan": plan,
+                "completion_mode": "criteria",
+            }
+        objectives.append({"type": "fix_chapter", "chapter_ids": resolved_ids})
+        constraints["chapter_ids"] = resolved_ids
+        criteria.append({"check": "chapters_written", "chapter_ids": resolved_ids})
+        criteria.append({"check": "no_open_blocks"})
         if wants_export:
             objectives.append({"type": "export", "targets": ["md", "docx"]})
             criteria.extend(
@@ -1201,13 +1606,12 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
             "plan": plan,
             "completion_mode": "criteria",
         }
+    elif wants_diagnose:
+        objectives.append({"type": "diagnose"})
+        criteria = []
     elif wants_status:
-        if any(k in text for k in ("诊断", "失败", "错误", "为啥挂")):
-            objectives.append({"type": "diagnose"})
-            criteria = []
-        else:
-            objectives.append({"type": "status"})
-            criteria = []
+        objectives.append({"type": "status"})
+        criteria = []
     else:
         objectives.append({"type": "chat"})
         criteria = []
