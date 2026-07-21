@@ -523,3 +523,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B37 | 2026-07-21 | Pipeline 运行日志新增每工作区 `runtime_logs.jsonl` 持久化与显式 workspace_id 的查询/SSE 路径，主聊天窗口不再订阅进程级混合日志；运行事件也按路径工作区读取，旧全局日志接口保留为兼容视图。 |
 | V2.0-B38 | 2026-07-21 | 主工作区列表改用不含进程级 active workspace 的 V2 Catalog，页面切换仅改变客户端上下文，不再调用 `/api/select-run`；归档改为直接提交 V2 `workspace.archive` Command，并清理未使用的旧 Agent 工具 API 封装。 |
 | V2.0-B39 | 2026-07-21 | 工作区创建新增 V2 Catalog POST，创建与 ACL owner 分配不再改写进程级 ACTIVE_RUN 或 `.active_run`；主创建对话框切换到新接口，旧 `/api/start-run` 继续保留选择 active workspace 的 V1 兼容语义。 |
+| V2.0-B40 | 2026-07-21 | 新建工作区所需的项目类型选项拆为无工作区状态的 V2 Catalog 接口，创建对话框不再通过 `/api/project-profile` 隐式读取 ACTIVE_RUN 的当前项目配置；旧接口继续服务 V1 当前工作区视图。 |

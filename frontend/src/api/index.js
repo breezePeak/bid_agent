@@ -39,12 +39,8 @@ export function createRun(name, projectType, expectedPages) {
   })
 }
 
-export function fetchProjectProfile() {
-  return api.get('/project-profile')
-}
-
 export function fetchProjectProfileChoices() {
-  return api.get('/project-profile')
+  return api.get('/v2/project-profiles')
 }
 
 export function fetchWorkflowStepDetail(runId, command) {

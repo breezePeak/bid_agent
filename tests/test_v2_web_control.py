@@ -1949,6 +1949,14 @@ class V2WebControlTests(unittest.TestCase):
             acl = ControlStore(WorkspaceContext.resolve(runs, "alpha")).workspace_acl()
             self.assertEqual(acl[0]["principal_id"], "owner-1")
 
+    def test_v2_project_profile_catalog_does_not_read_active_workspace(self) -> None:
+        with mock.patch.object(web_app, "project_profile_choices", return_value=[{"project_type": "goods"}]) as choices:
+            with mock.patch.object(web_app, "load_project_profile", side_effect=AssertionError("active workspace read")):
+                payload = _body(web_app.api_v2_project_profiles())
+
+        choices.assert_called_once_with()
+        self.assertEqual(payload["choices"], [{"project_type": "goods"}])
+
 
 if __name__ == "__main__":
     unittest.main()

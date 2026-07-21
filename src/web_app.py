@@ -4059,6 +4059,11 @@ def api_project_profile() -> JSONResponse:
     return JSONResponse({"ok": True, "profile": load_project_profile(root), "choices": project_profile_choices()})
 
 
+@app.get("/api/v2/project-profiles")
+def api_v2_project_profiles() -> JSONResponse:
+    return JSONResponse({"ok": True, "choices": project_profile_choices()})
+
+
 @app.post("/api/project-profile")
 async def api_set_project_profile(request: Request) -> JSONResponse:
     root = _active_root()

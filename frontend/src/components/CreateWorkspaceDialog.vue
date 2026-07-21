@@ -57,7 +57,7 @@
 
 <script setup>
 import { ref, reactive, onMounted } from 'vue'
-import { createRun, fetchProjectProfile } from '../api'
+import { createRun, fetchProjectProfileChoices } from '../api'
 
 defineProps({
   visible: { type: Boolean, default: false },
@@ -77,7 +77,7 @@ const error = ref('')
 
 onMounted(async () => {
   try {
-    const { data } = await fetchProjectProfile()
+    const { data } = await fetchProjectProfileChoices()
     if (data.ok && data.choices) {
       projectChoices.value = data.choices
     }
