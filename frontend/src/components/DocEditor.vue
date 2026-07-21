@@ -113,12 +113,13 @@
 
 <script setup>
 import { ref, computed, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
-import { confirmWorkspaceAction } from '../api'
+import { confirmWorkspaceAction, submitWorkspaceCommand } from '../api'
 
 const props = defineProps({ runId: { type: String, required: true } })
 const emit = defineEmits(['add-to-chat', 'add-annotation', 'update-page-count', 'rewrite-applied', 'rewrite-discarded'])
 
 const blocks = ref([])
+const baseSha256 = ref('')
 const loading = ref(false)
 const pendingDocEdit = ref(null)
 const selectionVisible = ref(false)
@@ -218,6 +219,7 @@ async function loadDoc() {
       fetch('/api/final-doc/pending').then(r => r.json()),
     ])
     blocks.value = renderRes.blocks || []
+    baseSha256.value = String(renderRes.base_sha256 || '')
     if (pendingRes.pending) pendingDocEdit.value = pendingRes.pending
   } catch (e) { /* ignore */ }
   loading.value = false
@@ -232,14 +234,19 @@ async function saveBlock(event, block) {
     return
   }
   try {
-    const proposed = await fetch('/api/final-doc/block-edit', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ block_id: block.block_id, new_text: newText, instruction: '' }),
-    }).then(r => r.json())
-    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
-    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    const proposed = await submitWorkspaceCommand(props.runId, 'document.apply_edit', {
+      mode: 'block',
+      block_id: block.block_id,
+      new_text: newText,
+      instruction: '',
+      base_sha256: baseSha256.value,
+    })
+    const actionId = proposed?.data?.action?.confirmation_id
+    if (!actionId) throw new Error(proposed?.data?.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, actionId)
     if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '修改失败')
     block.text = newText
+    await loadDoc()
     emit('rewrite-applied')
   } catch (e) { el.innerText = block.text }
 }
@@ -270,11 +277,26 @@ function clearSelection() { selectionVisible.value = false; selectedText.value =
 
 async function confirmPending() {
   if (!pendingDocEdit.value) return
-  const ep = pendingDocEdit.value.kind === 'chat_edit' ? '/api/final-doc/chat-apply' : '/api/final-doc/selection-apply'
   try {
-    const proposed = await fetch(ep, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ new_text: pendingDocEdit.value.new_text, instruction: pendingDocEdit.value.instruction || '' }) }).then(r => r.json())
-    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
-    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    const isFullDocument = pendingDocEdit.value.kind === 'chat_edit'
+    const payload = isFullDocument
+      ? {
+          mode: 'overwrite',
+          new_md: pendingDocEdit.value.new_md || pendingDocEdit.value.new_text || '',
+          instruction: pendingDocEdit.value.instruction || '',
+          base_sha256: baseSha256.value,
+        }
+      : {
+          mode: 'block',
+          block_id: pendingDocEdit.value.block_id,
+          new_text: pendingDocEdit.value.new_text || '',
+          instruction: pendingDocEdit.value.instruction || '',
+          base_sha256: baseSha256.value,
+        }
+    const proposed = await submitWorkspaceCommand(props.runId, 'document.apply_edit', payload)
+    const actionId = proposed?.data?.action?.confirmation_id
+    if (!actionId) throw new Error(proposed?.data?.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, actionId)
     if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '改写失败')
     pendingDocEdit.value = null; await loadDoc()
     emit('rewrite-applied')

@@ -7741,6 +7741,7 @@ def api_final_doc_render() -> JSONResponse:
         "ok": True,
         "final_md_exists": True,
         "final_docx_exists": _final_docx_path(root).exists(),
+        "base_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "blocks": blocks,
         "final_md_len": len(text),
         "pending": _PENDING_DOC_EDIT.get(root.resolve()),
@@ -8132,7 +8133,15 @@ async def api_final_doc_rewrite_block_stream(request: Request) -> StreamingRespo
                 }
                 _append_log(f"[WYSIWYG] 第 {line_number} 行流式改写完成。")
                 triggerDocRefresh()
-            yield _sse_event("done", {"block_id": target["block_id"], "line_number": line_number, "new_text": generated})
+            yield _sse_event(
+                "done",
+                {
+                    "block_id": target["block_id"],
+                    "line_number": line_number,
+                    "new_text": generated,
+                    "base_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                },
+            )
         except Exception as exc:
             yield _sse_event("error", {"message": str(exc)})
 

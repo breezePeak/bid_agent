@@ -1295,7 +1295,14 @@ async function doRewriteBlock(lineNumber, instruction) {
               messages.value[msgIndex].thinkingExpanded = false
               messages.value[msgIndex].content = streamedText
               messages.value[msgIndex].actions = [
-                { type: 'accept_rewrite', label: '确认改写', lineNumber, newText: finalNewText },
+                {
+                  type: 'accept_rewrite',
+                  label: '确认改写',
+                  lineNumber,
+                  blockId: data.block_id,
+                  newText: finalNewText,
+                  baseSha256: data.base_sha256,
+                },
                 { type: 'discard_rewrite', label: '放弃' },
               ]
               saveChatMessage('assistant', streamedText, { thinking: reasoningText, actions: messages.value[msgIndex].actions }).catch(() => {})
@@ -1541,13 +1548,16 @@ function handleAction(act, sourceMessage = null) {
 
 async function acceptRewrite(act) {
   try {
-    const proposed = await fetch('/api/final-doc/selection-apply', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_text: act.newText }),
-    }).then(r => r.json())
-    if (!proposed.ok || !proposed.action?.confirmation_id) throw new Error(proposed.message || '未生成确认操作')
-    const confirmed = await confirmWorkspaceAction(props.runId, proposed.action.confirmation_id)
+    const proposed = await submitWorkspaceCommand(props.runId, 'document.apply_edit', {
+      mode: 'block',
+      block_id: act.blockId,
+      new_text: act.newText,
+      instruction: '',
+      base_sha256: act.baseSha256,
+    })
+    const actionId = proposed?.data?.action?.confirmation_id
+    if (!actionId) throw new Error(proposed?.data?.message || '未生成确认操作')
+    const confirmed = await confirmWorkspaceAction(props.runId, actionId)
     if (!confirmed?.data?.ok) throw new Error(confirmed?.data?.message || '改写失败')
     addMessage('system', `第 ${act.lineNumber} 行改写已确认，Word 已重建。`, [
       { type: 'undo_rewrite', label: '撤销' },
