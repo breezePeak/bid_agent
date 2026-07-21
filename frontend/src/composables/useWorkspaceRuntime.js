@@ -22,6 +22,7 @@ const state = reactive({
 
 let pollTimer = null
 let pollInFlight = false
+let refreshPending = false
 let subscribers = 0
 let pollMs = 2000
 
@@ -34,15 +35,19 @@ function applyStatusPayload(data) {
 }
 
 async function refresh() {
-  if (pollInFlight) return state.status
+  if (pollInFlight) {
+    refreshPending = true
+    return state.status
+  }
   pollInFlight = true
   state.loading = true
+  const requestedRunId = resolveBoundRunId()
   try {
-    const runId = resolveBoundRunId()
-    if (!runId) return null
-    const resp = await fetchWorkspaceSnapshot(runId)
+    if (!requestedRunId) return null
+    const resp = await fetchWorkspaceSnapshot(requestedRunId)
     const body = resp?.data || resp
     const data = statusFromV2Snapshot(body?.snapshot)
+    if (requestedRunId !== resolveBoundRunId()) return null
     applyStatusPayload(data)
     return state.status
   } catch (e) {
@@ -51,6 +56,10 @@ async function refresh() {
   } finally {
     pollInFlight = false
     state.loading = false
+    if (refreshPending) {
+      refreshPending = false
+      queueMicrotask(() => refresh())
+    }
   }
 }
 
@@ -182,19 +191,8 @@ export function useWorkspaceRuntime(options = {}) {
   }
 }
 
-/** Non-component access (e.g. after orchestrate) */
-export function getWorkspaceRuntimeSnapshot() {
-  return {
-    status: state.status,
-    runtime: state.runtime,
-    updatedAt: state.updatedAt,
-  }
-}
-
-export function pushStatusSnapshot(data) {
-  applyStatusPayload(data)
-}
-
-export async function forceRuntimeRefresh() {
+export async function forceRuntimeRefresh(runId = '') {
+  const id = String(runId || '').trim()
+  if (id) bindRun(id)
   return refresh()
 }

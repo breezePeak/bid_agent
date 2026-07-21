@@ -178,8 +178,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { fetchAgentActivity } from '../api'
+import { computed } from 'vue'
 
 const POOL_SIZE = 10
 /** Board chips scroll inside columns; keep a moderate preview count */
@@ -196,19 +195,15 @@ const props = defineProps({
   runId: { type: String, required: true },
   active: { type: Boolean, default: false },
   intervalMs: { type: Number, default: 2000 },
-  /** Prefer parent-injected activity from useWorkspaceRuntime (single status bus). */
+  /** Authoritative activity injected from the V2 Snapshot state bus. */
   activity: { type: Object, default: null },
 })
 
-const local = ref({ status: 'idle', agents: [], summary: {}, phase_label: '' })
-let timer = null
-
 const data = computed(() => {
-  // Single truth: parent activity from /api/status first; local poll only as fallback
   if (props.activity && (Array.isArray(props.activity.agents) || props.activity.summary)) {
     return props.activity
   }
-  return local.value
+  return { status: 'idle', agents: [], summary: {}, phase_label: '' }
 })
 const agents = computed(() => (Array.isArray(data.value.agents) ? data.value.agents : []))
 const summary = computed(() => data.value.summary || {})
@@ -320,33 +315,4 @@ function pct(n) {
   return Math.max(0, Math.min(100, Math.round((Number(n || 0) / t) * 100)))
 }
 
-async function refresh() {
-  // Fallback only when parent does not inject activity from the shared status bus
-  if (props.activity && (Array.isArray(props.activity.agents) || props.activity.summary)) return
-  try {
-    const resp = await fetchAgentActivity()
-    const body = resp && resp.data ? resp.data : {}
-    if (body.ok && body.activity) local.value = body.activity
-  } catch (e) { /* ignore */ }
-}
-
-function start() {
-  stop()
-  if (props.activity && (Array.isArray(props.activity.agents) || props.activity.summary)) {
-    local.value = props.activity
-    return
-  }
-  refresh()
-  timer = setInterval(refresh, props.intervalMs)
-}
-function stop() {
-  if (timer) { clearInterval(timer); timer = null }
-}
-
-watch(() => props.runId, () => start())
-watch(() => props.active, (v) => { if (v) start() })
-watch(() => props.activity, (v) => { if (v) { local.value = v; stop() } }, { deep: true })
-
-onMounted(start)
-onBeforeUnmount(stop)
 </script>

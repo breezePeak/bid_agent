@@ -137,7 +137,7 @@ function start() {
   if (!props.enabled) return
   polling.value = true
   refresh()
-  // decisions are not in /api/status; light secondary poll only
+  // Decisions are append-only diagnostics, not control truth; poll separately.
   decisionTimer = setInterval(refreshDecisions, Math.max(props.intervalMs, 3000))
 }
 

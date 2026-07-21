@@ -43,10 +43,6 @@ export function selectRun(runId) {
   return api.post('/select-run', { run_id: runId })
 }
 
-export function fetchStatus() {
-  return api.get('/status')
-}
-
 export function fetchProjectProfile() {
   return api.get('/project-profile')
 }
@@ -222,18 +218,10 @@ export function declineWorkspaceAction(runId, actionId) {
   return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/actions/${encodeURIComponent(actionId)}/decline`)
 }
 
-export function fetchCurrentRepairJob() {
-  return api.get('/repair-jobs/current')
-}
-
 export default api
 
 export function fetchComplianceReport() {
   return api.get('/compliance-report')
-}
-
-export function fetchAgentActivity() {
-  return api.get('/agent/activity')
 }
 
 export function fetchAgentGoal() {

@@ -131,7 +131,7 @@ const localLogs = ref([])
 const deferredCountLocal = ref(0)
 const materialsExists = ref(false)
 
-// Single status bus: materials deferred badge follows /api/status
+// Single status bus: materials deferred badge follows the V2 Snapshot.
 const { materialsDeferred } = useWorkspaceRuntime({
   runId: computed(() => props.runId),
 })

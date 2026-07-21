@@ -506,3 +506,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B20 | 2026-07-21 | 修复 blocked Operation 的补救命令分发表不一致问题：所有声明可在 blocked 状态执行的修复、材料、复核、文档和工作区命令统一复用同一判定集合，并刷新 fencing token；避免部分已确认命令因映射缺失触发异常或绕开 lease。 |
 | V2.0-B21 | 2026-07-21 | 定向改稿与最小修复 Worker 在开始内容变更前必须成功同步权威 Operation；控制库写入失败会中止执行，不再静默继续。异步终态发布统一先清理进程内运行标志，再写 Operation，避免观察到 succeeded 与 RUNNING 并存。 |
 | V2.0-B22 | 2026-07-21 | 主 Vue 控制台的共享状态总线从 V1 `/api/status` 切换到工作区 V2 Snapshot；Goal、AgentActivity、RepairJob、Materials、Issues 和 Operation 由 Snapshot 的 SQLite 权威字段提供，workflow/合规展示暂放在显式 `presentation` 兼容区。材料导入增加一次性空集合标记，SQLite 空状态也不再回退读取后来出现的 V1 项，避免兼容投影重新成为隐性权威。 |
+| V2.0-B23 | 2026-07-21 | ChatPanel 的流程状态与 RepairJob 跟踪统一复用工作区 V2 Snapshot 状态总线，删除 `/api/status` fallback、`/repair-jobs/current` 和 AgentActivity 独立轮询入口；聊天、Goal 面板和 Agent 工位不再各自选择不同控制状态源。状态总线在工作区切换期间丢弃迟到响应并补发新工作区刷新，避免跨工作区 UI 污染。 |

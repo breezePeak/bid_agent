@@ -245,7 +245,6 @@ import {
   declineWorkspaceAction,
   downloadFinalDocx,
   fetchChatMessages,
-  fetchCurrentRepairJob,
   fetchExportPreflight,
   fetchMaterialsChecklist,
   orchestrateChat,
@@ -253,7 +252,7 @@ import {
   startOrResumePipeline,
   submitWorkspaceCommand,
 } from '../api'
-import { pushStatusSnapshot, forceRuntimeRefresh } from '../composables/useWorkspaceRuntime'
+import { forceRuntimeRefresh } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -665,9 +664,8 @@ async function refreshCurrentRepairJob(expectedJobId = '') {
   if (repairPollInFlight) return
   repairPollInFlight = true
   try {
-    const resp = await fetchCurrentRepairJob()
-    const body = resp && resp.data ? resp.data : {}
-    const job = body.repair_job || body.job || null
+    const status = await forceRuntimeRefresh(props.runId)
+    const job = status?.repair_job || null
     const returnedId = String(job?.job_id || '').trim()
     if (job && (!expectedJobId || !returnedId || returnedId === expectedJobId)) {
       applyRepairJob(job)
@@ -697,7 +695,7 @@ async function refreshCurrentRepairJob(expectedJobId = '') {
       }
     }
   } catch (_) {
-    // Keep the last known job visible; the next poll or /api/status can recover.
+    // Keep the last known job visible; the next V2 Snapshot can recover.
   } finally {
     repairPollInFlight = false
   }
@@ -727,19 +725,12 @@ async function beginRepairTracking(jobId = '', initialJob = null) {
 
 async function loadStatus() {
   try {
-    // Prefer shared runtime bus so office / goal / repair stay in lockstep
-    const data = await forceRuntimeRefresh()
+    const data = await forceRuntimeRefresh(props.runId)
     if (data) updateFromStatus(data)
-    else {
-      const raw = await fetch('/api/status').then(r => r.json())
-      updateFromStatus(raw)
-    }
   } catch (e) { /* */ }
 }
 function updateFromStatus(data) {
   if (!data || typeof data !== 'object') return
-  // Publish to shared bus for GoalPanel / Workbench
-  try { pushStatusSnapshot(data) } catch (_) { /* */ }
   if (data.repair_job) applyRepairJob(data.repair_job)
   const hasActiveRepairJob = ACTIVE_REPAIR_STATUSES.has(String(data.repair_job?.status || repairJob.value?.status || ''))
   const repairTaskRunning = hasActiveRepairJob || (!!data.running && isRepairTaskName(data.current_task))
@@ -1412,7 +1403,7 @@ async function resolveV2CommandAction(act, decline = false) {
       : await confirmWorkspaceAction(props.runId, actionId)
     const body = response?.data || {}
     addMessage('system', body.message || (decline ? '已保留当前任务。' : '操作已提交。'))
-    forceRuntimeRefresh()
+    forceRuntimeRefresh(props.runId)
     await loadStatus()
   } catch (error) {
     const message = error?.response?.data?.message || error?.message || '确认操作失败'
