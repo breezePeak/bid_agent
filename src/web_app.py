@@ -2084,7 +2084,15 @@ def _repair_result_count(result: dict[str, Any], key: str, count_key: str) -> in
         return 0
 
 
-def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool = True) -> dict[str, Any]:
+def _trigger_repair_job(
+    root: Path,
+    confirmation_id: str,
+    *,
+    allow_remint: bool = True,
+    control_operation_id: str = "",
+    control_fencing_token: int = 0,
+    resume_pipeline: bool = True,
+) -> dict[str, Any]:
     """Claim exactly one repair slot and run the persisted job in the background.
 
     If confirmation is stale (previous job failed/interrupted), optionally remint
@@ -2169,6 +2177,17 @@ def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool 
             if key in details:
                 changes[key] = details[key]
         update_repair_job(root, job_id, **changes)
+        if control_operation_id:
+            try:
+                context = _workspace_context(root.name)
+                ControlStore(context).sync_operation(
+                    control_operation_id,
+                    "running",
+                    message=message,
+                    fencing_token=control_fencing_token,
+                )
+            except Exception:
+                pass
 
     def _run() -> None:
         global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
@@ -2212,7 +2231,13 @@ def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool 
         resume_command = str(job.get("resume_command") or "")
         resume_started = False
         # Only auto-resume when fully clear — partial/failed jobs would hit the same gate again
-        should_resume = bool(resume_command) and terminal_status == "completed" and remaining_count == 0 and failed_count == 0
+        should_resume = (
+            resume_pipeline
+            and bool(resume_command)
+            and terminal_status == "completed"
+            and remaining_count == 0
+            and failed_count == 0
+        )
         if should_resume:
             try:
                 # Prefer gate-aware API path when available so 409 messages surface in logs
@@ -2265,6 +2290,23 @@ def _trigger_repair_job(root: Path, confirmation_id: str, *, allow_remint: bool 
         _append_log(f"[最小修复] {summary}")
         if not final_job:
             _append_log("[警告] 最小修复结果未能写入任务状态")
+        if control_operation_id:
+            operation_status = {
+                "completed": "succeeded",
+                "partial": "blocked",
+                "failed": "failed",
+            }.get(terminal_status, "failed")
+            try:
+                context = _workspace_context(root.name)
+                ControlStore(context).sync_operation(
+                    control_operation_id,
+                    operation_status,
+                    message=summary,
+                    error=result if operation_status == "failed" else None,
+                    fencing_token=control_fencing_token,
+                )
+            except Exception as exc:
+                _append_log(f"[警告] 修复 Operation 状态回写失败: {exc}")
 
     threading.Thread(target=_run, daemon=True, name=f"repair-{job_id}").start()
     return {"ok": True, "duplicate": False, "job": job, "message": "已开始最小修复，将按根因合并处理并统一重验"}
@@ -2564,15 +2606,8 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             )
 
         if intent in {"confirm", "start"}:
-            # Always mint a fresh confirmation when starting, or when previous job is terminal/interrupted
-            if intent == "start" or not current_job or terminal_repair or interrupted_repair:
-                current_job = _ensure_minimal_repair_confirmation(root)
-                has_pending = str(current_job.get("status") or "") == "awaiting_confirmation"
-            confirmation_id = str(action.get("confirmation_id") or current_job.get("confirmation_id") or "")
-            # Never claim with a stale confirmation_id from a failed job
-            if intent == "start" or terminal_repair or interrupted_repair:
-                confirmation_id = str(current_job.get("confirmation_id") or "")
-            if not current_job or not confirmation_id:
+            candidates = _minimal_repair_candidates(root)
+            if not candidates:
                 return _chat_response(
                     root,
                     run_id,
@@ -2581,30 +2616,45 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     actions=[],
                     intent="minimal_repair",
                     triggered_repair=False,
-                    repair_job=current_job or None,
+                    repair_job=None,
                 )
-            result = _trigger_repair_job(root, confirmation_id, allow_remint=True)
-            job = result.get("job") if isinstance(result.get("job"), dict) else load_repair_job(root)
-            triggered = bool(result.get("ok")) and str(job.get("status") or "") in {
-                "running",
-                "revalidating",
-            }
-            msg = str(result.get("message") or "已提交最小修复任务")
-            if triggered:
-                msg = f"已重新发起最小修复（{int(job.get('total_count') or 0)} 项），正在后台执行…"
-            elif result.get("busy"):
-                msg = str(result.get("message") or "当前有任务在运行，请稍后再试")
-            return _chat_response(
-                root,
-                run_id,
-                msg,
-                actions=_repair_retry_actions(job) if not triggered else [],
-                intent="minimal_repair",
-                triggered_repair=triggered,
-                job_id=str(job.get("job_id") or ""),
-                repair_job=job or None,
-                busy=bool(result.get("busy")),
-            )
+            try:
+                context = _workspace_context(run_id)
+                gateway = _command_gateway(context)
+                envelope = CommandEnvelope.from_mapping(
+                    {
+                        "kind": "repair.start",
+                        "payload": {
+                            "issue_ids": [str(item.get("id") or "") for item in candidates if item.get("id")],
+                        },
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": str(body.get("idempotency_key") or f"chat-repair:{uuid.uuid4()}"),
+                        "actor": {"type": "chat", "id": "current-user"},
+                    },
+                    workspace_id=run_id,
+                )
+                proposal = gateway.propose(envelope, label="确认执行最小修复", risk="high")
+                return _chat_response(
+                    root,
+                    run_id,
+                    f"将对 {len(candidates)} 个阻断问题执行最小修复并重新验证门禁，请确认。",
+                    actions=[
+                        proposal,
+                        {**proposal, "type": "decline_v2_command", "label": "暂不修复"},
+                    ],
+                    intent="minimal_repair_confirmation",
+                    triggered_repair=False,
+                )
+            except ControlPlaneError as exc:
+                return _chat_response(
+                    root,
+                    run_id,
+                    exc.message,
+                    actions=[],
+                    intent="minimal_repair_error",
+                    triggered_repair=False,
+                    command_error=exc.as_dict(),
+                )
 
         status = _status_payload(root, run_id)
         review_context = _load_review_context(root)
@@ -4937,6 +4987,40 @@ def _handle_pipeline_skip(
     )
 
 
+def _handle_repair_start(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    operation = ControlStore(context).operation(operation_id) or {}
+    fencing_token = int(operation.get("fencing_token") or 0)
+    job = _ensure_minimal_repair_confirmation(context.root)
+    confirmation_id = str(job.get("confirmation_id") or "")
+    if not confirmation_id:
+        return {
+            "accepted": True,
+            "operation_status": "succeeded",
+            "message": "当前没有可自动修复的阻断问题。",
+        }
+    result = _trigger_repair_job(
+        context.root,
+        confirmation_id,
+        allow_remint=False,
+        control_operation_id=operation_id,
+        control_fencing_token=fencing_token,
+        # V2 keeps repair and pipeline resume as separate audited Commands.
+        resume_pipeline=False,
+    )
+    if not result.get("ok"):
+        code = "LEASE_CONFLICT" if result.get("busy") else "GATE_BLOCKED"
+        raise ControlPlaneError(code, str(result.get("message") or "最小修复未能启动。"))
+    return {
+        "accepted": True,
+        "operation_status": "running",
+        "message": str(result.get("message") or "已开始最小修复。"),
+    }
+
+
 def _command_gateway(context: WorkspaceContext) -> CommandGateway:
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     return CommandGateway(
@@ -4948,6 +5032,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "pipeline.pause": _handle_pipeline_pause,
             "pipeline.cancel": _handle_pipeline_cancel,
             "pipeline.skip_stage": _handle_pipeline_skip,
+            "repair.start": _handle_repair_start,
         },
     )
 
@@ -5141,14 +5226,19 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
             raise ControlPlaneError("COMMAND_INVALID", "请求体必须是 JSON 对象。", status_code=400)
         envelope = CommandEnvelope.from_mapping(body, workspace_id=context.workspace_id)
         gateway = _command_gateway(context)
-        if envelope.kind in {"pipeline.cancel", "pipeline.skip_stage"}:
+        if envelope.kind in ControlStore.CONFIRMATION_REQUIRED_KINDS:
             if envelope.confirmation_id:
                 raise ControlPlaneError(
                     "CONFIRMATION_REQUIRED",
                     "高风险 Command 只能通过已持久化 Action 的确认接口执行。",
                     status_code=400,
                 )
-            label = "确认取消当前任务" if envelope.kind == "pipeline.cancel" else "确认跳过当前阶段"
+            labels = {
+                "pipeline.cancel": "确认取消当前任务",
+                "pipeline.skip_stage": "确认跳过当前阶段",
+                "repair.start": "确认执行最小修复",
+            }
+            label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
             return JSONResponse(
                 {

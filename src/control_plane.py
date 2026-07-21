@@ -169,6 +169,11 @@ class ControlStore:
 
     SCHEMA_VERSION = 1
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
+    CONFIRMATION_REQUIRED_KINDS = {
+        "pipeline.cancel",
+        "pipeline.skip_stage",
+        "repair.start",
+    }
 
     def __init__(self, context: WorkspaceContext) -> None:
         self.context = context
@@ -338,7 +343,7 @@ class ControlStore:
                     connection.commit()
                     return self._receipt_from_row(duplicate, duplicate=True), False
 
-                if envelope.kind in {"pipeline.cancel", "pipeline.skip_stage"}:
+                if envelope.kind in self.CONFIRMATION_REQUIRED_KINDS:
                     if not envelope.confirmation_id:
                         raise ControlPlaneError("CONFIRMATION_REQUIRED", "该 Command 必须先完成确认。")
                     confirmation = connection.execute(
@@ -373,13 +378,18 @@ class ControlStore:
                         details={"expected_revision": envelope.expected_revision, "current_revision": current_revision},
                     )
 
+                active = self._current_operation(connection)
+                repair_retry = (
+                    envelope.kind == "repair.start"
+                    and active is not None
+                    and str(active["status"]) == "blocked"
+                )
                 control_kind = envelope.kind in {
                     "pipeline.pause",
                     "pipeline.resume",
                     "pipeline.cancel",
                     "pipeline.skip_stage",
-                }
-                active = self._current_operation(connection)
+                } or repair_retry
                 operation_id = ""
                 previous_status = ""
                 fencing_token = 0
@@ -400,6 +410,7 @@ class ControlStore:
                         "pipeline.resume": {"paused", "blocked"},
                         "pipeline.cancel": {"queued", "running", "pausing", "paused", "blocked"},
                         "pipeline.skip_stage": {"paused", "blocked"},
+                        "repair.start": {"blocked"},
                     }
                     if previous_status not in allowed[envelope.kind]:
                         raise ControlPlaneError(
@@ -412,8 +423,9 @@ class ControlStore:
                         "pipeline.resume": "queued",
                         "pipeline.cancel": "cancelling",
                         "pipeline.skip_stage": previous_status,
+                        "repair.start": "queued",
                     }[envelope.kind]
-                    if envelope.kind == "pipeline.resume":
+                    if envelope.kind in {"pipeline.resume", "repair.start"}:
                         fencing_token += 1
                     connection.execute(
                         "UPDATE operations SET status = ?, fencing_token = ?, updated_at = ? WHERE operation_id = ?",

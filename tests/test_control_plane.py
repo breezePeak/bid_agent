@@ -156,6 +156,51 @@ class ControlPlaneTests(unittest.TestCase):
                 gateway.confirm(action["confirmation_id"])
             self.assertEqual(replay.exception.code, "ACTION_REPLAYED")
 
+    def test_repair_command_requires_persisted_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "running",
+            }
+            gateway = CommandGateway(context, {"repair.start": handler})
+            envelope = _envelope(context, gateway.store, "repair.start")
+
+            with self.assertRaises(ControlPlaneError) as unconfirmed:
+                gateway.submit(envelope)
+            self.assertEqual(unconfirmed.exception.code, "CONFIRMATION_REQUIRED")
+
+            action = gateway.propose(envelope, label="确认最小修复", risk="high")
+            receipt = gateway.confirm(action["confirmation_id"])
+            self.assertEqual(receipt.status, "accepted")
+            self.assertEqual(gateway.store.snapshot()["operation"]["kind"], "repair.start")
+
+    def test_repair_can_reuse_blocked_operation_with_new_fencing_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            start_handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "blocked",
+            }
+            repair_handler = lambda ctx, envelope, operation_id: {
+                "accepted": True,
+                "operation_status": "running",
+            }
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": start_handler, "repair.start": repair_handler},
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            before = gateway.store.operation(started.operation_id or "") or {}
+            repair = _envelope(context, gateway.store, "repair.start")
+            action = gateway.propose(repair, label="confirm repair", risk="high")
+            repaired = gateway.confirm(action["confirmation_id"])
+            after = gateway.store.operation(repaired.operation_id or "") or {}
+
+            self.assertEqual(repaired.operation_id, started.operation_id)
+            self.assertEqual(after["status"], "running")
+            self.assertEqual(after["fencing_token"], before["fencing_token"] + 1)
+
     def test_workspaces_have_independent_databases_and_revisions(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

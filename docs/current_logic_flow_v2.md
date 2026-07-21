@@ -476,3 +476,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 |---|---|---|
 | V2.0-plan | 2026-07-21 | 确认 Agent 控制面、唯一 Pipeline、SQLite 控制状态和两阶段迁移方案 |
 | V2.0-A1 | 2026-07-21 | 开始阶段 A：引入 WorkspaceContext、control.db、CommandGateway、revision/idempotency/lease/fencing、Action 确认、Snapshot/SSE；聊天与页面的启动、继续、暂停和取消已进入统一控制链。Repair、改稿、材料、正式导出、旧工作区导入与旧旁路删除仍未完成，不构成 V2 切换。 |
+| V2.0-A2 | 2026-07-21 | 将聊天最小修复迁入 `repair.start` Command 和 V2 Action 确认；修复 Worker 沿用同一 Operation/fencing token 回写进度与终态，partial 结果保持 blocked 且不再隐式恢复 Pipeline。定向改稿、材料、导出和其余 mutation Tool 仍待迁移。 |

@@ -238,67 +238,54 @@ class RepairWorkerTests(unittest.TestCase):
             self.assertEqual(resume.call_count, 0)
             self.assertIn("仍有未关闭问题", current["message"])
 
-    def test_natural_repair_command_bypasses_llm(self) -> None:
+    def test_natural_repair_command_bypasses_llm_and_proposes_v2_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._activate(root)
-            awaiting = {
-                "job_id": "repair-natural",
-                "confirmation_id": "confirm-natural",
-                "status": "awaiting_confirmation",
-            }
-            running = {**awaiting, "status": "running", "phase": "analysis"}
-            with mock.patch.object(web_app, "_ensure_minimal_repair_confirmation", return_value=awaiting):
-                with mock.patch.object(
-                    web_app,
-                    "_trigger_repair_job",
-                    return_value={"ok": True, "job": running, "message": "started"},
-                ):
-                    with mock.patch.object(web_app, "orchestrator_plan") as planner:
-                        body = _json_response(
-                            asyncio.run(web_app.api_chat_orchestrate(_Request({"message": "修复啊"})))
-                        )
-            planner.assert_not_called()
-            self.assertTrue(body["triggered_repair"])
-            close_chat_store(root)
+            context = web_app.WorkspaceContext("run-test", root)
+            try:
+                with mock.patch.object(web_app, "_workspace_context", return_value=context):
+                    with mock.patch.object(web_app, "_minimal_repair_candidates", return_value=[{"id": "issue-1"}]):
+                        with mock.patch.object(web_app, "orchestrator_plan") as planner:
+                            body = _json_response(
+                                asyncio.run(web_app.api_chat_orchestrate(_Request({"message": "修复啊"})))
+                            )
+                planner.assert_not_called()
+                self.assertFalse(body["triggered_repair"])
+                self.assertEqual(body["intent"], "minimal_repair_confirmation")
+                self.assertEqual(body["actions"][0]["type"], "confirm_v2_command")
+            finally:
+                close_chat_store(root)
 
-    def test_explicit_repair_bypasses_llm_and_returns_job_id(self) -> None:
+    def test_legacy_repair_confirmation_is_translated_to_v2_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._activate(root)
-            job = {
-                "job_id": "repair-1",
-                "confirmation_id": "confirm-1",
-                "status": "awaiting_confirmation",
-                "phase": "awaiting_confirmation",
-            }
-            running = {**job, "status": "running", "phase": "analysis"}
-            with mock.patch.object(web_app, "_ensure_minimal_repair_confirmation", return_value=job):
-                with mock.patch.object(
-                    web_app,
-                    "_trigger_repair_job",
-                    return_value={"ok": True, "job": running, "message": "started"},
-                ):
-                    with mock.patch.object(web_app, "orchestrator_plan") as planner:
-                        body = _json_response(
-                            asyncio.run(
-                                web_app.api_chat_orchestrate(
-                                    _Request(
-                                        {
-                                            "message": "是，执行最小修复",
-                                            "action": {
-                                                "type": "confirm_minimal_repair",
-                                                "confirmation_id": "confirm-1",
-                                            },
-                                        }
+            context = web_app.WorkspaceContext("run-test", root)
+            try:
+                with mock.patch.object(web_app, "_workspace_context", return_value=context):
+                    with mock.patch.object(web_app, "_minimal_repair_candidates", return_value=[{"id": "issue-1"}]):
+                        with mock.patch.object(web_app, "orchestrator_plan") as planner:
+                            body = _json_response(
+                                asyncio.run(
+                                    web_app.api_chat_orchestrate(
+                                        _Request(
+                                            {
+                                                "message": "是，执行最小修复",
+                                                "action": {
+                                                    "type": "confirm_minimal_repair",
+                                                    "confirmation_id": "confirm-1",
+                                                },
+                                            }
+                                        )
                                     )
                                 )
                             )
-                        )
-            planner.assert_not_called()
-            self.assertTrue(body["triggered_repair"])
-            self.assertEqual(body["job_id"], "repair-1")
-            close_chat_store(root)
+                planner.assert_not_called()
+                self.assertFalse(body["triggered_repair"])
+                self.assertEqual(body["actions"][0]["type"], "confirm_v2_command")
+            finally:
+                close_chat_store(root)
 
 
 class RepairActorGateTests(unittest.TestCase):
