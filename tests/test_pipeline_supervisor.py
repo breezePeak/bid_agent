@@ -276,6 +276,53 @@ class PipelineSupervisorTests(unittest.TestCase):
 
             self.assertIn("manifest locked", payload["error"])
 
+    def test_v2_stale_artifact_is_executed_instead_of_reused(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            calls: list[str] = []
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.stage_spec_by_command", return_value=SimpleNamespace(id="a", validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", return_value=True),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        lambda command, run_id, run_root: calls.append(command) or 0,
+                        artifact_readiness_evaluator=lambda run_root, command: False,
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(calls, ["a"])
+
+    def test_v2_artifact_readiness_failure_stops_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.stage_spec_by_command", return_value=SimpleNamespace(id="a", validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", return_value=True),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        lambda command, run_id, run_root: 0,
+                        artifact_readiness_evaluator=lambda run_root, command: (_ for _ in ()).throw(
+                            RuntimeError("manifest unavailable")
+                        ),
+                    )
+                )
+                payload = _wait_for_status(supervisor, root, "failed")
+
+            self.assertIn("manifest unavailable", payload["error"])
+
 
 if __name__ == "__main__":
     unittest.main()

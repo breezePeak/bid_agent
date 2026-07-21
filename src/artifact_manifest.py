@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
-from pipeline_registry import RunArtifact, stage_spec_by_command
+from pipeline_registry import RunArtifact, stage_spec_by_command, workflow_stage_specs
 
 
 def _hash_files(root: Path, files: list[Path]) -> tuple[str, int]:
@@ -75,6 +75,7 @@ def record_stage_artifacts(
     spec = stage_spec_by_command(command)
     input_fingerprint = stage_input_fingerprint(context.root, command)
     store = ControlStore(context)
+    previous = {item["artifact_key"]: item for item in store.artifact_states()}
     manifests: list[dict[str, Any]] = []
     for artifact in spec.produces:
         manifest = describe_artifact(context.root, artifact)
@@ -93,4 +94,54 @@ def record_stage_artifacts(
                 status_code=409,
             )
         manifests.append(manifest)
-    return store.upsert_artifact_states(manifests)
+    stored = store.upsert_artifact_states(manifests)
+    if disposition == "produced" and any(
+        not previous.get(item["artifact_key"])
+        or previous[item["artifact_key"]].get("sha256") != item.get("sha256")
+        or previous[item["artifact_key"]].get("input_fingerprint") != input_fingerprint
+        for item in manifests
+    ):
+        store.mark_artifact_states_stale(
+            downstream_artifact_keys(command),
+            reason=f"上游阶段 {command} 的产物或输入已变化",
+            source_command=command,
+        )
+    return stored
+
+
+def downstream_artifact_keys(command: str) -> list[str]:
+    stages = workflow_stage_specs()
+    start = next((index for index, stage in enumerate(stages) if stage.command == command), -1)
+    if start < 0:
+        return []
+    tainted = {artifact.path for artifact in stages[start].produces}
+    downstream: list[str] = []
+    for stage in stages[start + 1 :]:
+        if not any(artifact.path in tainted for artifact in stage.requires):
+            continue
+        for artifact in stage.produces:
+            tainted.add(artifact.path)
+            downstream.append(str(artifact.path).replace("\\", "/"))
+    return downstream
+
+
+def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
+    spec = stage_spec_by_command(command)
+    store = ControlStore(context)
+    states = {item["artifact_key"]: item for item in store.artifact_states()}
+    fingerprint = stage_input_fingerprint(context.root, command)
+    for artifact in spec.produces:
+        current = describe_artifact(context.root, artifact)
+        if current["status"] != "ready":
+            return False
+        state = states.get(current["artifact_key"])
+        # One compatibility release may bootstrap manifests for existing V1 output.
+        if state is None:
+            continue
+        if state.get("status") != "ready":
+            return False
+        if state.get("sha256") != current.get("sha256"):
+            return False
+        if state.get("input_fingerprint") != fingerprint:
+            return False
+    return True

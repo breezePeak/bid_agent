@@ -5299,6 +5299,12 @@ def _record_v2_stage_artifacts(context: WorkspaceContext, command: str, disposit
     record_stage_artifacts(context, command, disposition=disposition)
 
 
+def _v2_stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
+    from artifact_manifest import stage_artifacts_reusable
+
+    return stage_artifacts_reusable(context, command)
+
+
 _FORMAL_GATE_RULES_VERSION = "v2-formal-control-2026-07-21"
 _FORMAL_GATE_INPUTS = (
     "outputs/final.md",
@@ -5475,6 +5481,7 @@ def _handle_pipeline_start(
             command,
             disposition,
         ),
+        artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
     )
     if not started:
         raise ControlPlaneError("LEASE_CONFLICT", "流水线未启动，已有调度线程正在运行。")
@@ -8595,6 +8602,7 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
             command,
             disposition,
         ),
+        artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
     )
 
 

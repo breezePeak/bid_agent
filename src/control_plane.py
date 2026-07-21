@@ -1030,6 +1030,61 @@ class ControlStore:
             ).fetchall()
         return [self._artifact_row(row) for row in rows]
 
+    def mark_artifact_states_stale(
+        self,
+        artifact_keys: list[str],
+        *,
+        reason: str,
+        source_command: str = "",
+    ) -> list[dict[str, Any]]:
+        keys = sorted({str(key).strip() for key in artifact_keys if str(key).strip()})
+        if not keys:
+            return []
+        now = _now()
+        changed: list[str] = []
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    f"SELECT * FROM artifact_states WHERE artifact_key IN ({','.join('?' for _ in keys)})",
+                    keys,
+                ).fetchall()
+                candidates = [row for row in rows if str(row["status"]) != "stale"]
+                if not candidates:
+                    connection.commit()
+                    return []
+                revision = self._bump_revision(connection)
+                for row in candidates:
+                    payload = _decode(row["manifest_json"], {})
+                    manifest = dict(payload) if isinstance(payload, dict) else {}
+                    manifest.update(
+                        {
+                            "status": "stale",
+                            "stale_reason": reason,
+                            "stale_source_command": source_command,
+                        }
+                    )
+                    artifact_key = str(row["artifact_key"])
+                    connection.execute(
+                        "UPDATE artifact_states SET status = 'stale', manifest_json = ?, updated_at = ? WHERE artifact_key = ?",
+                        (_json(manifest), now, artifact_key),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "ArtifactStateChanged",
+                        "Artifact",
+                        artifact_key,
+                        {"status": "stale", "reason": reason, "source_command": source_command},
+                    )
+                    changed.append(artifact_key)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        states = {item["artifact_key"]: item for item in self.artifact_states()}
+        return [states[key] for key in changed]
+
     @staticmethod
     def _artifact_row(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
