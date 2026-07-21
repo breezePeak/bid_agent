@@ -549,7 +549,8 @@ async function uploadFiles(category, fileList) {
   const fd = new FormData(); fd.append('category', category)
   for (const f of fileList) fd.append('files', f)
   try {
-    const r = await fetch(`/api/upload?category=${encodeURIComponent(category)}`, { method: 'POST', body: fd }).then(r => r.json())
+    const workspace = encodeURIComponent(props.runId)
+    const r = await fetch(`/api/v2/workspaces/${workspace}/sources?category=${encodeURIComponent(category)}`, { method: 'POST', body: fd }).then(r => r.json())
     if (r.ok) {
       files[category] = r.saved || []
       addMessage('system', `已上传: ${files[category].join(', ')}`)

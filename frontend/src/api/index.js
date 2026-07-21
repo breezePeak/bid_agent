@@ -51,15 +51,6 @@ export function fetchProjectProfileChoices() {
   return api.get('/project-profile')
 }
 
-export function uploadFile(category, file) {
-  const formData = new FormData()
-  formData.append('category', category)
-  formData.append('file', file)
-  return api.post('/upload', formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-  })
-}
-
 export function fetchLogs(lines = 200) {
   return api.get('/logs', { params: { lines } })
 }

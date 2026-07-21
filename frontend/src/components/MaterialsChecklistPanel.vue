@@ -291,7 +291,8 @@ async function onCompanyFiles(e) {
     for (const file of files) {
       const fd = new FormData()
       fd.append('file', file)
-      const r = await fetch(`/api/upload?category=company`, { method: 'POST', body: fd }).then((x) => x.json())
+      const workspace = encodeURIComponent(props.runId)
+      const r = await fetch(`/api/v2/workspaces/${workspace}/sources?category=company`, { method: 'POST', body: fd }).then((x) => x.json())
       if (!r?.ok) throw new Error(r?.message || `上传失败: ${file.name}`)
     }
     msg.value = '上传完成，正在重建清单…'

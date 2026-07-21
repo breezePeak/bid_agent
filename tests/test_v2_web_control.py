@@ -1815,6 +1815,28 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(saved["message"]["content"], "saved")
             self.assertEqual(cleared["removed"], 2)
 
+    def test_v2_source_upload_uses_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+            upload = UploadFile(filename="company.txt", file=io.BytesIO(b"alpha company evidence"))
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(asyncio.run(web_app.api_upload("company", [upload], "alpha")))
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["saved"], ["company.txt"])
+            self.assertEqual(
+                (alpha / "sources" / "company" / "company.txt").read_bytes(),
+                b"alpha company evidence",
+            )
+            self.assertFalse((beta / "sources" / "company" / "company.txt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

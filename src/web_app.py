@@ -7266,12 +7266,17 @@ def _safe_source_filename(filename: str) -> str:
     return f"{stem[:160]}{extension[:20]}"
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/sources")
 @app.post("/api/upload")
-async def api_upload(category: str = "tender", files: list[UploadFile] = File(...)) -> JSONResponse:
+async def api_upload(
+    category: str = "tender",
+    files: list[UploadFile] = File(...),
+    workspace_id: str = "",
+) -> JSONResponse:
     if category not in VALID_CATEGORIES:
         return JSONResponse({"ok": False, "message": f"无效 category: {category}"}, status_code=400)
 
-    active_root = _active_root()
+    active_root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     if active_root == ROOT:
         return JSONResponse({"ok": False, "message": "请先选择或创建工作空间。"}, status_code=400)
 
