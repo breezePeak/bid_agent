@@ -3220,6 +3220,11 @@ async def api_v2_chat_turn(workspace_id: str, request: Request) -> JSONResponse:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON 对象。"}, status_code=400)
 
     class _WorkspaceChatRequest:
+        def __init__(self) -> None:
+            # Preserve the authenticated server context so downstream Command
+            # proposals bind the same actor as buttons and CLI/API requests.
+            self.state = getattr(request, "state", None)
+
         async def json(self) -> dict[str, Any]:
             return {**body, "run_id": workspace_id}
 

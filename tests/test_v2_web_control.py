@@ -62,6 +62,32 @@ class V2WebControlTests(unittest.TestCase):
         web_app.CURRENT_RUN_ROOT = self.previous_current_root
         web_app.SUPERVISOR.set_status_listener(None)
 
+    def test_v2_chat_turn_preserves_authenticated_principal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            principal = {"type": "user", "id": "chat-owner", "role": "admin"}
+
+            async def inspect_request(forwarded_request):
+                forwarded_body = await forwarded_request.json()
+                self.assertEqual(forwarded_body["run_id"], "alpha")
+                self.assertEqual(forwarded_request.state.principal, principal)
+                self.assertEqual(web_app._request_actor(forwarded_request, source="chat"), principal)
+                return web_app.JSONResponse({"ok": True})
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "api_chat_orchestrate", side_effect=inspect_request) as orchestrate:
+                    response = _body(
+                        asyncio.run(
+                            web_app.api_v2_chat_turn(
+                                "alpha",
+                                _Request({"message": "继续", "run_id": "spoofed"}, principal=principal),
+                            )
+                        )
+                    )
+            self.assertTrue(response["ok"])
+            orchestrate.assert_called_once()
+
     def test_material_readiness_does_not_trust_legacy_ready_projection(self) -> None:
         self.assertFalse(
             web_app._material_fulfillment_verified(
