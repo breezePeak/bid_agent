@@ -1427,6 +1427,12 @@ class V2WebControlTests(unittest.TestCase):
                 root.mkdir(parents=True)
                 context = WorkspaceContext.resolve(runs, "alpha")
                 ControlStore(context).grant_workspace_access("owner-only", role="owner")
+                beta_root = runs / "beta"
+                beta_root.mkdir(parents=True)
+                beta_context = WorkspaceContext.resolve(runs, "beta")
+                ControlStore(beta_context).grant_workspace_access("beta-owner", role="owner")
+                web_app.ACTIVE_RUN_ID = "alpha"
+                web_app.ACTIVE_RUN_ROOT = root
                 web_app._AUTH_SESSIONS.clear()
                 transport = httpx.ASGITransport(app=web_app.app)
                 with mock.patch.object(web_app, "RUNS_DIR", runs):
@@ -1454,6 +1460,18 @@ class V2WebControlTests(unittest.TestCase):
                             self.assertEqual(select_forbidden.status_code, 403)
                             delete_forbidden = await client.post("/api/delete-run", json={"run_id": "alpha"})
                             self.assertEqual(delete_forbidden.status_code, 403)
+                            ControlStore(context).grant_workspace_access("tester", role="editor")
+                            query_allowed = await client.get(
+                                "/api/materials-checklist",
+                                params={"workspace_id": "alpha"},
+                            )
+                            self.assertEqual(query_allowed.status_code, 200)
+                            query_forbidden = await client.get(
+                                "/api/materials-checklist",
+                                params={"workspace_id": "beta"},
+                            )
+                            self.assertEqual(query_forbidden.status_code, 403)
+                            self.assertEqual(query_forbidden.json()["error"]["code"], "WORKSPACE_FORBIDDEN")
                             self.assertTrue(root.exists())
 
         asyncio.run(scenario())

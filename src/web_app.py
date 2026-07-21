@@ -152,8 +152,15 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
         prefix = "/api/v2/workspaces/"
         if path.startswith(prefix):
             workspace_id = path[len(prefix):].split("/", 1)[0]
-        elif ACTIVE_RUN_ID and path not in {"/api/runs", "/api/start-run", "/api/select-run"}:
-            workspace_id = ACTIVE_RUN_ID
+        elif path not in {"/api/runs", "/api/start-run", "/api/select-run"}:
+            # V1 read adapters may carry an explicit workspace query. Bind ACL
+            # to that exact workspace before falling back to legacy ACTIVE_RUN.
+            workspace_id = str(
+                request.query_params.get("workspace_id")
+                or request.query_params.get("run_id")
+                or ACTIVE_RUN_ID
+                or ""
+            ).strip()
         if workspace_id:
             context = _workspace_context(workspace_id)
             _ensure_workspace_acl(
