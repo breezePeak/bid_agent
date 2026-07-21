@@ -196,7 +196,7 @@ async function refresh() {
   loading.value = true
   msg.value = ''
   try {
-    const { data } = await fetchMaterialsChecklist()
+    const { data } = await fetchMaterialsChecklist(props.runId)
     if (data?.ok) applyPayload(data)
     else emptyMsg.value = data?.message || '加载失败'
   } catch (e) {

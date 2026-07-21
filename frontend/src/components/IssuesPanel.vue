@@ -193,7 +193,7 @@ function onMaterialsPanelStatus(payload) {
 
 async function refreshMaterialsBadge() {
   try {
-    const { data } = await fetchMaterialsChecklist()
+    const { data } = await fetchMaterialsChecklist(props.runId)
     if (!data?.ok) return
     const summary = data.summary || data.checklist?.summary || {}
     publishMaterialsStatus({
@@ -210,7 +210,7 @@ async function refreshMaterialsBadge() {
 async function refresh() {
   loading.value = true
   try {
-    const { data } = await fetchComplianceReport()
+    const { data } = await fetchComplianceReport(props.runId)
     if (data && data.ok) {
       report.value = {
         exists: !!data.exists,

@@ -204,8 +204,8 @@ export function declineWorkspaceAction(runId, actionId) {
 
 export default api
 
-export function fetchComplianceReport() {
-  return api.get('/compliance-report')
+export function fetchComplianceReport(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/compliance-report`)
 }
 
 export function fetchAgentGoal() {
@@ -268,12 +268,12 @@ export function batchExecuteRepairs(runId, issueIds) {
   return submitWorkspaceCommand(runId, 'repair.issues', { issue_ids: issueIds })
 }
 
-export function fetchExportPreflight() {
-  return api.get('/export-preflight')
+export function fetchExportPreflight(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/export-preflight`)
 }
 
-export function fetchMaterialsChecklist() {
-  return api.get('/materials-checklist')
+export function fetchMaterialsChecklist(runId) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/materials-checklist`)
 }
 
 export function updateMaterialsChecklistItem(runId, payload) {

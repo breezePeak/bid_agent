@@ -3148,9 +3148,10 @@ def api_current_repair_job() -> JSONResponse:
     return JSONResponse({"ok": True, "repair_job": load_repair_job(_active_root()) or None})
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/export-preflight")
 @app.get("/api/export-preflight")
-def api_export_preflight() -> JSONResponse:
-    root = _active_root()
+def api_export_preflight(workspace_id: str = "") -> JSONResponse:
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
         from agent.issues import export_preflight
 
@@ -3489,10 +3490,11 @@ async def api_revalidate_gate(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/compliance-report")
 @app.get("/api/compliance-report")
-def api_compliance_report() -> JSONResponse:
+def api_compliance_report(workspace_id: str = "") -> JSONResponse:
     """Full compliance report for right-side issues panel."""
-    root = _active_root()
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     path = root / "workspace" / "compliance_report.json"
     if not path.exists():
         return JSONResponse(
@@ -3745,9 +3747,11 @@ def api_chat_messages_delete() -> JSONResponse:
     return JSONResponse({"ok": True, "removed": removed})
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/materials-checklist")
 @app.get("/api/materials-checklist")
-def api_materials_checklist() -> JSONResponse:
-    root = _active_root()
+def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
+    context = _workspace_context(workspace_id) if workspace_id else _workspace_context(ACTIVE_RUN_ID or _active_root().name)
+    root = context.root
     try:
         from materials_checklist import (
             chapters_ready_for_refill,
@@ -3756,7 +3760,6 @@ def api_materials_checklist() -> JSONResponse:
         )
 
         data = load_materials_checklist(root)
-        context = _workspace_context(ACTIVE_RUN_ID or root.name)
         authoritative_items = _material_items(context)
         summary = {
             "total": len(authoritative_items),
@@ -8209,7 +8212,7 @@ def api_global_review() -> JSONResponse:
 
 
 @app.get("/api/file/compliance-report")
-def api_compliance_report() -> JSONResponse:
+def api_file_compliance_report() -> JSONResponse:
     path = _active_root() / "workspace" / "compliance_report.json"
     if not path.exists():
         return JSONResponse(

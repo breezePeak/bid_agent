@@ -816,7 +816,7 @@ function applyMaterialsStatus(payload = {}) {
 
 async function maybeNotifyMaterialsGap({ force = false } = {}) {
   try {
-    const { data } = await fetchMaterialsChecklist()
+    const { data } = await fetchMaterialsChecklist(props.runId)
     if (!data?.ok || !data.exists) return
     const summary = data.summary || data.checklist?.summary || {}
     const deferred = Number(summary.deferred || 0) || 0
@@ -1429,7 +1429,7 @@ function handleAction(act, sourceMessage = null) {
   if (act && act.type === 'export_preflight') {
     ;(async () => {
       try {
-        const { data } = await fetchExportPreflight()
+        const { data } = await fetchExportPreflight(props.runId)
         const lines = (data.checks || []).map(c => `${c.ok ? '✓' : '✗'} ${c.label}: ${c.detail}`).join('\n')
         addMessage('system', (data.message || '出稿前检查') + '\n' + lines)
         if (!data.can_export && data.block_issues && data.block_issues.length) {

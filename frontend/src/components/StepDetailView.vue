@@ -822,7 +822,7 @@ async function refresh() {
       await loadManualReview()
       hasLoadedOnce.value = true
     } else if (isCompliance.value) {
-      const { data } = await fetchComplianceReport()
+      const { data } = await fetchComplianceReport(props.runId)
       if (!data?.ok) throw new Error(data?.message || '加载失败')
       compliance.value = {
         exists: data.exists,

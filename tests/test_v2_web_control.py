@@ -1693,6 +1693,37 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertEqual(payload["content"], "alpha report")
 
+    def test_v2_quality_reads_use_path_workspace_not_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            (alpha / "workspace").mkdir(parents=True)
+            (beta / "workspace").mkdir(parents=True)
+            (alpha / "workspace" / "compliance_report.json").write_text(
+                json.dumps({"blocking": True, "items": [{"check_id": "alpha-check", "status": "fail"}]}),
+                encoding="utf-8",
+            )
+            (beta / "workspace" / "compliance_report.json").write_text(
+                json.dumps({"blocking": False, "items": [{"check_id": "beta-check", "status": "ok"}]}),
+                encoding="utf-8",
+            )
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                compliance = _body(web_app.api_compliance_report("alpha"))
+                with mock.patch("agent.issues.export_preflight", return_value={"ok": True}) as preflight:
+                    _body(web_app.api_export_preflight("alpha"))
+                with mock.patch.object(web_app, "_material_items", return_value=[]):
+                    materials = _body(web_app.api_materials_checklist("alpha"))
+
+            self.assertTrue(compliance["blocking"])
+            self.assertEqual(compliance["items"][0]["check_id"], "alpha-check")
+            preflight.assert_called_once_with(alpha.resolve())
+            self.assertTrue(materials["ok"])
+            self.assertEqual(materials["items"], [])
+
 
 if __name__ == "__main__":
     unittest.main()
