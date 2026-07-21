@@ -64,7 +64,21 @@ class MaterialResumeTests(unittest.TestCase):
             # simulate verification pass → resume
             from agent.goal import resume_goal_after_materials
 
-            resume_goal_after_materials(root, note="material_verified:mat_cert_1")
+            verified = data["items"][0]
+            verified.update(
+                {
+                    "response_status": "ready",
+                    "evidence_status": "verified",
+                    "lifecycle_status": "verified",
+                }
+            )
+            data["summary"] = {"total": 1, "deferred": 0, "ready": 1}
+            write_json(ws / "materials_checklist.json", data)
+            resume_goal_after_materials(
+                root,
+                note="material_verified:mat_cert_1",
+                item_ids=["mat_cert_1"],
+            )
             goal = load_goal(root)
             self.assertEqual(goal.get("status"), "in_progress")
             plan = build_material_recovery_plan(root, item_ids=["mat_cert_1"])

@@ -181,7 +181,7 @@ class RepairWorkerTests(unittest.TestCase):
         web_app.CURRENT_RUN_ID = ""
         web_app.CURRENT_TASK = ""
 
-    def test_partial_repair_resumes_once_and_duplicate_does_not_restart(self) -> None:
+    def test_partial_repair_stays_blocked_and_duplicate_does_not_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             job = create_confirmation(
@@ -234,9 +234,9 @@ class RepairWorkerTests(unittest.TestCase):
 
             self.assertEqual(current["status"], "partial")
             self.assertEqual(current["remaining_count"], 1)
-            self.assertTrue(current["resume_attempted"])
-            self.assertEqual(resume.call_count, 1)
-            self.assertEqual(resume.call_args.kwargs["start_command"], "build-md")
+            self.assertFalse(current["resume_attempted"])
+            self.assertEqual(resume.call_count, 0)
+            self.assertIn("仍有未关闭问题", current["message"])
 
     def test_natural_repair_command_bypasses_llm(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

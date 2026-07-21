@@ -146,12 +146,12 @@ def _rule_based_decision(
     if any(k in message for k in ("覆盖率", "评分点未覆盖", "未覆盖评分", "补齐评分", "覆盖缺口", "评分覆盖", "补齐所有可自动")):
         if any(k in message for k in ("改", "修", "补", "处理", "修复", "补齐")):
             return {
-                "thought_summary": "用户要求按覆盖缺口改稿，先分析再修复",
-                "tool": "analyze_coverage",
-                "args": {"rebuild": True, "max_chapters": 5},
-                "reply": "我先分析评分覆盖缺口，再规划定向改稿。",
+                "thought_summary": "用户明确要求按覆盖缺口修复，生成待确认的定向改稿计划",
+                "tool": "fix_coverage",
+                "args": {"confirm_execute": False, "rebuild": True, "max_chapters": 5},
+                "reply": "我将先分析评分覆盖缺口并生成定向改稿计划，确认后再执行。",
                 "done": False,
-                "need_confirm": False,
+                "need_confirm": True,
             }
         return {
             "thought_summary": "用户询问评分覆盖，执行只读分析",
@@ -567,6 +567,10 @@ def run_supervisor_turn(
         )
 
     goal_id = str(goal.get("goal_id") or new_trace_id())
+    explicit_coverage_mutation = (
+        any(k in message for k in ("覆盖率", "评分点", "覆盖缺口", "评分覆盖"))
+        and any(k in message for k in ("改", "修", "补", "处理", "修复", "补齐"))
+    )
     steps: list[dict[str, Any]] = []
     final_reply_parts: list[str] = []
     actions: list[dict[str, Any]] = []
@@ -634,6 +638,16 @@ def run_supervisor_turn(
                 break
 
         plan_driven = bool(goal.get("plan"))
+        # A direct repair request should first propose the mutation itself. The
+        # fix_coverage tool performs its own fresh analysis; forcing the generic
+        # plan's analyze step here can hide the requested confirmation behind a
+        # stale or unavailable rebuild input.
+        prefer_plan_decision = not (
+            explicit_coverage_mutation
+            and budget.steps_used == 0
+            and not user_confirmed
+            and not confirmed_tools
+        )
         decision_raw: dict[str, Any]
         error_note = ""
         try:
@@ -641,18 +655,18 @@ def run_supervisor_turn(
                 decision_raw = _llm_decision(message, snapshot, history, llm_chat, budget=budget)
             elif use_llm and plan_driven and budget.llm_calls_used < budget.max_llm_calls:
                 decision_raw = _rule_based_decision(
-                    message, snapshot, root=root, goal=goal, prefer_plan=True
+                    message, snapshot, root=root, goal=goal, prefer_plan=prefer_plan_decision
                 )
                 if not decision_raw.get("tool"):
                     decision_raw = _llm_decision(message, snapshot, history, llm_chat, budget=budget)
             else:
                 decision_raw = _rule_based_decision(
-                    message, snapshot, root=root, goal=goal, prefer_plan=True
+                    message, snapshot, root=root, goal=goal, prefer_plan=prefer_plan_decision
                 )
         except Exception as exc:  # noqa: BLE001
             error_note = str(exc)
             decision_raw = _rule_based_decision(
-                message, snapshot, root=root, goal=goal, prefer_plan=True
+                message, snapshot, root=root, goal=goal, prefer_plan=prefer_plan_decision
             )
             decision_raw["reply"] = (decision_raw.get("reply") or "") + f"（规则兜底：{error_note[:120]}）"
 
