@@ -3261,10 +3261,11 @@ async def api_materials_confirm_verify(request: Request) -> JSONResponse:
         return _command_error_response(exc)
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/issues")
 @app.get("/api/issues")
-def api_list_issues(status: str = "open") -> JSONResponse:
+def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONResponse:
     """List quality issues (open snapshot)."""
-    root = _active_root()
+    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
         from agent.issues import issues_summary, load_open_issues
         from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review

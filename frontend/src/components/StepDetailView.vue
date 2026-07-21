@@ -570,7 +570,7 @@ const stageIssues = computed(() => {
 
 async function loadIssues() {
   try {
-    const { data } = await fetchIssues('open')
+    const { data } = await fetchIssues(props.runId, 'open')
     if (data && data.ok) issueList.value = data.issues || []
     else issueList.value = []
   } catch (e) {

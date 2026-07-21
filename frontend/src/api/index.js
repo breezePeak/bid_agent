@@ -233,8 +233,8 @@ export function invokeAgentTool(name, args = {}, { dryRun = false } = {}) {
 }
 
 
-export function fetchIssues(status = 'open') {
-  return api.get('/issues', { params: { status } })
+export function fetchIssues(runId, status = 'open') {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/issues`, { params: { status } })
 }
 
 export function previewIssueRepair(issueId) {
