@@ -84,6 +84,24 @@ _AUTH_SESSIONS: dict[str, dict[str, Any]] = {}
 _AUTH_LOCK = threading.Lock()
 
 
+def _is_v1_compat_api(path: str) -> bool:
+    if not path.startswith("/api/"):
+        return False
+    return not (
+        path.startswith("/api/v2/")
+        or path.startswith("/api/auth/")
+        or path.startswith("/api/llm-settings")
+    )
+
+
+def _mark_v1_compat_response(path: str, response: Any) -> Any:
+    if _is_v1_compat_api(path):
+        response.headers["Deprecation"] = "true"
+        response.headers["Warning"] = '299 bid-agent "V1 compatibility API; migrate to workspace-scoped V2"'
+        response.headers["Link"] = '</api/v2/workspaces>; rel="successor-version"'
+    return response
+
+
 def _auth_credentials() -> tuple[str, str]:
     return (
         str(os.environ.get("BID_AGENT_AUTH_USER") or "admin"),
@@ -145,7 +163,8 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
             )
     except ControlPlaneError as exc:
         return _command_error_response(exc)
-    return await call_next(request)
+    response = await call_next(request)
+    return _mark_v1_compat_response(path, response)
 
 
 @app.post("/api/auth/login")

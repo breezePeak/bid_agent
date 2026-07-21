@@ -539,3 +539,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B53 | 2026-07-21 | 修复 Windows 测试中 Repair Worker 已提交 Operation 终态但线程尚未完全退出时 `control.db` 被临时目录清理抢占的竞态；内部启动结果暴露仅供生命周期同步的 Worker handle，回归测试在释放工作区前等待线程收尾，并连续五轮验证修复/控制状态用例。 |
 | V2.0-B54 | 2026-07-21 | V2 Snapshot 的 Pipeline 状态改为以 `control.db.operations` 为权威，`pipeline_control.json` 只在 Operation ID 与 fencing token 同时匹配时提供当前阶段和 Worker PID；旧 checkpoint 与 SQLite 冲突时忽略其 running 状态并显式标记不一致，避免 UI 被过期文件伪装成仍在运行。 |
 | V2.0-B55 | 2026-07-21 | 启动恢复从只检查 ACTIVE_RUN 扩展为扫描全部工作区：每个工作区都会收敛中断的 RepairJob 与 AgentActivity；单进程 Worker 无法自动接管的非活动 Pipeline Operation fail-closed 为 blocked（暂停/取消请求分别收敛为 paused/cancelled），关联运行中 Goal 标记为 blocked_human 并保留孤立 Operation ID，避免后台状态永久伪装为 running。 |
+| V2.0-B56 | 2026-07-21 | V1 兼容 API 响应统一增加 `Deprecation`、HTTP 299 Warning 和 V2 successor Link；V2、认证及全局模型配置接口不标记弃用。兼容调用方现在可以在一个版本的迁移窗口内被机器可读地识别和监控，为后续删除旧路由提供调用量依据。 |
