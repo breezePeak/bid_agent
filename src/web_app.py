@@ -2475,8 +2475,15 @@ def _trigger_repair_job(
             except Exception as exc:
                 _append_log(f"[警告] 修复 Operation 状态回写失败: {exc}")
 
-    threading.Thread(target=_run, daemon=True, name=f"repair-{job_id}").start()
-    return {"ok": True, "duplicate": False, "job": job, "message": "已开始最小修复，将按根因合并处理并统一重验"}
+    worker_thread = threading.Thread(target=_run, daemon=True, name=f"repair-{job_id}")
+    worker_thread.start()
+    return {
+        "ok": True,
+        "duplicate": False,
+        "job": job,
+        "message": "已开始最小修复，将按根因合并处理并统一重验",
+        "_worker_thread": worker_thread,
+    }
 
 
 @app.post("/api/chat")
@@ -7182,6 +7189,22 @@ def api_v2_download_final(
     except Exception as exc:
         return _command_error_response(
             ControlPlaneError("STATE_UNAVAILABLE", f"正式稿下载校验失败: {exc}", status_code=503)
+        )
+
+
+@app.get("/api/v2/workspaces/{workspace_id}/exports/draft", response_model=None)
+def api_v2_download_draft(workspace_id: str) -> FileResponse | JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        artifact = context.root / "outputs" / "final.md"
+        if not artifact.exists() or not artifact.is_file() or artifact.stat().st_size <= 0:
+            raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)
+        return FileResponse(str(artifact), filename="final.md", media_type="text/markdown")
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"草稿下载失败: {exc}", status_code=503)
         )
 
 

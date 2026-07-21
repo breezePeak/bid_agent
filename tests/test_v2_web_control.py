@@ -420,6 +420,7 @@ class V2WebControlTests(unittest.TestCase):
                                     if current.get("status") == "succeeded":
                                         break
                                     time.sleep(0.01)
+                                started["_worker_thread"].join(timeout=2)
             self.assertEqual(current.get("status"), "succeeded")
             resume.assert_not_called()
 
@@ -1053,6 +1054,23 @@ class V2WebControlTests(unittest.TestCase):
                 stale = _body(web_app.api_v2_download_final("alpha", latest["receipt_id"]))
             self.assertFalse(stale["ok"])
             self.assertEqual(stale["error"]["code"], "GATE_RECEIPT_STALE")
+
+    def test_v2_draft_download_is_scoped_to_path_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha" / "outputs"
+            beta = runs / "beta" / "outputs"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            (alpha / "final.md").write_text("alpha draft", encoding="utf-8")
+            (beta / "final.md").write_text("beta draft", encoding="utf-8")
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta.parent
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                response = web_app.api_v2_download_draft("alpha")
+
+            self.assertEqual(Path(response.path).read_text(encoding="utf-8"), "alpha draft")
 
     def test_formal_gate_fingerprint_uses_sqlite_control_domains_not_v1_projections(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

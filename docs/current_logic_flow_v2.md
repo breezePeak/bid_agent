@@ -535,3 +535,5 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B49 | 2026-07-21 | 正式 GateReceipt 签发开始检查 SQLite Artifact readiness：正式依赖存在 stale/missing、磁盘 hash 与 manifest 不一致或 final.docx 输入 fingerprint 过期时一律阻断；Artifact 权威状态同时纳入 GateReceipt 指纹，签发后状态变化会令凭据失效。无 manifest 的 V1 旧产物仅在一个兼容版本内继续允许验收。 |
 | V2.0-B50 | 2026-07-21 | 修复 V2 Snapshot 将 SQLite Artifact manifest 被旧文件摘要覆盖的问题：`artifacts` 固定返回权威 manifest 数组，V1 文件展示摘要迁至 `artifact_files` 兼容字段；主前端适配器同步采用稳定数组契约，避免 UI 把兼容投影视为 Artifact 权威状态。 |
 | V2.0-B51 | 2026-07-21 | V2 Snapshot 的工作流展示状态开始由 SQLite Artifact manifest 覆盖旧文件存在性判断：已记录阶段只有全部 manifest ready 才显示完成，stale/missing 阶段回到可执行并提示重建；尚未迁移 manifest 的 V1 阶段继续沿用一个版本的兼容展示。 |
+| V2.0-B52 | 2026-07-21 | 草稿 Markdown 下载新增显式 workspace_id 的 V2 路径，主工作区页面停止通过 ACTIVE_RUN 下载其他工作区草稿；遗留 FloatingPreview 的步骤详情与文件预览也切换到显式工作区 V2 接口。正式 Word 仍必须携带有效 GateReceipt，草稿能力继续与正式导出门禁分离。 |
+| V2.0-B53 | 2026-07-21 | 修复 Windows 测试中 Repair Worker 已提交 Operation 终态但线程尚未完全退出时 `control.db` 被临时目录清理抢占的竞态；内部启动结果暴露仅供生命周期同步的 Worker handle，回归测试在释放工作区前等待线程收尾，并连续五轮验证修复/控制状态用例。 |

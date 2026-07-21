@@ -263,6 +263,7 @@ class RepairWorkerTests(unittest.TestCase):
                                     # Wait for worker to clear global RUNNING flag
                                     while web_app.RUNNING and time.monotonic() < deadline:
                                         time.sleep(0.01)
+                                    started["_worker_thread"].join(timeout=2)
 
                                     # Old confirmation is stale after terminal status
                                     stale = claim_repair_job(root, job["confirmation_id"])

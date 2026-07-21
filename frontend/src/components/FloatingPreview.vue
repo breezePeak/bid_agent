@@ -153,7 +153,8 @@ watch(() => [props.visible, props.command, props.mode], async () => {
   if (props.mode === 'step-detail' && props.command) {
     loading.value = true
     try {
-      const res = await fetch(`/api/workflow-step-detail?command=${encodeURIComponent(props.command)}`).then(r => r.json())
+      const workspace = encodeURIComponent(props.runId)
+      const res = await fetch(`/api/v2/workspaces/${workspace}/workflow-step-detail?command=${encodeURIComponent(props.command)}`).then(r => r.json())
       if (res.ok) {
         stepDetail.value = res
         title.value = res.step?.label || props.command
@@ -174,7 +175,8 @@ async function previewFile(path) {
   title.value = path
   previewFilePath.value = path
   try {
-    const res = await fetch(`/api/file-preview?path=${encodeURIComponent(path)}`).then(r => r.json())
+    const workspace = encodeURIComponent(props.runId)
+    const res = await fetch(`/api/v2/workspaces/${workspace}/files/preview?path=${encodeURIComponent(path)}`).then(r => r.json())
     if (res.ok && res.content) {
       fileContent.value = typeof res.content === 'string' ? res.content : JSON.stringify(res.content, null, 2)
     } else if (res.ok && res.message) {

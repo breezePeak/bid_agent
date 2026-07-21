@@ -59,8 +59,10 @@ export function updateManualReview(runId, category, payload) {
   return submitWorkspaceCommand(runId, 'review.update', { category, payload })
 }
 
-export function downloadFinalMd() {
-  window.open('/api/download/final-md', '_blank')
+export function downloadFinalMd(runId) {
+  if (!runId) throw new Error('缺少工作空间 ID，无法下载草稿')
+  const workspace = encodeURIComponent(runId)
+  window.open(`/api/v2/workspaces/${workspace}/exports/draft`, '_blank')
 }
 
 export async function downloadFinalDocx(runId) {
