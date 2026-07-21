@@ -1773,11 +1773,16 @@ def _chat_reply(root: Path, message: str, selected_command: str = "") -> dict[st
     }
 
 
-def _status_payload(root: Path, run_id: str) -> dict[str, Any]:
+def _status_payload(
+    root: Path,
+    run_id: str,
+    *,
+    persist_manual_review_summary: bool = True,
+) -> dict[str, Any]:
     run_state = _read_run_state(root)
     run_events = load_run_events(root)
     project_profile = load_project_profile(root)
-    review_summary = manual_review_summary(root)
+    review_summary = manual_review_summary(root) if persist_manual_review_summary else {}
     pipeline_control = SUPERVISOR.load(root)
     repair_job = load_repair_job(root)
     pending_confirmation = None
@@ -2082,12 +2087,17 @@ def api_status() -> dict[str, Any]:
 @app.get("/api/v2/workspaces/{workspace_id}/workflow-step-detail")
 @app.get("/api/workflow-step-detail")
 def api_workflow_step_detail(command: str = Query(..., min_length=1), workspace_id: str = "") -> JSONResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context is not None else _active_root()
     step = next((item for item in WORKFLOW_STEPS if item.get("command") == command), None)
     if step is None:
         return JSONResponse({"ok": False, "message": f"未知流程节点: {command}"}, status_code=404)
 
-    status = _status_payload(root, workspace_id or ACTIVE_RUN_ID or root.name)
+    status = _status_payload(
+        root,
+        workspace_id or ACTIVE_RUN_ID or root.name,
+        persist_manual_review_summary=context is None,
+    )
     workflow = status.get("workflow", []) if isinstance(status, dict) else []
     step_status = next((item for item in workflow if isinstance(item, dict) and item.get("command") == command), {})
     timings = status.get("timings", {}) if isinstance(status.get("timings"), dict) else {}
@@ -2109,7 +2119,11 @@ def api_workflow_step_detail(command: str = Query(..., min_length=1), workspace_
             ),
             "budget_hits": _budget_hits_for_command(root, command),
             "prompt_summary": _stage_prompt_summary(root, command),
-            "manual_review_summary": manual_review_summary(root),
+            "manual_review_summary": (
+                _v2_manual_review_summary(context)
+                if context is not None
+                else manual_review_summary(root)
+            ),
             "project_profile": load_project_profile(root),
             "run_root": str(root),
         }
@@ -7297,7 +7311,11 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         context = _workspace_context(workspace_id)
         store = ControlStore(context)
         snapshot = store.snapshot()
-        compatibility = _status_payload(context.root, context.workspace_id)
+        compatibility = _status_payload(
+            context.root,
+            context.workspace_id,
+            persist_manual_review_summary=False,
+        )
         goal_state = store.goal_state()
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
@@ -7340,6 +7358,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 },
                 "activity": activity_state or compatibility.get("agent_activity"),
                 "repair_job": repair_state or compatibility.get("repair_job"),
+                "manual_review_summary": _v2_manual_review_summary(context),
                 "pipeline": pipeline_snapshot,
                 "materials": {**material_summary, "items": material_items},
                 "findings": {

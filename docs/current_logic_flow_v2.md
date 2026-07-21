@@ -550,3 +550,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B64 | 2026-07-21 | 人工复核的执行期消费者（章节上下文、评分点分配、全文复核过滤和清单生成）在 control.db 存在时也以最新 SQLite PolicyDecision 覆盖 V1 override 文件；兼容投影被后续篡改为 pending/open 不能逆转已审计决定。无 control.db 的 V1 工作区继续沿用旧文件语义。 |
 | V2.0-B65 | 2026-07-21 | V2 风险接受改为直接读取 SQLite 权威 Issue，并在同一事务内更新 Issue 与追加 PolicyDecision；critical 只接受服务端认证的 admin 角色和已消费的持久化 Action 确认，客户端 admin/confirm 标志继续无效，fatal 与资格材料风险始终 fail-closed。V1 open.json 仅在权威提交后作为兼容投影刷新。 |
 | V2.0-B66 | 2026-07-21 | 修复 V2 Chat 转发层丢失认证上下文的问题：路径工作区仍覆盖客户端 run_id，同时完整保留服务端 principal，使聊天生成的 Command/Action 与按钮和 CLI/API 使用同一 actor、role 与审计语义，不再退化为 anonymous。 |
+| V2.0-B67 | 2026-07-21 | V2 Snapshot 与工作流详情读取停止调用会写入 `manual_review/summary.json` 的 V1 聚合路径；人工复核摘要直接由 SQLite PolicyDecision 和只读兼容输入计算并标注 `source=control.db`。V2 查询不再因刷新页面修改工作区文件状态。 |

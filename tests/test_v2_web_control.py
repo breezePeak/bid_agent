@@ -2022,7 +2022,7 @@ class V2WebControlTests(unittest.TestCase):
             }
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
-                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility) as status_payload:
                     payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
 
             snapshot = payload["snapshot"]
@@ -2039,6 +2039,11 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(snapshot["artifact_files"]["outputs"]["final_docx"], True)
             self.assertTrue(snapshot["presentation"]["workflow"][0]["done"])
             self.assertEqual(snapshot["presentation"]["workflow"][0]["artifact_source"], "control.db")
+            status_payload.assert_called_once_with(
+                context.root,
+                "alpha",
+                persist_manual_review_summary=False,
+            )
 
             store.mark_artifact_states_stale(
                 ["outputs/final.docx"],
@@ -2052,6 +2057,18 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(stale_step["done"])
             self.assertEqual(stale_step["state"], "ready")
             self.assertIn("已过期", stale_step["message"])
+
+    def test_v2_snapshot_does_not_write_manual_review_summary_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            summary_path = root / "workspace" / "manual_review" / "summary.json"
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+            self.assertTrue(payload["ok"])
+            self.assertFalse(summary_path.exists())
+            self.assertEqual(payload["snapshot"]["manual_review_summary"]["source"], "control.db")
 
     def test_pipeline_snapshot_rejects_stale_checkpoint_status(self) -> None:
         operation = {
@@ -2301,7 +2318,8 @@ class V2WebControlTests(unittest.TestCase):
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.object(web_app, "_status_payload", return_value={"workflow": [], "timings": {}}) as status:
-                    detail = _body(web_app.api_workflow_step_detail(command, "alpha"))
+                    with mock.patch.object(web_app, "_v2_manual_review_summary", return_value={"alpha": True}) as detail_summary:
+                        detail = _body(web_app.api_workflow_step_detail(command, "alpha"))
                 with mock.patch.object(web_app, "_v2_manual_review_summary", return_value={"alpha": True}) as review_summary:
                     summary = _body(web_app.api_manual_review_summary("alpha"))
                 with mock.patch.object(web_app, "_v2_manual_review_items", return_value=[{"id": "alpha-review"}]) as review_items:
@@ -2315,7 +2333,9 @@ class V2WebControlTests(unittest.TestCase):
                     batch_result = _body(asyncio.run(web_app.api_batch_preview_repair(_Request({"issue_ids": ["issue-1"]}), "alpha")))
 
             resolved = alpha.resolve()
-            status.assert_called_once_with(resolved, "alpha")
+            status.assert_called_once_with(resolved, "alpha", persist_manual_review_summary=False)
+            detail_summary.assert_called_once()
+            self.assertEqual(detail["manual_review_summary"], {"alpha": True})
             self.assertEqual(Path(detail["run_root"]), resolved)
             review_summary.assert_called_once()
             self.assertEqual(review_summary.call_args.args[0].root, resolved)
