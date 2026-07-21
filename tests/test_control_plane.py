@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import sys
 import tempfile
@@ -142,7 +143,31 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(store.migration_state()["status"], "ready")
             decisions = store.policy_decisions(issue_id=f"migration:{conflict['conflict_id']}")
             self.assertEqual(decisions[0]["decision_type"], "migration_reconciliation")
+            backup_path = context.root / resolved["resolution"]["backup_path"]
+            self.assertTrue(backup_path.exists())
+            self.assertEqual(hashlib.sha256(backup_path.read_bytes()).hexdigest(), resolved["resolution"]["backup_sha256"])
             self.assertTrue(any(event["kind"] == "MigrationConflictResolved" for event in store.events()))
+
+    def test_binding_legacy_goal_never_promotes_legacy_success_without_revalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.upsert_goal_state({"goal_id": "current", "status": "in_progress"}, source="test")
+            conflict = store.record_migration_conflict(
+                domain="goal",
+                legacy={"goal_id": "legacy", "status": "succeeded"},
+                authoritative=store.goal_state(),
+                reason="different goals",
+            )
+            resolved = store.resolve_migration_conflict(
+                conflict["conflict_id"],
+                resolution="bind_legacy",
+                actor={"id": "admin", "role": "admin"},
+                reason="bind after evidence review",
+            )
+            self.assertEqual(store.goal_state()["goal_id"], "legacy")
+            self.assertEqual(store.goal_state()["status"], "blocked_human")
+            self.assertEqual(resolved["resolution"]["state_effect"], "legacy_bound_goal_success_normalized")
 
     def test_lazy_v1_import_detects_existing_authoritative_conflicts_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

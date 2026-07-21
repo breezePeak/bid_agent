@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -594,6 +595,23 @@ class ControlStore:
             raise ControlPlaneError("COMMAND_INVALID", "无效的迁移冲突处理方式。", status_code=400)
         if not str(reason or "").strip():
             raise ControlPlaneError("COMMAND_INVALID", "迁移冲突处理必须填写原因。", status_code=400)
+        with self._connection() as connection:
+            preview_row = connection.execute(
+                "SELECT * FROM migration_conflicts WHERE conflict_id = ?", (conflict_id,)
+            ).fetchone()
+        if preview_row is None:
+            raise ControlPlaneError("MIGRATION_CONFLICT_NOT_FOUND", "迁移冲突不存在。", status_code=404)
+        backup_dir = self.path.parent / "migration_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"control-before-{conflict_id}.db"
+        if not backup_path.exists():
+            with self._connection() as source:
+                destination = sqlite3.connect(str(backup_path))
+                try:
+                    source.backup(destination)
+                finally:
+                    destination.close()
+        backup_sha256 = hashlib.sha256(backup_path.read_bytes()).hexdigest()
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -605,7 +623,129 @@ class ControlStore:
                     raise ControlPlaneError("MIGRATION_CONFLICT_NOT_FOUND", "迁移冲突不存在。", status_code=404)
                 if str(row["status"]) != "open":
                     raise ControlPlaneError("MIGRATION_CONFLICT_RESOLVED", "迁移冲突已处理。", status_code=409)
-                resolution_value = {"choice": resolution_name, "original_evidence_preserved": True}
+                domain = str(row["domain"])
+                legacy = _decode(str(row["legacy_json"]), None)
+                state_effect = "authority_preserved"
+                if resolution_name == "bind_legacy":
+                    if domain == "goal":
+                        if not isinstance(legacy, dict):
+                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Goal 证据无效。", status_code=503)
+                        goal_id = str(legacy.get("goal_id") or legacy.get("id") or "").strip()
+                        if not goal_id:
+                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Goal 缺少 goal_id。", status_code=503)
+                        legacy_status = str(legacy.get("status") or "pending")
+                        status = "blocked_human" if legacy_status in {"succeeded", "completed"} else legacy_status
+                        normalized = {**legacy, "goal_id": goal_id, "status": status}
+                        existing_goal = connection.execute(
+                            "SELECT created_at FROM goal_state WHERE singleton = 1"
+                        ).fetchone()
+                        connection.execute(
+                            """
+                            INSERT INTO goal_state(
+                                singleton, goal_id, status, goal_json, source, created_at, updated_at
+                            ) VALUES (1, ?, ?, ?, 'migration_reconciliation', ?, ?)
+                            ON CONFLICT(singleton) DO UPDATE SET
+                                goal_id = excluded.goal_id, status = excluded.status,
+                                goal_json = excluded.goal_json, source = excluded.source,
+                                updated_at = excluded.updated_at
+                            """,
+                            (
+                                goal_id, status, _json(normalized),
+                                str(existing_goal["created_at"]) if existing_goal else now, now,
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO control_meta(key, value) VALUES ('goal_v1_imported', '1') "
+                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                        )
+                        state_effect = "legacy_bound_goal_success_normalized" if status != legacy_status else "legacy_bound"
+                    elif domain == "materials":
+                        if not isinstance(legacy, list):
+                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移材料证据无效。", status_code=503)
+                        connection.execute("DELETE FROM material_states")
+                        for item in legacy:
+                            if not isinstance(item, dict) or not str(item.get("item_id") or "").strip():
+                                raise ControlPlaneError("STATE_UNAVAILABLE", "迁移材料项缺少 item_id。", status_code=503)
+                            connection.execute(
+                                """
+                                INSERT INTO material_states(
+                                    item_id, response_status, lifecycle_status, evidence_status,
+                                    item_json, source, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, ?, 'migration_reconciliation', ?, ?)
+                                """,
+                                (
+                                    str(item["item_id"]), str(item.get("response_status") or "deferred"),
+                                    str(item.get("lifecycle_status") or "missing"),
+                                    str(item.get("evidence_status") or "missing"), _json(item), now, now,
+                                ),
+                            )
+                        connection.execute(
+                            "INSERT INTO control_meta(key, value) VALUES ('materials_v1_imported', '1') "
+                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                        )
+                        state_effect = "legacy_bound"
+                    elif domain == "issues":
+                        if not isinstance(legacy, list):
+                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Issue 证据无效。", status_code=503)
+                        connection.execute("DELETE FROM issue_states")
+                        for item in legacy:
+                            issue_id = str(item.get("id") or "").strip() if isinstance(item, dict) else ""
+                            if not issue_id:
+                                raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Issue 缺少 id。", status_code=503)
+                            connection.execute(
+                                """
+                                INSERT INTO issue_states(
+                                    issue_id, status, severity, issue_json, source, created_at, updated_at
+                                ) VALUES (?, ?, ?, ?, 'migration_reconciliation', ?, ?)
+                                """,
+                                (
+                                    issue_id, str(item.get("status") or "open"),
+                                    str(item.get("severity") or "warn"), _json(item), now, now,
+                                ),
+                            )
+                            if str(item.get("status") or "") == "accepted":
+                                decision_id = str(uuid.uuid5(
+                                    uuid.NAMESPACE_URL,
+                                    f"{self.context.workspace_id}:migration-accepted-risk:{issue_id}",
+                                ))
+                                connection.execute(
+                                    """
+                                    INSERT OR IGNORE INTO policy_decisions(
+                                        decision_id, issue_id, decision_type, decision_json,
+                                        actor_json, created_at
+                                    ) VALUES (?, ?, 'accept_risk', ?, ?, ?)
+                                    """,
+                                    (
+                                        decision_id, issue_id,
+                                        _json({
+                                            "risk_class": item.get("risk_class"),
+                                            "reason": item.get("accept_reason"),
+                                            "source": "migration_reconciliation",
+                                        }),
+                                        _json(actor), now,
+                                    ),
+                                )
+                        connection.execute(
+                            "INSERT INTO control_meta(key, value) VALUES ('issue_v1_imported', '1') "
+                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                        )
+                        state_effect = "legacy_bound"
+                    else:
+                        raise ControlPlaneError("COMMAND_INVALID", f"不支持绑定迁移领域: {domain}", status_code=400)
+                elif resolution_name == "mark_failed" and domain == "goal":
+                    connection.execute(
+                        "UPDATE goal_state SET status = 'failed', source = 'migration_reconciliation', updated_at = ? "
+                        "WHERE singleton = 1",
+                        (now,),
+                    )
+                    state_effect = "goal_marked_failed"
+                resolution_value = {
+                    "choice": resolution_name,
+                    "state_effect": state_effect,
+                    "original_evidence_preserved": True,
+                    "backup_path": backup_path.relative_to(self.context.root).as_posix(),
+                    "backup_sha256": backup_sha256,
+                }
                 connection.execute(
                     """
                     UPDATE migration_conflicts
