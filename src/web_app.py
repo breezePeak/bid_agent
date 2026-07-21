@@ -7437,9 +7437,12 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
 
 @app.post("/api/v2/workspaces/{workspace_id}/actions/{action_id}/confirm")
 @app.post("/api/v2/workspaces/{workspace_id}/confirmations/{action_id}/confirm")
-def api_v2_confirm_action(workspace_id: str, action_id: str) -> JSONResponse:
+def api_v2_confirm_action(workspace_id: str, action_id: str, request: Request) -> JSONResponse:
     try:
-        receipt = _command_gateway(_workspace_context(workspace_id)).confirm(action_id)
+        receipt = _command_gateway(_workspace_context(workspace_id)).confirm(
+            action_id,
+            actor=_request_actor(request, source="v2_api"),
+        )
         return JSONResponse(
             {"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message},
             status_code=202 if receipt.status != "rejected" else 409,
@@ -7454,9 +7457,12 @@ def api_v2_confirm_action(workspace_id: str, action_id: str) -> JSONResponse:
 
 @app.post("/api/v2/workspaces/{workspace_id}/actions/{action_id}/decline")
 @app.post("/api/v2/workspaces/{workspace_id}/confirmations/{action_id}/decline")
-def api_v2_decline_action(workspace_id: str, action_id: str) -> JSONResponse:
+def api_v2_decline_action(workspace_id: str, action_id: str, request: Request) -> JSONResponse:
     try:
-        result = _command_gateway(_workspace_context(workspace_id)).decline(action_id)
+        result = _command_gateway(_workspace_context(workspace_id)).decline(
+            action_id,
+            actor=_request_actor(request, source="v2_api"),
+        )
         return JSONResponse({"ok": True, **result})
     except ControlPlaneError as exc:
         return _command_error_response(exc)

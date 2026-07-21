@@ -197,6 +197,36 @@ class ControlPlaneTests(unittest.TestCase):
                 gateway.confirm(action["confirmation_id"])
             self.assertEqual(replay.exception.code, "ACTION_REPLAYED")
 
+    def test_confirmation_is_bound_to_proposer_and_refreshes_actor_role(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            observed: dict = {}
+
+            def handler(ctx, envelope, operation_id):
+                observed.update(envelope.actor)
+                return {"accepted": True, "operation_status": "succeeded"}
+
+            gateway = CommandGateway(context, {"repair.start": handler})
+            envelope = _envelope(context, gateway.store, "repair.start")
+            action = gateway.propose(envelope, label="确认修复", risk="high")
+            revision = gateway.store.revision()
+
+            with self.assertRaises(ControlPlaneError) as forbidden:
+                gateway.confirm(
+                    action["confirmation_id"],
+                    actor={"type": "user", "id": "other-user", "role": "admin"},
+                )
+            self.assertEqual(forbidden.exception.code, "CONFIRMATION_FORBIDDEN")
+            self.assertEqual(gateway.store.revision(), revision)
+            self.assertEqual(gateway.store.snapshot()["confirmations"][0]["status"], "pending")
+
+            receipt = gateway.confirm(
+                action["confirmation_id"],
+                actor={"type": "user", "id": "tester", "role": "editor"},
+            )
+            self.assertEqual(receipt.status, "accepted")
+            self.assertEqual(observed, {"type": "user", "id": "tester", "role": "editor"})
+
     def test_repair_command_requires_persisted_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

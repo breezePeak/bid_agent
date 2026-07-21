@@ -2089,7 +2089,13 @@ class ControlStore:
                 connection.rollback()
                 raise
 
-    def consume_confirmation(self, confirmation_id: str, *, decline: bool = False) -> CommandEnvelope:
+    def consume_confirmation(
+        self,
+        confirmation_id: str,
+        *,
+        decline: bool = False,
+        actor: dict[str, Any] | None = None,
+    ) -> CommandEnvelope:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2101,6 +2107,18 @@ class ControlStore:
                     raise ControlPlaneError("CONFIRMATION_NOT_FOUND", "确认请求不存在。", status_code=404)
                 if str(row["status"]) != "pending":
                     raise ControlPlaneError("ACTION_REPLAYED", "确认请求已处理，不能重复使用。")
+                if actor is not None:
+                    proposed_actor = _decode(str(row["actor_json"] or ""), {})
+                    proposed_actor_id = str(
+                        proposed_actor.get("id") if isinstance(proposed_actor, dict) else ""
+                    ).strip()
+                    confirming_actor_id = str(actor.get("id") or "").strip()
+                    if not confirming_actor_id or confirming_actor_id != proposed_actor_id:
+                        raise ControlPlaneError(
+                            "CONFIRMATION_FORBIDDEN",
+                            "只能由创建该 Action 的认证主体确认或拒绝。",
+                            status_code=403,
+                        )
                 expires_at = datetime.fromisoformat(str(row["expires_at"]))
                 if expires_at <= datetime.now(timezone.utc):
                     connection.execute(
@@ -2133,7 +2151,12 @@ class ControlStore:
                 connection.commit()
                 data = _decode(str(row["command_json"]), {})
                 envelope = CommandEnvelope.from_mapping(data, workspace_id=self.context.workspace_id)
-                return replace(envelope, expected_revision=revision, confirmation_id=confirmation_id)
+                return replace(
+                    envelope,
+                    expected_revision=revision,
+                    confirmation_id=confirmation_id,
+                    actor=dict(actor) if actor is not None else envelope.actor,
+                )
             except Exception:
                 connection.rollback()
                 raise
@@ -2262,12 +2285,12 @@ class CommandGateway:
     def propose(self, envelope: CommandEnvelope, *, label: str, risk: str) -> dict[str, Any]:
         return self.store.propose_confirmation(envelope, label=label, risk=risk)
 
-    def confirm(self, confirmation_id: str) -> CommandReceipt:
-        envelope = self.store.consume_confirmation(confirmation_id)
+    def confirm(self, confirmation_id: str, *, actor: dict[str, Any] | None = None) -> CommandReceipt:
+        envelope = self.store.consume_confirmation(confirmation_id, actor=actor)
         return self.submit(envelope)
 
-    def decline(self, confirmation_id: str) -> dict[str, Any]:
-        envelope = self.store.consume_confirmation(confirmation_id, decline=True)
+    def decline(self, confirmation_id: str, *, actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        envelope = self.store.consume_confirmation(confirmation_id, decline=True, actor=actor)
         return {
             "confirmation_id": confirmation_id,
             "status": "declined",

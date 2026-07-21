@@ -275,7 +275,7 @@ class V2WebControlTests(unittest.TestCase):
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.object(web_app.SUPERVISOR, "is_running", return_value=False):
-                    confirmed = web_app.api_v2_confirm_action("alpha", action_id)
+                    confirmed = web_app.api_v2_confirm_action("alpha", action_id, _Request({}))
             confirmed_body = _body(confirmed)
             self.assertTrue(confirmed_body["ok"])
             self.assertEqual(ControlStore(context).snapshot()["operation"]["status"], "cancelled")
@@ -368,6 +368,7 @@ class V2WebControlTests(unittest.TestCase):
                         confirmed = web_app.api_v2_confirm_action(
                             "alpha",
                             proposal["action"]["action_id"],
+                            _Request({}),
                         )
 
             confirmed_body = _body(confirmed)
@@ -486,6 +487,7 @@ class V2WebControlTests(unittest.TestCase):
                     confirmed = web_app.api_v2_confirm_action(
                         "alpha",
                         proposal["action"]["action_id"],
+                        _Request({}),
                     )
             confirmed_body = _body(confirmed)
             self.assertTrue(confirmed_body["ok"])
@@ -676,7 +678,7 @@ class V2WebControlTests(unittest.TestCase):
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 first = _body(asyncio.run(propose("material-ready-unverified")))
-                blocked = _body(web_app.api_v2_confirm_action("alpha", first["action"]["action_id"]))
+                blocked = _body(web_app.api_v2_confirm_action("alpha", first["action"]["action_id"], _Request({})))
             self.assertFalse(blocked["ok"])
             self.assertEqual(blocked["receipt"]["error"]["code"], "GATE_BLOCKED")
 
@@ -701,7 +703,7 @@ class V2WebControlTests(unittest.TestCase):
                         return_value=workspace / "materials_checklist.json",
                     ):
                         accepted = _body(
-                            web_app.api_v2_confirm_action("alpha", second["action"]["action_id"])
+                            web_app.api_v2_confirm_action("alpha", second["action"]["action_id"], _Request({}))
                         )
             self.assertTrue(accepted["ok"], accepted)
             update.assert_called_once()
@@ -751,7 +753,7 @@ class V2WebControlTests(unittest.TestCase):
                     )
                 )
                 confirmed = _body(
-                    web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                    web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
                 )
             self.assertFalse(confirmed["ok"])
             self.assertEqual(confirmed["receipt"]["error"]["code"], "GATE_BLOCKED")
@@ -816,7 +818,7 @@ class V2WebControlTests(unittest.TestCase):
                 )
                 with mock.patch("materials_checklist.mark_material_uploaded") as upload:
                     rejected = _body(
-                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
                     )
             self.assertEqual(proposed["receipt"]["status"], "requires_confirmation")
             self.assertFalse(rejected["ok"])
@@ -871,7 +873,7 @@ class V2WebControlTests(unittest.TestCase):
                         return_value={"ok": True, "message": "updated"},
                     ):
                         accepted = _body(
-                            web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                            web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
                         )
             self.assertTrue(accepted["ok"])
             self.assertEqual(verify.call_args.kwargs["operator"], "anonymous")
@@ -948,7 +950,7 @@ class V2WebControlTests(unittest.TestCase):
                     return_value={"ok": True, "lifecycle_status": "uploaded", "message": "registered"},
                 ) as register:
                     accepted = _body(
-                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
                     )
                 self.assertTrue(accepted["ok"])
                 token_row = ControlStore(context).material_upload(staged["upload_token"])
@@ -978,7 +980,7 @@ class V2WebControlTests(unittest.TestCase):
                     )
                 )
                 rejected = _body(
-                    web_app.api_v2_confirm_action("alpha", replay["action"]["action_id"])
+                    web_app.api_v2_confirm_action("alpha", replay["action"]["action_id"], _Request({}))
                 )
             self.assertFalse(rejected["ok"])
             self.assertEqual(rejected["receipt"]["error"]["code"], "UPLOAD_TOKEN_INVALID")
@@ -1331,10 +1333,45 @@ class V2WebControlTests(unittest.TestCase):
                         )
                     )
                     rejected = _body(
-                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
                     )
             self.assertFalse(rejected["ok"])
             self.assertEqual(rejected["receipt"]["error"]["code"], "POLICY_DENIED")
+
+    def test_v2_action_cannot_be_confirmed_by_another_principal(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            owner = {"type": "user", "id": "owner-1", "role": "user"}
+            intruder = {"type": "user", "id": "editor-2", "role": "admin"}
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = _body(
+                    asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "pipeline.cancel",
+                                    "payload": {},
+                                    "expected_revision": 0,
+                                    "idempotency_key": "owner-cancel",
+                                },
+                                principal=owner,
+                            ),
+                        )
+                    )
+                )
+                rejected = _body(
+                    web_app.api_v2_confirm_action(
+                        "alpha",
+                        proposed["action"]["action_id"],
+                        _Request({}, principal=intruder),
+                    )
+                )
+            self.assertFalse(rejected["ok"])
+            self.assertEqual(rejected["error"]["code"], "CONFIRMATION_FORBIDDEN")
+            pending = ControlStore(WorkspaceContext.resolve(runs, "alpha")).snapshot()["confirmations"]
+            self.assertEqual(pending[0]["status"], "pending")
 
     def test_authenticated_admin_accepts_authoritative_critical_risk(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1393,7 +1430,11 @@ class V2WebControlTests(unittest.TestCase):
                         )
                     )
                     accepted = _body(
-                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                        web_app.api_v2_confirm_action(
+                            "alpha",
+                            proposed["action"]["action_id"],
+                            _Request({}, principal=principal),
+                        )
                     )
             self.assertTrue(accepted["ok"])
             state = ControlStore(context).issue_states()[0]
@@ -1439,7 +1480,11 @@ class V2WebControlTests(unittest.TestCase):
                             )
                         )
                         rejected = _body(
-                            web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"])
+                            web_app.api_v2_confirm_action(
+                                "alpha",
+                                proposed["action"]["action_id"],
+                                _Request({}, principal={"type": "user", "id": "admin", "role": "admin"}),
+                            )
                         )
                 self.assertFalse(rejected["ok"])
                 self.assertEqual(rejected["receipt"]["error"]["code"], "POLICY_DENIED")
