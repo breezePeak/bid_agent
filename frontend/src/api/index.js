@@ -32,7 +32,7 @@ export function fetchRuns() {
 }
 
 export function createRun(name, projectType, expectedPages) {
-  return api.post('/start-run', {
+  return api.post('/v2/workspaces', {
     name,
     project_type: projectType,
     expected_pages: expectedPages,

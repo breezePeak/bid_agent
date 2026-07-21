@@ -1920,6 +1920,35 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual({item["id"] for item in payload["runs"]}, {"alpha", "beta"})
             self.assertTrue(all("active" not in item for item in payload["runs"]))
 
+    def test_v2_workspace_creation_does_not_change_process_active_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            active_file = runs / ".active_run"
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+            web_app.RUNNING = True
+            request = _Request(
+                {"name": "Alpha", "project_type": "goods", "expected_pages": 20},
+                principal={"id": "owner-1", "role": "user"},
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "ACTIVE_RUN_FILE", active_file):
+                    with mock.patch.object(web_app, "_create_run_workspace", return_value=("alpha", alpha)):
+                        payload = _body(asyncio.run(web_app.api_v2_create_workspace(request)))
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["run"]["id"], "alpha")
+            self.assertEqual(web_app.ACTIVE_RUN_ID, "beta")
+            self.assertEqual(web_app.ACTIVE_RUN_ROOT, beta)
+            self.assertFalse(active_file.exists())
+            acl = ControlStore(WorkspaceContext.resolve(runs, "alpha")).workspace_acl()
+            self.assertEqual(acl[0]["principal_id"], "owner-1")
+
 
 if __name__ == "__main__":
     unittest.main()

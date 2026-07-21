@@ -309,11 +309,15 @@ def _load_active_run_from_disk() -> None:
 
 def _active_run_payload() -> dict[str, Any]:
     root = _active_root()
+    return _workspace_payload(ACTIVE_RUN_ID, root, isolated=ACTIVE_RUN_ROOT is not None)
+
+
+def _workspace_payload(run_id: str, root: Path, *, isolated: bool = True) -> dict[str, Any]:
     return {
-        "id": ACTIVE_RUN_ID,
+        "id": run_id,
         "root": str(root),
         "relative_root": str(root.relative_to(ROOT)) if root != ROOT and root.is_relative_to(ROOT) else str(root),
-        "isolated": ACTIVE_RUN_ROOT is not None,
+        "isolated": isolated,
     }
 
 
@@ -6579,11 +6583,10 @@ def _run_progress_summary(run_root: Path) -> dict[str, Any]:
     }
 
 
-@app.post("/api/start-run")
-async def api_start_run(request: Request) -> JSONResponse:
+async def _create_workspace_request(request: Request, *, select_legacy_active: bool) -> JSONResponse:
     global ACTIVE_RUN_ID, ACTIVE_RUN_ROOT
 
-    if RUNNING:
+    if select_legacy_active and RUNNING:
         return JSONResponse(
             {"ok": False, "message": "当前已有任务正在运行，请等待完成。"},
             status_code=409,
@@ -6613,12 +6616,24 @@ async def api_start_run(request: Request) -> JSONResponse:
     except Exception as exc:
         return JSONResponse({"ok": False, "message": f"创建运行工作空间失败: {exc}"}, status_code=500)
 
-    ACTIVE_RUN_ID = run_id
-    ACTIVE_RUN_ROOT = run_root
     ControlStore(WorkspaceContext.resolve(RUNS_DIR, run_id)).grant_workspace_access(principal_id, role="owner")
-    ACTIVE_RUN_FILE.write_text(run_id, encoding="utf-8")
-    _append_log(f"[运行] 已创建独立工作空间: {run_root.relative_to(ROOT)}")
-    return JSONResponse({"ok": True, "run": _active_run_payload()})
+    if select_legacy_active:
+        ACTIVE_RUN_ID = run_id
+        ACTIVE_RUN_ROOT = run_root
+        ACTIVE_RUN_FILE.write_text(run_id, encoding="utf-8")
+    relative_root = run_root.relative_to(ROOT) if run_root.is_relative_to(ROOT) else run_root
+    _append_log(f"[运行] 已创建独立工作空间: {relative_root}")
+    return JSONResponse({"ok": True, "run": _workspace_payload(run_id, run_root)})
+
+
+@app.post("/api/v2/workspaces")
+async def api_v2_create_workspace(request: Request) -> JSONResponse:
+    return await _create_workspace_request(request, select_legacy_active=False)
+
+
+@app.post("/api/start-run")
+async def api_start_run(request: Request) -> JSONResponse:
+    return await _create_workspace_request(request, select_legacy_active=True)
 
 
 def _visible_workspace_runs(request: Request, *, include_legacy_active: bool) -> list[dict[str, Any]]:
