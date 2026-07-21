@@ -3955,8 +3955,24 @@ async def api_set_project_profile(request: Request) -> JSONResponse:
         body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON。"}, status_code=400)
-    path = save_project_profile(root, str(body.get("project_type", "")).strip())
-    return JSONResponse({"ok": True, "profile": load_project_profile(root), "path": _safe_relative(root, path)})
+    project_type = str(body.get("project_type", "")).strip()
+    try:
+        context = _workspace_context(ACTIVE_RUN_ID or root.name)
+        gateway = _command_gateway(context)
+        envelope = CommandEnvelope.from_mapping(
+            {
+                "kind": "workspace.set_profile",
+                "payload": {"project_type": project_type},
+                "expected_revision": gateway.store.revision(),
+                "idempotency_key": f"legacy-set-profile:{uuid.uuid4()}",
+                "actor": _request_actor(request, source="legacy_web"),
+            },
+            workspace_id=context.workspace_id,
+        )
+        action = gateway.propose(envelope, label=f"确认切换项目类型为 {project_type}", risk="high")
+        return JSONResponse({"ok": True, "action": action}, status_code=202)
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
 
 
 # ---------------------------------------------------------------
@@ -5600,6 +5616,23 @@ def _handle_document_apply_edit(
     return {"accepted": True, "operation_status": "succeeded", "message": "文档修改已保存，Word 已重新生成。"}
 
 
+def _handle_workspace_set_profile(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    project_type = str(envelope.payload.get("project_type") or "").strip()
+    allowed = {str(item.get("project_type") or "") for item in project_profile_choices()}
+    if project_type not in allowed:
+        raise ControlPlaneError("COMMAND_INVALID", "项目类型无效。", status_code=400)
+    save_project_profile(context.root, project_type)
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"项目类型已切换为 {load_project_profile(context.root).get('label', project_type)}。",
+    }
+
+
 def _handle_rewrite_chapters(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -6214,6 +6247,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "goal.resume": _handle_goal_resume,
             "review.update": _handle_review_update,
             "document.apply_edit": _handle_document_apply_edit,
+            "workspace.set_profile": _handle_workspace_set_profile,
             "rewrite.chapters": _handle_rewrite_chapters,
             "materials.upload": _handle_materials_upload,
             "materials.verify": _handle_materials_verify,
@@ -6526,6 +6560,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "materials.confirm_verification": "确认材料人工核验结论",
                 "review.update": "确认更新人工复核结论",
                 "document.apply_edit": "确认修改终稿并重新生成 Word",
+                "workspace.set_profile": "确认切换项目类型",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")

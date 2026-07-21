@@ -1305,6 +1305,30 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertEqual(receipt.error["code"], "COMMAND_DISPATCH_FAILED")
                 self.assertEqual(final_md.read_text(encoding="utf-8"), "原内容\n")
 
+    def test_project_profile_change_requires_v2_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "alpha"
+            web_app.ACTIVE_RUN_ROOT = root
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                proposed = asyncio.run(
+                    web_app.api_set_project_profile(_Request({"project_type": "software_project"}))
+                )
+                proposal = _body(proposed)
+                self.assertEqual(proposed.status_code, 202)
+                self.assertFalse((root / "workspace" / "project_profile.json").exists())
+
+                receipt = web_app._command_gateway(WorkspaceContext.resolve(runs, "alpha")).confirm(
+                    proposal["action"]["confirmation_id"]
+                )
+
+                self.assertEqual(receipt.status, "accepted")
+                profile = json.loads((root / "workspace" / "project_profile.json").read_text(encoding="utf-8"))
+                self.assertEqual(profile["project_type"], "software_project")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1108,7 +1108,9 @@ async function submitManualReview(category, itemId, status) {
       alert(data.message || "人工复核更新失败");
       return;
     }
-    appendLog(`[人工复核] ${category}/${itemId} -> ${status}，建议从 ${data.result?.recommended_stage || ""} 重跑`);
+    const confirmed = await confirmV2MaterialAction(data, `确认将 ${itemId} 更新为 ${status}？`);
+    if (!confirmed.ok) return;
+    appendLog(`[人工复核] ${category}/${itemId} -> ${status}`);
     await loadStatus();
     await loadManualReviewItems(category);
   } catch (error) {
@@ -1129,7 +1131,9 @@ async function updateProjectProfile(projectType) {
       alert(data.message || "项目类型更新失败");
       return;
     }
-    appendLog(`[项目类型] 已切换为 ${data.profile?.label || data.profile?.project_type || projectType}`);
+    const confirmed = await confirmV2MaterialAction(data, `确认切换项目类型为 ${projectType}？`);
+    if (!confirmed.ok) return;
+    appendLog(`[项目类型] 已切换为 ${projectType}`);
     await loadStatus();
   } catch (error) {
     alert("项目类型更新失败: " + error);
@@ -1717,7 +1721,7 @@ async function resumeAgentGoal() {
 }
 
 async function confirmV2MaterialAction(data, promptText) {
-  if (data?.status !== "requires_confirmation" || !data?.action) return data;
+  if (!data?.action) return data;
   if (!window.confirm(promptText || data.action.label || "确认执行此操作？")) {
     const workspaceId = encodeURIComponent(data.action.workspace_id || "");
     const actionId = encodeURIComponent(data.action.action_id || data.action.confirmation_id || "");

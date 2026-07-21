@@ -182,6 +182,7 @@ class ControlStore:
         "materials.confirm_verification",
         "review.update",
         "document.apply_edit",
+        "workspace.set_profile",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -814,6 +815,7 @@ class ControlStore:
                         "materials.confirm_verification",
                         "review.update",
                         "document.apply_edit",
+                        "workspace.set_profile",
                     }
                     and active is not None
                     and str(active["status"]) == "blocked"
