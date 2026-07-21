@@ -109,10 +109,8 @@ class PipelineSupervisor:
         if listener:
             try:
                 listener(root, dict(current))
-            except Exception:
-                # V1 compatibility: a control-plane projection failure must not
-                # corrupt the deterministic runner's own durable control file.
-                pass
+            except Exception as exc:
+                raise RuntimeError(f"control state sync failed: {exc}") from exc
         return current
 
     def is_running(self, root: Path | None = None) -> bool:

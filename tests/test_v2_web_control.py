@@ -1416,6 +1416,90 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertTrue((archived[0] / "workspace" / "legacy.json").exists())
                 self.assertTrue((archived[0] / "outputs" / "final.md").exists())
 
+    def test_restart_reconcile_blocks_mismatched_pipeline_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "restart-mismatch",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            checkpoint = context.root / "workspace" / "pipeline_control.json"
+            checkpoint.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "operation_id": "wrong-operation",
+                        "fencing_token": 99,
+                        "current_stage": "build-md",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app.SUPERVISOR, "reconcile") as reconcile:
+                    resumed = web_app._reconcile_pipeline_from_control(context)
+
+            self.assertFalse(resumed)
+            reconcile.assert_not_called()
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            self.assertEqual(operation["status"], "blocked")
+            self.assertEqual(operation["error"]["code"], "STATE_CONFLICT")
+
+    def test_restart_reconcile_uses_matching_v2_operation_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "restart-match",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            checkpoint = context.root / "workspace" / "pipeline_control.json"
+            checkpoint.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "operation_id": receipt.operation_id,
+                        "fencing_token": operation["fencing_token"],
+                        "current_stage": "build-md",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app.SUPERVISOR, "reconcile", return_value=True) as reconcile:
+                    resumed = web_app._reconcile_pipeline_from_control(context)
+
+            self.assertTrue(resumed)
+            reconcile.assert_called_once_with("alpha", context.root, web_app._run_sync)
+
 
 if __name__ == "__main__":
     unittest.main()

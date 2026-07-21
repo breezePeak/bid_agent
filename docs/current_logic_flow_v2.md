@@ -500,3 +500,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B14 | 2026-07-21 | `control.db.goal_state` 成为 Goal 权威状态；V1 `workspace/agent/goal_state.json` 首次单向导入后只作为兼容投影，所有 Goal 状态机写入先提交 SQLite。运行状态说明同步标注 Goal/Materials/Issues/Policy 的新权威源，避免页面和诊断继续把兼容文件误认为真相源。 |
 | V2.0-B15 | 2026-07-21 | `control.db.repair_job_state` 成为 RepairJob 权威状态；V1 `workspace/repair_job.json` 首次单向导入后只作为兼容投影，确认、claim、进度、重验和终态均先提交 SQLite。跨进程文件锁暂保留一个兼容版本，用于保护旧 Worker 的 read-modify-write 临界区。 |
 | V2.0-B16 | 2026-07-21 | `control.db.agent_activity_state` 成为 Agent 工位/活动权威状态；V1 `workspace/agent/activity.json` 首次单向导入后只作为兼容投影，阶段开始、工位进度、结束和重启清理均先提交 SQLite。至此 Goal、AgentActivity、RepairJob、Materials、Issues 与 Policy Decision 已统一进入工作区控制库。 |
+| V2.0-B17 | 2026-07-21 | 重启恢复改为以 `control.db.operations` 的 Operation/fencing token 为权威，`pipeline_control.json` 仅提供 Worker PID 和当前阶段 checkpoint；身份不一致时将 Operation fail-closed 为 blocked，暂停/取消在重启时完成终态收敛。Pipeline 状态同步失败不再被静默吞掉，避免流水线脱离控制库继续执行。 |

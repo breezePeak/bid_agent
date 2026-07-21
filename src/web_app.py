@@ -5221,22 +5221,17 @@ def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
     operation_status = _pipeline_status_to_operation(str(payload.get("status") or ""))
     if not operation_id or not operation_status:
         return
-    try:
-        context = _workspace_context(root.name)
-        if not _same_path(context.root, root):
-            return
-        error = payload.get("error")
-        ControlStore(context).sync_operation(
-            operation_id,
-            operation_status,
-            message=str(payload.get("message") or ""),
-            error={"message": str(error)} if error else None,
-            fencing_token=int(payload.get("fencing_token") or 0),
-        )
-    except Exception:
-        # The supervisor retains its V1 control file. V2 snapshot exposes any
-        # projection problem on the next explicit command instead of changing roots.
+    context = _workspace_context(root.name)
+    if not _same_path(context.root, root):
         return
+    error = payload.get("error")
+    ControlStore(context).sync_operation(
+        operation_id,
+        operation_status,
+        message=str(payload.get("message") or ""),
+        error={"message": str(error)} if error else None,
+        fencing_token=int(payload.get("fencing_token") or 0),
+    )
 
 
 def _terminate_workspace_process(context: WorkspaceContext) -> None:
@@ -8197,6 +8192,64 @@ def api_clean_workspace(request: Request) -> JSONResponse:
 # ---------------------------------------------------------------
 
 
+def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
+    """Use control.db as restart authority and pipeline_control.json only as a worker checkpoint."""
+    store = ControlStore(context)
+    operation = store.snapshot().get("operation")
+    checkpoint = SUPERVISOR.load(context.root)
+    if not isinstance(operation, dict):
+        return False
+    status = str(operation.get("status") or "")
+    operation_id = str(operation.get("operation_id") or "")
+    fencing_token = int(operation.get("fencing_token") or 0)
+    if status == "pausing":
+        store.sync_operation(
+            operation_id,
+            "paused",
+            message="服务重启时完成暂停",
+            fencing_token=fencing_token,
+        )
+        return False
+    if status == "cancelling":
+        store.sync_operation(
+            operation_id,
+            "cancelled",
+            message="服务重启时完成取消",
+            fencing_token=fencing_token,
+        )
+        return False
+    if status not in {"queued", "running"}:
+        return False
+
+    checkpoint_operation = str(checkpoint.get("operation_id") or "")
+    checkpoint_fencing = int(checkpoint.get("fencing_token") or 0)
+    if not checkpoint or checkpoint_operation != operation_id or checkpoint_fencing != fencing_token:
+        store.sync_operation(
+            operation_id,
+            "blocked",
+            message="Pipeline checkpoint 与 control.db 不一致，已停止自动恢复。",
+            error={
+                "code": "STATE_CONFLICT",
+                "checkpoint_operation_id": checkpoint_operation,
+                "checkpoint_fencing_token": checkpoint_fencing,
+            },
+            fencing_token=fencing_token,
+        )
+        return False
+
+    if str(checkpoint.get("status") or "") not in {"running", "recovering", "retrying", "pausing"}:
+        SUPERVISOR._save(  # noqa: SLF001 - compatibility checkpoint is normalized from V2 authority here.
+            context.root,
+            {
+                "status": "recovering",
+                "operation_id": operation_id,
+                "fencing_token": fencing_token,
+                "message": "control.db 指示 Operation 仍在运行，准备断点恢复",
+            },
+        )
+    return SUPERVISOR.reconcile(context.workspace_id, context.root, _run_sync)
+
+
 def _startup_reconcile() -> None:
     # Install the V2 control-state bridge before any persisted V1 pipeline is
     # reconciled so subsequent status transitions carry the same operation
@@ -8259,7 +8312,7 @@ def _startup_reconcile() -> None:
     if ACTIVE_RUN_ROOT is None:
         return
     try:
-        _resumed = SUPERVISOR.reconcile(ACTIVE_RUN_ID, ACTIVE_RUN_ROOT, _run_sync)
+        _resumed = _reconcile_pipeline_from_control(_workspace_context(ACTIVE_RUN_ID))
     except Exception as exc:
         _append_log(f"[warn] pipeline resume skipped: {exc}")
         _resumed = False
