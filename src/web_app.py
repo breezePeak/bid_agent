@@ -3253,11 +3253,12 @@ def api_current_repair_job() -> JSONResponse:
 @app.get("/api/v2/workspaces/{workspace_id}/export-preflight")
 @app.get("/api/export-preflight")
 def api_export_preflight(workspace_id: str = "") -> JSONResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     try:
+        if workspace_id:
+            return JSONResponse(_v2_export_preflight(_workspace_context(workspace_id)))
         from agent.issues import export_preflight
 
-        return JSONResponse(export_preflight(root))
+        return JSONResponse(export_preflight(_active_root()))
     except Exception as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
@@ -5426,6 +5427,145 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     return gate
 
 
+def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
+    """Read-only formal-export checks backed by authoritative SQLite Issues."""
+    from agent.issues import classify_issue_risk
+
+    store = _ensure_v2_issue_import(context)
+    issues = store.issue_states()
+    open_issues = [
+        item for item in issues
+        if str(item.get("status") or "") in {"open", "in_progress"}
+    ]
+    blocks = [
+        item for item in open_issues
+        if str(item.get("severity") or "") in {"block", "fatal"}
+    ]
+    accepted = [item for item in issues if str(item.get("status") or "") == "accepted"]
+    checks: list[dict[str, Any]] = []
+
+    global_path = context.root / "workspace" / "global_review.json"
+    global_review = _read_json_file(global_path) if global_path.exists() else {}
+    global_blocks = [item for item in blocks if str(item.get("stage_id") or "") == "global_review"]
+    global_blocking = bool(isinstance(global_review, dict) and global_review.get("blocking"))
+    checks.append(
+        {
+            "id": "global_review",
+            "label": "全文审核门禁",
+            "ok": global_path.exists() and not global_blocking and not global_blocks,
+            "detail": (
+                "缺少 global_review.json"
+                if not global_path.exists()
+                else "通过"
+                if not global_blocking and not global_blocks
+                else f"阻断 {len(global_blocks)} 项"
+            ),
+        }
+    )
+
+    compliance_path = context.root / "workspace" / "compliance_report.json"
+    compliance = _read_json_file(compliance_path) if compliance_path.exists() else {}
+    compliance_summary = (
+        compliance.get("summary")
+        if isinstance(compliance, dict) and isinstance(compliance.get("summary"), dict)
+        else {}
+    )
+    compliance_blocking = bool(
+        isinstance(compliance, dict)
+        and (compliance.get("blocking") or compliance_summary.get("blocking"))
+    )
+    compliance_blocks = [
+        item for item in blocks
+        if str(item.get("stage_id") or "") == "compliance_check"
+    ]
+    checks.append(
+        {
+            "id": "compliance_check",
+            "label": "专项合规门禁",
+            "ok": compliance_path.exists() and not compliance_blocking and not compliance_blocks,
+            "detail": (
+                "缺少 compliance_report.json"
+                if not compliance_path.exists()
+                else "通过"
+                if not compliance_blocking and not compliance_blocks
+                else f"阻断 blocking={compliance_blocking}, issues={len(compliance_blocks)}"
+            ),
+        }
+    )
+
+    checks.append(
+        {
+            "id": "open_blocks",
+            "label": "无 open block 问题单",
+            "ok": not blocks,
+            "detail": "通过" if not blocks else f"仍有 {len(blocks)} 条 block",
+        }
+    )
+    checks.append(
+        {
+            "id": "accepted_risks",
+            "label": "已接受风险披露",
+            "ok": True,
+            "detail": "无" if not accepted else f"存在 {len(accepted)} 条已接受风险（终稿不得显示全部通过）",
+            "count": len(accepted),
+        }
+    )
+    final_md = context.root / "outputs" / "final.md"
+    checks.append(
+        {
+            "id": "final_md",
+            "label": "存在 final.md",
+            "ok": final_md.exists() and final_md.is_file() and final_md.stat().st_size > 0,
+            "detail": str(final_md) if final_md.exists() else "缺失",
+        }
+    )
+    can_export = all(bool(item.get("ok")) for item in checks if item.get("id") != "accepted_risks")
+    has_accepted = bool(accepted)
+    return {
+        "ok": True,
+        "can_export": can_export,
+        "all_passed": can_export and not has_accepted,
+        "has_accepted_risks": has_accepted,
+        "accepted_risks": [
+            {
+                "id": item.get("id"),
+                "code": item.get("code"),
+                "title": item.get("title"),
+                "risk_class": item.get("risk_class") or classify_issue_risk(item),
+                "accept_reason": item.get("accept_reason"),
+                "accepted_by": item.get("accepted_by"),
+                "accepted_at": item.get("accepted_at"),
+            }
+            for item in accepted[:50]
+        ],
+        "checks": checks,
+        "issues_summary": {
+            "open_count": len(open_issues),
+            "block_count": len(blocks),
+            "warn_count": sum(1 for item in open_issues if str(item.get("severity") or "") == "warn"),
+            "source": "control.db",
+        },
+        "block_issues": [
+            {
+                "id": item.get("id"),
+                "code": item.get("code"),
+                "title": item.get("title"),
+                "stage_id": item.get("stage_id"),
+                "risk_class": item.get("risk_class") or classify_issue_risk(item),
+            }
+            for item in blocks[:50]
+        ],
+        "message": (
+            f"可以出正式稿，但存在 {len(accepted)} 条已接受风险，不得标注“全部通过”"
+            if can_export and accepted
+            else "可以出正式稿"
+            if can_export
+            else "出稿前检查未通过，请先处理阻断项"
+        ),
+        "source": "control.db",
+    }
+
+
 def _record_v2_stage_artifacts(context: WorkspaceContext, command: str, disposition: str) -> None:
     from artifact_manifest import record_stage_artifacts
 
@@ -6805,8 +6945,6 @@ def _handle_gate_revalidate(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from agent.issues import export_preflight
-
     artifact = context.root / "outputs" / "final.docx"
     if not artifact.exists() or not artifact.is_file() or artifact.stat().st_size <= 0:
         raise ControlPlaneError("GATE_BLOCKED", "final.docx 不存在或为空，不能签发正式稿凭据。")
@@ -6820,7 +6958,7 @@ def _handle_gate_revalidate(
     _assert_formal_materials_verified(context)
     _assert_formal_artifacts_ready(context)
     try:
-        preflight = export_preflight(context.root)
+        preflight = _v2_export_preflight(context)
     except Exception as exc:
         raise ControlPlaneError(
             "STATE_UNAVAILABLE",

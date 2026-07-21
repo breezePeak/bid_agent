@@ -1051,7 +1051,7 @@ class V2WebControlTests(unittest.TestCase):
                     "_v2_gate_can_proceed",
                     return_value={"can_proceed": True, "block_count": 0, "blocks": []},
                 ):
-                    with mock.patch("agent.issues.export_preflight", return_value=preflight):
+                    with mock.patch.object(web_app, "_v2_export_preflight", return_value=preflight):
                         issued = _body(
                             asyncio.run(
                                 web_app.api_v2_submit_command(
@@ -2281,7 +2281,7 @@ class V2WebControlTests(unittest.TestCase):
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 compliance = _body(web_app.api_compliance_report("alpha"))
-                with mock.patch("agent.issues.export_preflight", return_value={"ok": True}) as preflight:
+                with mock.patch.object(web_app, "_v2_export_preflight", return_value={"ok": True}) as preflight:
                     _body(web_app.api_export_preflight("alpha"))
                 with mock.patch.object(web_app, "_material_items", return_value=[]):
                     materials = _body(web_app.api_materials_checklist("alpha"))
@@ -2292,7 +2292,8 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertTrue(compliance["blocking"])
             self.assertEqual(compliance["items"][0]["check_id"], "alpha-check")
-            preflight.assert_called_once_with(alpha.resolve())
+            preflight.assert_called_once()
+            self.assertEqual(preflight.call_args.args[0].root, alpha.resolve())
             self.assertTrue(materials["ok"])
             self.assertEqual(materials["items"], [])
             load_issues.assert_not_called()
@@ -2300,6 +2301,68 @@ class V2WebControlTests(unittest.TestCase):
             sync_review.assert_not_called()
             self.assertEqual(issues["issues"][0]["id"], "alpha-issue")
             self.assertEqual(issues["summary"]["source"], "control.db")
+
+    def test_v2_export_preflight_is_read_only_and_sqlite_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            outputs = root / "outputs"
+            issues_dir = workspace / "issues"
+            issues_dir.mkdir(parents=True)
+            outputs.mkdir(parents=True)
+            (workspace / "global_review.json").write_text(
+                json.dumps({"blocking": False}), encoding="utf-8"
+            )
+            (workspace / "compliance_report.json").write_text(
+                json.dumps({"blocking": False}), encoding="utf-8"
+            )
+            (outputs / "final.md").write_text("formal draft", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).replace_issue_states(
+                [
+                    {
+                        "id": "accepted-1",
+                        "code": "CRITICAL_CONFLICT",
+                        "severity": "block",
+                        "status": "accepted",
+                        "accept_reason": "approved by policy",
+                        "accepted_by": "admin",
+                    }
+                ],
+                source="test",
+            )
+            tampered_projection = [
+                {
+                    "id": "fatal-from-file",
+                    "code": "FATAL",
+                    "severity": "fatal",
+                    "status": "open",
+                }
+            ]
+            (issues_dir / "open.json").write_text(
+                json.dumps(tampered_projection), encoding="utf-8"
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch("agent.root_cause.sync_issues_from_compliance") as sync_compliance:
+                    with mock.patch("agent.root_cause.sync_issues_from_global_review") as sync_review:
+                        with mock.patch("agent.issues.write_risk_register") as write_register:
+                            preflight = _body(web_app.api_export_preflight("alpha"))
+
+            self.assertTrue(preflight["can_export"])
+            self.assertFalse(preflight["all_passed"])
+            self.assertEqual(preflight["source"], "control.db")
+            self.assertEqual(preflight["accepted_risks"][0]["id"], "accepted-1")
+            self.assertEqual(preflight["accepted_risks"][0]["risk_class"], "critical")
+            self.assertEqual(ControlStore(context).issue_states()[0]["status"], "accepted")
+            self.assertEqual(
+                json.loads((issues_dir / "open.json").read_text(encoding="utf-8")),
+                tampered_projection,
+            )
+            sync_compliance.assert_not_called()
+            sync_review.assert_not_called()
+            write_register.assert_not_called()
 
     def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

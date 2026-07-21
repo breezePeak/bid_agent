@@ -552,3 +552,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B66 | 2026-07-21 | 修复 V2 Chat 转发层丢失认证上下文的问题：路径工作区仍覆盖客户端 run_id，同时完整保留服务端 principal，使聊天生成的 Command/Action 与按钮和 CLI/API 使用同一 actor、role 与审计语义，不再退化为 anonymous。 |
 | V2.0-B67 | 2026-07-21 | V2 Snapshot 与工作流详情读取停止调用会写入 `manual_review/summary.json` 的 V1 聚合路径；人工复核摘要直接由 SQLite PolicyDecision 和只读兼容输入计算并标注 `source=control.db`。V2 查询不再因刷新页面修改工作区文件状态。 |
 | V2.0-B68 | 2026-07-21 | 工作区招标、公司和模板源文件上传后立即将 `prepare-inputs` 及其下游 SQLite Artifact manifest 标记 stale；旧导入结果、章节、审核和终稿不能在源材料变化后继续显示 ready 或被 Pipeline 复用。V1 上传别名沿用同一失效语义。 |
+| V2.0-B69 | 2026-07-21 | V2 正式出稿预检与 GateReceipt 签发改用只读 SQLite Issue 快照，不再调用会从旧报告同步 Issue、写风险登记文件的 V1 `export_preflight`；查询和签发期间旧报告只能作为门禁输入，不能反向覆盖权威 Issue/Policy 状态。V1 预检接口继续保留原兼容行为。 |
