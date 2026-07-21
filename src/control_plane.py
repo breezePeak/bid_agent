@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -270,6 +270,16 @@ class ControlStore:
                         created_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL,
                         consumed_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS material_states (
+                        item_id TEXT PRIMARY KEY,
+                        response_status TEXT NOT NULL,
+                        lifecycle_status TEXT NOT NULL,
+                        evidence_status TEXT NOT NULL,
+                        item_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS confirmations (
                         confirmation_id TEXT PRIMARY KEY,
@@ -457,9 +467,18 @@ class ControlStore:
                 except ValueError as exc:
                     raise ControlPlaneError("STATE_UNAVAILABLE", "上传 token 到期时间无效。", status_code=503) from exc
                 if expires_at <= datetime.now(timezone.utc):
+                    revision = self._bump_revision(connection)
                     connection.execute(
                         "UPDATE material_upload_tokens SET status = 'expired' WHERE upload_token = ?",
                         (token,),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "MaterialUploadExpired",
+                        "MaterialUpload",
+                        token,
+                        {},
                     )
                     connection.commit()
                     raise ControlPlaneError("UPLOAD_TOKEN_EXPIRED", "上传 token 已过期。", status_code=409)
@@ -489,6 +508,134 @@ class ControlStore:
                 if connection.in_transaction:
                     connection.rollback()
                 raise
+
+    def ensure_material_states(self, items: list[dict[str, Any]]) -> int:
+        rows = [dict(item) for item in items if isinstance(item, dict) and str(item.get("item_id") or "").strip()]
+        if not rows:
+            return 0
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                inserted = 0
+                for item in rows:
+                    item_id = str(item.get("item_id") or "").strip()
+                    cursor = connection.execute(
+                        """
+                        INSERT OR IGNORE INTO material_states(
+                            item_id, response_status, lifecycle_status, evidence_status,
+                            item_json, source, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, 'v1_import', ?, ?)
+                        """,
+                        (
+                            item_id,
+                            str(item.get("response_status") or "deferred"),
+                            str(item.get("lifecycle_status") or "missing"),
+                            str(item.get("evidence_status") or "missing"),
+                            _json(item),
+                            now,
+                            now,
+                        ),
+                    )
+                    inserted += max(0, int(cursor.rowcount or 0))
+                if inserted:
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection,
+                        revision,
+                        "MaterialStateImported",
+                        "Materials",
+                        self.context.workspace_id,
+                        {"count": inserted, "source": "v1_import"},
+                    )
+                connection.commit()
+                return inserted
+            except Exception:
+                connection.rollback()
+                raise
+
+    def material_states(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM material_states ORDER BY item_id").fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            value = dict(row)
+            item = _decode(value.pop("item_json", ""), {})
+            if not isinstance(item, dict):
+                item = {}
+            item.update(
+                {
+                    "item_id": value["item_id"],
+                    "response_status": value["response_status"],
+                    "lifecycle_status": value["lifecycle_status"],
+                    "evidence_status": value["evidence_status"],
+                    "control_source": value["source"],
+                    "control_updated_at": value["updated_at"],
+                }
+            )
+            result.append(item)
+        return result
+
+    def material_state(self, item_id: str) -> dict[str, Any] | None:
+        wanted = str(item_id or "").strip()
+        return next((item for item in self.material_states() if item.get("item_id") == wanted), None)
+
+    def upsert_material_state(self, item: dict[str, Any], *, source: str = "v2_command") -> dict[str, Any]:
+        item_id = str(item.get("item_id") or "").strip()
+        if not item_id:
+            raise ControlPlaneError("COMMAND_INVALID", "材料状态缺少 item_id。", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT created_at FROM material_states WHERE item_id = ?",
+                    (item_id,),
+                ).fetchone()
+                created_at = str(existing["created_at"]) if existing is not None else now
+                connection.execute(
+                    """
+                    INSERT INTO material_states(
+                        item_id, response_status, lifecycle_status, evidence_status,
+                        item_json, source, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        response_status = excluded.response_status,
+                        lifecycle_status = excluded.lifecycle_status,
+                        evidence_status = excluded.evidence_status,
+                        item_json = excluded.item_json,
+                        source = excluded.source,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        item_id,
+                        str(item.get("response_status") or "deferred"),
+                        str(item.get("lifecycle_status") or "missing"),
+                        str(item.get("evidence_status") or "missing"),
+                        _json(item),
+                        source,
+                        created_at,
+                        now,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "MaterialStateChanged",
+                    "Material",
+                    item_id,
+                    {
+                        "response_status": str(item.get("response_status") or "deferred"),
+                        "lifecycle_status": str(item.get("lifecycle_status") or "missing"),
+                        "source": source,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.material_state(item_id) or {}
 
     @staticmethod
     def _revision(connection: sqlite3.Connection) -> int:

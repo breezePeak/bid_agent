@@ -501,16 +501,24 @@ class V2WebControlTests(unittest.TestCase):
                 json.dumps(checklist),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).upsert_material_state(
+                checklist["items"][0],
+                source="test_verified",
+            )
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 second = _body(asyncio.run(propose("material-ready-verified")))
                 with mock.patch(
                     "materials_checklist.update_item_response",
                     return_value={"ok": True, "message": "updated"},
                 ) as update:
-                    accepted = _body(
-                        web_app.api_v2_confirm_action("alpha", second["action"]["action_id"])
-                    )
-            self.assertTrue(accepted["ok"])
+                    with mock.patch(
+                        "materials_checklist.build_materials_checklist",
+                        return_value=workspace / "materials_checklist.json",
+                    ):
+                        accepted = _body(
+                            web_app.api_v2_confirm_action("alpha", second["action"]["action_id"])
+                        )
+            self.assertTrue(accepted["ok"], accepted)
             update.assert_called_once()
             operation_id = accepted["receipt"]["operation_id"]
             operation = ControlStore(WorkspaceContext.resolve(runs, "alpha")).operation(operation_id)
@@ -760,6 +768,9 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertTrue(accepted["ok"])
                 token_row = ControlStore(context).material_upload(staged["upload_token"])
                 self.assertEqual(token_row["status"], "consumed")
+                material_state = ControlStore(context).material_state("mat-token")
+                self.assertEqual(material_state["lifecycle_status"], "uploaded")
+                self.assertEqual(material_state["response_status"], "deferred")
                 registered_path = Path(register.call_args.kwargs["uploaded_path"])
                 self.assertTrue(web_app._same_path(registered_path.parent, workspace / "material_uploads" / "staging"))
 
@@ -892,6 +903,56 @@ class V2WebControlTests(unittest.TestCase):
                         ),
                     )
                 )
+            payload = _body(response)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["receipt"]["error"]["code"], "GATE_BLOCKED")
+
+    def test_formal_gate_blocks_unverified_qualification_material(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            outputs = root / "outputs"
+            workspace.mkdir(parents=True)
+            outputs.mkdir(parents=True)
+            (outputs / "final.md").write_text("draft", encoding="utf-8")
+            (outputs / "final.docx").write_bytes(b"docx")
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "item_id": "qualification-gap",
+                                "category": "qualification",
+                                "severity": "block",
+                                "response_status": "deferred",
+                                "lifecycle_status": "missing",
+                                "evidence_status": "missing",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(
+                    web_app,
+                    "_v2_gate_can_proceed",
+                    return_value={"can_proceed": True, "block_count": 0, "blocks": []},
+                ):
+                    response = asyncio.run(
+                        web_app.api_v2_submit_command(
+                            "alpha",
+                            _Request(
+                                {
+                                    "kind": "gate.revalidate",
+                                    "payload": {},
+                                    "expected_revision": 0,
+                                    "idempotency_key": "qualification-gate",
+                                }
+                            ),
+                        )
+                    )
             payload = _body(response)
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["receipt"]["error"]["code"], "GATE_BLOCKED")

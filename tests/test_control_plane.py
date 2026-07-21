@@ -304,6 +304,33 @@ class ControlPlaneTests(unittest.TestCase):
                 store.consume_material_upload(staged["upload_token"])
             self.assertEqual(replay.exception.code, "UPLOAD_TOKEN_CONSUMED")
 
+    def test_material_state_import_is_one_time_and_v2_update_is_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            legacy = {
+                "item_id": "mat-1",
+                "response_status": "deferred",
+                "lifecycle_status": "missing",
+                "evidence_status": "missing",
+                "requirement": "certificate",
+            }
+            self.assertEqual(store.ensure_material_states([legacy]), 1)
+            changed_legacy = {**legacy, "response_status": "ready", "lifecycle_status": "uploaded"}
+            self.assertEqual(store.ensure_material_states([changed_legacy]), 0)
+            self.assertEqual(store.material_state("mat-1")["response_status"], "deferred")
+
+            authoritative = {
+                **legacy,
+                "response_status": "ready",
+                "lifecycle_status": "verified",
+                "evidence_status": "verified",
+            }
+            store.upsert_material_state(authoritative)
+            current = store.material_state("mat-1")
+            self.assertEqual(current["lifecycle_status"], "verified")
+            self.assertEqual(current["control_source"], "v2_command")
+
     def test_gate_rejection_keeps_operation_blocked_for_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

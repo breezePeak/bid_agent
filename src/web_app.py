@@ -3568,14 +3568,23 @@ def api_materials_checklist() -> JSONResponse:
         )
 
         data = load_materials_checklist(root)
+        context = _workspace_context(ACTIVE_RUN_ID or root.name)
+        authoritative_items = _material_items(context)
+        summary = {
+            "total": len(authoritative_items),
+            "ready": sum(1 for item in authoritative_items if item.get("response_status") == "ready"),
+            "deferred": sum(1 for item in authoritative_items if item.get("response_status") == "deferred"),
+            "waived": sum(1 for item in authoritative_items if item.get("response_status") == "waived"),
+        }
+        data = {**data, "items": authoritative_items, "summary": summary}
         exists = (root / "workspace" / "materials_checklist.json").exists()
         return JSONResponse(
             {
                 "ok": True,
                 "exists": exists,
                 "checklist": data,
-                "summary": data.get("summary") or {},
-                "items": data.get("items") or [],
+                "summary": summary,
+                "items": authoritative_items,
                 "gap_chapters": chapters_with_material_gaps(root),
                 "refill_plans": chapters_ready_for_refill(root),
             }
@@ -4908,6 +4917,11 @@ _FORMAL_GATE_TREES = (
 def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
     digest = hashlib.sha256()
     artifact_sha256 = ""
+    material_states = ControlStore(context).material_states()
+    digest.update(b"control.db:material_states\0")
+    digest.update(
+        json.dumps(material_states, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    )
     for relative in _FORMAL_GATE_INPUTS:
         path = context.root / relative
         digest.update(relative.encode("utf-8"))
@@ -4937,21 +4951,21 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
 
 
 def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
-    from materials_checklist import load_materials_checklist
-
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    items = _material_items(context)
     unsafe = [
         str(item.get("item_id") or "")
         for item in items
         if isinstance(item, dict)
-        and str(item.get("response_status") or "") == "ready"
         and not _material_fulfillment_verified(item)
+        and (
+            str(item.get("response_status") or "") == "ready"
+            or _protected_material(item)
+        )
     ]
     if unsafe:
         raise ControlPlaneError(
             "GATE_BLOCKED",
-            "正式稿包含未验证的 ready 材料，已拒绝签发 GateReceipt。",
+            "正式稿存在未验证的必交/资格材料或异常 ready 状态，已拒绝签发 GateReceipt。",
             details={"item_ids": unsafe[:50]},
         )
 
@@ -5246,18 +5260,40 @@ def _protected_material(item: dict[str, Any]) -> bool:
     }
 
 
-def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
+def _authoritative_material_state(item: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(item)
+    lifecycle = str(normalized.get("lifecycle_status") or "").strip().lower()
+    if _material_fulfillment_verified(normalized):
+        normalized["response_status"] = "ready"
+    elif lifecycle in {"waived", "not_applicable"}:
+        normalized["response_status"] = "waived"
+    else:
+        # V2 never projects submitted/uploaded/rejected/missing evidence as ready.
+        normalized["response_status"] = "deferred"
+    return normalized
+
+
+def _material_items(context: WorkspaceContext) -> list[dict[str, Any]]:
     from materials_checklist import load_materials_checklist
 
+    checklist = load_materials_checklist(context.root)
+    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    store = ControlStore(context)
+    store.ensure_material_states(
+        [_authoritative_material_state(dict(item)) for item in items if isinstance(item, dict)]
+    )
+    authoritative = store.material_states()
+    return authoritative or [dict(item) for item in items if isinstance(item, dict)]
+
+
+def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
     value = str(item_id or "").strip()
     if not value:
         raise ControlPlaneError("COMMAND_INVALID", "缺少 item_id。", status_code=400)
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
     item = next(
         (
             dict(row)
-            for row in items
+            for row in _material_items(context)
             if isinstance(row, dict) and str(row.get("item_id") or "").strip() == value
         ),
         None,
@@ -5265,6 +5301,20 @@ def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
     if item is None:
         raise ControlPlaneError("COMMAND_INVALID", f"材料项不存在: {value}", status_code=404)
     return item
+
+
+def _sync_material_state_from_projection(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
+    from materials_checklist import load_materials_checklist
+
+    checklist = load_materials_checklist(context.root)
+    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    item = next(
+        (dict(row) for row in items if isinstance(row, dict) and str(row.get("item_id") or "") == item_id),
+        None,
+    )
+    if item is None:
+        raise ControlPlaneError("STATE_UNAVAILABLE", f"材料 V1 投影缺少条目: {item_id}", status_code=503)
+    return ControlStore(context).upsert_material_state(_authoritative_material_state(item))
 
 
 def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
@@ -5332,6 +5382,18 @@ def _handle_materials_upload(
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "上传材料验证失败。"))
     lifecycle = str(result.get("lifecycle_status") or "uploaded")
+    projected = _sync_material_state_from_projection(context, item_id)
+    projected["lifecycle_status"] = lifecycle
+    verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
+    if lifecycle == "verified":
+        projected["evidence_status"] = "verified"
+        projected["verified_at"] = (
+            verification.get("verified_at")
+            or result.get("verified_at")
+            or datetime.now().isoformat(timespec="seconds")
+        )
+        projected["verification_confidence"] = verification.get("confidence")
+    ControlStore(context).upsert_material_state(_authoritative_material_state(projected))
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -5369,6 +5431,13 @@ def _handle_materials_verify(
     )
     if not update.get("ok"):
         raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "验证状态保存失败。"))
+    projected = _sync_material_state_from_projection(context, item_id)
+    projected["lifecycle_status"] = lifecycle
+    projected["verification_confidence"] = result.get("confidence")
+    if lifecycle == "verified":
+        projected["evidence_status"] = "verified"
+        projected["verified_at"] = result.get("verified_at") or datetime.now().isoformat(timespec="seconds")
+    ControlStore(context).upsert_material_state(_authoritative_material_state(projected))
     if lifecycle == "verified":
         _resume_goal_for_verified_material(context, item_id, f"material_verified:{item_id}")
     return {
@@ -5415,6 +5484,12 @@ def _handle_materials_confirm_verification(
     )
     if not update.get("ok"):
         raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "核验结论保存失败。"))
+    projected = _sync_material_state_from_projection(context, item_id)
+    projected["lifecycle_status"] = lifecycle
+    projected["evidence_status"] = "verified" if accept else "rejected"
+    if accept:
+        projected["verified_at"] = datetime.now().isoformat(timespec="seconds")
+    ControlStore(context).upsert_material_state(_authoritative_material_state(projected))
     if accept:
         _resume_goal_for_verified_material(context, item_id, f"material_human_verified:{item_id}")
     return {
@@ -5430,8 +5505,7 @@ def _handle_materials_update(
     operation_id: str,
 ) -> dict[str, Any]:
     from materials_checklist import (
-        batch_update_item_responses,
-        load_materials_checklist,
+        build_materials_checklist,
         update_item_response,
     )
 
@@ -5445,8 +5519,7 @@ def _handle_materials_update(
     if len(updates) > 200:
         raise ControlPlaneError("COMMAND_INVALID", "单次最多更新 200 条材料。", status_code=400)
 
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    items = _material_items(context)
     by_id = {str(item.get("item_id") or ""): item for item in items if isinstance(item, dict)}
     normalized: list[dict[str, Any]] = []
     for update in updates:
@@ -5458,13 +5531,12 @@ def _handle_materials_update(
             raise ControlPlaneError("COMMAND_INVALID", f"材料项不存在: {item_id}", status_code=404)
         if status not in {"deferred", "ready", "waived"}:
             raise ControlPlaneError("COMMAND_INVALID", f"无效材料状态: {status}", status_code=400)
-        if status == "ready" and str(item.get("response_status") or "") != "ready":
-            if not _material_fulfillment_verified(item):
-                raise ControlPlaneError(
-                    "GATE_BLOCKED",
-                    f"材料 {item_id} 尚未验证，submitted/uploaded 不能直接标记为 ready。",
-                    details={"item_id": item_id, "lifecycle_status": item.get("lifecycle_status")},
-                )
+        if status == "ready" and not _material_fulfillment_verified(item):
+            raise ControlPlaneError(
+                "GATE_BLOCKED",
+                f"材料 {item_id} 尚未验证，submitted/uploaded 不能直接标记为 ready。",
+                details={"item_id": item_id, "lifecycle_status": item.get("lifecycle_status")},
+            )
         if status == "waived":
             if _protected_material(item):
                 raise ControlPlaneError(
@@ -5480,23 +5552,29 @@ def _handle_materials_update(
                 "response_status": status,
                 "reason": reason,
                 "suggested_attachment": str(update.get("suggested_attachment") or ""),
+                "persist_status": (
+                    "verified"
+                    if status == "ready" and _material_fulfillment_verified(item)
+                    else status
+                ),
             }
         )
 
-    if len(normalized) == 1:
-        item = normalized[0]
+    result: dict[str, Any] = {"ok": True}
+    for item in normalized:
         result = update_item_response(
             context.root,
             item["item_id"],
-            response_status=item["response_status"],
+            response_status=item["persist_status"],
             reason=item["reason"],
             suggested_attachment=item["suggested_attachment"],
-            rebuild=True,
+            rebuild=False,
         )
-    else:
-        result = batch_update_item_responses(context.root, normalized, rebuild=True)
-    if not result.get("ok"):
-        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(result.get("message") or "材料状态更新失败。"))
+        if not result.get("ok"):
+            raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(result.get("message") or "材料状态更新失败。"))
+    build_materials_checklist(context.root)
+    for item in normalized:
+        _sync_material_state_from_projection(context, item["item_id"])
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -5509,13 +5587,41 @@ def _handle_materials_rebuild(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import build_materials_checklist, load_materials_checklist
+    from materials_checklist import build_materials_checklist, load_materials_checklist, update_item_response
 
+    authoritative = _material_items(context)
     path = build_materials_checklist(context.root)
+    for item in authoritative:
+        lifecycle = str(item.get("lifecycle_status") or "").strip().lower()
+        response_status = str(item.get("response_status") or "deferred").strip().lower()
+        persisted = (
+            lifecycle
+            if lifecycle
+            in {"verified", "uploaded", "rejected", "waived", "requested", "missing", "not_applicable"}
+            else response_status
+        )
+        result = update_item_response(
+            context.root,
+            str(item.get("item_id") or ""),
+            response_status=persisted,
+            reason=str(item.get("reason") or ""),
+            suggested_attachment=str(item.get("suggested_attachment") or ""),
+            rebuild=False,
+        )
+        if not result.get("ok"):
+            raise ControlPlaneError("STATE_UNAVAILABLE", str(result.get("message") or "材料投影更新失败。"), status_code=503)
+    if authoritative:
+        path = build_materials_checklist(context.root)
     checklist = load_materials_checklist(context.root)
     if not path.exists() or not isinstance(checklist, dict):
         raise ControlPlaneError("STATE_UNAVAILABLE", "材料清单重建后状态不可用。", status_code=503)
     summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
+    for item in checklist.get("items") or []:
+        if isinstance(item, dict):
+            ControlStore(context).upsert_material_state(
+                _authoritative_material_state(item),
+                source="v1_projection",
+            )
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -5598,11 +5704,12 @@ def _handle_materials_refill(
 ) -> dict[str, Any]:
     from materials_checklist import load_materials_checklist
 
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    items = _material_items(context)
+    projection = load_materials_checklist(context.root)
+    projection_items = projection.get("items") if isinstance(projection.get("items"), list) else []
     unsafe_ready = [
         str(item.get("item_id") or "")
-        for item in items
+        for item in [*items, *projection_items]
         if isinstance(item, dict)
         and str(item.get("response_status") or "") == "ready"
         and not _material_fulfillment_verified(item)
@@ -6078,13 +6185,26 @@ def api_v2_decline_action(workspace_id: str, action_id: str) -> JSONResponse:
 def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
     try:
         context = _workspace_context(workspace_id)
-        snapshot = ControlStore(context).snapshot()
+        store = ControlStore(context)
+        snapshot = store.snapshot()
         compatibility = _status_payload(context.root, context.workspace_id)
+        material_items = store.material_states()
+        material_summary = (
+            {
+                "total": len(material_items),
+                "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
+                "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
+                "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
+                "source": "control.db",
+            }
+            if material_items
+            else compatibility.get("materials_summary") or {}
+        )
         snapshot.update(
             {
                 "goal": compatibility.get("goal"),
                 "pipeline": compatibility.get("pipeline") or SUPERVISOR.load(context.root),
-                "materials": compatibility.get("materials_summary") or {},
+                "materials": {**material_summary, "items": material_items},
                 "findings": {"issues_summary": compatibility.get("issues_summary") or {}},
                 "artifacts": {
                     "inputs": compatibility.get("inputs") or {},
