@@ -547,3 +547,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B61 | 2026-07-21 | `review.update` 除写入一个版本的人工复核兼容投影外，同时追加不可变 SQLite PolicyDecision，记录 category、item、结论、操作说明与服务端 actor；人工复核变化因此进入 GateReceipt 的权威 Policy 指纹，既有正式凭据会失效，不再因只改了复核文件而继续有效。 |
 | V2.0-B62 | 2026-07-21 | `workspace.set_profile` 在项目类型实际变化后将当前 SQLite Artifact manifest 全部标记 stale；项目类型影响提示词、结构、篇幅和生成策略，后续 Pipeline 必须按新配置重建，不能继续复用旧项目类型下仅因文件存在而显示 ready 的产物。相同类型的幂等设置不触发失效。 |
 | V2.0-B63 | 2026-07-21 | V2 人工复核列表与摘要改为以 SQLite `manual_review` PolicyDecision 覆盖兼容文件结论；同一 category/item 的最新不可变决定控制 pending/closed 展示，响应标注 `control.db` 或 `v1_projection` 来源。V2 摘要读取不再调用会写 `summary.json` 的 V1 聚合函数，消除查询时修改状态的副作用。 |
+| V2.0-B64 | 2026-07-21 | 人工复核的执行期消费者（章节上下文、评分点分配、全文复核过滤和清单生成）在 control.db 存在时也以最新 SQLite PolicyDecision 覆盖 V1 override 文件；兼容投影被后续篡改为 pending/open 不能逆转已审计决定。无 control.db 的 V1 工作区继续沿用旧文件语义。 |

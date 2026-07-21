@@ -66,6 +66,19 @@ def _load_indexed_overrides(root: Path, category: str) -> dict[str, Any]:
     items = data.get("items")
     if not isinstance(items, dict):
         items = {}
+    control_db = root / "workspace" / "control.db"
+    if control_db.exists():
+        from control_plane import ControlStore, WorkspaceContext
+
+        prefix = f"manual-review:{category}:"
+        for record in ControlStore(WorkspaceContext(root.name, root.resolve())).policy_decisions():
+            issue_id = stringify(record.get("issue_id"))
+            if record.get("decision_type") != "manual_review" or not issue_id.startswith(prefix):
+                continue
+            item_id = issue_id[len(prefix) :]
+            decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+            payload = decision.get("payload") if isinstance(decision.get("payload"), dict) else decision
+            items[item_id] = {**(items.get(item_id) if isinstance(items.get(item_id), dict) else {}), **payload}
     return {"items": items, "updated_at": str(data.get("updated_at", ""))}
 
 
@@ -417,4 +430,3 @@ def manual_review_summary(root: Path | None = None) -> dict[str, Any]:
     }
     write_json(_manual_path(root, "summary"), summary)
     return summary
-
