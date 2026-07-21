@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -58,6 +59,46 @@ class ControlPlaneTests(unittest.TestCase):
             with self.assertRaises(ControlPlaneError) as missing:
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
+
+    def test_schema_v12_adds_parent_operation_to_existing_database(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            database = context.root / "workspace" / "control.db"
+            database.parent.mkdir(parents=True, exist_ok=True)
+            connection = sqlite3.connect(database)
+            try:
+                connection.execute(
+                    """
+                    CREATE TABLE operations (
+                        operation_id TEXT PRIMARY KEY,
+                        kind TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        start_command TEXT NOT NULL DEFAULT '',
+                        fencing_token INTEGER NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        message TEXT NOT NULL DEFAULT '',
+                        error_json TEXT
+                    )
+                    """
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            store = ControlStore(context)
+            migrated = sqlite3.connect(store.path)
+            try:
+                columns = {str(row[1]) for row in migrated.execute("PRAGMA table_info(operations)")}
+                schema_version = migrated.execute(
+                    "SELECT value FROM control_meta WHERE key = 'schema_version'"
+                ).fetchone()[0]
+            finally:
+                migrated.close()
+
+            self.assertIn("parent_operation_id", columns)
+            self.assertEqual(schema_version, "12")
 
     def test_command_is_durable_idempotent_and_emits_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,7 +216,7 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(receipt.status, "accepted")
             self.assertEqual(gateway.store.snapshot()["operation"]["kind"], "repair.start")
 
-    def test_repair_can_reuse_blocked_operation_with_new_fencing_token(self) -> None:
+    def test_repair_creates_child_operation_and_preserves_blocked_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             start_handler = lambda ctx, envelope, operation_id: {
@@ -197,11 +238,13 @@ class ControlPlaneTests(unittest.TestCase):
             repaired = gateway.confirm(action["confirmation_id"])
             after = gateway.store.operation(repaired.operation_id or "") or {}
 
-            self.assertEqual(repaired.operation_id, started.operation_id)
+            self.assertNotEqual(repaired.operation_id, started.operation_id)
+            self.assertEqual(after["parent_operation_id"], started.operation_id)
             self.assertEqual(after["status"], "running")
-            self.assertEqual(after["fencing_token"], before["fencing_token"] + 1)
+            self.assertEqual(after["fencing_token"], 1)
+            self.assertEqual(gateway.store.operation(started.operation_id or "")["status"], "blocked")
 
-    def test_confirmed_remediation_can_reuse_blocked_operation(self) -> None:
+    def test_confirmed_remediation_uses_child_and_pipeline_can_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             gateway = CommandGateway(
@@ -214,6 +257,10 @@ class ControlPlaneTests(unittest.TestCase):
                     "issues.accept_risk": lambda ctx, envelope, operation_id: {
                         "accepted": True,
                         "operation_status": "succeeded",
+                    },
+                    "pipeline.resume": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "running",
                     },
                 },
             )
@@ -229,9 +276,55 @@ class ControlPlaneTests(unittest.TestCase):
             accepted = gateway.confirm(action["confirmation_id"])
             after = gateway.store.operation(accepted.operation_id or "") or {}
 
-            self.assertEqual(accepted.operation_id, started.operation_id)
+            self.assertNotEqual(accepted.operation_id, started.operation_id)
+            self.assertEqual(after["parent_operation_id"], started.operation_id)
             self.assertEqual(after["status"], "succeeded")
-            self.assertEqual(after["fencing_token"], before["fencing_token"] + 1)
+            self.assertEqual(gateway.store.operation(started.operation_id or "")["status"], "blocked")
+            resumed = gateway.submit(_envelope(context, gateway.store, "pipeline.resume"))
+            self.assertEqual(resumed.operation_id, started.operation_id)
+            self.assertEqual(gateway.store.operation(started.operation_id or "")["status"], "running")
+            self.assertEqual(
+                gateway.store.operation(started.operation_id or "")["fencing_token"],
+                before["fencing_token"] + 1,
+            )
+
+    def test_blocked_remediation_retry_reuses_child_not_pipeline_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            attempts = 0
+
+            def repair(ctx, envelope, operation_id):
+                nonlocal attempts
+                attempts += 1
+                return {
+                    "accepted": True,
+                    "operation_status": "blocked" if attempts == 1 else "succeeded",
+                }
+
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "blocked",
+                    },
+                    "repair.start": repair,
+                },
+            )
+            pipeline = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            first_envelope = _envelope(context, gateway.store, "repair.start")
+            first_action = gateway.propose(first_envelope, label="repair", risk="high")
+            first = gateway.confirm(first_action["confirmation_id"])
+            first_state = gateway.store.operation(first.operation_id or "") or {}
+            second_envelope = _envelope(context, gateway.store, "repair.start")
+            second_action = gateway.propose(second_envelope, label="repair again", risk="high")
+            second = gateway.confirm(second_action["confirmation_id"])
+
+            self.assertEqual(second.operation_id, first.operation_id)
+            self.assertNotEqual(second.operation_id, pipeline.operation_id)
+            self.assertEqual(first_state["parent_operation_id"], pipeline.operation_id)
+            self.assertEqual(gateway.store.operation(second.operation_id or "")["status"], "succeeded")
+            self.assertEqual(gateway.store.operation(pipeline.operation_id or "")["status"], "blocked")
 
     def test_rewrite_requires_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -167,7 +167,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 11
+    SCHEMA_VERSION = 12
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -196,6 +196,11 @@ class ControlStore:
         "materials.refill",
         "materials.upload",
         "materials.confirm_verification",
+        "materials.verify",
+        "materials.rebuild",
+        "quality.revalidate",
+        "gate.revalidate",
+        "goal.resume",
         "review.update",
         "document.apply_edit",
         "workspace.set_profile",
@@ -254,6 +259,7 @@ class ControlStore:
                     );
                     CREATE TABLE IF NOT EXISTS operations (
                         operation_id TEXT PRIMARY KEY,
+                        parent_operation_id TEXT,
                         kind TEXT NOT NULL,
                         status TEXT NOT NULL,
                         start_command TEXT NOT NULL DEFAULT '',
@@ -397,6 +403,12 @@ class ControlStore:
                     CREATE INDEX IF NOT EXISTS idx_artifact_states_status ON artifact_states(status, producer);
                     """
                 )
+                operation_columns = {
+                    str(row["name"])
+                    for row in connection.execute("PRAGMA table_info(operations)").fetchall()
+                }
+                if "parent_operation_id" not in operation_columns:
+                    connection.execute("ALTER TABLE operations ADD COLUMN parent_operation_id TEXT")
                 connection.execute(
                     """
                     INSERT INTO control_meta(key, value) VALUES ('schema_version', ?)
@@ -1634,12 +1646,17 @@ class ControlStore:
                     and active is not None
                     and str(active["status"]) == "blocked"
                 )
+                blocked_pipeline_parent = bool(
+                    blocked_mutation_retry
+                    and active is not None
+                    and str(active["kind"] or "").startswith("pipeline.")
+                )
                 control_kind = envelope.kind in {
                     "pipeline.pause",
                     "pipeline.resume",
                     "pipeline.cancel",
                     "pipeline.skip_stage",
-                } or blocked_mutation_retry
+                } or (blocked_mutation_retry and not blocked_pipeline_parent)
                 operation_id = ""
                 previous_status = ""
                 fencing_token = 0
@@ -1685,24 +1702,26 @@ class ControlStore:
                         (prepared_status, fencing_token, now, operation_id),
                     )
                 else:
-                    if active:
+                    if active and not blocked_pipeline_parent:
                         raise ControlPlaneError(
                             "LEASE_CONFLICT",
                             "当前工作区已有变更 Operation。",
                             details={"operation_id": str(active["operation_id"]), "status": str(active["status"])},
                         )
                     operation_id = str(uuid.uuid4())
-                    previous_status = ""
+                    previous_status = str(active["status"]) if blocked_pipeline_parent and active else ""
+                    parent_operation_id = str(active["operation_id"]) if blocked_pipeline_parent and active else ""
                     fencing_token = 1
                     connection.execute(
                         """
                         INSERT INTO operations(
-                            operation_id, kind, status, start_command, fencing_token,
-                            created_at, updated_at, message
-                        ) VALUES (?, ?, 'queued', ?, ?, ?, ?, '')
+                            operation_id, parent_operation_id, kind, status, start_command,
+                            fencing_token, created_at, updated_at, message
+                        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, '')
                         """,
                         (
                             operation_id,
+                            parent_operation_id or None,
                             envelope.kind,
                             str(envelope.payload.get("start_command") or ""),
                             fencing_token,
@@ -1762,6 +1781,7 @@ class ControlStore:
                         "kind": envelope.kind,
                         "operation_id": operation_id,
                         "previous_operation_status": previous_status,
+                        "parent_operation_id": parent_operation_id if not control_kind else "",
                         "fencing_token": fencing_token,
                     },
                 )
@@ -2063,7 +2083,10 @@ class ControlStore:
         return {
             "workspace_id": self.context.workspace_id,
             "revision": revision,
-            "operation": operations[0] if operations else None,
+            "operation": next(
+                (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
+                operations[0] if operations else None,
+            ),
             "operations": operations,
             "commands": commands,
             "confirmations": confirmations,

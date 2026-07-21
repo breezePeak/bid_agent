@@ -541,3 +541,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B55 | 2026-07-21 | 启动恢复从只检查 ACTIVE_RUN 扩展为扫描全部工作区：每个工作区都会收敛中断的 RepairJob 与 AgentActivity；单进程 Worker 无法自动接管的非活动 Pipeline Operation fail-closed 为 blocked（暂停/取消请求分别收敛为 paused/cancelled），关联运行中 Goal 标记为 blocked_human 并保留孤立 Operation ID，避免后台状态永久伪装为 running。 |
 | V2.0-B56 | 2026-07-21 | V1 兼容 API 响应统一增加 `Deprecation`、HTTP 299 Warning 和 V2 successor Link；V2、认证及全局模型配置接口不标记弃用。兼容调用方现在可以在一个版本的迁移窗口内被机器可读地识别和监控，为后续删除旧路由提供调用量依据。 |
 | V2.0-B57 | 2026-07-21 | 修复 V1 只读兼容接口的 ACL 绑定旁路：当请求携带 `workspace_id`/`run_id` 查询参数时，中间件对该精确工作区授权，不再只检查 ACTIVE_RUN 后由端点读取另一工作区；无显式参数时才回退到旧活动工作区语义。 |
+| V2.0-B58 | 2026-07-21 | 修复 blocked Pipeline 的补救命令复用并终结原 Operation、导致后续无法继续的生命周期缺陷：Repair/Rewrite/Materials/Quality 等补救现在创建带 `parent_operation_id` 的独立子 Operation，原 Pipeline 保持 blocked；子 Operation 完成后 Snapshot 重新暴露活动父 Operation，用户可通过独立 `pipeline.resume` Command 增加 fencing token 并继续。control.db schema 升级为 12。 |
