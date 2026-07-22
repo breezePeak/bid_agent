@@ -5694,6 +5694,32 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
                 status_code=409,
                 details={"expected_fingerprint": expected_fingerprint, "current_fingerprint": current_fingerprint},
             )
+    latest_evaluations: dict[str, dict[str, Any]] = {}
+    for evaluation in store.gate_evaluations(limit=200):
+        command = str(evaluation.get("command") or "")
+        if command and command not in latest_evaluations:
+            latest_evaluations[command] = evaluation
+    failed_evaluations = [
+        evaluation for evaluation in latest_evaluations.values()
+        if str(evaluation.get("verdict") or "") in {"block", "error"}
+    ]
+    if failed_evaluations:
+        error_evaluations = [item for item in failed_evaluations if item.get("verdict") == "error"]
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE" if error_evaluations else "GATE_BLOCKED",
+            "存在尚未通过或异常的最新 GateEvaluation，已拒绝正式出稿。",
+            status_code=503 if error_evaluations else 409,
+            details={
+                "gate_evaluations": [
+                    {
+                        "evaluation_id": item.get("evaluation_id"),
+                        "command": item.get("command"),
+                        "verdict": item.get("verdict"),
+                    }
+                    for item in failed_evaluations
+                ]
+            },
+        )
     issues = store.issue_states()
     open_issues = [
         item for item in issues

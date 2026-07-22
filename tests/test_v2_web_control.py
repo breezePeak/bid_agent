@@ -2556,6 +2556,43 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["error"]["code"], "STATE_UNAVAILABLE")
 
+    def test_v2_export_preflight_rejects_latest_failed_gate_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.record_gate_evaluation(
+                command="global-review",
+                verdict="error",
+                input_fingerprint="fingerprint",
+                findings=[],
+                source="test",
+            )
+
+            with mock.patch.object(web_app, "_ensure_v2_issue_import", return_value=store):
+                with self.assertRaises(ControlPlaneError) as blocked:
+                    web_app._v2_export_preflight(context)
+
+            self.assertEqual(blocked.exception.code, "STATE_UNAVAILABLE")
+            store.record_gate_evaluation(
+                command="global-review",
+                verdict="pass",
+                input_fingerprint="new-fingerprint",
+                findings=[],
+                source="test",
+            )
+            workspace = context.root / "workspace"
+            outputs = context.root / "outputs"
+            workspace.mkdir(parents=True, exist_ok=True)
+            outputs.mkdir(parents=True)
+            (workspace / "global_review.json").write_text(json.dumps({"blocking": False}), encoding="utf-8")
+            (workspace / "compliance_report.json").write_text(json.dumps({"blocking": False}), encoding="utf-8")
+            (outputs / "final.md").write_text("draft", encoding="utf-8")
+            with mock.patch.object(web_app, "_ensure_v2_issue_import", return_value=store):
+                preflight = web_app._v2_export_preflight(context)
+            self.assertTrue(preflight["can_export"])
+
     def test_v2_export_preflight_rejects_stale_migration_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

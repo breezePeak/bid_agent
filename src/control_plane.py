@@ -1238,12 +1238,12 @@ class ControlStore:
         with self._connection() as connection:
             if command:
                 rows = connection.execute(
-                    "SELECT * FROM gate_evaluations WHERE command = ? ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM gate_evaluations WHERE command = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (str(command), capped_limit),
                 ).fetchall()
             else:
                 rows = connection.execute(
-                    "SELECT * FROM gate_evaluations ORDER BY created_at DESC LIMIT ?",
+                    "SELECT * FROM gate_evaluations ORDER BY created_at DESC, rowid DESC LIMIT ?",
                     (capped_limit,),
                 ).fetchall()
         result: list[dict[str, Any]] = []
