@@ -8,6 +8,10 @@
       <button class="btn btn-sm" @click="propose('migration.scan')">扫描旧状态</button>
       <button class="btn btn-sm" @click="propose('migration.cutover')" :disabled="migration.status === 'needs_reconciliation'">切换 V2</button>
     </div>
+    <div v-if="compatibilityCallCount" class="migration-compatibility">
+      V1 兼容 API 观测：{{ compatibilityCallCount }} 次调用
+      <span v-if="compatibilityUsage.updated_at">· 最近 {{ compatibilityUsage.updated_at }}</span>
+    </div>
     <div v-if="backups.length" class="migration-backups">
       <b>恢复演练备份</b>
       <div v-for="backup in backups" :key="backup.path" class="migration-backup">
@@ -39,7 +43,11 @@ const pending = ref(null)
 const choices = ref({})
 const backups = ref([])
 const drilling = ref('')
+const compatibilityUsage = ref({})
 const openConflicts = computed(() => (migration.value.conflicts || []).filter(item => item.status === 'open'))
+const compatibilityCallCount = computed(() => Object.values(compatibilityUsage.value.routes || {}).reduce(
+  (total, item) => total + Number(item?.calls || 0), 0
+))
 const migrationLabel = computed(() => {
   if (migration.value.status === 'needs_reconciliation') return `待协调 ${migration.value.open_count || 0} 项`
   if (migration.value.status === 'cutover_stale') return 'V2 切换已失效：旧状态源变化，需重新扫描并切换'
@@ -51,7 +59,9 @@ async function refresh() {
   if (!props.runId) return
   loading.value = true
   try {
-    migration.value = (await fetchWorkspaceSnapshot(props.runId))?.data?.snapshot?.migration || {}
+    const snapshot = (await fetchWorkspaceSnapshot(props.runId))?.data?.snapshot || {}
+    migration.value = snapshot.migration || {}
+    compatibilityUsage.value = snapshot.compatibility_usage || {}
     backups.value = (await fetchMigrationBackups(props.runId))?.data?.backups || []
   }
   finally { loading.value = false }
@@ -86,5 +96,5 @@ onMounted(refresh)
 </script>
 
 <style scoped>
-.migration-actions,.migration-pending{display:flex;gap:8px;align-items:center;padding:8px 12px}.migration-conflict{display:grid;gap:7px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-conflict select{max-width:150px}.migration-pending{background:#fff6df;font-size:12px;flex-wrap:wrap}.migration-backups{display:grid;gap:6px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-backup{display:flex;justify-content:space-between;gap:8px;align-items:center}
+.migration-actions,.migration-pending{display:flex;gap:8px;align-items:center;padding:8px 12px}.migration-conflict{display:grid;gap:7px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-conflict select{max-width:150px}.migration-pending{background:#fff6df;font-size:12px;flex-wrap:wrap}.migration-backups,.migration-compatibility{display:grid;gap:6px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-compatibility{color:var(--text-muted,#667)}.migration-backup{display:flex;justify-content:space-between;gap:8px;align-items:center}
 </style>
