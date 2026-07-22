@@ -3575,6 +3575,9 @@ class ControlStore:
                 "SELECT command_id, kind, status, operation_id, confirmation_id, message, created_at, updated_at "
                 "FROM commands ORDER BY created_at DESC LIMIT 50"
             ).fetchall()]
+            stage_runs = [dict(row) for row in connection.execute(
+                "SELECT * FROM stage_runs ORDER BY started_at DESC LIMIT 100"
+            ).fetchall()]
             confirmations = [dict(row) for row in connection.execute(
                 "SELECT confirmation_id, risk, label, status, expected_revision, expires_at, created_at "
                 "FROM confirmations WHERE status = 'pending' ORDER BY created_at"
@@ -3594,6 +3597,8 @@ class ControlStore:
             ).fetchone()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
+        for stage_run in stage_runs:
+            stage_run["error"] = _decode(stage_run.pop("error_json", None), None)
         return {
             "workspace_id": self.context.workspace_id,
             "revision": revision,
@@ -3603,6 +3608,7 @@ class ControlStore:
             ),
             "operations": operations,
             "commands": commands,
+            "stage_runs": stage_runs,
             "confirmations": confirmations,
             "lease": dict(lease_row) if lease_row else None,
             "artifacts": [self._artifact_row(row) for row in artifact_rows],
