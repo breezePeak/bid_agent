@@ -6963,12 +6963,12 @@ def _handle_materials_upload(
     actual_sha256 = hashlib.sha256(uploaded_path.read_bytes()).hexdigest()
     if actual_sha256 != str(staged.get("sha256") or ""):
         raise ControlPlaneError("UPLOAD_HASH_MISMATCH", "暂存材料摘要不匹配，已拒绝登记。", status_code=409)
-    consumed_upload = store.consume_material_upload(upload_token)
     submission_receipt = store.record_material_submission(
         item_id=item_id,
-        upload=consumed_upload,
+        upload=staged,
         actor=envelope.actor if isinstance(envelope.actor, dict) else {},
         source="materials.upload",
+        consume_upload=True,
     )
     result = mark_material_uploaded(
         context.root,

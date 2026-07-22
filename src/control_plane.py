@@ -1471,6 +1471,7 @@ class ControlStore:
         upload: dict[str, Any],
         actor: dict[str, Any],
         source: str,
+        consume_upload: bool = False,
     ) -> dict[str, Any]:
         material_id = str(item_id or "").strip()
         token = str(upload.get("upload_token") or "").strip()
@@ -1493,15 +1494,23 @@ class ControlStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 upload_row = connection.execute(
-                    "SELECT filename, sha256, size_bytes, status FROM material_upload_tokens WHERE upload_token = ?",
+                    "SELECT filename, sha256, size_bytes, status, expires_at FROM material_upload_tokens WHERE upload_token = ?",
                     (token,),
                 ).fetchone()
-                if upload_row is None or str(upload_row["status"] or "") != "consumed":
+                expected_status = "pending" if consume_upload else "consumed"
+                if upload_row is None or str(upload_row["status"] or "") != expected_status:
                     raise ControlPlaneError(
                         "UPLOAD_TOKEN_INVALID",
-                        "材料提交必须关联已消费的当前工作区 upload_token。",
+                        "材料提交必须关联当前工作区可用的 upload_token。",
                         status_code=409,
                     )
+                if consume_upload:
+                    try:
+                        expires_at = datetime.fromisoformat(str(upload_row["expires_at"]))
+                    except ValueError as exc:
+                        raise ControlPlaneError("STATE_UNAVAILABLE", "上传 token 到期时间无效。", status_code=503) from exc
+                    if expires_at <= datetime.now(timezone.utc):
+                        raise ControlPlaneError("UPLOAD_TOKEN_EXPIRED", "上传 token 已过期。", status_code=409)
                 if (
                     str(upload_row["filename"] or "") != filename
                     or str(upload_row["sha256"] or "") != sha256
@@ -1521,6 +1530,19 @@ class ControlStore:
                     ),
                 )
                 revision = self._bump_revision(connection)
+                if consume_upload:
+                    connection.execute(
+                        """
+                        UPDATE material_upload_tokens
+                        SET status = 'consumed', consumed_at = ?
+                        WHERE upload_token = ? AND status = 'pending'
+                        """,
+                        (created_at, token),
+                    )
+                    self._event(
+                        connection, revision, "MaterialUploadConsumed", "MaterialUpload", token,
+                        {"sha256": sha256, "filename": filename},
+                    )
                 self._event(
                     connection, revision, "MaterialSubmitted", "MaterialSubmission", submission_id,
                     {"item_id": material_id, "filename": filename, "sha256": sha256, "size_bytes": size_bytes},

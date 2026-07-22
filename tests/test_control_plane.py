@@ -248,6 +248,35 @@ class ControlPlaneTests(unittest.TestCase):
                 )
             self.assertEqual(forged.exception.code, "UPLOAD_HASH_MISMATCH")
 
+    def test_material_submission_keeps_upload_token_pending_when_audit_insert_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            staged = store.register_material_upload(
+                staged_path="workspace/material_uploads/license.pdf",
+                filename="license.pdf",
+                sha256="a" * 64,
+                size_bytes=123,
+            )
+            with store._connection() as connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_material_submission
+                    BEFORE INSERT ON material_submissions
+                    BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END
+                    """
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.record_material_submission(
+                    item_id="qualification-license",
+                    upload=staged,
+                    actor={"id": "owner", "role": "operator"},
+                    source="materials.upload",
+                    consume_upload=True,
+                )
+            self.assertEqual(store.material_upload(staged["upload_token"])["status"], "pending")
+            self.assertEqual(store.material_submissions(item_id="qualification-license"), [])
+
     def test_latest_gate_evaluations_uses_persisted_insertion_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

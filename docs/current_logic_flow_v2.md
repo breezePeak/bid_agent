@@ -596,3 +596,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B110 | 2026-07-22 | 材料清单的提交/核验摘要改为由 SQLite 按每个材料聚合 count 与最新持久化记录，不再依赖固定条数历史列表；大量材料或高频核验时也不会漏掉较早材料的最新审计结论。 |
 | V2.0-B111 | 2026-07-22 | 自动上传核验、自动复验和人工确认现在在同一 SQLite 事务内同时写入 MaterialVerification 与当前 MaterialState；任一审计写入失败都会回滚履约状态，避免“已 verified 但没有核验证据”的半提交状态。 |
 | V2.0-B112 | 2026-07-22 | 材料命令在落库核验前只读取 V1 清单投影，不再先调用独立 MaterialState upsert；因此自动上传核验、自动复验和人工确认的权威状态不会在审计写入失败时提前提交。新增 SQLite 触发器故障注入回归验证事务回滚。 |
+| V2.0-B113 | 2026-07-22 | `materials.upload` 将 upload_token 消费和 MaterialSubmission 审计合并到同一 SQLite 事务与 revision；提交审计失败时 token 保持 pending，不会出现“token 已消费却无提交证据”的不可重试半提交。保留已消费 token 的兼容审计写入路径，仅受管命令使用原子消费。 |
