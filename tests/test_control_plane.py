@@ -220,6 +220,25 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(store.revision(), revision)
             self.assertEqual(store.migration_conflicts(), [])
 
+    def test_migration_dry_run_does_not_reopen_resolved_orphan_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            orphan = {"path": "goal_state.json", "kind": "root_legacy_control_state"}
+            conflict = store.record_migration_conflict(
+                domain="orphan", legacy=orphan, authoritative={}, reason="root legacy state"
+            )
+            store.resolve_migration_conflict(
+                conflict["conflict_id"],
+                resolution="keep_orphan",
+                actor={"id": "admin", "role": "admin"},
+                reason="keep evidence outside workspace",
+            )
+            dry_run = store.migration_dry_run({}, orphans=[orphan])
+            self.assertEqual(dry_run["status"], "ready")
+            self.assertEqual(dry_run["counts"]["orphans"], 0)
+            self.assertEqual(dry_run["counts"]["acknowledged"], 1)
+
     def test_command_is_durable_idempotent_and_emits_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

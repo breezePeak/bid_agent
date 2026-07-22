@@ -5368,6 +5368,7 @@ def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
 
 def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     """Inventory legacy control files without mutating SQLite or compatibility files."""
+    store = ControlStore(context)
     domains: dict[str, Any] = {}
     unrecognized: list[dict[str, Any]] = []
     sources = {
@@ -5376,7 +5377,7 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
         "issues": context.root / "workspace" / "issues" / "open.json",
     }
     for domain, path in sources.items():
-        if not path.exists():
+        if not path.exists() or not store.v1_import_pending(domain):
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -5403,7 +5404,7 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
                     "reason": "根目录旧状态未绑定到工作区 Agent，不自动导入。",
                 }
             )
-    result = ControlStore(context).migration_dry_run(
+    result = store.migration_dry_run(
         domains,
         orphans=orphans,
         unrecognized=unrecognized,
@@ -5504,6 +5505,14 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
 
     store = _ensure_v2_issue_import(context)
     store.assert_migration_ready()
+    migration_preview = _v1_migration_dry_run(context)
+    if migration_preview.get("status") != "ready":
+        raise ControlPlaneError(
+            "MIGRATION_SCAN_REQUIRED",
+            "旧工作区迁移预检发现未登记的状态，请先执行管理员迁移扫描。",
+            status_code=409,
+            details={"migration": migration_preview.get("counts") or {}},
+        )
     issues = store.issue_states()
     open_issues = [
         item for item in issues

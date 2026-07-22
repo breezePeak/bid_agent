@@ -466,6 +466,20 @@ class ControlStore:
             "conflicts": conflicts,
         }
 
+    def v1_import_pending(self, domain: str) -> bool:
+        markers = {
+            "goal": "goal_v1_imported",
+            "materials": "materials_v1_imported",
+            "issues": "issue_v1_imported",
+        }
+        marker = markers.get(str(domain or ""))
+        if not marker:
+            raise ControlPlaneError("COMMAND_INVALID", "未知 V1 导入领域。", status_code=400)
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT 1 FROM control_meta WHERE key = ?", (marker,)
+            ).fetchone() is None
+
     def migration_dry_run(
         self,
         legacy_domains: dict[str, Any],
@@ -504,16 +518,39 @@ class ControlStore:
                 for item in rows if isinstance(item, dict)
             )
 
+        resolved_evidence = {
+            (str(item.get("domain") or ""), _json(item.get("legacy")))
+            for item in self.migration_conflicts(status="resolved")
+        }
+
+        def is_acknowledged(domain: str, legacy: Any) -> bool:
+            return (domain, _json(legacy)) in resolved_evidence
+
         inventory: dict[str, list[dict[str, Any]]] = {
             "importable": [],
             "aligned": [],
             "conflicts": [],
-            "orphans": list(orphans or []),
-            "unrecognized": list(unrecognized or []),
+            "orphans": [],
+            "unrecognized": [],
+            "acknowledged": [],
         }
+        for item in orphans or []:
+            if is_acknowledged("orphan", item):
+                inventory["acknowledged"].append({"domain": "orphan", "legacy": item})
+            else:
+                inventory["orphans"].append(item)
+        for item in unrecognized or []:
+            if is_acknowledged("unrecognized", item):
+                inventory["acknowledged"].append({"domain": "unrecognized", "legacy": item})
+            else:
+                inventory["unrecognized"].append(item)
         for domain, candidate in legacy_domains.items():
             if domain not in authoritative:
-                inventory["unrecognized"].append({"domain": domain, "value": candidate})
+                item = {"domain": domain, "value": candidate}
+                if is_acknowledged("unrecognized", item):
+                    inventory["acknowledged"].append({"domain": "unrecognized", "legacy": item})
+                else:
+                    inventory["unrecognized"].append(item)
                 continue
             current = authoritative[domain]
             current_empty = current is None if domain == "goal" else not current
@@ -522,10 +559,16 @@ class ControlStore:
                 inventory["importable"].append(item)
             elif projection(domain, candidate) == projection(domain, current):
                 inventory["aligned"].append(item)
+            elif is_acknowledged(domain, candidate):
+                inventory["acknowledged"].append(item)
             else:
                 inventory["conflicts"].append(item)
         return {
-            "status": "needs_reconciliation" if inventory["conflicts"] or inventory["orphans"] else "ready",
+            "status": (
+                "needs_reconciliation"
+                if inventory["conflicts"] or inventory["orphans"] or inventory["unrecognized"]
+                else "ready"
+            ),
             "dry_run": True,
             "inventory": inventory,
             "counts": {key: len(value) for key, value in inventory.items()},
