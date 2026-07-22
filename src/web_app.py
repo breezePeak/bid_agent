@@ -2232,6 +2232,22 @@ def _minimal_repair_resume_command(root: Path) -> str:
     return commands[-1] if commands else ""
 
 
+def _v2_pipeline_resume_command(context: WorkspaceContext) -> str:
+    """Choose a resume stage from authoritative Pipeline Operations only."""
+    allowed = set(auto_run_commands())
+    try:
+        operations = ControlStore(context).snapshot().get("operations") or []
+        for item in operations:
+            if not isinstance(item, dict) or not str(item.get("kind") or "").startswith("pipeline."):
+                continue
+            command = str(item.get("start_command") or "").strip()
+            if command in allowed:
+                return command
+    except Exception:
+        return ""
+    return ""
+
+
 def _issue_repair_fingerprint(issue: dict[str, Any]) -> str:
     try:
         from agent.repair import issue_fingerprint
@@ -3085,7 +3101,11 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             start_cmd = stage_from_action if stage_from_action in auto_cmds else ""
             if not start_cmd:
                 try:
-                    start_cmd = _minimal_repair_resume_command(root)
+                    start_cmd = (
+                        _v2_pipeline_resume_command(_workspace_context(run_id))
+                        if is_v2_workspace_chat
+                        else _minimal_repair_resume_command(root)
+                    )
                     if start_cmd not in auto_cmds:
                         start_cmd = ""
                 except Exception:
@@ -6371,8 +6391,15 @@ def _handle_pipeline_resume(
 ) -> dict[str, Any]:
     payload = dict(envelope.payload)
     if not str(payload.get("start_command") or "").strip():
-        control = SUPERVISOR.load(context.root)
-        payload["start_command"] = str(control.get("current_stage") or "")
+        previous_operation_id = str(payload.get("operation_id") or "").strip()
+        previous = ControlStore(context).operation(previous_operation_id) if previous_operation_id else None
+        payload["start_command"] = str((previous or {}).get("start_command") or "")
+        if not payload["start_command"]:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "恢复流水线缺少 control.db 中的起始阶段，已拒绝读取旧 checkpoint。",
+                status_code=503,
+            )
     return _handle_pipeline_start(
         context,
         replace_command_envelope(envelope, kind="pipeline.resume", payload=payload),
@@ -6472,7 +6499,7 @@ def _handle_repair_start(
         total_count=len(candidates),
         auto_count=auto_count,
         manual_count=max(0, len(candidates) - auto_count),
-        resume_command=_minimal_repair_resume_command(context.root),
+        resume_command=_v2_pipeline_resume_command(context),
     )
     result = _trigger_repair_job(
         context.root,

@@ -458,6 +458,63 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse((beta / "workspace" / "control.db").exists())
             web_app.close_chat_store(context.root)
 
+    def test_v2_pipeline_resume_uses_prior_operation_not_legacy_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "paused"}},
+            )
+            previous = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "global-review"},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "prior-pipeline",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            self.assertTrue(previous.operation_id)
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "pipeline.resume",
+                    "payload": {"operation_id": previous.operation_id},
+                    "expected_revision": gateway.store.revision(),
+                    "idempotency_key": "resume-pipeline",
+                },
+                workspace_id="alpha",
+            )
+
+            with mock.patch.object(web_app, "_handle_pipeline_start", return_value={"accepted": True}) as start:
+                result = web_app._handle_pipeline_resume(context, envelope, "resume-operation")
+
+            self.assertTrue(result["accepted"])
+            self.assertEqual(start.call_args.args[1].payload["start_command"], "global-review")
+
+    def test_v2_pipeline_resume_rejects_missing_prior_control_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "pipeline.resume",
+                    "payload": {"operation_id": "missing"},
+                    "expected_revision": 0,
+                    "idempotency_key": "missing-resume",
+                },
+                workspace_id="alpha",
+            )
+
+            with self.assertRaises(ControlPlaneError) as raised:
+                web_app._handle_pipeline_resume(context, envelope, "resume-operation")
+
+            self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
+
     def test_v2_repair_requires_confirmation_and_uses_same_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
