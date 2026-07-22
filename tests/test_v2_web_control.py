@@ -2408,6 +2408,7 @@ class V2WebControlTests(unittest.TestCase):
             (runs / "alpha").mkdir(parents=True)
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
+                listed = _body(web_app.api_list_issues("open", "alpha"))
                 preview = web_app.api_preview_repair("missing", "alpha")
                 explained = asyncio.run(
                     web_app.api_explain_issue_cause("missing", _Request({}), "alpha")
@@ -2416,6 +2417,7 @@ class V2WebControlTests(unittest.TestCase):
                     web_app.api_batch_preview_repair(_Request({"issue_ids": ["missing"]}), "alpha")
                 )
 
+            self.assertEqual(listed["summary"]["source"], "control.db")
             self.assertEqual(preview.status_code, 404)
             self.assertEqual(explained.status_code, 404)
             self.assertNotEqual(batch.status_code, 409)

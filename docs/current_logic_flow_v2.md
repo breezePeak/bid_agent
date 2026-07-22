@@ -622,3 +622,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B136 | 2026-07-22 | 问题与合规面板改为逐项展示正式出稿所需的全文审核与专项合规 GateEvaluation（已通过、被阻断、异常或待重验），即使尚无证据也不会将其隐藏为“正常”。 |
 | V2.0-B137 | 2026-07-22 | 前端单问题“dry-run”修复改用显式 workspace_id 的 V2 修复预览接口，不再调用依赖 ACTIVE_RUN 的旧 execute 端点；实际修复仍必须经 `repair.issues` Command 与持久化确认。 |
 | V2.0-B138 | 2026-07-22 | V2 单项预览、根因解释和批量预览统一按“旧 `open.json` 实际存在且未迁移”判定迁移阻断；全新工作区可返回空/未找到结果，不再因不存在的旧 Issue 导入标记被误报 `MIGRATION_SCAN_REQUIRED`。 |
+| V2.0-B139 | 2026-07-22 | V2 Issue 列表的来源摘要也采用实际旧文件判定；空工作区返回 `control.db`，与 Snapshot、Gate 和 Issue 预览的迁移语义一致。 |

@@ -3402,7 +3402,10 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
             from agent.issues import quality_gate_mode
 
             store = ControlStore(context)
-            issue_import_pending = store.issue_v1_import_pending()
+            issue_import_pending = (
+                store.issue_v1_import_pending()
+                and (context.root / "workspace" / "issues" / "open.json").exists()
+            )
             all_issues = store.issue_states()
             open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
             blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
