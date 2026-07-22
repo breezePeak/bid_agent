@@ -7120,7 +7120,7 @@ def _handle_document_apply_edit(
 
     from artifact_manifest import record_document_edit_artifacts
 
-    record_document_edit_artifacts(context)
+    record_document_edit_artifacts(context, operation_id=operation_id)
     store = ControlStore(context)
     if mode == "undo":
         store.clear_document_undo()

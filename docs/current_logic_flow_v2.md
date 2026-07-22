@@ -663,3 +663,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B177 | 2026-07-22 | PipelineSupervisor 在每个阶段开始时写入 `StageRun.running`，并在复用、成功、门禁阻断、执行失败、产物不完整、取消或暂停时写入对应终态和原因；Artifact manifest 与 StageRun 分离记录但任一控制记录失败均 fail-closed。`control.db` schema 升级至 v18，以支持暂停阶段的审计终态。 |
 | V2.0-B178 | 2026-07-22 | StageRun 生命周期补齐计划中的 `queued → running → terminal`：Supervisor 在每个候选阶段先持久化 queued，进入执行前将同一 attempt 提升为 running；复用、失败、暂停和取消均终结该 attempt，不会把 queued/running 拆成两个 attempt。`control.db` schema 升级至 v19。 |
 | V2.0-B179 | 2026-07-22 | 阶段复用现在同时要求当前 Artifact manifest/hash/input fingerprint 有效，且该阶段最近一次跨 Operation 的 StageRun 为 `succeeded` 或 `reused`；只有尚未存在任何 manifest 的未切换 V1 工作区可进行一次兼容 bootstrap。已切换工作区或已有 manifest 却缺少成功 StageRun 时一律重跑，防止仅凭文件或孤立 manifest 误判完成。 |
+| V2.0-B180 | 2026-07-22 | `document.apply_edit` 重建 `build-docx` 后会把同一 Command Operation 写为 `StageRun.succeeded(document_edit_rebuild)`；手工终稿编辑产生的 DOCX manifest 因此拥有与执行记录一致的可复用证据，不再依赖更早 Pipeline 的 StageRun 或被误判为孤立 Artifact。 |

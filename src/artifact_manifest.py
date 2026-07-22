@@ -156,7 +156,7 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
     return all(str(artifact.path).replace("\\", "/") not in states for artifact in spec.produces)
 
 
-def record_document_edit_artifacts(context: WorkspaceContext) -> None:
+def record_document_edit_artifacts(context: WorkspaceContext, *, operation_id: str = "") -> None:
     """Keep manual final.md edits authoritative while invalidating quality outputs."""
     store = ControlStore(context)
     store.mark_artifact_states_stale(
@@ -182,6 +182,16 @@ def record_document_edit_artifacts(context: WorkspaceContext) -> None:
     )
     store.upsert_artifact_state(final_md)
     record_stage_artifacts(context, "build-docx", disposition="produced")
+    if operation_id:
+        # The document Command rebuilt DOCX through the deterministic stage
+        # runner. Preserve that execution evidence so a later Pipeline can
+        # safely reuse the manifest instead of treating it as an orphan file.
+        store.record_stage_run(
+            operation_id,
+            "build-docx",
+            "succeeded",
+            disposition="document_edit_rebuild",
+        )
 
 
 def record_external_chapter_mutation(

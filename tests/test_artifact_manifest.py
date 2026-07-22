@@ -162,12 +162,15 @@ class ArtifactManifestTests(unittest.TestCase):
                     }
                 )
 
-            record_document_edit_artifacts(context)
+            record_document_edit_artifacts(context, operation_id="document-edit-1")
 
             self.assertEqual(store.artifact_state("outputs/final.md")["disposition"], "manual_override")
             self.assertEqual(store.artifact_state("outputs/final.docx")["status"], "ready")
             self.assertEqual(store.artifact_state("workspace/compliance_report.json")["status"], "stale")
             self.assertEqual(store.artifact_state("workspace/format_check_report.json")["status"], "stale")
+            run = store.latest_stage_run("document-edit-1", "build-docx") or {}
+            self.assertEqual(run.get("status"), "succeeded")
+            self.assertEqual(run.get("disposition"), "document_edit_rebuild")
 
     def test_external_chapter_mutation_refreshes_chapters_and_stales_downstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

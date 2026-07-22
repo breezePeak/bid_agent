@@ -3270,7 +3270,7 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertTrue(result["accepted"])
             self.assertEqual(final_md.read_text(encoding="utf-8"), "after\n")
-            record_artifacts.assert_called_once_with(context)
+            record_artifacts.assert_called_once_with(context, operation_id="operation-alpha")
             undo_state = ControlStore(context).document_undo()
             self.assertIsNotNone(undo_state)
             self.assertTrue(str(undo_state["backup_path"]).startswith("workspace/manual_line_edits/"))
