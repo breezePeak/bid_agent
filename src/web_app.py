@@ -2451,6 +2451,7 @@ def _trigger_repair_job(
     control_operation_id: str = "",
     control_fencing_token: int = 0,
     resume_pipeline: bool = True,
+    defer_start: bool = False,
 ) -> dict[str, Any]:
     """Claim exactly one repair slot and run the persisted job in the background.
 
@@ -2679,14 +2680,22 @@ def _trigger_repair_job(
                 _append_log(f"[警告] 修复 Operation 状态回写失败: {exc}")
 
     worker_thread = threading.Thread(target=_run, daemon=True, name=f"repair-{job_id}")
-    worker_thread.start()
-    return {
+
+    def start_worker() -> None:
+        worker_thread.start()
+
+    result: dict[str, Any] = {
         "ok": True,
         "duplicate": False,
         "job": job,
         "message": "已开始最小修复，将按根因合并处理并统一重验",
         "_worker_thread": worker_thread,
     }
+    if defer_start:
+        result["_after_commit"] = start_worker
+    else:
+        start_worker()
+    return result
 
 
 @app.post("/api/chat")
@@ -2742,6 +2751,7 @@ def _trigger_rewrite_targets_inline(
     run_id: str = "",
     control_operation_id: str = "",
     control_fencing_token: int = 0,
+    defer_start: bool = False,
 ) -> dict[str, Any]:
     if not targets:
         return {"ok": False, "message": "没有定向改稿目标。"}
@@ -2828,8 +2838,26 @@ def _trigger_rewrite_targets_inline(
         except Exception as exc:
             _append_log(f"[警告] 改稿 Operation 终态回写失败: {exc}")
 
-    threading.Thread(target=_run_rewrite_sync, args=(chapter_ids, run_root), daemon=True).start()
-    return {"ok": True, "message": f"定向改稿已启动: {chapter_ids}"}
+    worker_thread = threading.Thread(
+        target=_run_rewrite_sync,
+        args=(chapter_ids, run_root),
+        daemon=True,
+        name=f"rewrite-{resolved_run_id}",
+    )
+
+    def start_worker() -> None:
+        worker_thread.start()
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "message": f"定向改稿已启动: {chapter_ids}",
+        "_worker_thread": worker_thread,
+    }
+    if defer_start:
+        result["_after_commit"] = start_worker
+    else:
+        start_worker()
+    return result
 
 
 def _chat_response(
@@ -6623,6 +6651,7 @@ def _handle_repair_start(
         control_fencing_token=fencing_token,
         # V2 keeps repair and pipeline resume as separate audited Commands.
         resume_pipeline=False,
+        defer_start=True,
     )
     if not result.get("ok"):
         code = "LEASE_CONFLICT" if result.get("busy") else "GATE_BLOCKED"
@@ -6631,6 +6660,7 @@ def _handle_repair_start(
         "accepted": True,
         "operation_status": "running",
         "message": str(result.get("message") or "已开始最小修复。"),
+        "_after_commit": result.get("_after_commit"),
     }
 
 
@@ -7222,6 +7252,7 @@ def _handle_rewrite_chapters(
         run_id=context.workspace_id,
         control_operation_id=operation_id,
         control_fencing_token=fencing_token,
+        defer_start=True,
     )
     if not result.get("ok"):
         code = "LEASE_CONFLICT" if "正在运行" in str(result.get("message") or "") else "COMMAND_DISPATCH_FAILED"
@@ -7230,6 +7261,7 @@ def _handle_rewrite_chapters(
         "accepted": True,
         "operation_status": "running",
         "message": str(result.get("message") or "已开始定向改稿。"),
+        "_after_commit": result.get("_after_commit"),
     }
 
 
@@ -7719,6 +7751,7 @@ def _trigger_material_refill(
     chapter_ids: list[str] | None,
     replan_jobs: bool,
     max_chapters: int,
+    defer_start: bool = False,
 ) -> dict[str, Any]:
     if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         return {"ok": False, "busy": True, "message": "当前已有任务在运行。"}
@@ -7769,8 +7802,17 @@ def _trigger_material_refill(
         except Exception as exc:
             _append_log(f"[警告] 材料回填 Operation 状态回写失败: {exc}")
 
-    threading.Thread(target=worker, daemon=True, name=f"materials-refill-{context.workspace_id}").start()
-    return {"ok": True, "message": "材料回填已启动。"}
+    worker_thread = threading.Thread(target=worker, daemon=True, name=f"materials-refill-{context.workspace_id}")
+
+    def start_worker() -> None:
+        worker_thread.start()
+
+    result: dict[str, Any] = {"ok": True, "message": "材料回填已启动。", "_worker_thread": worker_thread}
+    if defer_start:
+        result["_after_commit"] = start_worker
+    else:
+        start_worker()
+    return result
 
 
 def _handle_materials_refill(
@@ -7816,10 +7858,16 @@ def _handle_materials_refill(
         chapter_ids=chapter_ids,
         replan_jobs=bool(envelope.payload.get("replan_jobs", True)),
         max_chapters=max_chapters,
+        defer_start=True,
     )
     if not result.get("ok"):
         raise ControlPlaneError("LEASE_CONFLICT", str(result.get("message") or "材料回填未能启动。"))
-    return {"accepted": True, "operation_status": "running", "message": result["message"]}
+    return {
+        "accepted": True,
+        "operation_status": "running",
+        "message": result["message"],
+        "_after_commit": result.get("_after_commit"),
+    }
 
 
 def _handle_gate_revalidate(
