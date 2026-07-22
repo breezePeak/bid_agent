@@ -2664,6 +2664,45 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(operation["status"], "blocked")
             self.assertEqual(operation["error"]["code"], "STATE_CONFLICT")
 
+    def test_pipeline_failure_sync_records_terminal_stage_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "stage-run-terminal",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                web_app._sync_pipeline_control_state(
+                    context.root,
+                    {
+                        "operation_id": receipt.operation_id,
+                        "fencing_token": operation["fencing_token"],
+                        "status": "failed",
+                        "current_stage": "build-docx",
+                        "error": "docx failed",
+                    },
+                )
+
+            stage_run = gateway.store.stage_runs(receipt.operation_id or "")[0]
+            self.assertEqual(stage_run["status"], "failed")
+            self.assertEqual(stage_run["stage_command"], "build-docx")
+            self.assertEqual(stage_run["error"]["message"], "docx failed")
+
     def test_restart_reconcile_uses_matching_v2_operation_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
