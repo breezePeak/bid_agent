@@ -600,3 +600,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B114 | 2026-07-22 | 正式 Artifact 门禁保留未切换工作区一个版本的 V1 manifest 兼容例外；但工作区一旦完成 V2 cutover，所有正式输入必须存在 SQLite Artifact manifest，缺失即以 `manifest_missing_after_cutover` 阻断，不能再靠文件存在性导出正式稿。 |
 | V2.0-B115 | 2026-07-22 | V2 正式出稿预检、GateReceipt 指纹与材料门禁移除读取时的 V1 自动导入/同步副作用。兼容窗口内仍可只读使用 V1 投影；V2 cutover 后未迁移材料一律以 `MIGRATION_SCAN_REQUIRED` fail-closed。预检先完成只读迁移检查后才读取材料与 Artifact，避免一次查询把兼容投影写成权威状态。 |
 | V2.0-B116 | 2026-07-22 | V2 WorkspaceSnapshot 不再在刷新页面时自动导入 V1 Issue/Materials，且检测到实际待迁移 V1 状态时不再调用会初始化旧 Goal/Repair/Activity 的 V1 展示聚合器；未迁移领域显式标记 `migration_required` 并保持 SQLite revision 不变。迁移仍必须通过管理员确认的 `migration.scan` Command，避免只读 UI 成为隐式状态写入入口。 |
+| V2.0-B117 | 2026-07-22 | V2 Issue 列表与修复预览读取路径移除 V1 自动导入：列表在迁移前仅返回 SQLite 空快照并标记 `migration_required`，修复预览返回 409 `MIGRATION_SCAN_REQUIRED`。只读请求不再能够把旧 Issue 文件转化为权威状态。 |

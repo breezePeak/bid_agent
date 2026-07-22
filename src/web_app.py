@@ -3401,7 +3401,9 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
         if context:
             from agent.issues import quality_gate_mode
 
-            all_issues = _ensure_v2_issue_import(context).issue_states()
+            store = ControlStore(context)
+            issue_import_pending = store.issue_v1_import_pending()
+            all_issues = store.issue_states()
             open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
             blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
             warns = [i for i in open_issues if str(i.get("severity")) == "warn"]
@@ -3416,7 +3418,7 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
                     {"id": i.get("id"), "code": i.get("code"), "title": i.get("title"), "stage_id": i.get("stage_id")}
                     for i in blocks[:8]
                 ],
-                "source": "control.db",
+                "source": "migration_required" if issue_import_pending else "control.db",
             }
         else:
             from agent.issues import issues_summary, load_open_issues
@@ -3480,7 +3482,13 @@ def api_preview_repair(issue_id: str, workspace_id: str = "") -> JSONResponse:
         from agent.repair import build_repair_plan
 
         if context:
-            issue = next((item for item in _ensure_v2_issue_import(context).issue_states() if str(item.get("id")) == issue_id), None)
+            store = ControlStore(context)
+            if store.issue_v1_import_pending():
+                return JSONResponse(
+                    {"ok": False, "code": "MIGRATION_SCAN_REQUIRED", "message": "Issue 权威状态尚未迁移。"},
+                    status_code=409,
+                )
+            issue = next((item for item in store.issue_states() if str(item.get("id")) == issue_id), None)
             plan = build_repair_plan(root, issue_id, issue=issue) if issue else {"ok": False, "message": f"未找到问题: {issue_id}"}
         else:
             plan = build_repair_plan(root, issue_id)
