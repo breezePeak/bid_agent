@@ -307,6 +307,7 @@ class V2WebControlTests(unittest.TestCase):
                     workspace_id="alpha",
                 )
             )
+            store.ensure_material_states([{"item_id": "license", "response_status": "ready"}])
             (root / "workspace").mkdir(exist_ok=True)
             (root / "workspace" / "pipeline_control.json").write_text(
                 json.dumps({"status": "failed", "current_stage": "legacy-stage"}), encoding="utf-8"
@@ -314,10 +315,13 @@ class V2WebControlTests(unittest.TestCase):
 
             with mock.patch.object(web_app.SUPERVISOR, "load", side_effect=AssertionError("legacy pipeline read")):
                 with mock.patch.object(web_app, "manual_review_summary", side_effect=AssertionError("legacy review read")):
-                    status = web_app._status_payload(root, "alpha", v2_read_only=True, persist_manual_review_summary=False)
+                    with mock.patch("materials_checklist.load_materials_checklist", side_effect=AssertionError("legacy material read")):
+                        status = web_app._status_payload(root, "alpha", v2_read_only=True, persist_manual_review_summary=False)
 
             self.assertEqual(status["pipeline"]["status"], "queued")
             self.assertEqual(status["pipeline"]["current_stage"], "build-md")
+            self.assertEqual(status["materials_summary"]["ready"], 1)
+            self.assertEqual(status["materials_summary"]["source"], "control.db")
 
     def test_v2_goal_resume_updates_control_state_without_legacy_goal_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
