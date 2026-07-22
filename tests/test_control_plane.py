@@ -185,6 +185,23 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(store.goal_state()["status"], "blocked_human")
             self.assertEqual(resolved["resolution"]["state_effect"], "legacy_bound_goal_success_normalized")
 
+    def test_migration_backup_is_integrity_checked_before_recovery_use(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            conflict = store.record_migration_conflict(
+                domain="orphan", legacy={"path": "goal_state.json"}, authoritative={}, reason="orphan"
+            )
+            store.resolve_migration_conflict(
+                conflict["conflict_id"], resolution="keep_orphan",
+                actor={"id": "admin", "role": "admin"}, reason="retain evidence",
+            )
+            backups = store.migration_backups()
+            self.assertEqual(len(backups), 1)
+            self.assertTrue(backups[0]["verified"])
+            self.assertEqual(backups[0]["integrity"], "ok")
+            self.assertTrue(backups[0]["schema_version"])
+
     def test_lazy_v1_import_detects_existing_authoritative_conflicts_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

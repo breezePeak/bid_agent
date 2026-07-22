@@ -471,6 +471,47 @@ class ControlStore:
             "last_scan": _decode(str(scan["value"]), None) if scan is not None else None,
         }
 
+    def migration_backups(self) -> list[dict[str, Any]]:
+        backup_dir = (self.path.parent / "migration_backups").resolve()
+        if not backup_dir.exists():
+            return []
+        result: list[dict[str, Any]] = []
+        for path in sorted(backup_dir.glob("control-before-*.db")):
+            resolved = path.resolve()
+            if not resolved.is_relative_to(backup_dir) or not resolved.is_file():
+                continue
+            item: dict[str, Any] = {
+                "path": resolved.relative_to(self.context.root).as_posix(),
+                "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+                "size_bytes": resolved.stat().st_size,
+                "verified": False,
+            }
+            try:
+                connection = sqlite3.connect(f"file:{resolved.as_posix()}?mode=ro", uri=True)
+                try:
+                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                    tables = {
+                        str(row[0])
+                        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                    }
+                    version = connection.execute(
+                        "SELECT value FROM control_meta WHERE key = 'schema_version'"
+                    ).fetchone() if "control_meta" in tables else None
+                    item.update(
+                        {
+                            "verified": bool(integrity and str(integrity[0]).lower() == "ok")
+                            and {"control_meta", "operations", "workspace_events"}.issubset(tables),
+                            "integrity": str(integrity[0]) if integrity else "missing",
+                            "schema_version": str(version[0]) if version else "",
+                        }
+                    )
+                finally:
+                    connection.close()
+            except (OSError, sqlite3.Error) as exc:
+                item["error"] = str(exc)
+            result.append(item)
+        return result
+
     def record_migration_scan(self, *, fingerprint: str, manifest: list[dict[str, Any]], actor: dict[str, Any]) -> None:
         if not fingerprint:
             raise ControlPlaneError("COMMAND_INVALID", "迁移扫描缺少 source fingerprint。", status_code=400)

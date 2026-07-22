@@ -7826,6 +7826,19 @@ def api_v2_migration_dry_run(workspace_id: str) -> JSONResponse:
         )
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/migration/backups")
+def api_v2_migration_backups(workspace_id: str) -> JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        return JSONResponse({"ok": True, "backups": ControlStore(context).migration_backups()})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"迁移备份读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
 @app.get("/api/v2/workspaces/{workspace_id}/gates/latest")
 def api_v2_latest_gate_receipt(workspace_id: str) -> JSONResponse:
     try:
