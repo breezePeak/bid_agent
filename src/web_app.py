@@ -5560,6 +5560,17 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
             status_code=409,
             details={"migration": migration_preview.get("counts") or {}},
         )
+    cutover = (store.snapshot().get("migration") or {}).get("cutover")
+    if isinstance(cutover, dict) and cutover.get("status") == "active":
+        expected_fingerprint = str(cutover.get("fingerprint") or "")
+        current_fingerprint = str(migration_preview.get("source_fingerprint") or "")
+        if not expected_fingerprint or expected_fingerprint != current_fingerprint:
+            raise ControlPlaneError(
+                "MIGRATION_CUTOVER_STALE",
+                "V2 切换后的旧状态源已变化，请重新扫描并完成协调。",
+                status_code=409,
+                details={"expected_fingerprint": expected_fingerprint, "current_fingerprint": current_fingerprint},
+            )
     issues = store.issue_states()
     open_issues = [
         item for item in issues

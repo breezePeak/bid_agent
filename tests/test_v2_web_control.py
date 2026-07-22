@@ -2465,6 +2465,41 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["error"]["code"], "STATE_UNAVAILABLE")
 
+    def test_v2_export_preflight_rejects_stale_migration_cutover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            goal_path = context.root / "workspace" / "agent" / "goal_state.json"
+            goal_path.parent.mkdir(parents=True)
+            legacy_goal = {
+                "goal_id": "legacy-goal",
+                "status": "running",
+                "objective": "legacy objective",
+            }
+            goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
+            store = ControlStore(context)
+            store.ensure_goal_state(legacy_goal)
+            preview = web_app._v1_migration_dry_run(context)
+            self.assertEqual(preview["status"], "ready")
+            store.record_migration_scan(
+                fingerprint=preview["source_fingerprint"],
+                manifest=preview["source_manifest"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            store.activate_migration_cutover(
+                fingerprint=preview["source_fingerprint"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            legacy_goal["objective"] = "legacy source changed after cutover"
+            goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
+
+            with mock.patch.object(web_app, "_ensure_v2_issue_import", return_value=store):
+                with self.assertRaises(ControlPlaneError) as blocked:
+                    web_app._v2_export_preflight(context)
+
+            self.assertEqual(blocked.exception.code, "MIGRATION_CUTOVER_STALE")
+
     def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

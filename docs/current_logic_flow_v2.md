@@ -577,3 +577,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B91 | 2026-07-22 | 主 Vue 控制台新增“迁移”面板：管理员可查看 V2 Snapshot 中的 Migration 状态与 open conflict，提出扫描、cutover 或逐项协调 Action，并在界面上明确点击确认后调用同一 V2 Confirmation API。前端不直接修改迁移状态，也不自动确认高风险 Action。 |
 | V2.0-B92 | 2026-07-22 | 新增无破坏性迁移备份恢复演练 API/CLI：管理员只能对已完整性校验的工作区内 backup 发起演练，系统把其复制到临时 SQLite、再次执行 integrity/table contract 校验后返回 `recovery_drill=passed`；演练不替换运行中的 control.db。 |
 | V2.0-B93 | 2026-07-22 | Vue 迁移面板新增已校验备份列表与“演练”入口；前端仅调用管理员受限的 V2 API，展示无破坏性演练结果，不能触发运行中 control.db 替换。 |
+| V2.0-B94 | 2026-07-22 | 正式出稿预检在 V2 cutover 已 active 时复算旧状态源 manifest fingerprint；若与切换时已审计的 fingerprint 不一致，即使尚未形成新的迁移冲突也返回 `MIGRATION_CUTOVER_STALE` 并 fail-closed，管理员必须重新扫描、协调并重新切换。 |
