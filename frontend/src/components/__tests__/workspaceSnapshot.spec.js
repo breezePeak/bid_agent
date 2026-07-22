@@ -13,6 +13,10 @@ describe('statusFromV2Snapshot', () => {
       repair_job: { job_id: 'repair-v2', status: 'partial' },
       materials: { total: 1, ready: 1, source: 'control.db' },
       findings: { issues_summary: { open: 1, source: 'control.db' } },
+      quality: {
+        source: 'control.db',
+        latest_gate_evaluations: [{ command: 'global-review', verdict: 'pass' }],
+      },
       artifacts: [{ artifact_key: 'outputs/final.docx', status: 'ready' }],
       artifact_files: { outputs: { final_docx: true } },
       presentation: {
@@ -29,6 +33,7 @@ describe('statusFromV2Snapshot', () => {
     assert.equal(status.repair_job.job_id, 'repair-v2')
     assert.equal(status.materials_summary.source, 'control.db')
     assert.equal(status.issues_summary.source, 'control.db')
+    assert.equal(status.quality.latest_gate_evaluations[0].verdict, 'pass')
     assert.deepEqual(status.workflow, [{ command: 'write-all' }])
     assert.equal(status.artifacts[0].artifact_key, 'outputs/final.docx')
     assert.equal(status.artifact_files.outputs.final_docx, true)

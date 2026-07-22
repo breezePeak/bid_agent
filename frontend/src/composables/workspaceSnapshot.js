@@ -9,6 +9,9 @@ export function statusFromV2Snapshot(snapshot) {
   const findings = snapshot.findings && typeof snapshot.findings === 'object'
     ? snapshot.findings
     : {}
+  const quality = snapshot.quality && typeof snapshot.quality === 'object'
+    ? snapshot.quality
+    : {}
   const operationStatus = String(snapshot.operation?.status || '')
   const operationRunning = ['queued', 'running', 'pausing', 'cancelling'].includes(operationStatus)
   return {
@@ -23,6 +26,12 @@ export function statusFromV2Snapshot(snapshot) {
     repair_job: snapshot.repair_job || null,
     materials_summary: materials,
     issues_summary: findings.issues_summary || {},
+    quality: {
+      ...quality,
+      latest_gate_evaluations: Array.isArray(quality.latest_gate_evaluations)
+        ? quality.latest_gate_evaluations
+        : [],
+    },
     artifacts: Array.isArray(snapshot.artifacts) ? snapshot.artifacts : [],
     artifact_files: snapshot.artifact_files && typeof snapshot.artifact_files === 'object'
       ? snapshot.artifact_files

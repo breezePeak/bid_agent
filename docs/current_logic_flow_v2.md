@@ -616,3 +616,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B130 | 2026-07-22 | Snapshot 的 `migration_required` 标记仅在对应 V1 材料/Issue 源文件实际存在且未迁移时出现；全新工作区没有旧状态文件时直接以空 SQLite 状态显示 `control.db`，避免把不存在的 V1 导入 marker 误报为迁移阻断。 |
 | V2.0-B131 | 2026-07-22 | 正式材料门禁与 Snapshot 采用相同规则：cutover 后仅当旧 `materials_checklist.json` 实际存在且未迁移时才要求扫描；全新工作区不因不存在的 V1 材料文件而被误阻断。 |
 | V2.0-B132 | 2026-07-22 | V2 Snapshot 新增 SQLite 权威 `quality.latest_gate_evaluations`，聊天、按钮和控制台可在同一工作区快照中读取当前质量证据，不再依赖旧报告文件或单独轮询来判断最近门禁结论。 |
+| V2.0-B133 | 2026-07-22 | 前端 V2 Snapshot 适配器保留并规范化 `quality.latest_gate_evaluations`，使控制台消费与后端快照契约一致；缺失或异常值降级为空列表，不回退读取 V1 报告。 |
