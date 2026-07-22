@@ -7226,6 +7226,21 @@ def _handle_migration_scan(
         actor=actor,
     )
     state = store.migration_state()
+    from utils import write_json
+
+    write_json(
+        context.root / "workspace" / "migration_report.json",
+        {
+            "version": 1,
+            "workspace_id": context.workspace_id,
+            "source_fingerprint": dry_run.get("source_fingerprint"),
+            "source_manifest": dry_run.get("source_manifest") or [],
+            "inventory": inventory,
+            "imported_count": imported,
+            "detected_count": detected,
+            "migration": state,
+        },
+    )
     return {
         "accepted": True,
         "operation_status": "succeeded",

@@ -2830,6 +2830,9 @@ class V2WebControlTests(unittest.TestCase):
             scan = store.snapshot()["migration"]["last_scan"]
             self.assertTrue(scan["fingerprint"])
             self.assertEqual(len(scan["manifest"]), 2)
+            report = json.loads((root / "workspace" / "migration_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(report["source_fingerprint"], scan["fingerprint"])
+            self.assertEqual(report["migration"]["status"], "needs_reconciliation")
 
 
 if __name__ == "__main__":
