@@ -8162,8 +8162,14 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
         issue_states = store.issue_states()
-        material_import_pending = store.v1_import_pending("materials")
-        issue_import_pending = store.v1_import_pending("issues")
+        material_import_pending = (
+            store.v1_import_pending("materials")
+            and (context.root / "workspace" / "materials_checklist.json").exists()
+        )
+        issue_import_pending = (
+            store.v1_import_pending("issues")
+            and (context.root / "workspace" / "issues" / "open.json").exists()
+        )
         material_items = store.material_states()
         material_summary = {
             "exists": bool(material_items),

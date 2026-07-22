@@ -2294,6 +2294,8 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(payload["ok"])
             self.assertFalse(summary_path.exists())
             self.assertEqual(payload["snapshot"]["manual_review_summary"]["source"], "control.db")
+            self.assertEqual(payload["snapshot"]["materials"]["source"], "control.db")
+            self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "control.db")
 
     def test_v2_snapshot_does_not_import_legacy_control_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
