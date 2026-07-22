@@ -6734,6 +6734,20 @@ def _record_quality_gate_evaluation(
     return evaluation
 
 
+def _project_quality_issues(context: WorkspaceContext) -> int:
+    """Project a completed V2 quality evaluation into authoritative Issues.
+
+    The evaluator still emits the one-version ``open.json`` compatibility
+    projection.  This explicit Command-owned projection is the only allowed
+    route back into SQLite; normal reads never import that file.
+    """
+    from agent.issues import load_open_issues
+
+    store = _ensure_v2_issue_import(context)
+    rows = load_open_issues(context.root)
+    return store.replace_issue_states(rows, source="quality.revalidate")
+
+
 def _handle_quality_revalidate(
     context: WorkspaceContext,
     envelope: CommandEnvelope,
@@ -6741,6 +6755,7 @@ def _handle_quality_revalidate(
 ) -> dict[str, Any]:
     from agent.repair import revalidate_gate
 
+    _ensure_v2_issue_import(context)
     command = str(envelope.payload.get("command") or "").strip()
     allowed = {str(step.get("command") or "") for step in WORKFLOW_STEPS}
     if not command or command not in allowed:
@@ -6776,6 +6791,17 @@ def _handle_quality_revalidate(
             str(safe_result.get("message") or "门禁重验返回无效状态。"),
             details={"command": command, "gate_evaluation_id": evaluation["evaluation_id"]},
         )
+    try:
+        _project_quality_issues(context)
+    except ControlPlaneError:
+        raise
+    except Exception as exc:
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            f"质量重验结果无法写入权威 Issue 状态，已保持阻断: {exc}",
+            status_code=503,
+            retryable=True,
+        ) from exc
     evaluation = _record_quality_gate_evaluation(context, command, result)
     return {
         "accepted": True,

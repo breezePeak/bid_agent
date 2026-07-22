@@ -633,3 +633,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B147 | 2026-07-22 | V2 Chat 状态聚合不再通过 V1 Runtime/Goal/RepairJob/Issue loader 读取或导入旧控制文件；聊天查询直接使用 SQLite Goal、RepairJob、Issue 与 AgentActivity 快照，并继续避免写入人工复核摘要。存在旧控制状态时查询保持只读，必须由 `migration.scan` 导入。 |
 | V2.0-B148 | 2026-07-22 | V2 Chat 的“继续”与 `pipeline.resume` 不再读取 `pipeline_control.json`/`run_state.json` 推断阶段；恢复阶段只从此前 Pipeline Operation 的 `start_command` 获取，缺少可信 control.db 前序 Operation 时 fail-closed。V2 RepairJob 的恢复提示也改为读取同一 Operation 状态。 |
 | V2.0-B149 | 2026-07-22 | `goal.resume` 移除 V1 Goal loader 与材料回填 helper 的隐式导入/重验路径：旧 `goal_state.json` 未迁移时 fail-closed；已迁移 Goal 直接先更新 SQLite 权威状态，再刷新一次兼容文件投影，不再由旧状态机反向决定 V2 恢复。 |
+| V2.0-B150 | 2026-07-22 | `quality.revalidate` 在运行前先检查 Issue 迁移状态；重验成功后由该显式 V2 Command 将 Gate 输出投影为 `control.db.issue_states`，再生成不可变 GateEvaluation。普通读取仍不导入 `open.json`，重验结果不会继续停留在 V1 Issue 投影。 |

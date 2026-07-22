@@ -1914,6 +1914,32 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(evaluation["verdict"], "block")
             self.assertEqual(evaluation["findings"][0]["issue_id"], "issue-1")
 
+    def test_quality_revalidation_projects_completed_result_to_authoritative_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.replace_issue_states(
+                [{"id": "stale-issue", "severity": "block", "status": "open"}], source="test"
+            )
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "quality.revalidate",
+                    "payload": {"command": "global-review"},
+                    "expected_revision": store.revision(),
+                    "idempotency_key": "quality-project",
+                },
+                workspace_id="alpha",
+            )
+            refreshed = [{"id": "fresh-issue", "severity": "warn", "status": "open", "code": "NEW"}]
+
+            with mock.patch("agent.repair.revalidate_gate", return_value={"ok": True, "message": "revalidated"}):
+                with mock.patch("agent.issues.load_open_issues", return_value=refreshed):
+                    web_app._handle_quality_revalidate(context, envelope, "quality-op")
+
+            self.assertEqual([item["id"] for item in store.issue_states()], ["fresh-issue"])
+
     def test_failed_quality_revalidation_records_fail_closed_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
