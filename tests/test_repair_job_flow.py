@@ -20,6 +20,7 @@ from agent.repair_jobs import (  # noqa: E402
     create_authorized_repair_job,
     create_confirmation,
     load_repair_job,
+    load_v2_repair_job,
     reconcile_interrupted_repair,
     update_repair_job,
 )
@@ -57,6 +58,21 @@ class RepairJobPersistenceTests(unittest.TestCase):
             current = load_repair_job(root)
             self.assertEqual(current["status"], "running")
             self.assertEqual(current["phase"], "repairing")
+
+    def test_v2_repair_read_does_not_import_legacy_job_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "workspace" / "repair_job.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(
+                json.dumps({"job_id": "repair-legacy", "status": "awaiting_confirmation"}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(load_v2_repair_job(root), {})
+            store = web_app.ControlStore(web_app.WorkspaceContext.resolve(root.parent, root.name))
+            self.assertTrue(store.v1_import_pending("repair_job"))
+            self.assertEqual(store.revision(), 0)
 
     def test_confirmation_and_duplicate_claim_survive_reload(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

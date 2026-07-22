@@ -93,6 +93,11 @@ def load_repair_job(root: Path) -> dict[str, Any]:
     return store.repair_job_state()
 
 
+def load_v2_repair_job(root: Path) -> dict[str, Any]:
+    """Read the V2 authority without importing the V1 compatibility file."""
+    return _repair_control_store(root.resolve()).repair_job_state()
+
+
 def _write_job(root: Path, job: dict[str, Any]) -> dict[str, Any]:
     root = root.resolve()
     payload = dict(job)
@@ -182,7 +187,7 @@ def create_authorized_repair_job(
         raise ValueError("operation_id is required")
     fingerprints = sorted({str(item) for item in issue_fingerprints if str(item)})
     with _job_lock(root):
-        current = load_repair_job(root)
+        current = load_v2_repair_job(root)
         status = str(current.get("status") or "")
         if status in RUNNING_REPAIR_STATUSES and str(current.get("authorized_by_operation") or "") == operation:
             return current
@@ -267,7 +272,7 @@ def claim_repair_job_authorized(root: Path, operation_id: str) -> dict[str, Any]
     if not str(operation_id or "").strip():
         return {"ok": False, "message": "缺少 V2 Operation 授权标识"}
     with _job_lock(root):
-        job = load_repair_job(root)
+        job = load_v2_repair_job(root)
         if not job:
             return {"ok": False, "message": "没有待执行的修复任务"}
         status = str(job.get("status") or "")

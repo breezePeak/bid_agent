@@ -56,6 +56,7 @@ from agent.repair_jobs import (
     create_authorized_repair_job,
     decline_repair_job,
     load_repair_job,
+    load_v2_repair_job,
     reconcile_interrupted_repair,
     update_repair_job,
 )
@@ -2364,7 +2365,7 @@ def _trigger_repair_job(
     """
     global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
     with _REPAIR_START_LOCK:
-        current = load_repair_job(root)
+        current = load_v2_repair_job(root) if control_operation_id else load_repair_job(root)
         if str(current.get("status") or "") in RUNNING_REPAIR_STATUSES:
             return {"ok": True, "duplicate": True, "job": current, "message": current.get("message", "修复任务正在执行")}
         pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
@@ -2900,7 +2901,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     command_error=exc.as_dict(),
                 )
 
-        current_job = load_repair_job(root)
+        current_job = load_v2_repair_job(root) if is_v2_workspace_chat else load_repair_job(root)
         job_status = str(current_job.get("status") or "")
         has_pending = job_status == "awaiting_confirmation"
         terminal_repair = job_status in {"completed", "partial", "failed"}
@@ -5482,6 +5483,19 @@ def _ensure_v2_material_import(context: WorkspaceContext) -> ControlStore:
     return store
 
 
+def _ensure_v2_repair_import(context: WorkspaceContext) -> ControlStore:
+    """Reject V2 repair mutation until an existing V1 job is explicitly migrated."""
+    store = ControlStore(context)
+    legacy_path = context.root / "workspace" / "repair_job.json"
+    if store.v1_import_pending("repair_job") and legacy_path.exists():
+        raise ControlPlaneError(
+            "MIGRATION_SCAN_REQUIRED",
+            "RepairJob 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            status_code=409,
+        )
+    return store
+
+
 def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     """Inventory legacy control files without mutating SQLite or compatibility files."""
     store = ControlStore(context)
@@ -6402,7 +6416,8 @@ def _handle_repair_start(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    operation = ControlStore(context).operation(operation_id) or {}
+    store = _ensure_v2_repair_import(context)
+    operation = store.operation(operation_id) or {}
     fencing_token = int(operation.get("fencing_token") or 0)
     candidates = _minimal_repair_candidates(context.root, context=context)
     if not candidates:
