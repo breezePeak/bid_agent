@@ -3231,6 +3231,51 @@ class ControlStore:
                         "materials.refill": {"blocked"},
                     }
                     allowed_statuses = {"blocked"} if blocked_mutation_retry else allowed[envelope.kind]
+                    if (
+                        envelope.kind in {"pipeline.pause", "pipeline.cancel"}
+                        and previous_status in {"succeeded", "failed", "cancelled"}
+                    ):
+                        revision = self._bump_revision(connection)
+                        message = f"Operation 已处于终态 {previous_status}，无需执行 {envelope.kind}。"
+                        connection.execute(
+                            """
+                            INSERT INTO commands(
+                                command_id, kind, payload_json, goal_id, actor_json,
+                                expected_revision, idempotency_key, status, operation_id,
+                                confirmation_id, message, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'no_op', ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                envelope.command_id,
+                                envelope.kind,
+                                _json(envelope.payload),
+                                envelope.goal_id,
+                                _json(envelope.actor),
+                                envelope.expected_revision,
+                                envelope.idempotency_key,
+                                operation_id,
+                                envelope.confirmation_id,
+                                message,
+                                now,
+                                now,
+                            ),
+                        )
+                        self._event(
+                            connection,
+                            revision,
+                            "CommandNoOp",
+                            "Command",
+                            envelope.command_id,
+                            {"kind": envelope.kind, "operation_id": operation_id, "operation_status": previous_status},
+                        )
+                        connection.commit()
+                        return CommandReceipt(
+                            command_id=envelope.command_id,
+                            operation_id=operation_id,
+                            status="no_op",
+                            workspace_revision=revision,
+                            message=message,
+                        ), False
                     if previous_status not in allowed_statuses:
                         raise ControlPlaneError(
                             "OPERATION_STATE_CONFLICT",

@@ -764,6 +764,51 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "STATE_CONFLICT")
             self.assertEqual((gateway.store.operation(receipt.operation_id or "") or {})["status"], "succeeded")
 
+    def test_late_pause_or_cancel_on_terminal_pipeline_is_durable_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"},
+                    "pipeline.pause": lambda ctx, envelope, operation_id: self.fail("late pause must not dispatch"),
+                    "pipeline.cancel": lambda ctx, envelope, operation_id: self.fail("late cancel must not dispatch"),
+                },
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation = gateway.store.operation(started.operation_id or "") or {}
+            gateway.store.sync_operation(
+                started.operation_id or "",
+                "succeeded",
+                fencing_token=operation["fencing_token"],
+            )
+            pause = gateway.submit(
+                _envelope(
+                    context,
+                    gateway.store,
+                    "pipeline.pause",
+                    payload={"operation_id": started.operation_id},
+                    key="late-pause",
+                )
+            )
+            self.assertEqual(pause.status, "no_op")
+            self.assertEqual(pause.operation_id, started.operation_id)
+
+            cancel_action = gateway.propose(
+                _envelope(
+                    context,
+                    gateway.store,
+                    "pipeline.cancel",
+                    payload={"operation_id": started.operation_id},
+                    key="late-cancel",
+                ),
+                label="确认取消",
+                risk="high",
+            )
+            cancel = gateway.confirm(cancel_action["confirmation_id"])
+            self.assertEqual(cancel.status, "no_op")
+            self.assertEqual(cancel.operation_id, started.operation_id)
+
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
