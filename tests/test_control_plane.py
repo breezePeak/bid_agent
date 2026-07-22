@@ -183,6 +183,36 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(state["response_status"], "ready")
             self.assertEqual(verification_event["workspace_revision"], state_event["workspace_revision"])
 
+    def test_material_verification_rolls_back_current_state_when_audit_insert_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            with store._connection() as connection:
+                connection.execute(
+                    """
+                    CREATE TRIGGER reject_material_verification
+                    BEFORE INSERT ON material_verifications
+                    BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END
+                    """
+                )
+            with self.assertRaises(sqlite3.IntegrityError):
+                store.record_material_verification(
+                    item_id="qualification-license",
+                    verification_type="human",
+                    verdict="verified",
+                    verification={"reason": "checked original"},
+                    actor={"id": "admin", "role": "admin"},
+                    source="materials.confirm_verification",
+                    material_state={
+                        "item_id": "qualification-license",
+                        "response_status": "ready",
+                        "lifecycle_status": "verified",
+                        "evidence_status": "verified",
+                    },
+                )
+            self.assertIsNone(store.material_state("qualification-license"))
+            self.assertEqual(store.material_verifications(item_id="qualification-license"), [])
+
     def test_material_submission_keeps_hash_and_actor_without_staged_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

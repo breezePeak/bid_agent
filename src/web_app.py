@@ -6888,7 +6888,12 @@ def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
     return item
 
 
-def _sync_material_state_from_projection(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
+def _sync_material_state_from_projection(
+    context: WorkspaceContext,
+    item_id: str,
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
     from materials_checklist import load_materials_checklist
 
     checklist = load_materials_checklist(context.root)
@@ -6899,7 +6904,10 @@ def _sync_material_state_from_projection(context: WorkspaceContext, item_id: str
     )
     if item is None:
         raise ControlPlaneError("STATE_UNAVAILABLE", f"材料 V1 投影缺少条目: {item_id}", status_code=503)
-    return ControlStore(context).upsert_material_state(_authoritative_material_state(item))
+    authoritative = _authoritative_material_state(item)
+    if not persist:
+        return authoritative
+    return ControlStore(context).upsert_material_state(authoritative)
 
 
 def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
@@ -6973,7 +6981,7 @@ def _handle_materials_upload(
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "上传材料验证失败。"))
     lifecycle = str(result.get("lifecycle_status") or "uploaded")
-    projected = _sync_material_state_from_projection(context, item_id)
+    projected = _sync_material_state_from_projection(context, item_id, persist=False)
     projected["lifecycle_status"] = lifecycle
     verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
     if lifecycle == "verified":
@@ -7038,7 +7046,7 @@ def _handle_materials_verify(
     )
     if not update.get("ok"):
         raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "验证状态保存失败。"))
-    projected = _sync_material_state_from_projection(context, item_id)
+    projected = _sync_material_state_from_projection(context, item_id, persist=False)
     projected["lifecycle_status"] = lifecycle
     projected["verification_confidence"] = result.get("confidence")
     if lifecycle == "verified":
@@ -7106,7 +7114,7 @@ def _handle_materials_confirm_verification(
     )
     if not update.get("ok"):
         raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "核验结论保存失败。"))
-    projected = _sync_material_state_from_projection(context, item_id)
+    projected = _sync_material_state_from_projection(context, item_id, persist=False)
     projected["lifecycle_status"] = lifecycle
     projected["evidence_status"] = "verified" if accept else "rejected"
     if accept:
