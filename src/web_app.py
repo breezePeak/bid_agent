@@ -8083,24 +8083,41 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         store = ControlStore(context)
         snapshot = _migration_snapshot_with_source_state(context, store.snapshot())
         snapshot["compatibility_usage"] = store.compatibility_usage()
-        compatibility = _status_payload(
-            context.root,
-            context.workspace_id,
-            persist_manual_review_summary=False,
+        migration_preview = _v1_migration_dry_run(context)
+        legacy_import_pending = any(
+            bool(item.get("import_pending"))
+            for item in migration_preview.get("source_manifest") or []
+            if isinstance(item, dict)
+        )
+        # The V1 presentation aggregator initializes several legacy control
+        # files. Never invoke it while actual V1 state still awaits an
+        # administrator migration scan; the Snapshot endpoint must stay read-only.
+        compatibility = (
+            {
+                "goal": {}, "goal_full": {}, "agent_activity": {}, "repair_job": {},
+                "pipeline": {}, "workflow": [], "issues_summary": {}, "outputs": {},
+            }
+            if legacy_import_pending
+            else _status_payload(
+                context.root,
+                context.workspace_id,
+                persist_manual_review_summary=False,
+            )
         )
         goal_state = store.goal_state()
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
-        _ensure_v2_issue_import(context)
         issue_states = store.issue_states()
-        material_items = _material_items(context)
+        material_import_pending = store.v1_import_pending("materials")
+        issue_import_pending = store.v1_import_pending("issues")
+        material_items = store.material_states()
         material_summary = {
             "exists": bool(material_items),
             "total": len(material_items),
             "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
             "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
             "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
-            "source": "control.db",
+            "source": "migration_required" if material_import_pending else "control.db",
         }
         artifact_states = snapshot.get("artifacts") or []
         pipeline_snapshot = _pipeline_snapshot_from_control(
@@ -8170,7 +8187,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                             if str(item.get("status") or "") in {"open", "in_progress"}
                             and str(item.get("severity") or "") == "block"
                         ][:8],
-                        "source": "control.db",
+                "source": "migration_required" if issue_import_pending else "control.db",
                     },
                     "issues": issue_states,
                 },

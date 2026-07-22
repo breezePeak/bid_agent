@@ -2245,6 +2245,33 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(summary_path.exists())
             self.assertEqual(payload["snapshot"]["manual_review_summary"]["source"], "control.db")
 
+    def test_v2_snapshot_does_not_import_legacy_control_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            (workspace / "issues").mkdir(parents=True)
+            (workspace / "issues" / "open.json").write_text(
+                json.dumps({"issues": [{"id": "legacy-issue", "status": "open", "severity": "warn"}]}),
+                encoding="utf-8",
+            )
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "legacy-material", "response_status": "ready"}]}),
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            self.assertTrue(payload["ok"])
+            self.assertTrue(store.issue_v1_import_pending())
+            self.assertTrue(store.v1_import_pending("materials"))
+            self.assertEqual(store.revision(), 0)
+            self.assertEqual(payload["snapshot"]["materials"]["source"], "migration_required")
+            self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "migration_required")
+
     def test_pipeline_snapshot_rejects_stale_checkpoint_status(self) -> None:
         operation = {
             "operation_id": "op-current",
