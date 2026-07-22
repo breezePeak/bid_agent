@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import hashlib
 import hmac
 import json
@@ -289,6 +290,32 @@ SUPERVISOR = PipelineSupervisor()
 ACTIVE_RUN_ID = ""
 ACTIVE_RUN_ROOT: Path | None = None
 _PENDING_LINE_EDITS: dict[Path, dict[str, Any]] = {}
+
+
+@contextmanager
+def _legacy_execution_scope(task: str, run_id: str, run_root: Path):
+    """Serialize residual process-global runner state during V2 worker execution."""
+    global RUNNING, CURRENT_TASK, CURRENT_PROCESS, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
+    with _EXECUTION_LOCK:
+        RUNNING = True
+        CURRENT_TASK = task
+        CURRENT_PROCESS = None
+        CURRENT_RUN_ID = run_id
+        CURRENT_RUN_ROOT = run_root
+        PAUSE_REQUESTED = False
+        _LOG_CONTEXT.run_root = run_root
+        try:
+            yield
+        finally:
+            if _same_path(CURRENT_RUN_ROOT, run_root):
+                RUNNING = False
+                CURRENT_TASK = ""
+                CURRENT_PROCESS = None
+                CURRENT_RUN_ID = ""
+                CURRENT_RUN_ROOT = None
+                PAUSE_REQUESTED = False
+            if hasattr(_LOG_CONTEXT, "run_root"):
+                del _LOG_CONTEXT.run_root
 
 def _workflow_step_payload() -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
@@ -2441,7 +2468,12 @@ def _trigger_repair_job(
         if not control_operation_id:
             pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
             pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
-        if RUNNING or SUPERVISOR.is_running() or pipeline_busy:
+        v2_busy = (
+            (RUNNING and _same_path(CURRENT_RUN_ROOT, root))
+            or SUPERVISOR.is_running(root)
+        )
+        v1_busy = RUNNING or SUPERVISOR.is_running() or pipeline_busy
+        if (v2_busy if control_operation_id else v1_busy):
             return {"ok": False, "busy": True, "job": current, "message": "当前已有任务正在运行，修复确认已保留，请稍后重试"}
         claimed = (
             claim_repair_job_authorized(root, control_operation_id)
@@ -2474,12 +2506,7 @@ def _trigger_repair_job(
         if claimed.get("duplicate"):
             return {"ok": True, "duplicate": True, "job": job, "message": job.get("message", "已处理该修复确认")}
         job_id = str(job.get("job_id") or "")
-        job_run_id = ACTIVE_RUN_ID or root.name
-        RUNNING = True
-        CURRENT_TASK = "minimal-repair"
-        CURRENT_RUN_ID = job_run_id
-        CURRENT_RUN_ROOT = root
-        PAUSE_REQUESTED = False
+        job_run_id = root.name if control_operation_id else (ACTIVE_RUN_ID or root.name)
 
     def _progress(phase: str, progress: dict[str, Any] | None = None) -> None:
         details = progress if isinstance(progress, dict) else {}
@@ -2530,33 +2557,33 @@ def _trigger_repair_job(
                 raise RuntimeError(f"repair control state sync failed: {exc}") from exc
 
     def _run() -> None:
-        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
         result: dict[str, Any]
         failure: Exception | None = None
-        try:
-            from agent.repair import execute_repair_batch
+        with _legacy_execution_scope("minimal-repair", job_run_id, root):
+            try:
+                from agent.repair import execute_repair_batch
 
-            repair_context = _workspace_context(root.name) if control_operation_id else None
-            issues = _minimal_repair_candidates(root, context=repair_context)
-            issue_ids = [str(issue.get("id") or "") for issue in issues if issue.get("id")]
-            result = execute_repair_batch(
-                root,
-                issue_ids,
-                confirm=True,
-                dry_run=False,
-                issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
-                progress_callback=_progress,
-            )
-            if control_operation_id:
-                from artifact_manifest import record_external_chapter_mutation
-
-                record_external_chapter_mutation(
-                    _workspace_context(root.name),
-                    disposition="issue_repair",
+                repair_context = _workspace_context(root.name) if control_operation_id else None
+                issues = _minimal_repair_candidates(root, context=repair_context)
+                issue_ids = [str(issue.get("id") or "") for issue in issues if issue.get("id")]
+                result = execute_repair_batch(
+                    root,
+                    issue_ids,
+                    confirm=True,
+                    dry_run=False,
+                    issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
+                    progress_callback=_progress,
                 )
-        except Exception as exc:
-            failure = exc
-            result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
+                if control_operation_id:
+                    from artifact_manifest import record_external_chapter_mutation
+
+                    record_external_chapter_mutation(
+                        _workspace_context(root.name),
+                        disposition="issue_repair",
+                    )
+            except Exception as exc:
+                failure = exc
+                result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
 
         resolved_count = _repair_result_count(result, "resolved", "resolved_count")
         remaining_count = _repair_result_count(result, "still_open", "remaining_count")
@@ -2570,12 +2597,6 @@ def _trigger_repair_job(
             terminal_status = "partial"
         else:
             terminal_status = "completed"
-
-        with _REPAIR_START_LOCK:
-            RUNNING = False
-            CURRENT_TASK = ""
-            CURRENT_RUN_ID = ""
-            CURRENT_RUN_ROOT = None
 
         resume_command = str(job.get("resume_command") or "")
         resume_started = False

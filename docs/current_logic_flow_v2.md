@@ -652,3 +652,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B166 | 2026-07-22 | `document.apply_edit` 的单步撤销指针迁入目标 workspace 的 `control.db`；重启后 V2 撤销仍可从受路径边界校验的备份恢复，确认执行成功后清除指针，进程内 `_LAST_BACKUP` 仅保留兼容缓存。 |
 | V2.0-B167 | 2026-07-22 | 在完全拆除旧 Runner 进程级句柄前，所有 `_run_sync` 调用以执行锁串行化；V2 可按工作区提交并持有各自 lease，但旧 `RUNNING`、进程句柄与运行上下文不会被并发文档重建或阶段执行互相覆盖。 |
 | V2.0-B168 | 2026-07-22 | PipelineSupervisor 改为每 workspace 独立的运行槽、暂停/取消信号和恢复监控；不同工作区可同时拥有受各自 SQLite lease 授权的 Pipeline，而底层旧 Runner 仍由执行锁安全串行化。 |
+| V2.0-B169 | 2026-07-22 | V2 Repair Worker 不再在确认/claim 时预占进程级 `RUNNING`，而是在执行期进入共享旧执行锁；不同工作区的 Repair 可独立获得 CommandGateway 授权并排队执行，旧全局进程上下文不会相互覆盖。 |
