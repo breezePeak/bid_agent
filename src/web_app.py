@@ -5719,6 +5719,23 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
                 ]
             },
         )
+    if isinstance(cutover, dict) and cutover.get("status") == "active":
+        latest_by_command = {
+            str(item.get("command") or ""): item
+            for item in store.latest_gate_evaluations()
+        }
+        missing_evaluations = [
+            command
+            for command in ("global-review", "compliance-check")
+            if str((latest_by_command.get(command) or {}).get("verdict") or "") != "pass"
+        ]
+        if missing_evaluations:
+            raise ControlPlaneError(
+                "GATE_BLOCKED",
+                "V2 切换后正式出稿必须具有当前通过的质量门禁评估。",
+                status_code=409,
+                details={"missing_gate_evaluations": missing_evaluations},
+            )
     issues = store.issue_states()
     open_issues = [
         item for item in issues

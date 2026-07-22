@@ -2756,6 +2756,41 @@ class V2WebControlTests(unittest.TestCase):
                 preflight = web_app._v2_export_preflight(context)
             self.assertTrue(preflight["can_export"])
 
+    def test_v2_cutover_preflight_requires_passed_quality_evaluations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            outputs = root / "outputs"
+            workspace.mkdir(parents=True)
+            outputs.mkdir(parents=True)
+            (workspace / "global_review.json").write_text(json.dumps({"blocking": False}), encoding="utf-8")
+            (workspace / "compliance_report.json").write_text(json.dumps({"blocking": False}), encoding="utf-8")
+            (outputs / "final.md").write_text("draft", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.ensure_issue_states([])
+            store.ensure_material_states([])
+            preview = web_app._v1_migration_dry_run(context)
+            store.record_migration_scan(
+                fingerprint=preview["source_fingerprint"],
+                manifest=preview["source_manifest"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            store.activate_migration_cutover(
+                fingerprint=preview["source_fingerprint"],
+                actor={"id": "admin", "role": "admin"},
+            )
+
+            with self.assertRaises(ControlPlaneError) as blocked:
+                web_app._v2_export_preflight(context)
+
+            self.assertEqual(blocked.exception.code, "GATE_BLOCKED")
+            self.assertEqual(
+                blocked.exception.details["missing_gate_evaluations"],
+                ["global-review", "compliance-check"],
+            )
+
     def test_v2_export_preflight_rejects_stale_migration_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

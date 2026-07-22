@@ -611,3 +611,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B125 | 2026-07-22 | 前端测试使用 Node 内置 test runner，前端包声明 Node >=18 运行时要求；控制台构建/契约回归不再依赖开发机上可能不支持 `node --test` 的旧 Node 14。 |
 | V2.0-B126 | 2026-07-22 | 控制面统一解析 upload token 与 Action 的到期时间：损坏或缺少时区的时间戳一律以 `STATE_UNAVAILABLE` fail-closed，避免 SQLite 异常值触发 naive/aware 时间比较错误后走入不确定状态。 |
 | V2.0-B127 | 2026-07-22 | GateReceipt 签发要求非空 rules_version；缺少规则版本的凭据不进入控制库，防止无法确定适用门禁规则的凭据被当作可验证正式稿证据。 |
+| V2.0-B128 | 2026-07-22 | V2 cutover active 的工作区在正式出稿前必须存在当前 `pass` 的 `global-review` 与 `compliance-check` GateEvaluation；仅有报告文件或旧状态不足以签发正式凭据，缺任一评估均阻断。 |
