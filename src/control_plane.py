@@ -188,6 +188,7 @@ class ControlStore:
         "workspace.archive",
         "workspace.clean",
         "migration.scan",
+        "migration.cutover",
         "migration.reconcile",
     }
     BLOCKED_REMEDIATION_KINDS = {
@@ -537,6 +538,51 @@ class ControlStore:
                     {"fingerprint": fingerprint, "source_count": len(manifest), "actor": actor},
                 )
                 connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def activate_migration_cutover(self, *, fingerprint: str, actor: dict[str, Any]) -> dict[str, Any]:
+        state = self.migration_state()
+        if state["open_count"]:
+            raise ControlPlaneError(
+                "MIGRATION_RECONCILIATION_REQUIRED",
+                "存在未处理迁移冲突，不能切换工作区控制面。",
+                details={"open_count": state["open_count"]},
+            )
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                scan_row = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
+                ).fetchone()
+                scan = _decode(str(scan_row["value"]), {}) if scan_row is not None else {}
+                if not isinstance(scan, dict) or str(scan.get("fingerprint") or "") != fingerprint:
+                    raise ControlPlaneError(
+                        "MIGRATION_SCAN_REQUIRED",
+                        "迁移扫描不存在或源文件已变化，请重新扫描后切换。",
+                        details={"scan_fingerprint": scan.get("fingerprint") if isinstance(scan, dict) else ""},
+                    )
+                existing = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
+                ).fetchone()
+                prior = _decode(str(existing["value"]), {}) if existing is not None else {}
+                if isinstance(prior, dict) and prior.get("fingerprint") == fingerprint:
+                    connection.commit()
+                    return prior
+                value = {"status": "active", "fingerprint": fingerprint, "actor": actor, "activated_at": _now()}
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('migration_cutover', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_json(value),),
+                )
+                self._event(
+                    connection, revision, "MigrationCutoverActivated", "Migration", self.context.workspace_id,
+                    {"fingerprint": fingerprint, "actor": actor},
+                )
+                connection.commit()
+                return value
             except Exception:
                 connection.rollback()
                 raise
@@ -2853,6 +2899,9 @@ class ControlStore:
             migration_scan = connection.execute(
                 "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
             ).fetchone()
+            migration_cutover = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
+            ).fetchone()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         return {
@@ -2876,6 +2925,7 @@ class ControlStore:
                 "open_count": sum(1 for row in migration_rows if str(row["status"]) == "open"),
                 "conflicts": [self._migration_conflict_row(row) for row in migration_rows],
                 "last_scan": _decode(str(migration_scan["value"]), None) if migration_scan else None,
+                "cutover": _decode(str(migration_cutover["value"]), None) if migration_cutover else None,
             },
         }
 

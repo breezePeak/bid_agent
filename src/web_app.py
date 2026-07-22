@@ -7216,6 +7216,25 @@ def _handle_migration_scan(
     }
 
 
+def _handle_migration_cutover(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    actor = dict(envelope.actor or {})
+    if str(actor.get("role") or "").strip().lower() != "admin":
+        raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以切换工作区至 V2 控制面。", status_code=403)
+    dry_run = _v1_migration_dry_run(context)
+    fingerprint = str(dry_run.get("source_fingerprint") or "")
+    cutover = ControlStore(context).activate_migration_cutover(fingerprint=fingerprint, actor=actor)
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": "工作区已完成 V2 控制面切换。",
+        "cutover": cutover,
+    }
+
+
 def _command_gateway(context: WorkspaceContext) -> CommandGateway:
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     return CommandGateway(
@@ -7247,6 +7266,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.refill": _handle_materials_refill,
             "gate.revalidate": _handle_gate_revalidate,
             "migration.scan": _handle_migration_scan,
+            "migration.cutover": _handle_migration_cutover,
             "migration.reconcile": _handle_migration_reconcile,
         },
     )
@@ -7604,6 +7624,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "workspace.archive": "确认归档工作区",
                 "workspace.clean": "确认清理工作区产物",
                 "migration.scan": "确认扫描并登记旧工作区迁移状态",
+                "migration.cutover": "确认切换工作区至 V2 控制面",
                 "migration.reconcile": "确认处理 V1/V2 迁移冲突",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")

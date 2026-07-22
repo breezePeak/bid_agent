@@ -148,6 +148,9 @@ def build_parser() -> argparse.ArgumentParser:
     scan = commands.add_parser("migration-scan", help="创建管理员旧工作区迁移扫描 Action")
     scan.add_argument("--workspace", required=True)
 
+    cutover = commands.add_parser("migration-cutover", help="创建管理员 V2 控制面切换 Action")
+    cutover.add_argument("--workspace", required=True)
+
     reconcile = commands.add_parser("reconcile", help="创建管理员迁移冲突处理 Action")
     reconcile.add_argument("--workspace", required=True)
     reconcile.add_argument("--conflict-id", required=True)
@@ -195,6 +198,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 payload={},
                 expected_revision=revision,
                 idempotency_key=f"cli:migration-scan:{uuid.uuid4()}",
+            )
+        elif args.control_command == "migration-cutover":
+            snapshot = client.snapshot(args.workspace)
+            revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
+            result = client.submit(
+                args.workspace,
+                kind="migration.cutover",
+                payload={},
+                expected_revision=revision,
+                idempotency_key=f"cli:migration-cutover:{uuid.uuid4()}",
             )
         elif args.control_command == "reconcile":
             snapshot = client.snapshot(args.workspace)

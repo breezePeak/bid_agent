@@ -202,6 +202,24 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(backups[0]["integrity"], "ok")
             self.assertTrue(backups[0]["schema_version"])
 
+    def test_migration_cutover_requires_current_scan_and_no_open_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            with self.assertRaises(ControlPlaneError) as missing:
+                store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
+            self.assertEqual(missing.exception.code, "MIGRATION_SCAN_REQUIRED")
+            store.record_migration_scan(fingerprint="scan-1", manifest=[], actor={"id": "admin"})
+            cutover = store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
+            self.assertEqual(cutover["status"], "active")
+            self.assertEqual(store.snapshot()["migration"]["cutover"]["fingerprint"], "scan-1")
+            store.record_migration_conflict(
+                domain="orphan", legacy={"path": "legacy.json"}, authoritative={}, reason="orphan"
+            )
+            with self.assertRaises(ControlPlaneError) as blocked:
+                store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
+            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+
     def test_lazy_v1_import_detects_existing_authoritative_conflicts_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
