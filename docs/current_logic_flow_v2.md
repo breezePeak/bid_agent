@@ -659,3 +659,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B173 | 2026-07-22 | CommandGateway 的 post-commit Worker 启动回调若抛出异常，会将尚在运行态的 Operation 与 CommandReceipt 归为失败并记录 `COMMAND_POST_COMMIT_FAILED`；不再把“已接受但 Worker 未启动”误报为成功。 |
 | V2.0-B174 | 2026-07-22 | `control.db.stage_runs` 开始记录 V2 Pipeline 已产出或复用阶段的 attempt、终态与 disposition，并与 Artifact manifest 记录处于同一失败边界；manifest 记录异常或缺少当前 Pipeline Operation 时 fail-closed。失败/取消阶段的完整 StageRun 生命周期仍在后续切片补齐。 |
 | V2.0-B175 | 2026-07-22 | V2 WorkspaceSnapshot 新增 `stage_runs`，控制台和 SSE 重新拉取后可读取 SQLite 阶段 attempt/终态，而不需要从 `pipeline_control.json` 推断已完成阶段。 |
+| V2.0-B176 | 2026-07-22 | Pipeline checkpoint 终态同步到 control.db 时，失败或取消的当前阶段同步写入 `stage_runs`；异常与取消原因进入该 StageRun 审计记录，补齐成功/复用之外的终态可观测性。 |

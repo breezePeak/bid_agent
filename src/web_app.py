@@ -6446,13 +6446,23 @@ def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
     if not _same_path(context.root, root):
         return
     error = payload.get("error")
-    ControlStore(context).sync_operation(
+    store = ControlStore(context)
+    store.sync_operation(
         operation_id,
         operation_status,
         message=str(payload.get("message") or ""),
         error={"message": str(error)} if error else None,
         fencing_token=int(payload.get("fencing_token") or 0),
     )
+    stage_command = str(payload.get("current_stage") or "").strip()
+    if stage_command and operation_status in {"failed", "cancelled"}:
+        store.record_stage_run(
+            operation_id,
+            stage_command,
+            "failed" if operation_status == "failed" else "cancelled",
+            disposition="pipeline_terminal",
+            error={"message": str(error)} if error else None,
+        )
 
 
 def _terminate_workspace_process(
