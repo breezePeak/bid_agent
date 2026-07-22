@@ -2402,6 +2402,25 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(store.issue_v1_import_pending())
             self.assertEqual(store.revision(), 0)
 
+    def test_v2_issue_preview_paths_allow_clean_workspace_without_legacy_issue_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                preview = web_app.api_preview_repair("missing", "alpha")
+                explained = asyncio.run(
+                    web_app.api_explain_issue_cause("missing", _Request({}), "alpha")
+                )
+                batch = asyncio.run(
+                    web_app.api_batch_preview_repair(_Request({"issue_ids": ["missing"]}), "alpha")
+                )
+
+            self.assertEqual(preview.status_code, 404)
+            self.assertEqual(explained.status_code, 404)
+            self.assertNotEqual(batch.status_code, 409)
+            self.assertNotEqual(_body(batch).get("code"), "MIGRATION_SCAN_REQUIRED")
+
     def test_pipeline_snapshot_rejects_stale_checkpoint_status(self) -> None:
         operation = {
             "operation_id": "op-current",

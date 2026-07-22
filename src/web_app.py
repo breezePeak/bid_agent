@@ -3482,11 +3482,12 @@ def api_preview_repair(issue_id: str, workspace_id: str = "") -> JSONResponse:
         from agent.repair import build_repair_plan
 
         if context:
-            store = ControlStore(context)
-            if store.issue_v1_import_pending():
+            try:
+                store = _ensure_v2_issue_import(context)
+            except ControlPlaneError as exc:
                 return JSONResponse(
-                    {"ok": False, "code": "MIGRATION_SCAN_REQUIRED", "message": "Issue 权威状态尚未迁移。"},
-                    status_code=409,
+                    {"ok": False, "code": exc.code, "message": exc.message},
+                    status_code=exc.status_code,
                 )
             issue = next((item for item in store.issue_states() if str(item.get("id")) == issue_id), None)
             plan = build_repair_plan(root, issue_id, issue=issue) if issue else {"ok": False, "message": f"未找到问题: {issue_id}"}
@@ -3573,11 +3574,12 @@ async def api_explain_issue_cause(issue_id: str, request: Request, workspace_id:
         from agent.root_cause import refine_issue_cause_with_llm
 
         if context:
-            store = ControlStore(context)
-            if store.issue_v1_import_pending():
+            try:
+                store = _ensure_v2_issue_import(context)
+            except ControlPlaneError as exc:
                 return JSONResponse(
-                    {"ok": False, "code": "MIGRATION_SCAN_REQUIRED", "message": "Issue 权威状态尚未迁移。"},
-                    status_code=409,
+                    {"ok": False, "code": exc.code, "message": exc.message},
+                    status_code=exc.status_code,
                 )
             source = store.issue_states()
         else:
@@ -3606,12 +3608,16 @@ async def api_batch_preview_repair(request: Request, workspace_id: str = "") -> 
     try:
         from agent.repair import execute_repair_batch
 
-        if context and ControlStore(context).issue_v1_import_pending():
-            return JSONResponse(
-                {"ok": False, "code": "MIGRATION_SCAN_REQUIRED", "message": "Issue 权威状态尚未迁移。"},
-                status_code=409,
-            )
-        issue_snapshot = ControlStore(context).issue_states() if context else None
+        if context:
+            try:
+                issue_snapshot = _ensure_v2_issue_import(context).issue_states()
+            except ControlPlaneError as exc:
+                return JSONResponse(
+                    {"ok": False, "code": exc.code, "message": exc.message},
+                    status_code=exc.status_code,
+                )
+        else:
+            issue_snapshot = None
         result = execute_repair_batch(
             root,
             [str(x) for x in ids],
