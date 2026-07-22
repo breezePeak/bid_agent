@@ -71,8 +71,11 @@
           </div>
         </div>
         <div v-else class="ip-empty-soft">{{ emptyMsg }}</div>
-        <div v-if="qualityEvaluations.length" class="ip-empty-soft">
-          V2 门禁证据：通过 {{ qualityPassedCount }} · 阻断/异常 {{ qualityFailedCount }}
+        <div class="ip-empty-soft" aria-live="polite">
+          V2 门禁证据：
+          <span v-for="(gate, index) in qualityGateRows" :key="gate.command" :title="gate.createdAt || '尚未重验'">
+            <span v-if="index"> · </span>{{ gate.label }} {{ gate.verdictLabel }}
+          </span>
         </div>
       </div>
 
@@ -156,8 +159,24 @@ const counts = computed(() => report.value.counts || {})
 const qualityEvaluations = computed(() => Array.isArray(quality.value?.latest_gate_evaluations)
   ? quality.value.latest_gate_evaluations
   : [])
-const qualityPassedCount = computed(() => qualityEvaluations.value.filter(item => item?.verdict === 'pass').length)
-const qualityFailedCount = computed(() => qualityEvaluations.value.filter(item => ['block', 'error'].includes(item?.verdict)).length)
+const qualityGateRows = computed(() => {
+  const byCommand = new Map(qualityEvaluations.value
+    .filter(item => item && typeof item === 'object')
+    .map(item => [String(item.command || ''), item]))
+  return [
+    ['global-review', '全文审核'],
+    ['compliance-check', '专项合规'],
+  ].map(([command, label]) => {
+    const evaluation = byCommand.get(command)
+    const verdict = String(evaluation?.verdict || '')
+    return {
+      command,
+      label,
+      createdAt: String(evaluation?.created_at || ''),
+      verdictLabel: ({ pass: '已通过', block: '被阻断', error: '异常' })[verdict] || '待重验',
+    }
+  })
+})
 const filters = [
   { key: 'fail', label: '失败' },
   { key: 'warn', label: '警告' },
