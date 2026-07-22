@@ -6352,10 +6352,54 @@ def _handle_quality_revalidate(
             str(result.get("message") if isinstance(result, dict) else "门禁重验返回无效状态。"),
             details={"command": command},
         )
+    store = _ensure_v2_issue_import(context)
+    issues = store.issue_states()
+    findings: list[dict[str, Any]] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        target = issue.get("target") if isinstance(issue.get("target"), dict) else {}
+        identity = {
+            "code": str(issue.get("code") or ""),
+            "stage_id": str(issue.get("stage_id") or ""),
+            "target": target,
+        }
+        finding_id = hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        findings.append(
+            {
+                "finding_id": finding_id,
+                "rule_key": identity["code"] or identity["stage_id"] or "unknown",
+                "target_key": json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                "risk_class": str(issue.get("risk_class") or issue.get("severity") or "warn"),
+                "issue_id": str(issue.get("id") or ""),
+                "status": str(issue.get("status") or "open"),
+                "evidence": {"command": command, "result": result.get("summary") or result.get("message") or ""},
+            }
+        )
+    blocks = [
+        item for item in findings
+        if item["status"] in {"open", "in_progress"} and item["risk_class"] in {"block", "fatal", "critical"}
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            {"command": command, "result": result, "findings": findings},
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    evaluation = store.record_gate_evaluation(
+        command=command,
+        verdict="block" if blocks else "pass",
+        input_fingerprint=fingerprint,
+        findings=findings,
+        source="quality.revalidate",
+    )
     return {
         "accepted": True,
         "operation_status": "succeeded",
         "message": str(result.get("message") or f"门禁 {command} 已重验。"),
+        "gate_evaluation": evaluation,
     }
 
 

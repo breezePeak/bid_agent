@@ -169,7 +169,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 13
+    SCHEMA_VERSION = 14
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -295,6 +295,18 @@ class ControlStore:
                         policy_decisions_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS gate_evaluations (
+                        evaluation_id TEXT PRIMARY KEY,
+                        command TEXT NOT NULL,
+                        verdict TEXT NOT NULL,
+                        input_fingerprint TEXT NOT NULL,
+                        findings_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        source_revision INTEGER NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_gate_evaluations_command
+                        ON gate_evaluations(command, created_at);
                     CREATE TABLE IF NOT EXISTS material_upload_tokens (
                         upload_token TEXT PRIMARY KEY,
                         staged_path TEXT NOT NULL,
@@ -1141,6 +1153,80 @@ class ControlStore:
                 connection.rollback()
                 raise
         return next(item for item in self.migration_conflicts() if item["conflict_id"] == conflict_id)
+
+    def record_gate_evaluation(
+        self,
+        *,
+        command: str,
+        verdict: str,
+        input_fingerprint: str,
+        findings: list[dict[str, Any]],
+        source: str,
+    ) -> dict[str, Any]:
+        command_name = str(command or "").strip()
+        verdict_name = str(verdict or "").strip().lower()
+        fingerprint = str(input_fingerprint or "").strip()
+        if not command_name or verdict_name not in {"pass", "block", "error"} or not fingerprint:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "GateEvaluation 输入无效，已拒绝记录。", status_code=503)
+        normalized = [dict(item) for item in findings if isinstance(item, dict)]
+        evaluation_id = str(uuid.uuid4())
+        created_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                source_revision = self._revision(connection)
+                connection.execute(
+                    """
+                    INSERT INTO gate_evaluations(
+                        evaluation_id, command, verdict, input_fingerprint,
+                        findings_json, source, source_revision, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        evaluation_id, command_name, verdict_name, fingerprint,
+                        _json(normalized), str(source or "v2_quality_revalidate"),
+                        source_revision, created_at,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection, revision, "GateEvaluated", "GateEvaluation", evaluation_id,
+                    {"command": command_name, "verdict": verdict_name, "finding_count": len(normalized)},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "evaluation_id": evaluation_id,
+            "command": command_name,
+            "verdict": verdict_name,
+            "input_fingerprint": fingerprint,
+            "findings": normalized,
+            "source": str(source or "v2_quality_revalidate"),
+            "source_revision": source_revision,
+            "created_at": created_at,
+        }
+
+    def gate_evaluations(self, *, command: str = "", limit: int = 50) -> list[dict[str, Any]]:
+        capped_limit = max(1, min(int(limit), 200))
+        with self._connection() as connection:
+            if command:
+                rows = connection.execute(
+                    "SELECT * FROM gate_evaluations WHERE command = ? ORDER BY created_at DESC LIMIT ?",
+                    (str(command), capped_limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM gate_evaluations ORDER BY created_at DESC LIMIT ?",
+                    (capped_limit,),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["findings"] = _decode(item.pop("findings_json", ""), [])
+            result.append(item)
+        return result
 
     def issue_gate_receipt(
         self,

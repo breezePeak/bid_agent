@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v13_adds_parent_operation_and_migration_conflicts(self) -> None:
+    def test_schema_v14_adds_parent_operation_migration_conflicts_and_gate_evaluations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -98,12 +98,16 @@ class ControlPlaneTests(unittest.TestCase):
                 migration_table = migrated.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'migration_conflicts'"
                 ).fetchone()
+                gate_evaluations = migrated.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'gate_evaluations'"
+                ).fetchone()
             finally:
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "13")
+            self.assertEqual(schema_version, "14")
             self.assertIsNotNone(migration_table)
+            self.assertIsNotNone(gate_evaluations)
 
     def test_compatibility_usage_does_not_advance_control_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
