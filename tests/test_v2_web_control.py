@@ -1107,6 +1107,26 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(stale["ok"])
             self.assertEqual(stale["error"]["code"], "GATE_RECEIPT_STALE")
 
+    def test_formal_export_rejects_gate_receipt_with_nonfinal_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            (root / "outputs" / "final.docx").write_bytes(b"docx")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            receipt = ControlStore(context).issue_gate_receipt(
+                verdict="pass",
+                gate_input_fingerprint="unused",
+                artifact_path="../outside.docx",
+                artifact_sha256="a" * 64,
+                rules_version=web_app._FORMAL_GATE_RULES_VERSION,
+            )
+
+            with self.assertRaises(ControlPlaneError) as raised:
+                web_app._validate_formal_gate_receipt(context, receipt["receipt_id"])
+
+            self.assertEqual(raised.exception.code, "GATE_RECEIPT_INVALID")
+
     def test_v2_draft_download_is_scoped_to_path_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

@@ -6032,7 +6032,10 @@ def _validate_formal_gate_receipt(
         raise ControlPlaneError("GATE_RECEIPT_INVALID", "GateReceipt 不存在或未通过。", status_code=409)
     if receipt.get("rules_version") != _FORMAL_GATE_RULES_VERSION:
         raise ControlPlaneError("GATE_RECEIPT_STALE", "GateReceipt 规则版本已过期。", status_code=409)
-    artifact = context.root / str(receipt.get("artifact_path") or "outputs/final.docx")
+    artifact_path = str(receipt.get("artifact_path") or "")
+    if artifact_path != "outputs/final.docx":
+        raise ControlPlaneError("GATE_RECEIPT_INVALID", "GateReceipt 关联的正式稿路径无效。", status_code=409)
+    artifact = context.root / artifact_path
     fingerprint, artifact_sha256 = _formal_gate_fingerprint(context)
     if (
         fingerprint != receipt.get("gate_input_fingerprint")
