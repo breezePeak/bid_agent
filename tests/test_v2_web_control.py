@@ -1751,6 +1751,32 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
             trigger.assert_not_called()
 
+    def test_v2_material_refill_can_queue_behind_other_workspace_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            web_app.RUNNING = True
+            web_app.CURRENT_RUN_ROOT = beta
+
+            with mock.patch.object(web_app.SUPERVISOR, "is_running", return_value=False), mock.patch.object(
+                web_app.threading, "Thread"
+            ) as worker:
+                result = web_app._trigger_material_refill(
+                    context,
+                    "refill-alpha",
+                    1,
+                    chapter_ids=None,
+                    replan_jobs=False,
+                    max_chapters=20,
+                )
+
+            self.assertTrue(result["ok"])
+            worker.return_value.start.assert_called_once()
+
     def test_formal_gate_blocks_unverified_qualification_material(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
