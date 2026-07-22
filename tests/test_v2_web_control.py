@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -2790,6 +2791,20 @@ class V2WebControlTests(unittest.TestCase):
                 blocked.exception.details["missing_gate_evaluations"],
                 ["global-review", "compliance-check"],
             )
+            store.record_gate_evaluation(
+                command="global-review", verdict="pass", input_fingerprint="global", findings=[], source="test"
+            )
+            store.record_gate_evaluation(
+                command="compliance-check", verdict="pass", input_fingerprint="compliance", findings=[], source="test"
+            )
+            future = time.time() + 60
+            os.utime(workspace / "global_review.json", (future, future))
+
+            with self.assertRaises(ControlPlaneError) as stale:
+                web_app._v2_export_preflight(context)
+
+            self.assertEqual(stale.exception.code, "GATE_BLOCKED")
+            self.assertEqual(stale.exception.details["stale_gate_evaluations"], ["global-review"])
 
     def test_v2_export_preflight_rejects_stale_migration_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
