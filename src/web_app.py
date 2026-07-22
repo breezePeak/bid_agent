@@ -3572,7 +3572,16 @@ async def api_explain_issue_cause(issue_id: str, request: Request, workspace_id:
         from agent.issues import load_open_issues
         from agent.root_cause import refine_issue_cause_with_llm
 
-        source = _ensure_v2_issue_import(context).issue_states() if context else load_open_issues(root)
+        if context:
+            store = ControlStore(context)
+            if store.issue_v1_import_pending():
+                return JSONResponse(
+                    {"ok": False, "code": "MIGRATION_SCAN_REQUIRED", "message": "Issue 权威状态尚未迁移。"},
+                    status_code=409,
+                )
+            source = store.issue_states()
+        else:
+            source = load_open_issues(root)
         issue = next((i for i in source if str(i.get("id")) == issue_id), None)
         if not issue:
             return JSONResponse({"ok": False, "message": "未找到问题"}, status_code=404)
@@ -3597,7 +3606,12 @@ async def api_batch_preview_repair(request: Request, workspace_id: str = "") -> 
     try:
         from agent.repair import execute_repair_batch
 
-        issue_snapshot = _ensure_v2_issue_import(context).issue_states() if context else None
+        if context and ControlStore(context).issue_v1_import_pending():
+            return JSONResponse(
+                {"ok": False, "code": "MIGRATION_SCAN_REQUIRED", "message": "Issue 权威状态尚未迁移。"},
+                status_code=409,
+            )
+        issue_snapshot = ControlStore(context).issue_states() if context else None
         result = execute_repair_batch(
             root,
             [str(x) for x in ids],

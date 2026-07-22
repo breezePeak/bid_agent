@@ -2285,12 +2285,22 @@ class V2WebControlTests(unittest.TestCase):
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 listed = _body(web_app.api_list_issues("open", "alpha"))
                 preview = web_app.api_preview_repair("legacy-issue", "alpha")
+                explained = asyncio.run(
+                    web_app.api_explain_issue_cause("legacy-issue", _Request({}), "alpha")
+                )
+                batch = asyncio.run(
+                    web_app.api_batch_preview_repair(_Request({"issue_ids": ["legacy-issue"]}), "alpha")
+                )
 
             self.assertTrue(listed["ok"])
             self.assertEqual(listed["issues"], [])
             self.assertEqual(listed["summary"]["source"], "migration_required")
             self.assertEqual(preview.status_code, 409)
             self.assertEqual(_body(preview)["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(explained.status_code, 409)
+            self.assertEqual(_body(explained)["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(batch.status_code, 409)
+            self.assertEqual(_body(batch)["code"], "MIGRATION_SCAN_REQUIRED")
             self.assertTrue(store.issue_v1_import_pending())
             self.assertEqual(store.revision(), 0)
 
