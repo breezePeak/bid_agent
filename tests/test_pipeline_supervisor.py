@@ -119,6 +119,48 @@ class PipelineSupervisorTests(unittest.TestCase):
 
             self.assertEqual(calls, ["b"])
 
+    def test_reconcile_marks_lost_worker_stage_before_retrying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            lifecycle: list[tuple[str, str, str]] = []
+            completed: set[str] = set()
+            supervisor._save(
+                root,
+                {"run_id": "run-1", "status": "running", "current_stage": "b", "worker_pid": 0},
+            )
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                completed.add(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", side_effect=lambda r, stage: stage in completed),
+            ):
+                self.assertTrue(
+                    supervisor.reconcile(
+                        "run-1",
+                        root,
+                        runner,
+                        stage_lifecycle_recorder=lambda run_root, command, status, disposition, error: lifecycle.append(
+                            (command, status, disposition)
+                        ),
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(
+                lifecycle,
+                [
+                    ("b", "failed", "worker_lost"),
+                    ("b", "queued", "queued"),
+                    ("b", "running", "started"),
+                    ("b", "succeeded", "produced"),
+                ],
+            )
+
     def test_single_command_stops_after_requested_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

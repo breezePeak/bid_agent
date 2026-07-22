@@ -520,6 +520,26 @@ class PipelineSupervisor:
                 slot.thread.start()
                 return True
         self._save(root, {"status": "interrupted", "worker_pid": 0, "message": "检测到服务中断，正在断点恢复"})
+        if command and stage_lifecycle_recorder is not None:
+            try:
+                stage_lifecycle_recorder(
+                    root,
+                    command,
+                    "failed",
+                    "worker_lost",
+                    {"message": "检测到服务中断，原 Worker 未报告阶段终态。"},
+                )
+            except Exception as exc:
+                self._save(
+                    root,
+                    {
+                        "status": "failed",
+                        "current_stage": command,
+                        "worker_pid": 0,
+                        "error": f"StageRun 中断审计失败: {exc}",
+                    },
+                )
+                return False
         return self.start(
             run_id,
             root,
@@ -564,6 +584,26 @@ class PipelineSupervisor:
                 stage_lifecycle_recorder and stage_lifecycle_recorder(root, command, "paused", "paused", None)
             self._save(root, {"status": "paused", "worker_pid": 0})
             return
+        if command and stage_lifecycle_recorder is not None:
+            try:
+                stage_lifecycle_recorder(
+                    root,
+                    command,
+                    "failed",
+                    "worker_lost",
+                    {"message": f"重启接管的 Worker {pid} 已退出但未报告阶段终态。"},
+                )
+            except Exception as exc:
+                self._save(
+                    root,
+                    {
+                        "status": "failed",
+                        "current_stage": command,
+                        "worker_pid": 0,
+                        "error": f"StageRun 中断审计失败: {exc}",
+                    },
+                )
+                return
         self.start(
             slot.run_id,
             root,

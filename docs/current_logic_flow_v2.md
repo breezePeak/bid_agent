@@ -669,3 +669,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B183 | 2026-07-22 | `Operation` 的 Worker 同步同样实施终态不可逆：成功、失败或取消后，同终态迟到心跳按幂等忽略，不同终态被 `STATE_CONFLICT` 拒绝。旧 Worker、checkpoint 或重启接管逻辑不能再把已完成 Operation 回退或反转。 |
 | V2.0-B184 | 2026-07-22 | Pipeline 在准备复用前已创建新的 queued StageRun；Artifact 复用判定现明确查询该命令最近的**终态** attempt，忽略当前 in-flight queued/running 重试。这样既保留“必须有成功历史 StageRun”的门槛，也不会让新 queued 记录错误遮蔽上一轮成功证据而强制无意义重跑。 |
 | V2.0-B185 | 2026-07-22 | pause/cancel 与 Pipeline 完成竞态时，若控制 Command 到达时目标 Operation 已是 succeeded/failed/cancelled，Gateway 持久化 `CommandNoOp` 并返回 `no_op`，不再报状态冲突或重新取得 lease。该结果可幂等重放并保留审计事件。 |
+| V2.0-B186 | 2026-07-22 | Pipeline 重启恢复发现 checkpoint Worker 已丢失时，会先将其当前 StageRun 以 `failed(worker_lost)` 终结，再创建新的 queued attempt 断点重试；StageRun 中断审计失败则 Pipeline fail-closed，不会留下未说明的 running 阶段或将半成品作为可复用输出。 |
