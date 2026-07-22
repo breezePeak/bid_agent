@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v14_adds_parent_operation_migration_conflicts_and_gate_evaluations(self) -> None:
+    def test_schema_v15_adds_control_migration_gate_and_material_verification_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -101,13 +101,17 @@ class ControlPlaneTests(unittest.TestCase):
                 gate_evaluations = migrated.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'gate_evaluations'"
                 ).fetchone()
+                material_verifications = migrated.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'material_verifications'"
+                ).fetchone()
             finally:
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "14")
+            self.assertEqual(schema_version, "15")
             self.assertIsNotNone(migration_table)
             self.assertIsNotNone(gate_evaluations)
+            self.assertIsNotNone(material_verifications)
 
     def test_compatibility_usage_does_not_advance_control_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,6 +124,31 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(usage["routes"]["/api/status"]["calls"], 2)
             self.assertEqual(usage["routes"]["/api/status"]["last_actor"]["id"], "owner")
             self.assertEqual(store.revision(), revision)
+
+    def test_material_verification_is_immutable_and_audited(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            first = store.record_material_verification(
+                item_id="qualification-license",
+                verification_type="automatic",
+                verdict="verified",
+                verification={"confidence": 0.95, "evidence_ref": "upload-1"},
+                actor={"id": "reviewer", "role": "reviewer"},
+                source="materials.verify",
+            )
+            second = store.record_material_verification(
+                item_id="qualification-license",
+                verification_type="human",
+                verdict="verified",
+                verification={"reason": "checked original"},
+                actor={"id": "admin", "role": "admin"},
+                source="materials.confirm_verification",
+            )
+            history = store.material_verifications(item_id="qualification-license")
+            self.assertEqual([item["verification_id"] for item in history], [second["verification_id"], first["verification_id"]])
+            self.assertEqual(history[0]["actor"]["id"], "admin")
+            self.assertTrue(any(event["kind"] == "MaterialVerified" for event in store.events()))
 
     def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -586,3 +586,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B100 | 2026-07-22 | 迁移面板展示当前工作区 V1 兼容 API 的累计调用与最近观测时间，使管理员在切换和下线评审中可直接看到兼容适配器是否仍被使用。 |
 | V2.0-B101 | 2026-07-22 | `control.db` schema 升级为 14。`quality.revalidate` 在受 CommandGateway 控制的重验后，按当前权威 Issue 快照记录不可变 GateEvaluation（command、输入 fingerprint、稳定 Finding 标识、来源 revision 与 verdict）；block 或 evaluator 异常也留下 fail-closed 评估证据。Issue 仍是可处理投影，后续状态变化不会改写既有评估证据。 |
 | V2.0-B102 | 2026-07-22 | 迁移扫描开始对现存 V1 Pipeline Artifact 重新计算 hash 并写入 SQLite manifest，但一律标为 `stale/unverified`，绝不因文件存在推断为可复用成功输出；只有后续 V2 Pipeline 成功产出并记录输入 fingerprint 后才能变为 ready。 |
+| V2.0-B103 | 2026-07-22 | `control.db` schema 升级为 15，新增不可变 MaterialVerification 审计表。自动上传核验、自动复验和人工确认均记录材料 ID、结论、最小 actor、证据摘要与来源 Command；MaterialState 继续作为当前履约投影，历史核验不会被后续状态更新覆盖。 |

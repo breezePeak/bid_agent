@@ -6941,11 +6941,26 @@ def _handle_materials_upload(
             or datetime.now().isoformat(timespec="seconds")
         )
         projected["verification_confidence"] = verification.get("confidence")
-    ControlStore(context).upsert_material_state(_authoritative_material_state(projected))
+    store.upsert_material_state(_authoritative_material_state(projected))
+    verification_receipt = store.record_material_verification(
+        item_id=item_id,
+        verification_type="auto_upload",
+        verdict=lifecycle if lifecycle in {"verified", "rejected"} else "uploaded",
+        verification={
+            "lifecycle_status": lifecycle,
+            "upload_sha256": str(staged.get("sha256") or ""),
+            "upload_filename": str(staged.get("filename") or ""),
+            "confidence": verification.get("confidence"),
+            "verification": verification,
+        },
+        actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+        source="materials.upload",
+    )
     return {
         "accepted": True,
         "operation_status": "succeeded",
         "message": str(result.get("message") or f"材料 {item_id} 已登记，状态={lifecycle}。"),
+        "material_verification": verification_receipt,
     }
 
 
@@ -6985,13 +7000,28 @@ def _handle_materials_verify(
     if lifecycle == "verified":
         projected["evidence_status"] = "verified"
         projected["verified_at"] = result.get("verified_at") or datetime.now().isoformat(timespec="seconds")
-    ControlStore(context).upsert_material_state(_authoritative_material_state(projected))
+    store = ControlStore(context)
+    store.upsert_material_state(_authoritative_material_state(projected))
+    verification_receipt = store.record_material_verification(
+        item_id=item_id,
+        verification_type="automatic",
+        verdict=lifecycle if lifecycle in {"verified", "rejected"} else "uploaded",
+        verification={
+            "lifecycle_status": lifecycle,
+            "confidence": result.get("confidence"),
+            "verified_at": result.get("verified_at"),
+            "message": result.get("message"),
+        },
+        actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+        source="materials.verify",
+    )
     if lifecycle == "verified":
         _resume_goal_for_verified_material(context, item_id, f"material_verified:{item_id}")
     return {
         "accepted": True,
         "operation_status": "succeeded",
         "message": str(result.get("message") or f"材料 {item_id} 验证完成。"),
+        "material_verification": verification_receipt,
     }
 
 
@@ -7037,13 +7067,23 @@ def _handle_materials_confirm_verification(
     projected["evidence_status"] = "verified" if accept else "rejected"
     if accept:
         projected["verified_at"] = datetime.now().isoformat(timespec="seconds")
-    ControlStore(context).upsert_material_state(_authoritative_material_state(projected))
+    store = ControlStore(context)
+    store.upsert_material_state(_authoritative_material_state(projected))
+    verification_receipt = store.record_material_verification(
+        item_id=item_id,
+        verification_type="human",
+        verdict=lifecycle,
+        verification={"accepted": accept, "reason": reason, "operator": operator},
+        actor=actor,
+        source="materials.confirm_verification",
+    )
     if accept:
         _resume_goal_for_verified_material(context, item_id, f"material_human_verified:{item_id}")
     return {
         "accepted": True,
         "operation_status": "succeeded",
         "message": f"材料 {item_id} 已人工{'确认通过' if accept else '拒绝'}。",
+        "material_verification": verification_receipt,
     }
 
 

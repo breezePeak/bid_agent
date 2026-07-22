@@ -169,7 +169,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 14
+    SCHEMA_VERSION = 15
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -328,6 +328,18 @@ class ControlStore:
                         created_at TEXT NOT NULL,
                         updated_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS material_verifications (
+                        verification_id TEXT PRIMARY KEY,
+                        item_id TEXT NOT NULL,
+                        verification_type TEXT NOT NULL,
+                        verdict TEXT NOT NULL,
+                        verification_json TEXT NOT NULL,
+                        actor_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_material_verifications_item
+                        ON material_verifications(item_id, created_at);
                     CREATE TABLE IF NOT EXISTS workspace_acl (
                         principal_id TEXT PRIMARY KEY,
                         role TEXT NOT NULL,
@@ -1516,6 +1528,85 @@ class ControlStore:
                     "control_updated_at": value["updated_at"],
                 }
             )
+            result.append(item)
+        return result
+
+    def record_material_verification(
+        self,
+        *,
+        item_id: str,
+        verification_type: str,
+        verdict: str,
+        verification: dict[str, Any],
+        actor: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        material_id = str(item_id or "").strip()
+        kind = str(verification_type or "").strip()
+        decision = str(verdict or "").strip().lower()
+        if not material_id or not kind or decision not in {"verified", "rejected", "uploaded"}:
+            raise ControlPlaneError("COMMAND_INVALID", "材料核验记录无效。", status_code=400)
+        verification_id = str(uuid.uuid4())
+        created_at = _now()
+        payload = dict(verification) if isinstance(verification, dict) else {}
+        actor_value = {
+            "type": str(actor.get("type") or "")[:64],
+            "id": str(actor.get("id") or "")[:128],
+            "role": str(actor.get("role") or "")[:32],
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO material_verifications(
+                        verification_id, item_id, verification_type, verdict,
+                        verification_json, actor_json, source, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        verification_id, material_id, kind, decision,
+                        _json(payload), _json(actor_value), str(source or "v2_command"), created_at,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection, revision, "MaterialVerified", "MaterialVerification", verification_id,
+                    {"item_id": material_id, "verification_type": kind, "verdict": decision},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "verification_id": verification_id,
+            "item_id": material_id,
+            "verification_type": kind,
+            "verdict": decision,
+            "verification": payload,
+            "actor": actor_value,
+            "source": str(source or "v2_command"),
+            "created_at": created_at,
+        }
+
+    def material_verifications(self, *, item_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        capped_limit = max(1, min(int(limit), 500))
+        with self._connection() as connection:
+            if item_id:
+                rows = connection.execute(
+                    "SELECT * FROM material_verifications WHERE item_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (str(item_id), capped_limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM material_verifications ORDER BY created_at DESC LIMIT ?",
+                    (capped_limit,),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["verification"] = _decode(item.pop("verification_json", ""), {})
+            item["actor"] = _decode(item.pop("actor_json", ""), {})
             result.append(item)
         return result
 
