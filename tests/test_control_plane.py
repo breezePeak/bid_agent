@@ -176,6 +176,10 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(history[0]["sha256"], "a" * 64)
             self.assertEqual(history[0]["actor"]["id"], "owner")
             self.assertNotIn("staged_path", history[0])
+            self.assertEqual(
+                store.material_audit_summary()["qualification-license"]["latest_submission"]["submission_id"],
+                submission["submission_id"],
+            )
             with self.assertRaises(ControlPlaneError) as forged:
                 store.record_material_submission(
                     item_id="qualification-license",

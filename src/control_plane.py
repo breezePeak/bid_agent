@@ -1739,6 +1739,39 @@ class ControlStore:
             result.append(item)
         return result
 
+    def material_audit_summary(self) -> dict[str, dict[str, Any]]:
+        """Return count/latest submission and latest verification for each material."""
+        with self._connection() as connection:
+            submission_counts = connection.execute(
+                "SELECT item_id, COUNT(*) AS count FROM material_submissions GROUP BY item_id"
+            ).fetchall()
+            latest_submissions = connection.execute(
+                """
+                SELECT * FROM material_submissions
+                WHERE rowid IN (SELECT MAX(rowid) FROM material_submissions GROUP BY item_id)
+                """
+            ).fetchall()
+            latest_verifications = connection.execute(
+                """
+                SELECT * FROM material_verifications
+                WHERE rowid IN (SELECT MAX(rowid) FROM material_verifications GROUP BY item_id)
+                """
+            ).fetchall()
+        summary: dict[str, dict[str, Any]] = {
+            str(row["item_id"]): {"submission_count": int(row["count"] or 0)}
+            for row in submission_counts
+        }
+        for row in latest_submissions:
+            item = dict(row)
+            item["actor"] = _decode(item.pop("actor_json", ""), {})
+            summary.setdefault(str(item["item_id"]), {})["latest_submission"] = item
+        for row in latest_verifications:
+            item = dict(row)
+            item["verification"] = _decode(item.pop("verification_json", ""), {})
+            item["actor"] = _decode(item.pop("actor_json", ""), {})
+            summary.setdefault(str(item["item_id"]), {})["latest_verification"] = item
+        return summary
+
     def material_state(self, item_id: str) -> dict[str, Any] | None:
         wanted = str(item_id or "").strip()
         return next((item for item in self.material_states() if item.get("item_id") == wanted), None)
