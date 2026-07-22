@@ -2967,7 +2967,13 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     command_error=exc.as_dict(),
                 )
 
-        status = _status_payload(root, run_id)
+        status = _status_payload(
+            root,
+            run_id,
+            # Chat queries are read-only in V2.  The compatibility summary
+            # writer remains available only to the legacy chat adapter.
+            persist_manual_review_summary=not is_v2_workspace_chat,
+        )
         review_context = _load_review_context(root)
         # Frontend confirm buttons: tool_scope only when tool is present (PR-1)
         tool_name = str(action.get("tool") or "").strip()

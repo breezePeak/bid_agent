@@ -129,6 +129,31 @@ class V2WebControlTests(unittest.TestCase):
                 "awaiting_confirmation",
             )
 
+    def test_v2_chat_query_does_not_write_legacy_manual_review_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            plan = {"reply": "当前状态正常", "actions": []}
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "load_messages", return_value=[]):
+                    with mock.patch.object(web_app, "save_message", return_value={}):
+                        with mock.patch.object(web_app, "manual_review_summary") as summary:
+                            with mock.patch.object(web_app, "orchestrator_plan", return_value=plan):
+                                with mock.patch.object(web_app, "orchestrator_resolve", return_value=plan):
+                                    response = _body(
+                                        asyncio.run(
+                                            web_app.api_v2_chat_turn(
+                                                "alpha", _Request({"message": "当前状态"})
+                                            )
+                                        )
+                                    )
+
+            self.assertTrue(response["ok"])
+            summary.assert_not_called()
+            self.assertFalse((root / "workspace" / "manual_review" / "summary.json").exists())
+
     def test_material_readiness_does_not_trust_legacy_ready_projection(self) -> None:
         self.assertFalse(
             web_app._material_fulfillment_verified(
