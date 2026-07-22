@@ -8452,6 +8452,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 context.root,
                 context.workspace_id,
                 persist_manual_review_summary=False,
+                v2_read_only=True,
             )
         )
         goal_state = store.goal_state()
@@ -8478,7 +8479,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         artifact_states = snapshot.get("artifacts") or []
         pipeline_snapshot = _pipeline_snapshot_from_control(
             snapshot.get("operations") or [],
-            compatibility.get("pipeline") or SUPERVISOR.load(context.root),
+            compatibility.get("pipeline") or {},
         )
         workflow = []
         for raw_step in compatibility.get("workflow") or []:

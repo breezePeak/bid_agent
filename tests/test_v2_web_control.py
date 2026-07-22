@@ -2640,6 +2640,7 @@ class V2WebControlTests(unittest.TestCase):
                 context.root,
                 "alpha",
                 persist_manual_review_summary=False,
+                v2_read_only=True,
             )
 
             store.mark_artifact_states_stale(
