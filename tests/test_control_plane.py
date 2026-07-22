@@ -717,6 +717,42 @@ class ControlPlaneTests(unittest.TestCase):
                 store.record_stage_run("operation-1", "build-md", "failed", disposition="late_failure")
             self.assertEqual(raised.exception.code, "STATE_CONFLICT")
 
+    def test_operation_terminal_state_rejects_late_worker_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            gateway.store.sync_operation(
+                receipt.operation_id or "",
+                "succeeded",
+                message="completed",
+                fencing_token=operation["fencing_token"],
+            )
+            revision = gateway.store.revision()
+
+            self.assertEqual(
+                gateway.store.sync_operation(
+                    receipt.operation_id or "",
+                    "succeeded",
+                    message="late duplicate",
+                    fencing_token=operation["fencing_token"],
+                ),
+                revision,
+            )
+            with self.assertRaises(ControlPlaneError) as raised:
+                gateway.store.sync_operation(
+                    receipt.operation_id or "",
+                    "failed",
+                    message="late worker failure",
+                    fencing_token=operation["fencing_token"],
+                )
+            self.assertEqual(raised.exception.code, "STATE_CONFLICT")
+            self.assertEqual((gateway.store.operation(receipt.operation_id or "") or {})["status"], "succeeded")
+
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

@@ -3435,6 +3435,22 @@ class ControlStore:
                             "actual_fencing_token": int(fencing_token),
                         },
                     )
+                current_status = str(row["status"])
+                terminal_states = {"succeeded", "failed", "cancelled"}
+                if current_status in terminal_states:
+                    if current_status != status:
+                        raise ControlPlaneError(
+                            "STATE_CONFLICT",
+                            "Operation 已处于终态，拒绝覆盖控制状态。",
+                            status_code=409,
+                            details={
+                                "operation_id": operation_id,
+                                "current_status": current_status,
+                                "requested_status": status,
+                            },
+                        )
+                    connection.commit()
+                    return self._revision(connection)
                 error_json = _json(error) if error else None
                 if str(row["status"]) == status and str(row["message"] or "") == message and row["error_json"] == error_json:
                     if status not in {"succeeded", "failed", "cancelled"}:
