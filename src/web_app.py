@@ -5757,13 +5757,19 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
     digest = hashlib.sha256()
     artifact_sha256 = ""
     store = _ensure_v2_issue_import(context)
+    migration_state = store.migration_state()
     control_domains = {
         "material_states": store.material_states(),
         "issue_states": store.issue_states(),
         "policy_decisions": store.policy_decisions(),
         "artifact_states": store.artifact_states(),
-        "migration_conflicts": store.migration_conflicts(),
+        "migration": migration_state,
     }
+    cutover = migration_state.get("cutover") if isinstance(migration_state, dict) else None
+    if isinstance(cutover, dict) and cutover.get("status") == "active":
+        control_domains["migration_source_fingerprint"] = (
+            _v1_migration_dry_run(context).get("source_fingerprint") or ""
+        )
     for domain, value in control_domains.items():
         digest.update(f"control.db:{domain}\0".encode("utf-8"))
         digest.update(

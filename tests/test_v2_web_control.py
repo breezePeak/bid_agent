@@ -2500,6 +2500,34 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertEqual(blocked.exception.code, "MIGRATION_CUTOVER_STALE")
 
+    def test_formal_gate_fingerprint_tracks_active_cutover_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            goal_path = context.root / "workspace" / "agent" / "goal_state.json"
+            goal_path.parent.mkdir(parents=True)
+            legacy_goal = {"goal_id": "legacy-goal", "status": "running"}
+            goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
+            store = ControlStore(context)
+            store.ensure_goal_state(legacy_goal)
+            preview = web_app._v1_migration_dry_run(context)
+            store.record_migration_scan(
+                fingerprint=preview["source_fingerprint"],
+                manifest=preview["source_manifest"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            store.activate_migration_cutover(
+                fingerprint=preview["source_fingerprint"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            before, _ = web_app._formal_gate_fingerprint(context)
+            legacy_goal["objective"] = "changed after receipt issuance"
+            goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
+            after, _ = web_app._formal_gate_fingerprint(context)
+
+            self.assertNotEqual(before, after)
+
     def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

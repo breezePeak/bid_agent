@@ -466,11 +466,15 @@ class ControlStore:
             scan = connection.execute(
                 "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
             ).fetchone()
+            cutover = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
+            ).fetchone()
         return {
             "status": "needs_reconciliation" if open_conflicts else "ready",
             "open_count": len(open_conflicts),
             "conflicts": conflicts,
             "last_scan": _decode(str(scan["value"]), None) if scan is not None else None,
+            "cutover": _decode(str(cutover["value"]), None) if cutover is not None else None,
         }
 
     def migration_backups(self) -> list[dict[str, Any]]:
