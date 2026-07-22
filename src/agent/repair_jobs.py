@@ -161,6 +161,61 @@ def create_confirmation(
         return _write_job(root, job)
 
 
+def create_authorized_repair_job(
+    root: Path,
+    *,
+    operation_id: str,
+    issue_fingerprints: list[str],
+    total_count: int,
+    auto_count: int,
+    manual_count: int,
+    resume_command: str,
+) -> dict[str, Any]:
+    """Create a V2 repair job bound to an already-confirmed Operation.
+
+    This deliberately has no ``confirmation_id`` and never enters the V1
+    ``awaiting_confirmation`` state: CommandGateway confirmation is the only
+    authorization for this path.
+    """
+    operation = str(operation_id or "").strip()
+    if not operation:
+        raise ValueError("operation_id is required")
+    fingerprints = sorted({str(item) for item in issue_fingerprints if str(item)})
+    with _job_lock(root):
+        current = load_repair_job(root)
+        status = str(current.get("status") or "")
+        if status in RUNNING_REPAIR_STATUSES and str(current.get("authorized_by_operation") or "") == operation:
+            return current
+        now = _now()
+        job = {
+            "job_id": f"repair-{uuid.uuid4().hex[:12]}",
+            "confirmation_id": "",
+            "status": "awaiting_v2_operation",
+            "phase": "awaiting_v2_operation",
+            "authorized_by_operation": operation,
+            "issue_fingerprints": fingerprints,
+            "total_count": int(total_count),
+            "auto_count": int(auto_count),
+            "manual_count": int(manual_count),
+            "resolved_count": 0,
+            "remaining_count": int(total_count),
+            "failed_count": 0,
+            "progress_percent": 0,
+            "phase_completed": 0,
+            "phase_total": 0,
+            "resume_command": str(resume_command or ""),
+            "resume_attempted": False,
+            "message": f"V2 Operation 已确认，将修复 {int(total_count)} 个阻断问题",
+            "created_at": now,
+            "updated_at": now,
+            "started_at": "",
+            "finished_at": "",
+            "result": {},
+            "restarted_from": str(current.get("job_id") or ""),
+        }
+        return _write_job(root, job)
+
+
 def claim_repair_job(root: Path, confirmation_id: str) -> dict[str, Any]:
     """Atomically claim a confirmed job; duplicate confirmation is idempotent.
 
@@ -226,8 +281,10 @@ def claim_repair_job_authorized(root: Path, operation_id: str) -> dict[str, Any]
                 "job": job,
                 "message": "上一轮修复已结束或中断，请重新发起最小修复",
             }
-        if status != "awaiting_confirmation":
+        if status not in {"awaiting_v2_operation", "awaiting_confirmation"}:
             return {"ok": False, "message": "修复任务状态不可执行"}
+        if status == "awaiting_v2_operation" and str(job.get("authorized_by_operation") or "") != str(operation_id):
+            return {"ok": False, "message": "RepairJob 未绑定当前 V2 Operation"}
         job.update(
             {
                 "status": "running",

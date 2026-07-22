@@ -628,3 +628,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B142 | 2026-07-22 | V2 Chat 不再创建或执行 V1 最小修复确认 token：被动聊天不再写入 `repair_job.json` 以展示旧确认卡，携带旧确认按钮的请求被明确拒绝并要求重新发起 `repair.start` V2 Action。聊天的暂停、继续、取消、修复与改稿仍统一经过 CommandGateway。 |
 | V2.0-B143 | 2026-07-22 | V2 Chat 的普通查询调用只读状态聚合，不再写入 V1 `manual_review/summary.json`；人工复核摘要继续由 V2 SQLite Snapshot/专用读取接口提供，旧聊天适配器保留原兼容投影行为。 |
 | V2.0-B144 | 2026-07-22 | V2 Chat 的最小修复候选、确认后的 Repair Worker 和 `repair.start` 均直接读取 `control.db.issue_states`；不再同步或读取 V1 `open.json`。旧 Issue 存在但尚未扫描时，聊天明确返回 `MIGRATION_SCAN_REQUIRED` 且不创建 legacy RepairJob。 |
+| V2.0-B145 | 2026-07-22 | 已确认的 V2 `repair.start` 直接创建绑定 Operation ID 的 `awaiting_v2_operation` RepairJob，记录为空 `confirmation_id`；Worker 仅接受该 Operation claim，不再先创建或校验 V1 最小修复确认 token。遗留 awaiting-confirmation Job 仅保留一个版本的 claim 兼容。 |

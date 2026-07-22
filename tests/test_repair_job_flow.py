@@ -17,6 +17,7 @@ import web_app  # noqa: E402
 from agent.repair_jobs import (  # noqa: E402
     claim_repair_job,
     claim_repair_job_authorized,
+    create_authorized_repair_job,
     create_confirmation,
     load_repair_job,
     reconcile_interrupted_repair,
@@ -110,6 +111,24 @@ class RepairJobPersistenceTests(unittest.TestCase):
             self.assertFalse(claimed["duplicate"])
             self.assertEqual(claimed["job"]["job_id"], job["job_id"])
             self.assertEqual(claimed["job"]["authorized_by_operation"], "operation-123")
+            self.assertEqual(claimed["job"]["status"], "running")
+
+    def test_v2_authorized_job_has_no_legacy_confirmation_token(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job = create_authorized_repair_job(
+                root,
+                operation_id="operation-456",
+                issue_fingerprints=["v2-issue"],
+                total_count=1,
+                auto_count=1,
+                manual_count=0,
+                resume_command="build-md",
+            )
+            self.assertEqual(job["confirmation_id"], "")
+            self.assertEqual(job["status"], "awaiting_v2_operation")
+            claimed = claim_repair_job_authorized(root, "operation-456")
+            self.assertTrue(claimed["ok"])
             self.assertEqual(claimed["job"]["status"], "running")
 
     def test_interrupted_worker_is_persisted_as_failed(self) -> None:

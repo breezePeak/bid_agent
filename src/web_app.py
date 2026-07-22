@@ -53,6 +53,7 @@ from agent.repair_jobs import (
     claim_repair_job,
     claim_repair_job_authorized,
     create_confirmation,
+    create_authorized_repair_job,
     decline_repair_job,
     load_repair_job,
     reconcile_interrupted_repair,
@@ -6403,17 +6404,26 @@ def _handle_repair_start(
 ) -> dict[str, Any]:
     operation = ControlStore(context).operation(operation_id) or {}
     fencing_token = int(operation.get("fencing_token") or 0)
-    job = _ensure_minimal_repair_confirmation(context.root, context=context)
-    confirmation_id = str(job.get("confirmation_id") or "")
-    if not confirmation_id:
+    candidates = _minimal_repair_candidates(context.root, context=context)
+    if not candidates:
         return {
             "accepted": True,
             "operation_status": "succeeded",
             "message": "当前没有可自动修复的阻断问题。",
         }
+    auto_count = sum(1 for issue in candidates if _issue_has_auto_repair(issue))
+    job = create_authorized_repair_job(
+        context.root,
+        operation_id=operation_id,
+        issue_fingerprints=[_issue_repair_fingerprint(issue) for issue in candidates],
+        total_count=len(candidates),
+        auto_count=auto_count,
+        manual_count=max(0, len(candidates) - auto_count),
+        resume_command=_minimal_repair_resume_command(context.root),
+    )
     result = _trigger_repair_job(
         context.root,
-        confirmation_id,
+        "",
         allow_remint=False,
         control_operation_id=operation_id,
         control_fencing_token=fencing_token,

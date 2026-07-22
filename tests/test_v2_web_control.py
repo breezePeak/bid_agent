@@ -474,21 +474,22 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(proposal["receipt"]["status"], "requires_confirmation")
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
-                with mock.patch.object(
-                    web_app,
-                    "_ensure_minimal_repair_confirmation",
-                    return_value={"confirmation_id": "v1-confirmation"},
-                ):
+                with mock.patch.object(web_app, "_minimal_repair_candidates", return_value=[{"id": "issue-1"}]):
                     with mock.patch.object(
                         web_app,
-                        "_trigger_repair_job",
-                        return_value={"ok": True, "message": "repair started"},
-                    ) as trigger:
-                        confirmed = web_app.api_v2_confirm_action(
-                            "alpha",
-                            proposal["action"]["action_id"],
-                            _Request({}),
-                        )
+                        "create_authorized_repair_job",
+                        return_value={"job_id": "repair-v2", "confirmation_id": ""},
+                    ):
+                        with mock.patch.object(
+                            web_app,
+                            "_trigger_repair_job",
+                            return_value={"ok": True, "message": "repair started"},
+                        ) as trigger:
+                            confirmed = web_app.api_v2_confirm_action(
+                                "alpha",
+                                proposal["action"]["action_id"],
+                                _Request({}),
+                            )
 
             confirmed_body = _body(confirmed)
             self.assertTrue(confirmed_body["ok"])
@@ -496,6 +497,7 @@ class V2WebControlTests(unittest.TestCase):
             operation = ControlStore(WorkspaceContext.resolve(runs, "alpha")).operation(operation_id)
             self.assertEqual(operation["kind"], "repair.start")
             self.assertEqual(operation["status"], "running")
+            self.assertEqual(trigger.call_args.args[1], "")
             self.assertEqual(trigger.call_args.kwargs["control_operation_id"], operation_id)
             self.assertFalse(trigger.call_args.kwargs["resume_pipeline"])
 
