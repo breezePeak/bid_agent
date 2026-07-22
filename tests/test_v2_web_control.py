@@ -3010,6 +3010,25 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(response["ok"])
             self.assertEqual(response["report"]["workspace_id"], "alpha")
 
+    def test_migration_scan_hashes_legacy_artifacts_as_stale_until_v2_rebuild(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            outputs = root / "outputs"
+            outputs.mkdir(parents=True)
+            (outputs / "final.md").write_text("legacy formal draft", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+
+            imported = web_app._register_legacy_artifact_inventory(context, store)
+
+            artifact = store.artifact_state("outputs/final.md")
+            self.assertGreater(imported, 0)
+            self.assertEqual(artifact["status"], "stale")
+            self.assertTrue(artifact["sha256"])
+            self.assertEqual(artifact["legacy_readiness"], "unverified")
+            self.assertEqual(web_app._register_legacy_artifact_inventory(context, store), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

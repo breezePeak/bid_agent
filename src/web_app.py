@@ -5507,6 +5507,46 @@ def _migration_snapshot_with_source_state(
     return updated
 
 
+def _register_legacy_artifact_inventory(context: WorkspaceContext, store: ControlStore) -> int:
+    """Hash existing V1 artifacts but never infer that they are reusable stage output."""
+    from artifact_manifest import describe_artifact
+    from pipeline_registry import workflow_stage_specs
+
+    existing = {item["artifact_key"] for item in store.artifact_states()}
+    manifests: list[dict[str, Any]] = []
+    for stage in workflow_stage_specs():
+        for artifact in stage.produces:
+            if artifact.kind == "virtual":
+                continue
+            current = describe_artifact(context.root, artifact)
+            artifact_key = str(current.get("artifact_key") or "")
+            if (
+                not artifact_key
+                or artifact_key in existing
+                or current.get("status") != "ready"
+                or not current.get("files")
+            ):
+                continue
+            manifests.append(
+                {
+                    **current,
+                    "status": "stale",
+                    "producer": stage.command,
+                    "stage_id": stage.id,
+                    "input_fingerprint": "",
+                    "disposition": "legacy_discovered",
+                    "legacy_artifact": True,
+                    "legacy_readiness": "unverified",
+                    "stale_reason": "V1 旧产物仅完成哈希盘点，缺少 V2 成功 StageRun 证据。",
+                }
+            )
+            existing.add(artifact_key)
+    if not manifests:
+        return 0
+    store.upsert_artifact_states(manifests)
+    return len(manifests)
+
+
 def _refresh_migration_report(
     context: WorkspaceContext,
     migration: dict[str, Any],
@@ -7403,6 +7443,7 @@ def _handle_migration_scan(
         manifest=[dict(item) for item in dry_run.get("source_manifest") or [] if isinstance(item, dict)],
         actor=actor,
     )
+    legacy_artifact_count = _register_legacy_artifact_inventory(context, store)
     state = store.migration_state()
     from utils import write_json
 
@@ -7415,6 +7456,7 @@ def _handle_migration_scan(
             "source_manifest": dry_run.get("source_manifest") or [],
             "inventory": inventory,
             "imported_count": imported,
+            "legacy_artifact_count": legacy_artifact_count,
             "detected_count": detected,
             "migration": state,
         },
@@ -7422,7 +7464,10 @@ def _handle_migration_scan(
     return {
         "accepted": True,
         "operation_status": "succeeded",
-        "message": f"迁移扫描完成：导入 {imported} 项，发现 {detected} 项待协调状态。",
+        "message": (
+            f"迁移扫描完成：导入 {imported} 项，登记 {legacy_artifact_count} 个待重建旧 Artifact，"
+            f"发现 {detected} 项待协调状态。"
+        ),
         "migration": state,
     }
 
