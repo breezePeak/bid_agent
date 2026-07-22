@@ -5736,6 +5736,30 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
                 status_code=409,
                 details={"missing_gate_evaluations": missing_evaluations},
             )
+        evaluation_inputs = {
+            "global-review": context.root / "workspace" / "global_review.json",
+            "compliance-check": context.root / "workspace" / "compliance_report.json",
+        }
+        stale_evaluations: list[str] = []
+        for command, source_path in evaluation_inputs.items():
+            try:
+                evaluated_at = datetime.fromisoformat(str(latest_by_command[command].get("created_at") or ""))
+                source_changed_at = datetime.fromtimestamp(source_path.stat().st_mtime, tz=timezone.utc)
+            except (OSError, TypeError, ValueError):
+                raise ControlPlaneError(
+                    "STATE_UNAVAILABLE",
+                    "质量门禁评估或其输入时间戳无效，已拒绝正式出稿。",
+                    status_code=503,
+                )
+            if evaluated_at.tzinfo is None or evaluated_at < source_changed_at:
+                stale_evaluations.append(command)
+        if stale_evaluations:
+            raise ControlPlaneError(
+                "GATE_BLOCKED",
+                "质量门禁评估早于当前报告输入，请重新评估。",
+                status_code=409,
+                details={"stale_gate_evaluations": stale_evaluations},
+            )
     issues = store.issue_states()
     open_issues = [
         item for item in issues
