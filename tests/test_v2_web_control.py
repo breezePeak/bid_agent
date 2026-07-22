@@ -3066,6 +3066,36 @@ class V2WebControlTests(unittest.TestCase):
                 hashlib.sha256((alpha / "outputs" / "final.md").read_bytes()).hexdigest(),
             )
 
+    def test_v2_document_undo_proposal_uses_path_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.ACTIVE_RUN_ID = "beta"
+            web_app.ACTIVE_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                alpha_root = web_app._workspace_context("alpha").root
+                (alpha_root / "outputs").mkdir(parents=True)
+                backup_dir = alpha_root / "workspace" / "manual_line_edits"
+                backup_dir.mkdir(parents=True)
+                (alpha_root / "outputs" / "final.md").write_text("current", encoding="utf-8")
+                backup = backup_dir / "final_md_before_block_test.md"
+                backup.write_text("previous", encoding="utf-8")
+                web_app._LAST_BACKUP[alpha_root.resolve()] = backup
+                try:
+                    response = web_app.api_final_doc_undo_rewrite(_Request({}), "alpha")
+                finally:
+                    web_app._LAST_BACKUP.pop(alpha_root.resolve(), None)
+
+            payload = _body(response)
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["action"]["workspace_id"], "alpha")
+            self.assertEqual(len(ControlStore(WorkspaceContext.resolve(runs, "alpha")).snapshot()["confirmations"]), 1)
+            self.assertFalse((beta / "workspace" / "control.db").exists())
+
     def test_v2_document_proposal_busy_state_is_workspace_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

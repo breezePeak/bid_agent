@@ -9189,7 +9189,13 @@ def _propose_document_edit(request: Request, root: Path, payload: dict[str, Any]
     path = root / "outputs" / "final.md"
     if not path.exists() or not path.is_file():
         raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)
-    context = _workspace_context(ACTIVE_RUN_ID or root.name)
+    context = _workspace_context(root.name)
+    if not _same_path(context.root, root):
+        raise ControlPlaneError(
+            "WORKSPACE_MISMATCH",
+            "文档路径与 Command 工作区不一致，已拒绝创建确认操作。",
+            status_code=400,
+        )
     gateway = _command_gateway(context)
     command_payload = dict(payload)
     command_payload["base_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
