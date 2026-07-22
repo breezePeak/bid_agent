@@ -8,6 +8,13 @@
       <button class="btn btn-sm" @click="propose('migration.scan')">扫描旧状态</button>
       <button class="btn btn-sm" @click="propose('migration.cutover')" :disabled="migration.status === 'needs_reconciliation'">切换 V2</button>
     </div>
+    <div v-if="backups.length" class="migration-backups">
+      <b>恢复演练备份</b>
+      <div v-for="backup in backups" :key="backup.path" class="migration-backup">
+        <span>{{ backup.path }} · {{ backup.verified ? '已校验' : '未通过校验' }}</span>
+        <button class="btn btn-sm" :disabled="!backup.verified || drilling === backup.path" @click="drill(backup)">演练</button>
+      </div>
+    </div>
     <div v-if="pending" class="migration-pending">
       <span>{{ pending.label || '高风险操作等待确认' }}</span>
       <button class="btn btn-sm btn-danger" @click="confirm">确认执行</button>
@@ -23,20 +30,33 @@
 
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
-import { confirmWorkspaceAction, fetchWorkspaceSnapshot, submitWorkspaceCommand } from '../api'
+import { confirmWorkspaceAction, drillMigrationBackup, fetchMigrationBackups, fetchWorkspaceSnapshot, submitWorkspaceCommand } from '../api'
 
 const props = defineProps({ runId: { type: String, required: true } })
 const migration = ref({})
 const loading = ref(false)
 const pending = ref(null)
 const choices = ref({})
+const backups = ref([])
+const drilling = ref('')
 const openConflicts = computed(() => (migration.value.conflicts || []).filter(item => item.status === 'open'))
 
 async function refresh() {
   if (!props.runId) return
   loading.value = true
-  try { migration.value = (await fetchWorkspaceSnapshot(props.runId))?.data?.snapshot?.migration || {} }
+  try {
+    migration.value = (await fetchWorkspaceSnapshot(props.runId))?.data?.snapshot?.migration || {}
+    backups.value = (await fetchMigrationBackups(props.runId))?.data?.backups || []
+  }
   finally { loading.value = false }
+}
+async function drill(backup) {
+  drilling.value = backup.path
+  try {
+    const result = await drillMigrationBackup(props.runId, backup.path)
+    window.alert(result?.data?.backup?.recovery_drill === 'passed' ? '恢复演练通过' : '恢复演练未通过')
+  } catch (error) { window.alert(error?.response?.data?.message || error?.message || '恢复演练失败') }
+  finally { drilling.value = '' }
 }
 async function propose(kind, payload = {}) {
   try {
@@ -60,5 +80,5 @@ onMounted(refresh)
 </script>
 
 <style scoped>
-.migration-actions,.migration-pending{display:flex;gap:8px;align-items:center;padding:8px 12px}.migration-conflict{display:grid;gap:7px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-conflict select{max-width:150px}.migration-pending{background:#fff6df;font-size:12px;flex-wrap:wrap}
+.migration-actions,.migration-pending{display:flex;gap:8px;align-items:center;padding:8px 12px}.migration-conflict{display:grid;gap:7px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-conflict select{max-width:150px}.migration-pending{background:#fff6df;font-size:12px;flex-wrap:wrap}.migration-backups{display:grid;gap:6px;padding:10px 12px;border-top:1px solid var(--border-color,#ddd);font-size:12px}.migration-backup{display:flex;justify-content:space-between;gap:8px;align-items:center}
 </style>
