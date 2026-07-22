@@ -5667,7 +5667,7 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
     """Read-only formal-export checks backed by authoritative SQLite Issues."""
     from agent.issues import classify_issue_risk
 
-    store = _ensure_v2_issue_import(context)
+    store = ControlStore(context)
     store.assert_migration_ready()
     migration_preview = _v1_migration_dry_run(context)
     if migration_preview.get("status") != "ready":
@@ -5894,7 +5894,7 @@ _FORMAL_GATE_TREES = (
 def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
     digest = hashlib.sha256()
     artifact_sha256 = ""
-    store = _ensure_v2_issue_import(context)
+    store = ControlStore(context)
     migration_state = store.migration_state()
     control_domains = {
         "material_states": store.material_states(),
@@ -5943,7 +5943,24 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
 
 
 def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
-    items = _material_items(context)
+    store = ControlStore(context)
+    if store.v1_import_pending("materials"):
+        cutover = store.migration_state().get("cutover") or {}
+        if str(cutover.get("status") or "") == "active":
+            raise ControlPlaneError(
+                "MIGRATION_SCAN_REQUIRED",
+                "材料权威状态尚未迁移，已拒绝签发 GateReceipt。",
+                status_code=409,
+            )
+        # One-version V1 compatibility: read the legacy projection without
+        # importing or writing it while a formal gate is being evaluated.
+        from materials_checklist import load_materials_checklist
+
+        checklist = load_materials_checklist(context.root)
+        items = checklist.get("items") if isinstance(checklist, dict) else []
+        items = [dict(item) for item in items if isinstance(item, dict)]
+    else:
+        items = store.material_states()
     unsafe = [
         str(item.get("item_id") or "")
         for item in items
@@ -7405,10 +7422,10 @@ def _handle_gate_revalidate(
             str(gate.get("message") or "质量门禁未通过。"),
             details={"blocks": gate.get("blocks") or []},
         )
-    _assert_formal_materials_verified(context)
-    _assert_formal_artifacts_ready(context)
     try:
         preflight = _v2_export_preflight(context)
+        _assert_formal_materials_verified(context)
+        _assert_formal_artifacts_ready(context)
     except ControlPlaneError:
         raise
     except Exception as exc:

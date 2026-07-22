@@ -598,3 +598,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B112 | 2026-07-22 | 材料命令在落库核验前只读取 V1 清单投影，不再先调用独立 MaterialState upsert；因此自动上传核验、自动复验和人工确认的权威状态不会在审计写入失败时提前提交。新增 SQLite 触发器故障注入回归验证事务回滚。 |
 | V2.0-B113 | 2026-07-22 | `materials.upload` 将 upload_token 消费和 MaterialSubmission 审计合并到同一 SQLite 事务与 revision；提交审计失败时 token 保持 pending，不会出现“token 已消费却无提交证据”的不可重试半提交。保留已消费 token 的兼容审计写入路径，仅受管命令使用原子消费。 |
 | V2.0-B114 | 2026-07-22 | 正式 Artifact 门禁保留未切换工作区一个版本的 V1 manifest 兼容例外；但工作区一旦完成 V2 cutover，所有正式输入必须存在 SQLite Artifact manifest，缺失即以 `manifest_missing_after_cutover` 阻断，不能再靠文件存在性导出正式稿。 |
+| V2.0-B115 | 2026-07-22 | V2 正式出稿预检、GateReceipt 指纹与材料门禁移除读取时的 V1 自动导入/同步副作用。兼容窗口内仍可只读使用 V1 投影；V2 cutover 后未迁移材料一律以 `MIGRATION_SCAN_REQUIRED` fail-closed。预检先完成只读迁移检查后才读取材料与 Artifact，避免一次查询把兼容投影写成权威状态。 |

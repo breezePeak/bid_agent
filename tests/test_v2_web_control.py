@@ -1169,6 +1169,25 @@ class V2WebControlTests(unittest.TestCase):
             self.assertNotEqual(changed_issue, changed_policy)
             self.assertNotEqual(changed_policy, changed_artifact)
 
+    def test_v2_export_preflight_does_not_import_legacy_issue_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            issue_dir = root / "workspace" / "issues"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "open.json").write_text(
+                json.dumps({"issues": [{"id": "legacy-only", "status": "open", "severity": "warn"}]}),
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+
+            preflight = web_app._v2_export_preflight(context)
+
+            self.assertTrue(preflight["ok"])
+            self.assertTrue(store.issue_v1_import_pending())
+            self.assertEqual(store.revision(), 0)
+
     def test_formal_gate_blocks_stale_sqlite_artifact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
