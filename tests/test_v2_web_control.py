@@ -2344,6 +2344,29 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(payload["snapshot"]["materials"]["source"], "migration_required")
             self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "migration_required")
 
+    def test_v2_snapshot_exposes_latest_quality_evaluations(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            latest = store.record_gate_evaluation(
+                command="global-review",
+                verdict="pass",
+                input_fingerprint="current",
+                findings=[],
+                source="test",
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            self.assertEqual(payload["snapshot"]["quality"]["source"], "control.db")
+            self.assertEqual(
+                payload["snapshot"]["quality"]["latest_gate_evaluations"][0]["evaluation_id"],
+                latest["evaluation_id"],
+            )
+
     def test_v2_issue_reads_do_not_import_legacy_issue_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

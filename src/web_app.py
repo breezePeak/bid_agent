@@ -8138,6 +8138,10 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         store = ControlStore(context)
         snapshot = _migration_snapshot_with_source_state(context, store.snapshot())
         snapshot["compatibility_usage"] = store.compatibility_usage()
+        snapshot["quality"] = {
+            "latest_gate_evaluations": store.latest_gate_evaluations(),
+            "source": "control.db",
+        }
         migration_preview = _v1_migration_dry_run(context)
         legacy_import_pending = any(
             bool(item.get("import_pending"))
