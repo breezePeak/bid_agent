@@ -2812,6 +2812,9 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(store.goal_state()["goal_id"], "legacy")
             self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
             self.assertEqual(store.migration_conflicts()[0]["domain"], "orphan")
+            scan = store.snapshot()["migration"]["last_scan"]
+            self.assertTrue(scan["fingerprint"])
+            self.assertEqual(len(scan["manifest"]), 2)
 
 
 if __name__ == "__main__":

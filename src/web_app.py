@@ -5371,16 +5371,29 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     store = ControlStore(context)
     domains: dict[str, Any] = {}
     unrecognized: list[dict[str, Any]] = []
+    manifest: list[dict[str, Any]] = []
     sources = {
         "goal": context.root / "workspace" / "agent" / "goal_state.json",
         "materials": context.root / "workspace" / "materials_checklist.json",
         "issues": context.root / "workspace" / "issues" / "open.json",
     }
     for domain, path in sources.items():
-        if not path.exists() or not store.v1_import_pending(domain):
+        if not path.exists():
+            continue
+        content = path.read_bytes()
+        manifest.append(
+            {
+                "path": path.relative_to(context.root).as_posix(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+                "domain": domain,
+                "import_pending": store.v1_import_pending(domain),
+            }
+        )
+        if not store.v1_import_pending(domain):
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(content.decode("utf-8"))
             if domain == "materials":
                 payload = payload.get("items") if isinstance(payload, dict) else payload
             elif domain == "issues":
@@ -5397,6 +5410,16 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     for name in ("goal_state.json", "decision_trace.json", "decision_trace.jsonl"):
         path = context.root / name
         if path.exists() and path.is_file():
+            content = path.read_bytes()
+            manifest.append(
+                {
+                    "path": path.relative_to(context.root).as_posix(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                    "domain": "orphan",
+                    "import_pending": True,
+                }
+            )
             orphans.append(
                 {
                     "path": path.relative_to(context.root).as_posix(),
@@ -5414,6 +5437,10 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
         for domain, path in sources.items()
         if path.exists()
     }
+    result["source_manifest"] = manifest
+    result["source_fingerprint"] = hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     return result
 
 
@@ -7169,6 +7196,11 @@ def _handle_migration_scan(
                 reason=reason,
             )
             detected += 1
+    store.record_migration_scan(
+        fingerprint=str(dry_run.get("source_fingerprint") or ""),
+        manifest=[dict(item) for item in dry_run.get("source_manifest") or [] if isinstance(item, dict)],
+        actor=actor,
+    )
     state = store.migration_state()
     return {
         "accepted": True,

@@ -460,11 +460,45 @@ class ControlStore:
     def migration_state(self) -> dict[str, Any]:
         conflicts = self.migration_conflicts()
         open_conflicts = [item for item in conflicts if item.get("status") == "open"]
+        with self._connection() as connection:
+            scan = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
+            ).fetchone()
         return {
             "status": "needs_reconciliation" if open_conflicts else "ready",
             "open_count": len(open_conflicts),
             "conflicts": conflicts,
+            "last_scan": _decode(str(scan["value"]), None) if scan is not None else None,
         }
+
+    def record_migration_scan(self, *, fingerprint: str, manifest: list[dict[str, Any]], actor: dict[str, Any]) -> None:
+        if not fingerprint:
+            raise ControlPlaneError("COMMAND_INVALID", "迁移扫描缺少 source fingerprint。", status_code=400)
+        value = {"fingerprint": fingerprint, "manifest": manifest, "actor": actor, "scanned_at": _now()}
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                prior = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
+                ).fetchone()
+                prior_value = _decode(str(prior["value"]), {}) if prior is not None else {}
+                if isinstance(prior_value, dict) and prior_value.get("fingerprint") == fingerprint:
+                    connection.commit()
+                    return
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('migration_last_scan', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_json(value),),
+                )
+                self._event(
+                    connection, revision, "MigrationScanned", "Migration", self.context.workspace_id,
+                    {"fingerprint": fingerprint, "source_count": len(manifest), "actor": actor},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def v1_import_pending(self, domain: str) -> bool:
         markers = {
@@ -2671,6 +2705,9 @@ class ControlStore:
             migration_rows = connection.execute(
                 "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
             ).fetchall()
+            migration_scan = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
+            ).fetchone()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         return {
@@ -2693,6 +2730,7 @@ class ControlStore:
                 ),
                 "open_count": sum(1 for row in migration_rows if str(row["status"]) == "open"),
                 "conflicts": [self._migration_conflict_row(row) for row in migration_rows],
+                "last_scan": _decode(str(migration_scan["value"]), None) if migration_scan else None,
             },
         }
 
