@@ -6985,8 +6985,6 @@ def _handle_document_apply_edit(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING:
-        raise ControlPlaneError("LEASE_CONFLICT", "当前已有执行任务，不能并发修改终稿。", status_code=409)
     path = context.root / "outputs" / "final.md"
     if not path.exists() or not path.is_file():
         raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)

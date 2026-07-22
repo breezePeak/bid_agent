@@ -3096,6 +3096,42 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(len(ControlStore(WorkspaceContext.resolve(runs, "alpha")).snapshot()["confirmations"]), 1)
             self.assertFalse((beta / "workspace" / "control.db").exists())
 
+    def test_v2_document_edit_ignores_other_workspace_process_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            (alpha / "outputs").mkdir(parents=True)
+            beta.mkdir(parents=True)
+            final_md = alpha / "outputs" / "final.md"
+            final_md.write_text("before\n", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "document.apply_edit",
+                    "payload": {
+                        "mode": "overwrite",
+                        "new_md": "after",
+                        "base_sha256": hashlib.sha256(final_md.read_bytes()).hexdigest(),
+                    },
+                    "expected_revision": 0,
+                    "idempotency_key": "document-edit-other-workspace-running",
+                    "actor": {"type": "user", "id": "owner"},
+                },
+                workspace_id="alpha",
+            )
+            web_app.RUNNING = True
+            web_app.CURRENT_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "_run_sync", return_value=0), mock.patch(
+                "artifact_manifest.record_document_edit_artifacts"
+            ) as record_artifacts:
+                result = web_app._handle_document_apply_edit(context, envelope, "operation-alpha")
+
+            self.assertTrue(result["accepted"])
+            self.assertEqual(final_md.read_text(encoding="utf-8"), "after\n")
+            record_artifacts.assert_called_once_with(context)
+
     def test_v2_document_proposal_busy_state_is_workspace_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
