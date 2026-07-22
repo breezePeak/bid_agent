@@ -160,6 +160,18 @@ class V2WebControlTests(unittest.TestCase):
                 with self.assertRaisesRegex(Exception, "已拒绝执行"):
                     web_app._v2_gate_can_proceed(context, "build-md")
 
+    def test_v2_gate_allows_new_workspace_without_legacy_issue_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+
+            with mock.patch("agent.issues.quality_gate_mode", return_value="hard"):
+                gate = web_app._v2_gate_can_proceed(context, "build-md")
+
+            self.assertTrue(gate["can_proceed"])
+            self.assertEqual(gate["source"], "control.db")
+
     def test_v2_gate_requires_migration_for_legacy_issues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

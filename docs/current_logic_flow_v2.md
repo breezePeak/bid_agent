@@ -604,3 +604,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B118 | 2026-07-22 | V2 mutation 的质量门禁也不再自动导入旧 Issue：发现 Issue 领域待迁移即返回 `MIGRATION_SCAN_REQUIRED`，由显式管理员 `migration.scan` 建立权威 SQLite 状态后才允许继续。这样 CommandGateway 的门禁检查不会成为隐藏迁移通道。 |
 | V2.0-B119 | 2026-07-22 | V2 Issue 根因解释与批量修复预览同样移除自动导入；待迁移工作区统一返回 409 `MIGRATION_SCAN_REQUIRED`。Issue 查询、预览、解释与门禁均不会再通过读取路径改变 control.db。 |
 | V2.0-B120 | 2026-07-22 | 移除残留的 V2 Issue 自动导入 helper 语义：风险接受与 GateEvaluation 写入在 Issue 未迁移时也统一拒绝，旧 `open.json` 只能由 `migration.scan` 导入。所有 V2 Issue 消费者不再有隐式迁移旁路。 |
+| V2.0-B121 | 2026-07-22 | V2 Gate 对 Issue 迁移状态与其他消费者共用同一判定：存在旧 `open.json` 且尚未迁移时拒绝；没有旧状态文件的新建工作区可使用空 SQLite Issue 快照继续执行，不会因缺少无意义的导入 marker 被误阻断。 |

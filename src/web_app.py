@@ -5617,13 +5617,7 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     try:
         from agent.issues import quality_gate_mode
 
-        store = ControlStore(context)
-        if store.issue_v1_import_pending():
-            raise ControlPlaneError(
-                "MIGRATION_SCAN_REQUIRED",
-                "Issue 权威状态尚未迁移，已拒绝执行。",
-                status_code=409,
-            )
+        store = _ensure_v2_issue_import(context)
         issues = store.issue_states()
         open_issues = [
             item for item in issues
