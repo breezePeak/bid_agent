@@ -294,6 +294,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
             self.assertTrue(ControlStore(context).v1_import_pending("goal"))
 
+    def test_v2_status_uses_control_db_not_pipeline_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.prepare(
+                CommandEnvelope.from_mapping(
+                    {"kind": "pipeline.start", "payload": {"start_command": "build-md"}, "expected_revision": 0, "idempotency_key": "status-v2"},
+                    workspace_id="alpha",
+                )
+            )
+            (root / "workspace").mkdir(exist_ok=True)
+            (root / "workspace" / "pipeline_control.json").write_text(
+                json.dumps({"status": "failed", "current_stage": "legacy-stage"}), encoding="utf-8"
+            )
+
+            with mock.patch.object(web_app.SUPERVISOR, "load", side_effect=AssertionError("legacy pipeline read")):
+                status = web_app._status_payload(root, "alpha", v2_read_only=True, persist_manual_review_summary=False)
+
+            self.assertEqual(status["pipeline"]["status"], "queued")
+            self.assertEqual(status["pipeline"]["current_stage"], "build-md")
+
     def test_v2_goal_resume_updates_control_state_without_legacy_goal_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

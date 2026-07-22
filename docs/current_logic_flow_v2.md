@@ -637,3 +637,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B151 | 2026-07-22 | 材料验证成功后的 Goal 恢复移除 V1 Goal loader/状态机旁路：直接更新 `control.db.goal_state`，再刷新 `goal_state.json` 兼容投影；旧 Goal 未完成显式迁移时 fail-closed。 |
 | V2.0-B152 | 2026-07-22 | 材料回填在启动前检查 Issue 迁移；异步回填后的 Issue 重验结果立即显式投影到 `control.db.issue_states`。重验或投影异常会把 Operation 置为 blocked，避免旧 `open.json` 与 SQLite 门禁状态分叉。 |
 | V2.0-B153 | 2026-07-22 | 上传、自动验证和人工确认材料在产生任何副作用前检查 Goal 迁移；自动验证通过也会恢复 SQLite Goal 并刷新兼容投影，避免同一工作区出现“材料已 verified、Goal 仍被旧状态机阻塞”的分叉。 |
+| V2.0-B154 | 2026-07-22 | V2 Chat 状态读取改由 `control.db` 的 Operation、Event 与 AgentActivity 构成，不再读取 `pipeline_control.json`、`run_state.json` 或 Supervisor 作为运行权威；旧投影只保留给 V1 兼容界面。 |

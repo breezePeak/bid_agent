@@ -1827,11 +1827,35 @@ def _status_payload(
     persist_manual_review_summary: bool = True,
     v2_read_only: bool = False,
 ) -> dict[str, Any]:
-    run_state = _read_run_state(root)
-    run_events = load_run_events(root)
+    v2_store = ControlStore(WorkspaceContext.resolve(root.parent, root.name)) if v2_read_only else None
+    v2_snapshot = v2_store.snapshot() if v2_store is not None else {}
+    v2_operation = v2_snapshot.get("operation") if isinstance(v2_snapshot.get("operation"), dict) else {}
+    if v2_read_only:
+        # Control status must come from SQLite in V2.  V1 run_state.json and
+        # pipeline_control.json are compatibility projections, not a fallback
+        # authority for the Chat control surface.
+        pipeline_control = {
+            "operation_id": str(v2_operation.get("operation_id") or ""),
+            "kind": str(v2_operation.get("kind") or ""),
+            "status": str(v2_operation.get("status") or "idle"),
+            "current_stage": str(v2_operation.get("start_command") or ""),
+            "message": str(v2_operation.get("message") or ""),
+            "updated_at": str(v2_operation.get("updated_at") or ""),
+        }
+        run_state = {
+            "stage": pipeline_control["current_stage"],
+            "status": pipeline_control["status"],
+            "message": pipeline_control["message"],
+            "updated_at": pipeline_control["updated_at"],
+            "summary": {},
+        }
+        run_events = v2_store.events(max(1, v2_snapshot.get("revision", 0) - 20), limit=20)
+    else:
+        run_state = _read_run_state(root)
+        run_events = load_run_events(root)
+        pipeline_control = SUPERVISOR.load(root)
     project_profile = load_project_profile(root)
     review_summary = manual_review_summary(root) if persist_manual_review_summary else {}
-    pipeline_control = SUPERVISOR.load(root)
     repair_job = load_v2_repair_job(root) if v2_read_only else load_repair_job(root)
     pending_confirmation = None
     if str(repair_job.get("status") or "") == "awaiting_confirmation":
@@ -1841,13 +1865,13 @@ def _status_payload(
             "job_id": str(repair_job.get("job_id") or ""),
             "count": int(repair_job.get("total_count") or 0),
         }
-    pipeline_running = SUPERVISOR.is_running(root) or str(pipeline_control.get("status", "")) in {
+    pipeline_running = (not v2_read_only and SUPERVISOR.is_running(root)) or str(pipeline_control.get("status", "")) in {
         "running",
         "recovering",
         "retrying",
         "pausing",
     }
-    selected_running = (RUNNING and _same_path(CURRENT_RUN_ROOT, root)) or pipeline_running
+    selected_running = ((RUNNING and _same_path(CURRENT_RUN_ROOT, root)) if not v2_read_only else False) or pipeline_running
     effective_task = CURRENT_TASK if RUNNING and _same_path(CURRENT_RUN_ROOT, root) else str(pipeline_control.get("current_stage", ""))
     run_state_stage = str(run_state.get("stage", ""))
     run_state_command = _command_for_stage(run_state_stage)
@@ -1950,7 +1974,7 @@ def _status_payload(
         },
         "running": selected_running,
         "current_task": effective_task if selected_running else "",
-        "global_running": RUNNING or SUPERVISOR.is_running(),
+        "global_running": selected_running if v2_read_only else (RUNNING or SUPERVISOR.is_running()),
         "pipeline": pipeline_control,
         "recovery_resolved": recovery_resolved,
         "running_run": {
@@ -1976,7 +2000,7 @@ def _status_payload(
         "project_profile_choices": project_profile_choices(),
         "llm_config": _active_llm_summary(),
         "agent_activity": (
-            ControlStore(WorkspaceContext.resolve(root.parent, root.name)).agent_activity_state()
+            v2_store.agent_activity_state()
             if v2_read_only
             else _safe_agent_activity(root)
         ),
