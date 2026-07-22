@@ -532,6 +532,55 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(confirmed_body["ok"])
             self.assertEqual(ControlStore(context).snapshot()["operation"]["status"], "cancelled")
 
+    def test_v2_process_termination_rejects_mismatched_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "pipeline_control.json").write_text(
+                json.dumps(
+                    {
+                        "operation_id": "stale-operation",
+                        "fencing_token": 3,
+                        "worker_pid": 999,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            web_app.CURRENT_PROCESS = None
+            web_app.CURRENT_RUN_ROOT = None
+
+            with mock.patch.object(web_app, "_terminate_pid_tree") as terminate:
+                with self.assertRaises(ControlPlaneError) as raised:
+                    web_app._terminate_workspace_process(
+                        context,
+                        operation_id="current-operation",
+                        fencing_token=4,
+                    )
+
+            self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
+            terminate.assert_not_called()
+
+            (workspace / "pipeline_control.json").write_text(
+                json.dumps(
+                    {
+                        "operation_id": "current-operation",
+                        "fencing_token": 4,
+                        "worker_pid": 999,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.object(web_app, "_terminate_pid_tree") as terminate:
+                web_app._terminate_workspace_process(
+                    context,
+                    operation_id="current-operation",
+                    fencing_token=4,
+                )
+            terminate.assert_called_once_with(999)
+
     def test_chat_uses_explicit_workspace_and_pause_gateway(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

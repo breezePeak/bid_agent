@@ -6386,12 +6386,28 @@ def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
     )
 
 
-def _terminate_workspace_process(context: WorkspaceContext) -> None:
+def _terminate_workspace_process(
+    context: WorkspaceContext,
+    *,
+    operation_id: str,
+    fencing_token: int,
+) -> None:
     process = CURRENT_PROCESS if _same_path(CURRENT_RUN_ROOT, context.root) else None
     if process:
         _terminate_process_tree(process)
         return
     control = SUPERVISOR.load(context.root)
+    if (
+        not operation_id
+        or int(fencing_token or 0) <= 0
+        or str(control.get("operation_id") or "") != operation_id
+        or int(control.get("fencing_token") or 0) != int(fencing_token)
+    ):
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            "Pipeline Worker checkpoint 与 control.db Operation 不一致，已拒绝终止未知进程。",
+            status_code=503,
+        )
     _terminate_pid_tree(int(control.get("worker_pid", 0) or 0))
 
 
@@ -6494,7 +6510,12 @@ def _handle_pipeline_pause(
     if SUPERVISOR.is_running(context.root):
         SUPERVISOR.pause()
         _append_log(f"[暂停] CommandGateway 正在停止: {context.workspace_id}/{CURRENT_TASK}")
-        _terminate_workspace_process(context)
+        operation = ControlStore(context).operation(operation_id) or {}
+        _terminate_workspace_process(
+            context,
+            operation_id=operation_id,
+            fencing_token=int(operation.get("fencing_token") or 0),
+        )
         return {"accepted": True, "operation_status": "pausing", "message": "已发送暂停指令。"}
     return {"accepted": True, "operation_status": "paused", "message": "Operation 已处于暂停状态。"}
 
@@ -6510,7 +6531,12 @@ def _handle_pipeline_cancel(
     if SUPERVISOR.is_running(context.root):
         SUPERVISOR.cancel()
         _append_log(f"[取消] CommandGateway 正在终止: {context.workspace_id}/{CURRENT_TASK}")
-        _terminate_workspace_process(context)
+        operation = ControlStore(context).operation(operation_id) or {}
+        _terminate_workspace_process(
+            context,
+            operation_id=operation_id,
+            fencing_token=int(operation.get("fencing_token") or 0),
+        )
         return {"accepted": True, "operation_status": "cancelling", "message": "已发送取消指令。"}
     return {"accepted": True, "operation_status": "cancelled", "message": "Operation 已取消。"}
 
