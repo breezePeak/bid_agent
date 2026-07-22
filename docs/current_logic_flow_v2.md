@@ -601,3 +601,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B115 | 2026-07-22 | V2 正式出稿预检、GateReceipt 指纹与材料门禁移除读取时的 V1 自动导入/同步副作用。兼容窗口内仍可只读使用 V1 投影；V2 cutover 后未迁移材料一律以 `MIGRATION_SCAN_REQUIRED` fail-closed。预检先完成只读迁移检查后才读取材料与 Artifact，避免一次查询把兼容投影写成权威状态。 |
 | V2.0-B116 | 2026-07-22 | V2 WorkspaceSnapshot 不再在刷新页面时自动导入 V1 Issue/Materials，且检测到实际待迁移 V1 状态时不再调用会初始化旧 Goal/Repair/Activity 的 V1 展示聚合器；未迁移领域显式标记 `migration_required` 并保持 SQLite revision 不变。迁移仍必须通过管理员确认的 `migration.scan` Command，避免只读 UI 成为隐式状态写入入口。 |
 | V2.0-B117 | 2026-07-22 | V2 Issue 列表与修复预览读取路径移除 V1 自动导入：列表在迁移前仅返回 SQLite 空快照并标记 `migration_required`，修复预览返回 409 `MIGRATION_SCAN_REQUIRED`。只读请求不再能够把旧 Issue 文件转化为权威状态。 |
+| V2.0-B118 | 2026-07-22 | V2 mutation 的质量门禁也不再自动导入旧 Issue：发现 Issue 领域待迁移即返回 `MIGRATION_SCAN_REQUIRED`，由显式管理员 `migration.scan` 建立权威 SQLite 状态后才允许继续。这样 CommandGateway 的门禁检查不会成为隐藏迁移通道。 |

@@ -5618,7 +5618,14 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
     try:
         from agent.issues import quality_gate_mode
 
-        issues = _ensure_v2_issue_import(context).issue_states()
+        store = ControlStore(context)
+        if store.issue_v1_import_pending():
+            raise ControlPlaneError(
+                "MIGRATION_SCAN_REQUIRED",
+                "Issue 权威状态尚未迁移，已拒绝执行。",
+                status_code=409,
+            )
+        issues = store.issue_states()
         open_issues = [
             item for item in issues
             if str(item.get("status") or "") in {"open", "in_progress"}
@@ -5659,6 +5666,8 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
                 else f"存在 {len(blocks)} 条阻断问题，禁止继续执行。"
             ),
         }
+    except ControlPlaneError:
+        raise
     except Exception as exc:
         raise ControlPlaneError(
             "STATE_UNAVAILABLE",

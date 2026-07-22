@@ -160,7 +160,7 @@ class V2WebControlTests(unittest.TestCase):
                 with self.assertRaisesRegex(Exception, "已拒绝执行"):
                     web_app._v2_gate_can_proceed(context, "build-md")
 
-    def test_v2_gate_imports_legacy_issues_once_then_keeps_sqlite_authority(self) -> None:
+    def test_v2_gate_requires_migration_for_legacy_issues(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             root = runs / "alpha"
@@ -173,18 +173,14 @@ class V2WebControlTests(unittest.TestCase):
             )
             context = WorkspaceContext.resolve(runs, "alpha")
 
-            with mock.patch("agent.issues.quality_gate_mode", return_value="hard"):
-                first = web_app._v2_gate_can_proceed(context, "build-md")
-                path.write_text(json.dumps({"issues": []}), encoding="utf-8")
-                second = web_app._v2_gate_can_proceed(context, "build-md")
+            with self.assertRaises(ControlPlaneError) as raised:
+                web_app._v2_gate_can_proceed(context, "build-md")
 
-            self.assertFalse(first["can_proceed"])
-            self.assertFalse(second["can_proceed"])
-            imported = ControlStore(context).issue_states()
-            self.assertEqual(imported[0]["id"], "legacy-block")
-            self.assertEqual(imported[0]["control_source"], "v1_import")
+            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertTrue(ControlStore(context).issue_v1_import_pending())
+            self.assertEqual(ControlStore(context).revision(), 0)
 
-    def test_v2_issue_import_fails_closed_for_invalid_legacy_state(self) -> None:
+    def test_v2_gate_fails_closed_for_unmigrated_invalid_legacy_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             root = runs / "alpha"
@@ -193,8 +189,9 @@ class V2WebControlTests(unittest.TestCase):
             (issue_dir / "open.json").write_text("{invalid", encoding="utf-8")
             context = WorkspaceContext.resolve(runs, "alpha")
 
-            with self.assertRaisesRegex(Exception, "无法导入"):
+            with self.assertRaises(ControlPlaneError) as raised:
                 web_app._v2_gate_can_proceed(context, "build-md")
+            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
             self.assertTrue(ControlStore(context).issue_v1_import_pending())
 
     def test_v2_start_snapshot_pause_and_cancel_confirmation(self) -> None:
