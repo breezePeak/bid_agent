@@ -1368,6 +1368,18 @@ class V2WebControlTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).replace_issue_states(
+                [
+                    {
+                        "id": "critical-1",
+                        "code": "CRITICAL_CONFLICT",
+                        "title": "critical conflict",
+                        "severity": "block",
+                        "status": "open",
+                    }
+                ],
+                source="test",
+            )
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.dict("os.environ", {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
                     proposed = _body(
@@ -1383,7 +1395,9 @@ class V2WebControlTests(unittest.TestCase):
                                             "is_admin": True,
                                             "confirm_critical": True,
                                         },
-                                        "expected_revision": 0,
+                                        "expected_revision": ControlStore(
+                                            WorkspaceContext.resolve(runs, "alpha")
+                                        ).revision(),
                                         "idempotency_key": "critical-risk",
                                     }
                                 ),

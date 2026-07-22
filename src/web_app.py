@@ -5384,30 +5384,15 @@ def _workspace_context(workspace_id: str) -> WorkspaceContext:
 
 
 def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
-    """Import a V1 Issue snapshot exactly once before V2 treats SQLite as authority."""
+    """Return migrated V2 Issue state; V1 imports only happen via migration.scan."""
     store = ControlStore(context)
-    if not store.issue_v1_import_pending():
-        return store
-    path = context.root / "workspace" / "issues" / "open.json"
-    issues: list[dict[str, Any]] = []
-    if path.exists():
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise ControlPlaneError(
-                "STATE_UNAVAILABLE",
-                f"旧 Issue 状态无法导入，已拒绝继续: {exc}",
-                status_code=503,
-            ) from exc
-        rows = payload.get("issues") if isinstance(payload, dict) else payload
-        if not isinstance(rows, list):
-            raise ControlPlaneError(
-                "STATE_UNAVAILABLE",
-                "旧 Issue 状态格式无效，已拒绝继续。",
-                status_code=503,
-            )
-        issues = [dict(item) for item in rows if isinstance(item, dict)]
-    store.ensure_issue_states(issues)
+    legacy_path = context.root / "workspace" / "issues" / "open.json"
+    if store.issue_v1_import_pending() and legacy_path.exists():
+        raise ControlPlaneError(
+            "MIGRATION_SCAN_REQUIRED",
+            "Issue 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            status_code=409,
+        )
     return store
 
 
