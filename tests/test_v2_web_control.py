@@ -3638,6 +3638,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertIn("alpha-log", chunk)
             self.assertNotIn("beta-log", chunk)
 
+    def test_v2_log_stream_reads_control_events_not_v1_run_events(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).replace_issue_states(
+                [{"id": "issue-1", "status": "open", "severity": "warn"}],
+                source="test",
+            )
+
+            async def first_chunk() -> str:
+                response = await web_app.api_logs_stream(_EventRequest(), "alpha")
+                chunk = await anext(response.body_iterator)
+                await response.body_iterator.aclose()
+                return chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "load_run_events", side_effect=AssertionError("legacy event read")):
+                    chunk = asyncio.run(first_chunk())
+
+            self.assertIn("workspace_event", chunk)
+            self.assertIn("IssueStateProjected", chunk)
+
     def test_workspace_log_context_is_cleared_when_pipeline_raises(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "alpha"

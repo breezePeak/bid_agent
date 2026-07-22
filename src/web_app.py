@@ -8983,7 +8983,9 @@ def api_logs(lines: int = Query(200, ge=1, le=2000), workspace_id: str = "") -> 
 @app.get("/api/v2/workspaces/{workspace_id}/logs/stream")
 @app.get("/api/logs/stream")
 async def api_logs_stream(request: Request, workspace_id: str = "") -> StreamingResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else None
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context is not None else None
+    control_store = ControlStore(context) if context is not None else None
 
     async def stream():
         last = 0
@@ -8995,12 +8997,21 @@ async def api_logs_stream(request: Request, workspace_id: str = "") -> Streaming
             while last < len(available_lines):
                 yield f"data: {json.dumps({'type': 'log', 'line': available_lines[last]}, ensure_ascii=False)}\n\n"
                 last += 1
-            events = load_run_events(root or _active_root())
-            while last_event < len(events):
-                event = events[last_event]
-                event_line = f"[{event.get('stage', '')}] {event.get('event_type', '')} {event.get('message', '')}".strip()
-                yield f"data: {json.dumps({'type': 'run_event', 'event': event, 'line': event_line}, ensure_ascii=False)}\n\n"
-                last_event += 1
+            if control_store is not None:
+                events = control_store.events(last_event, limit=200)
+                for event in events:
+                    last_event = int(event.get("seq") or last_event)
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    message = str(payload.get("message") or payload.get("status") or "")
+                    event_line = f"[ControlPlane] {event.get('kind', '')} {message}".strip()
+                    yield f"data: {json.dumps({'type': 'workspace_event', 'event': event, 'line': event_line}, ensure_ascii=False)}\n\n"
+            else:
+                events = load_run_events(_active_root())
+                while last_event < len(events):
+                    event = events[last_event]
+                    event_line = f"[{event.get('stage', '')}] {event.get('event_type', '')} {event.get('message', '')}".strip()
+                    yield f"data: {json.dumps({'type': 'run_event', 'event': event, 'line': event_line}, ensure_ascii=False)}\n\n"
+                    last_event += 1
             await asyncio.sleep(0.5)
 
     return StreamingResponse(stream(), media_type="text/event-stream")

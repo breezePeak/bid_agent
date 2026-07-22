@@ -983,11 +983,11 @@ function connectSSE() {
       const d = JSON.parse(e.data)
       if (!d || !d.line) return
       const line = String(d.line)
-      if (d.type === 'run_event') {
-        const et = (d.event && d.event.event_type) || ''
+      if (d.type === 'run_event' || d.type === 'workspace_event') {
+        const et = (d.event && (d.event.event_type || d.event.kind)) || ''
         // success 由 status 轮询给出带用时的更漂亮消息，这里避免重复
         if (et === 'success') return
-        pushValuableLog(line, 'run_event')
+        pushValuableLog(line, d.type)
       } else {
         if (VALUABLE_LOG_RE.test(line)) pushValuableLog(line, 'log')
       }
