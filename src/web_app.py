@@ -6465,13 +6465,19 @@ def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
     )
     stage_command = str(payload.get("current_stage") or "").strip()
     if stage_command and operation_status in {"failed", "cancelled"}:
-        store.record_stage_run(
-            operation_id,
-            stage_command,
-            "failed" if operation_status == "failed" else "cancelled",
-            disposition="pipeline_terminal",
-            error={"message": str(error)} if error else None,
-        )
+        latest = store.latest_stage_run(operation_id, stage_command)
+        # The Supervisor has already persisted detailed terminal dispositions
+        # (gate blocked, runner failure, artifact failure, etc.). Checkpoint
+        # synchronization only fills the crash/restart gap; it must not erase
+        # the more specific lifecycle audit record.
+        if latest is None or str(latest.get("status") or "") == "running":
+            store.record_stage_run(
+                operation_id,
+                stage_command,
+                "failed" if operation_status == "failed" else "cancelled",
+                disposition="pipeline_terminal",
+                error={"message": str(error)} if error else None,
+            )
 
 
 def _terminate_workspace_process(

@@ -2980,6 +2980,20 @@ class ControlStore:
             result.append(item)
         return result
 
+    def latest_stage_run(self, operation_id: str, stage_command: str) -> dict[str, Any] | None:
+        """Return the latest attempt for one stage without inferring its state."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM stage_runs WHERE operation_id = ? AND stage_command = ? "
+                "ORDER BY attempt DESC LIMIT 1",
+                (str(operation_id or ""), str(stage_command or "")),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
     def document_undo(self) -> dict[str, Any] | None:
         """Return the durable one-step document undo pointer for this workspace."""
         with self._connection() as connection:

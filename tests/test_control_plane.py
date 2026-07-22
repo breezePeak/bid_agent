@@ -686,6 +686,8 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(runs[0]["status"], "succeeded")
             self.assertEqual(runs[0]["disposition"], "produced")
             self.assertEqual(store.snapshot()["stage_runs"][0]["stage_run_id"], running["stage_run_id"])
+            self.assertEqual(store.latest_stage_run("operation-1", "build-md")["status"], "succeeded")
+            self.assertIsNone(store.latest_stage_run("operation-1", "missing-stage"))
 
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

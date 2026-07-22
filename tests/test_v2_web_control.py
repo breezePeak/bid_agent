@@ -2703,6 +2703,57 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(stage_run["stage_command"], "build-docx")
             self.assertEqual(stage_run["error"]["message"], "docx failed")
 
+    def test_pipeline_failure_sync_preserves_supervisor_stage_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "stage-run-specific-failure",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            gateway.store.record_stage_run(
+                receipt.operation_id or "",
+                "build-docx",
+                "running",
+                disposition="started",
+            )
+            gateway.store.record_stage_run(
+                receipt.operation_id or "",
+                "build-docx",
+                "failed",
+                disposition="outputs_incomplete",
+                error={"message": "artifact missing"},
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                web_app._sync_pipeline_control_state(
+                    context.root,
+                    {
+                        "operation_id": receipt.operation_id,
+                        "fencing_token": operation["fencing_token"],
+                        "status": "failed",
+                        "current_stage": "build-docx",
+                        "error": "generic checkpoint failure",
+                    },
+                )
+
+            stage_run = gateway.store.latest_stage_run(receipt.operation_id or "", "build-docx") or {}
+            self.assertEqual(stage_run["disposition"], "outputs_incomplete")
+            self.assertEqual(stage_run["error"]["message"], "artifact missing")
+
     def test_restart_reconcile_uses_matching_v2_operation_identity(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
