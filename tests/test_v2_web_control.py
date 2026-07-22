@@ -1194,6 +1194,33 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "GATE_BLOCKED")
             self.assertEqual(raised.exception.details["artifacts"][0]["reason"], "stale")
 
+    def test_formal_gate_requires_artifact_manifest_after_v2_cutover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            (root / "outputs" / "final.docx").write_bytes(b"docx")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.record_migration_scan(
+                fingerprint="verified-v1-source",
+                manifest=[],
+                actor={"type": "user", "id": "admin", "role": "admin"},
+            )
+            store.activate_migration_cutover(
+                fingerprint="verified-v1-source",
+                actor={"type": "user", "id": "admin", "role": "admin"},
+            )
+
+            with self.assertRaises(ControlPlaneError) as raised:
+                web_app._assert_formal_artifacts_ready(context)
+
+            self.assertEqual(raised.exception.code, "GATE_BLOCKED")
+            self.assertEqual(
+                raised.exception.details["artifacts"][0]["reason"],
+                "manifest_missing_after_cutover",
+            )
+
     def test_formal_gate_fails_closed_without_docx(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

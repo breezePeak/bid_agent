@@ -5967,12 +5967,17 @@ def _assert_formal_artifacts_ready(context: WorkspaceContext) -> None:
 
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
+    cutover_active = str((store.migration_state().get("cutover") or {}).get("status") or "") == "active"
     blocked: list[dict[str, str]] = []
     for relative in _FORMAL_GATE_INPUTS:
         state = states.get(relative)
         # During the one-version V1 compatibility window, missing manifests are
         # accepted and will be bootstrapped by the V2 Pipeline on first reuse.
+        # A workspace that has explicitly cut over to V2 can no longer use this
+        # exception: its formal outputs must have V2 manifest evidence.
         if state is None:
+            if cutover_active:
+                blocked.append({"path": relative, "reason": "manifest_missing_after_cutover"})
             continue
         current = describe_artifact(context.root, RunArtifact(relative))
         if state.get("status") != "ready":
