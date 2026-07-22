@@ -2506,9 +2506,15 @@ class V2WebControlTests(unittest.TestCase):
             context = WorkspaceContext.resolve(runs, "alpha")
             store = ControlStore(context)
             store.ensure_material_states([{"item_id": "license", "requirement": "营业执照", "response_status": "submitted"}])
+            staged = store.register_material_upload(
+                staged_path="workspace/material_uploads/license.pdf",
+                filename="license.pdf",
+                sha256="b" * 64,
+                size_bytes=99,
+            )
             store.record_material_submission(
                 item_id="license",
-                upload={"upload_token": "token-1", "filename": "license.pdf", "sha256": "b" * 64, "size_bytes": 99},
+                upload=store.consume_material_upload(staged["upload_token"]),
                 actor={"id": "owner"},
                 source="test",
             )

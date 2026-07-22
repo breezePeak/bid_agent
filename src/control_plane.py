@@ -1492,6 +1492,22 @@ class ControlStore:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                upload_row = connection.execute(
+                    "SELECT filename, sha256, size_bytes, status FROM material_upload_tokens WHERE upload_token = ?",
+                    (token,),
+                ).fetchone()
+                if upload_row is None or str(upload_row["status"] or "") != "consumed":
+                    raise ControlPlaneError(
+                        "UPLOAD_TOKEN_INVALID",
+                        "材料提交必须关联已消费的当前工作区 upload_token。",
+                        status_code=409,
+                    )
+                if (
+                    str(upload_row["filename"] or "") != filename
+                    or str(upload_row["sha256"] or "") != sha256
+                    or int(upload_row["size_bytes"] or 0) != size_bytes
+                ):
+                    raise ControlPlaneError("UPLOAD_HASH_MISMATCH", "材料提交与 upload_token 证据不一致。", status_code=409)
                 connection.execute(
                     """
                     INSERT INTO material_submissions(

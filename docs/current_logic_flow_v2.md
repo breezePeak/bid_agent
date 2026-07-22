@@ -592,3 +592,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B106 | 2026-07-22 | 正式出稿预检开始检查每个命令最新的 GateEvaluation；最新 verdict 为 `block` 或 `error` 时分别以 GATE_BLOCKED 或 STATE_UNAVAILABLE fail-closed，必须重新完成成功的重验，历史较早失败记录不会覆盖同命令后续评估。 |
 | V2.0-B107 | 2026-07-22 | 最新 GateEvaluation 的查询改为按 SQLite 持久化插入顺序逐命令取值，不再依赖有限条数的内存筛选；高频重验不会因历史记录超过读取上限而遗漏某个命令的最新阻断结论。 |
 | V2.0-B108 | 2026-07-22 | GateReceipt 输入 fingerprint 纳入每个命令最新 GateEvaluation；任何后续质量重验都会使既有正式凭据 stale，下载正式稿必须重新完成预检与凭据签发，不能继续使用质量证据变化前的 receipt。 |
+| V2.0-B109 | 2026-07-22 | MaterialSubmission 写入前必须复核当前工作区已消费 upload_token 的文件名、hash 与大小；内部调用方也不能伪造提交历史或把其他上传证据绑定到材料，状态/证据不一致一律拒绝。 |

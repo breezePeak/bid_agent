@@ -158,15 +158,16 @@ class ControlPlaneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             store = ControlStore(context)
+            staged = store.register_material_upload(
+                staged_path="workspace/material_uploads/license.pdf",
+                filename="license.pdf",
+                sha256="a" * 64,
+                size_bytes=123,
+            )
+            consumed = store.consume_material_upload(staged["upload_token"])
             submission = store.record_material_submission(
                 item_id="qualification-license",
-                upload={
-                    "upload_token": "token-1",
-                    "filename": "license.pdf",
-                    "sha256": "a" * 64,
-                    "size_bytes": 123,
-                    "staged_path": "workspace/material_uploads/secret.pdf",
-                },
+                upload={**consumed, "staged_path": "workspace/material_uploads/secret.pdf"},
                 actor={"id": "owner", "role": "operator"},
                 source="materials.upload",
             )
@@ -175,6 +176,14 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(history[0]["sha256"], "a" * 64)
             self.assertEqual(history[0]["actor"]["id"], "owner")
             self.assertNotIn("staged_path", history[0])
+            with self.assertRaises(ControlPlaneError) as forged:
+                store.record_material_submission(
+                    item_id="qualification-license",
+                    upload={**consumed, "sha256": "b" * 64},
+                    actor={"id": "owner"},
+                    source="materials.upload",
+                )
+            self.assertEqual(forged.exception.code, "UPLOAD_HASH_MISMATCH")
 
     def test_latest_gate_evaluations_uses_persisted_insertion_order(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
