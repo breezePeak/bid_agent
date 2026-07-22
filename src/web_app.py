@@ -7720,64 +7720,54 @@ def _trigger_material_refill(
     replan_jobs: bool,
     max_chapters: int,
 ) -> dict[str, Any]:
-    global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
-    if RUNNING or SUPERVISOR.is_running():
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         return {"ok": False, "busy": True, "message": "当前已有任务在运行。"}
-    RUNNING = True
-    CURRENT_TASK = "materials-refill"
-    CURRENT_RUN_ID = context.workspace_id
-    CURRENT_RUN_ROOT = context.root
-    PAUSE_REQUESTED = False
 
     def worker() -> None:
-        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
         status = "failed"
         message = "材料回填失败。"
         error: dict[str, Any] | None = None
-        try:
-            from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
-
-            ControlStore(context).sync_operation(
-                operation_id,
-                "running",
-                message="正在按已验证材料回填章节。",
-                fencing_token=fencing_token,
-            )
-            result = refill_material_gaps(
-                context.root,
-                chapter_ids=chapter_ids,
-                replan_jobs=replan_jobs,
-                max_chapters=max_chapters,
-            )
-            from artifact_manifest import record_external_chapter_mutation
-
-            record_external_chapter_mutation(context, disposition="materials_refill")
+        with _legacy_execution_scope("materials-refill", context.workspace_id, context.root):
             try:
-                result["revalidate"] = revalidate_issues_after_materials(context.root)
-                _project_quality_issues(context)
-            except Exception as exc:
-                result["revalidate_error"] = str(exc)
-            failed = result.get("failed") if isinstance(result.get("failed"), list) else []
-            status = "succeeded" if result.get("ok") and not failed and not result.get("revalidate_error") else "blocked"
-            message = str(result.get("message") or "材料回填完成。")
-            error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
-        except Exception as exc:
-            error = {"message": str(exc)}
-            message = f"材料回填失败: {exc}"
-        finally:
-            try:
+                from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
+
                 ControlStore(context).sync_operation(
                     operation_id,
-                    status,
-                    message=message,
-                    error=error,
+                    "running",
+                    message="正在按已验证材料回填章节。",
                     fencing_token=fencing_token,
                 )
-            finally:
-                RUNNING = False
-                CURRENT_TASK = ""
-                CURRENT_RUN_ID = ""
-                CURRENT_RUN_ROOT = None
+                result = refill_material_gaps(
+                    context.root,
+                    chapter_ids=chapter_ids,
+                    replan_jobs=replan_jobs,
+                    max_chapters=max_chapters,
+                )
+                from artifact_manifest import record_external_chapter_mutation
+
+                record_external_chapter_mutation(context, disposition="materials_refill")
+                try:
+                    result["revalidate"] = revalidate_issues_after_materials(context.root)
+                    _project_quality_issues(context)
+                except Exception as exc:
+                    result["revalidate_error"] = str(exc)
+                failed = result.get("failed") if isinstance(result.get("failed"), list) else []
+                status = "succeeded" if result.get("ok") and not failed and not result.get("revalidate_error") else "blocked"
+                message = str(result.get("message") or "材料回填完成。")
+                error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
+            except Exception as exc:
+                error = {"message": str(exc)}
+                message = f"材料回填失败: {exc}"
+        try:
+            ControlStore(context).sync_operation(
+                operation_id,
+                status,
+                message=message,
+                error=error,
+                fencing_token=fencing_token,
+            )
+        except Exception as exc:
+            _append_log(f"[警告] 材料回填 Operation 状态回写失败: {exc}")
 
     threading.Thread(target=worker, daemon=True, name=f"materials-refill-{context.workspace_id}").start()
     return {"ok": True, "message": "材料回填已启动。"}
