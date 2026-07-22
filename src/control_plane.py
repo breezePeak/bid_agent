@@ -662,10 +662,21 @@ class ControlStore:
                     (conflict_id, domain_name, _json(legacy), _json(authoritative), str(reason), now),
                 )
                 if int(cursor.rowcount or 0):
+                    placeholders = ",".join("?" for _ in self.ACTIVE_OPERATION_STATES)
+                    blocked = connection.execute(
+                        f"UPDATE operations SET status = 'blocked', updated_at = ?, "
+                        "message = ? WHERE status IN (" + placeholders + ")",
+                        (
+                            now,
+                            "检测到 V1/V2 状态迁移冲突，等待管理员协调。",
+                            *self.ACTIVE_OPERATION_STATES,
+                        ),
+                    )
                     revision = self._bump_revision(connection)
                     self._event(
                         connection, revision, "MigrationConflictDetected", "MigrationConflict",
-                        conflict_id, {"domain": domain_name, "reason": str(reason)},
+                        conflict_id,
+                        {"domain": domain_name, "reason": str(reason), "blocked_operations": int(blocked.rowcount or 0)},
                     )
                 connection.commit()
             except Exception:

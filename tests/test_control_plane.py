@@ -148,6 +148,22 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(hashlib.sha256(backup_path.read_bytes()).hexdigest(), resolved["resolution"]["backup_sha256"])
             self.assertTrue(any(event["kind"] == "MigrationConflictResolved" for event in store.events()))
 
+    def test_migration_conflict_blocks_active_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            gateway.store.record_migration_conflict(
+                domain="goal", legacy={"goal_id": "v1"}, authoritative={"goal_id": "v2"}, reason="mismatch"
+            )
+            operation = gateway.store.operation(started.operation_id or "") or {}
+            self.assertEqual(operation["status"], "blocked")
+            event = next(item for item in gateway.store.events() if item["kind"] == "MigrationConflictDetected")
+            self.assertEqual(event["payload"]["blocked_operations"], 1)
+
     def test_binding_legacy_goal_never_promotes_legacy_success_without_revalidation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
