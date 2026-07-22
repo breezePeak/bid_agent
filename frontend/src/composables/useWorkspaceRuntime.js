@@ -186,6 +186,7 @@ export function useWorkspaceRuntime(options = {}) {
   const pipeline = computed(() => state.status?.pipeline || null)
   const issuesSummary = computed(() => state.status?.issues_summary || null)
   const complianceSummary = computed(() => state.status?.compliance_summary || null)
+  const quality = computed(() => state.status?.quality || { latest_gate_evaluations: [] })
   const stores = computed(() => runtime.value?.stores || null)
 
   function resolveRunId() {
@@ -234,6 +235,7 @@ export function useWorkspaceRuntime(options = {}) {
     pipeline,
     issuesSummary,
     complianceSummary,
+    quality,
     stores,
     loading: computed(() => state.loading),
     error: computed(() => state.error),

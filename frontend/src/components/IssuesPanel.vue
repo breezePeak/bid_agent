@@ -70,6 +70,9 @@
             · 最高 {{ severityLabel(report.max_severity) }}
           </div>
         </div>
+        <div v-if="qualityEvaluations.length" class="ip-empty-soft">
+          V2 门禁证据：通过 {{ qualityPassedCount }} · 阻断/异常 {{ qualityFailedCount }}
+        </div>
         <div v-else class="ip-empty-soft">{{ emptyMsg }}</div>
       </div>
 
@@ -138,7 +141,7 @@ const deferredCountLocal = ref(0)
 const materialsExists = ref(false)
 
 // Single status bus: materials deferred badge follows the V2 Snapshot.
-const { materialsDeferred } = useWorkspaceRuntime({
+const { materialsDeferred, quality } = useWorkspaceRuntime({
   runId: computed(() => props.runId),
 })
 const deferredCount = computed(() => {
@@ -150,6 +153,11 @@ const emptyMsg = ref('暂无合规报告。跑完 compliance-check 后会显示�
 let materialsTimer = null
 
 const counts = computed(() => report.value.counts || {})
+const qualityEvaluations = computed(() => Array.isArray(quality.value?.latest_gate_evaluations)
+  ? quality.value.latest_gate_evaluations
+  : [])
+const qualityPassedCount = computed(() => qualityEvaluations.value.filter(item => item?.verdict === 'pass').length)
+const qualityFailedCount = computed(() => qualityEvaluations.value.filter(item => ['block', 'error'].includes(item?.verdict)).length)
 const filters = [
   { key: 'fail', label: '失败' },
   { key: 'warn', label: '警告' },
