@@ -3196,6 +3196,41 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(callable(archive["_after_commit"]))
             self.assertTrue(callable(clean["_after_commit"]))
 
+    def test_v2_runner_serializes_legacy_process_globals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            alpha = Path(tmp) / "alpha"
+            beta = Path(tmp) / "beta"
+            alpha.mkdir()
+            beta.mkdir()
+            first_entered = threading.Event()
+            second_entered = threading.Event()
+            release_first = threading.Event()
+            calls: list[str] = []
+
+            def fake_run(command: str, run_id: str, root: Path) -> int:
+                calls.append(run_id)
+                if run_id == "alpha":
+                    first_entered.set()
+                    release_first.wait(timeout=5)
+                else:
+                    second_entered.set()
+                return 0
+
+            with mock.patch.object(web_app, "_run_sync_impl", side_effect=fake_run):
+                first = threading.Thread(target=web_app._run_sync, args=("build-docx", "alpha", alpha))
+                second = threading.Thread(target=web_app._run_sync, args=("build-docx", "beta", beta))
+                first.start()
+                self.assertTrue(first_entered.wait(timeout=2))
+                second.start()
+                self.assertFalse(second_entered.wait(timeout=0.2))
+                release_first.set()
+                first.join(timeout=5)
+                second.join(timeout=5)
+
+            self.assertFalse(first.is_alive())
+            self.assertFalse(second.is_alive())
+            self.assertEqual(calls, ["alpha", "beta"])
+
     def test_v2_document_proposal_busy_state_is_workspace_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

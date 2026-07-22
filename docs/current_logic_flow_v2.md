@@ -650,3 +650,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B164 | 2026-07-22 | `document.apply_edit` 执行并发边界只由目标工作区的 CommandGateway Operation 与 SQLite lease 控制，不再被其他工作区的进程级 `RUNNING` 标志误阻断；终稿编辑保持 workspace 隔离。 |
 | V2.0-B165 | 2026-07-22 | 工作区归档与清理只检查目标 workspace 的 Worker/Supervisor 状态；其他工作区的进程级执行标志不再误阻断维护 Action，目标范围仍由 CommandGateway lease 和路径边界双重约束。 |
 | V2.0-B166 | 2026-07-22 | `document.apply_edit` 的单步撤销指针迁入目标 workspace 的 `control.db`；重启后 V2 撤销仍可从受路径边界校验的备份恢复，确认执行成功后清除指针，进程内 `_LAST_BACKUP` 仅保留兼容缓存。 |
+| V2.0-B167 | 2026-07-22 | 在完全拆除旧 Runner 进程级句柄前，所有 `_run_sync` 调用以执行锁串行化；V2 可按工作区提交并持有各自 lease，但旧 `RUNNING`、进程句柄与运行上下文不会被并发文档重建或阶段执行互相覆盖。 |

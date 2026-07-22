@@ -275,6 +275,7 @@ LOG_LINES: list[str] = []
 LOG_MAX = 2000
 _LOG_CONTEXT = threading.local()
 _WORKSPACE_LOG_LOCK = threading.Lock()
+_EXECUTION_LOCK = threading.RLock()
 RUNNING = False
 CURRENT_TASK = ""
 _REPAIR_START_LOCK = threading.RLock()
@@ -5490,12 +5491,17 @@ def _attempt_auto_recovery(command: str, run_root: Path, error_lines: list[str])
 
 
 def _run_sync(command: str, run_id: str, run_root: Path) -> int:
-    _LOG_CONTEXT.run_root = run_root
-    try:
-        return _run_sync_impl(command, run_id, run_root)
-    finally:
-        if hasattr(_LOG_CONTEXT, "run_root"):
-            del _LOG_CONTEXT.run_root
+    # The legacy runner still owns process-global handles. Keep its critical
+    # section serialized while V2 CommandGateway provides workspace-scoped
+    # authorization and state, so a document rebuild cannot overwrite another
+    # workspace's live process handle.
+    with _EXECUTION_LOCK:
+        _LOG_CONTEXT.run_root = run_root
+        try:
+            return _run_sync_impl(command, run_id, run_root)
+        finally:
+            if hasattr(_LOG_CONTEXT, "run_root"):
+                del _LOG_CONTEXT.run_root
 
 
 def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
