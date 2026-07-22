@@ -319,6 +319,27 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(goal["resume_context"]["reason"], "v2_explicit_resume")
             self.assertTrue((root / "workspace" / "agent" / "goal_state.json").exists())
 
+    def test_material_verification_resumes_v2_goal_without_legacy_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.upsert_goal_state(
+                {"goal_id": "v2-goal", "status": "blocked_human", "blocked_reason": "need material"},
+                source="test",
+            )
+
+            web_app._resume_goal_for_verified_material(context, "license", "material_verified:license")
+
+            goal = store.goal_state() or {}
+            self.assertEqual(goal["status"], "in_progress")
+            self.assertEqual(goal["resume_note"], "material_verified:license")
+            self.assertEqual(goal["resume_context"]["reason"], "material_verified")
+            self.assertEqual(goal["resume_context"]["item_ids"], ["license"])
+            self.assertTrue((root / "workspace" / "agent" / "goal_state.json").exists())
+
     def test_v2_gate_fails_closed_when_sqlite_state_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

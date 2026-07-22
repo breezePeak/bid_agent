@@ -7229,15 +7229,40 @@ def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
 
 
 def _resume_goal_for_verified_material(context: WorkspaceContext, item_id: str, note: str) -> None:
-    try:
-        from agent.goal import load_goal, resume_goal_after_materials
+    """Resume a blocked V2 Goal after material verification.
 
-        goal = load_goal(context.root)
-        if goal and str(goal.get("status")) == "blocked_human":
-            resume_goal_after_materials(context.root, note=note, item_ids=[item_id])
-    except Exception:
-        # Goal compatibility state is not authoritative for this material command.
-        pass
+    Material commands must not invoke the legacy Goal loader: it can import
+    ``goal_state.json`` and then mutate a second state machine.  SQLite is
+    updated first and the V1 file is refreshed only as a compatibility
+    projection, consistent with the explicit ``goal.resume`` command.
+    """
+    from agent.goal import write_goal_projection
+
+    store = _ensure_v2_goal_import(context)
+    goal = store.goal_state()
+    if not isinstance(goal, dict) or str(goal.get("status") or "") != "blocked_human":
+        return
+    previous_reason = str(goal.get("blocked_reason") or "")
+    goal.update(
+        {
+            "status": "in_progress",
+            "blocked_reason": "",
+            "resume_note": note,
+            "resumed_at": datetime.now(timezone.utc).isoformat(),
+            "resume_context": {
+                "reason": "material_verified",
+                "item_ids": [item_id],
+                "skip_same_snapshot_once": True,
+                "prev_blocked_reason": previous_reason[:500],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
+    )
+    constraints = dict(goal.get("constraints") or {})
+    constraints["block_on_missing_materials"] = True
+    goal["constraints"] = constraints
+    resumed = store.upsert_goal_state(goal, source="v2_material_verified")
+    write_goal_projection(context.root, resumed)
 
 
 def _handle_materials_upload(
