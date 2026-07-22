@@ -625,3 +625,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B139 | 2026-07-22 | V2 Issue 列表的来源摘要也采用实际旧文件判定；空工作区返回 `control.db`，与 Snapshot、Gate 和 Issue 预览的迁移语义一致。 |
 | V2.0-B140 | 2026-07-22 | V2 材料清单读取移除 `_material_items` 的隐式 SQLite 导入副作用；存在待迁移旧材料文件时仅返回 `migration_required` 的空 V2 快照，材料、回填计划和审计状态只能由管理员 `migration.scan` 建立权威状态。 |
 | V2.0-B141 | 2026-07-22 | V2 材料 mutation 也移除隐式 V1 导入：更新、上传、核验、回填与重建在存在待迁移 `materials_checklist.json` 时统一返回 `MIGRATION_SCAN_REQUIRED`。只有管理员 `migration.scan` 可将旧材料投影建立为 SQLite 权威状态，命令成功后才允许双写兼容投影。 |
+| V2.0-B142 | 2026-07-22 | V2 Chat 不再创建或执行 V1 最小修复确认 token：被动聊天不再写入 `repair_job.json` 以展示旧确认卡，携带旧确认按钮的请求被明确拒绝并要求重新发起 `repair.start` V2 Action。聊天的暂停、继续、取消、修复与改稿仍统一经过 CommandGateway。 |

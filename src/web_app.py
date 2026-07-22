@@ -2786,6 +2786,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         return JSONResponse({"ok": False, "message": "请求体必须是 JSON 对象"}, status_code=400)
     sent_run_id = str(body.get("run_id") or "").strip()
+    is_v2_workspace_chat = bool(getattr(request, "v2_workspace_id", ""))
     if sent_run_id:
         try:
             context = _workspace_context(sent_run_id)
@@ -2815,6 +2816,18 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                 run_id,
                 "可以直接告诉我你想做什么，例如查看状态、继续流程或自动修复阻断问题。",
                 actions=[],
+            )
+
+        # V2 has no compatibility repair-confirmation token.  Fresh V2 repair
+        # proposals use ActionProposal/repair.start; never let a stale legacy
+        # chat button mutate repair_job.json through the V2 chat route.
+        if is_v2_workspace_chat and action_type in {"confirm_minimal_repair", "decline_minimal_repair"}:
+            return _chat_response(
+                root,
+                run_id,
+                "该旧修复确认已不适用于 V2。请重新发送“自动修复”，系统会创建新的 V2 确认操作。",
+                actions=[],
+                intent="legacy_repair_confirmation_rejected",
             )
 
         control_text = re.sub(r"\s+", "", message)
@@ -3071,7 +3084,9 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                         command_receipts=[receipt.as_dict()],
                     )
                 reply = receipt.message or "流水线未能启动。"
-                repair_prompt, repair_actions = _persistent_minimal_repair_prompt(root)
+                repair_prompt, repair_actions = (
+                    ("", []) if is_v2_workspace_chat else _persistent_minimal_repair_prompt(root)
+                )
                 if repair_prompt:
                     reply = f"{reply}\n\n{repair_prompt}"
                 return _chat_response(
@@ -3198,7 +3213,9 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             actions = [item for item in actions if item.get("type") != "auto_run"]
             actions = [{"type": "auto_run", "label": "一键跑完剩余步骤"}, *actions]
 
-        repair_prompt, repair_actions = _persistent_minimal_repair_prompt(root)
+        repair_prompt, repair_actions = (
+            ("", []) if is_v2_workspace_chat else _persistent_minimal_repair_prompt(root)
+        )
         if repair_prompt and not has_pending:
             if repair_prompt not in reply:
                 reply = f"{reply}\n\n{repair_prompt}".strip() if reply else repair_prompt
@@ -3263,6 +3280,7 @@ async def api_v2_chat_turn(workspace_id: str, request: Request) -> JSONResponse:
             # Preserve the authenticated server context so downstream Command
             # proposals bind the same actor as buttons and CLI/API requests.
             self.state = getattr(request, "state", None)
+            self.v2_workspace_id = workspace_id
 
         async def json(self) -> dict[str, Any]:
             return {**body, "run_id": workspace_id}

@@ -89,6 +89,46 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(response["ok"])
             orchestrate.assert_called_once()
 
+    def test_v2_chat_rejects_legacy_repair_confirmation_without_mutating_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            legacy = create_confirmation(
+                root,
+                issue_fingerprints=["legacy-issue"],
+                total_count=1,
+                auto_count=1,
+                manual_count=0,
+                resume_command="global-review",
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "load_messages", return_value=[]):
+                    with mock.patch.object(web_app, "save_message", return_value={}):
+                        response = _body(
+                            asyncio.run(
+                                web_app.api_v2_chat_turn(
+                                    "alpha",
+                                    _Request(
+                                        {
+                                            "action": {
+                                                "type": "decline_minimal_repair",
+                                                "confirmation_id": legacy["confirmation_id"],
+                                            }
+                                        }
+                                    ),
+                                )
+                            )
+                        )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["intent"], "legacy_repair_confirmation_rejected")
+            self.assertEqual(
+                web_app.load_repair_job(root).get("status"),
+                "awaiting_confirmation",
+            )
+
     def test_material_readiness_does_not_trust_legacy_ready_projection(self) -> None:
         self.assertFalse(
             web_app._material_fulfillment_verified(
