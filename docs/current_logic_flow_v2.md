@@ -579,3 +579,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B93 | 2026-07-22 | Vue 迁移面板新增已校验备份列表与“演练”入口；前端仅调用管理员受限的 V2 API，展示无破坏性演练结果，不能触发运行中 control.db 替换。 |
 | V2.0-B94 | 2026-07-22 | 正式出稿预检在 V2 cutover 已 active 时复算旧状态源 manifest fingerprint；若与切换时已审计的 fingerprint 不一致，即使尚未形成新的迁移冲突也返回 `MIGRATION_CUTOVER_STALE` 并 fail-closed，管理员必须重新扫描、协调并重新切换。 |
 | V2.0-B95 | 2026-07-22 | 正式 GateReceipt 的输入指纹在 active cutover 工作区纳入迁移状态和当前旧状态源 fingerprint；切换后旧源变化会使已签发凭据变 stale，下载正式 Word 不能绕过重新扫描与门禁复核。 |
+| V2.0-B96 | 2026-07-22 | V2 Snapshot 与迁移面板显式展示 active cutover 的源 fingerprint 健康状态；旧状态源在切换后变化时只读快照标记 `cutover_stale`，提示管理员重新扫描并切换，避免 UI 将已失效切换误显示为就绪。 |

@@ -5464,6 +5464,33 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     return result
 
 
+def _migration_snapshot_with_source_state(
+    context: WorkspaceContext,
+    snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose a read-only cutover health state without trusting legacy files."""
+    migration = snapshot.get("migration")
+    if not isinstance(migration, dict):
+        return snapshot
+    cutover = migration.get("cutover")
+    if not isinstance(cutover, dict) or cutover.get("status") != "active":
+        return snapshot
+    preview = _v1_migration_dry_run(context)
+    expected = str(cutover.get("fingerprint") or "")
+    current = str(preview.get("source_fingerprint") or "")
+    updated = dict(snapshot)
+    updated_migration = dict(migration)
+    updated_cutover = dict(cutover)
+    updated_cutover["current_fingerprint"] = current
+    updated_cutover["source_stale"] = not expected or expected != current
+    if updated_cutover["source_stale"]:
+        updated_cutover["status"] = "stale"
+        updated_migration["status"] = "cutover_stale"
+    updated_migration["cutover"] = updated_cutover
+    updated["migration"] = updated_migration
+    return updated
+
+
 def _request_actor(request: Request, *, source: str) -> dict[str, str]:
     """Bind Command actors on the server; never trust actor fields in JSON payloads."""
     state = getattr(request, "state", None)
@@ -7756,7 +7783,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
     try:
         context = _workspace_context(workspace_id)
         store = ControlStore(context)
-        snapshot = store.snapshot()
+        snapshot = _migration_snapshot_with_source_state(context, store.snapshot())
         compatibility = _status_payload(
             context.root,
             context.workspace_id,

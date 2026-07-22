@@ -2,7 +2,7 @@
   <div class="migration-panel">
     <div class="ip-header">
       <div class="ip-title-row"><strong>V1 → V2 迁移</strong><button class="btn btn-sm" @click="refresh" :disabled="loading">刷新</button></div>
-      <div class="ip-empty-soft">{{ migration.status === 'needs_reconciliation' ? `待协调 ${migration.open_count || 0} 项` : '迁移状态就绪' }}</div>
+      <div class="ip-empty-soft">{{ migrationLabel }}</div>
     </div>
     <div class="migration-actions">
       <button class="btn btn-sm" @click="propose('migration.scan')">扫描旧状态</button>
@@ -40,6 +40,12 @@ const choices = ref({})
 const backups = ref([])
 const drilling = ref('')
 const openConflicts = computed(() => (migration.value.conflicts || []).filter(item => item.status === 'open'))
+const migrationLabel = computed(() => {
+  if (migration.value.status === 'needs_reconciliation') return `待协调 ${migration.value.open_count || 0} 项`
+  if (migration.value.status === 'cutover_stale') return 'V2 切换已失效：旧状态源变化，需重新扫描并切换'
+  if (migration.value.cutover?.status === 'active') return 'V2 控制面已切换'
+  return '迁移状态就绪'
+})
 
 async function refresh() {
   if (!props.runId) return

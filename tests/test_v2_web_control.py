@@ -2528,6 +2528,36 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertNotEqual(before, after)
 
+    def test_migration_snapshot_marks_active_cutover_stale_when_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            goal_path = context.root / "workspace" / "agent" / "goal_state.json"
+            goal_path.parent.mkdir(parents=True)
+            legacy_goal = {"goal_id": "legacy-goal", "status": "running"}
+            goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
+            store = ControlStore(context)
+            store.ensure_goal_state(legacy_goal)
+            preview = web_app._v1_migration_dry_run(context)
+            store.record_migration_scan(
+                fingerprint=preview["source_fingerprint"],
+                manifest=preview["source_manifest"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            store.activate_migration_cutover(
+                fingerprint=preview["source_fingerprint"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            legacy_goal["objective"] = "changed after cutover"
+            goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
+
+            snapshot = web_app._migration_snapshot_with_source_state(context, store.snapshot())
+
+            self.assertEqual(snapshot["migration"]["status"], "cutover_stale")
+            self.assertEqual(snapshot["migration"]["cutover"]["status"], "stale")
+            self.assertTrue(snapshot["migration"]["cutover"]["source_stale"])
+
     def test_v2_step_detail_proposals_use_path_workspace_not_active_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
