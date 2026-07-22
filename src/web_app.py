@@ -6326,32 +6326,13 @@ def _handle_accept_issue_risk(
     }
 
 
-def _handle_quality_revalidate(
+def _record_quality_gate_evaluation(
     context: WorkspaceContext,
-    envelope: CommandEnvelope,
-    operation_id: str,
+    command: str,
+    result: dict[str, Any],
+    *,
+    verdict: str | None = None,
 ) -> dict[str, Any]:
-    from agent.repair import revalidate_gate
-
-    command = str(envelope.payload.get("command") or "").strip()
-    allowed = {str(step.get("command") or "") for step in WORKFLOW_STEPS}
-    if not command or command not in allowed:
-        raise ControlPlaneError("COMMAND_INVALID", f"不可重验的门禁命令: {command or '-'}", status_code=400)
-    try:
-        result = revalidate_gate(context.root, command)
-    except Exception as exc:
-        raise ControlPlaneError(
-            "STATE_UNAVAILABLE",
-            f"门禁重验失败，已保持阻断: {exc}",
-            status_code=503,
-            retryable=True,
-        ) from exc
-    if not isinstance(result, dict) or not result.get("ok"):
-        raise ControlPlaneError(
-            "GATE_BLOCKED",
-            str(result.get("message") if isinstance(result, dict) else "门禁重验返回无效状态。"),
-            details={"command": command},
-        )
     store = _ensure_v2_issue_import(context)
     issues = store.issue_states()
     findings: list[dict[str, Any]] = []
@@ -6382,6 +6363,19 @@ def _handle_quality_revalidate(
         item for item in findings
         if item["status"] in {"open", "in_progress"} and item["risk_class"] in {"block", "fatal", "critical"}
     ]
+    resolved_verdict = verdict or ("block" if blocks else "pass")
+    if resolved_verdict == "error":
+        findings.append(
+            {
+                "finding_id": hashlib.sha256(f"{command}:gate-error".encode("utf-8")).hexdigest(),
+                "rule_key": "gate_evaluator",
+                "target_key": command,
+                "risk_class": "fatal",
+                "issue_id": "",
+                "status": "open",
+                "evidence": {"command": command, "error": str(result.get("error") or result.get("message") or "unknown")},
+            }
+        )
     fingerprint = hashlib.sha256(
         json.dumps(
             {"command": command, "result": result, "findings": findings},
@@ -6390,11 +6384,57 @@ def _handle_quality_revalidate(
     ).hexdigest()
     evaluation = store.record_gate_evaluation(
         command=command,
-        verdict="block" if blocks else "pass",
+        verdict=resolved_verdict,
         input_fingerprint=fingerprint,
         findings=findings,
         source="quality.revalidate",
     )
+    return evaluation
+
+
+def _handle_quality_revalidate(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    from agent.repair import revalidate_gate
+
+    command = str(envelope.payload.get("command") or "").strip()
+    allowed = {str(step.get("command") or "") for step in WORKFLOW_STEPS}
+    if not command or command not in allowed:
+        raise ControlPlaneError("COMMAND_INVALID", f"不可重验的门禁命令: {command or '-'}", status_code=400)
+    try:
+        result = revalidate_gate(context.root, command)
+    except Exception as exc:
+        try:
+            _record_quality_gate_evaluation(
+                context,
+                command,
+                {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                verdict="error",
+            )
+        except Exception:
+            pass
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            f"门禁重验失败，已保持阻断: {exc}",
+            status_code=503,
+            retryable=True,
+        ) from exc
+    if not isinstance(result, dict) or not result.get("ok"):
+        safe_result = result if isinstance(result, dict) else {"ok": False, "message": "门禁重验返回无效状态。"}
+        evaluation = _record_quality_gate_evaluation(
+            context,
+            command,
+            safe_result,
+            verdict="error" if safe_result.get("error") else "block",
+        )
+        raise ControlPlaneError(
+            "GATE_BLOCKED",
+            str(safe_result.get("message") or "门禁重验返回无效状态。"),
+            details={"command": command, "gate_evaluation_id": evaluation["evaluation_id"]},
+        )
+    evaluation = _record_quality_gate_evaluation(context, command, result)
     return {
         "accepted": True,
         "operation_status": "succeeded",

@@ -584,4 +584,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B98 | 2026-07-22 | `migration_report.json` 作为 SQLite 迁移审计的只读投影，会在管理员协调或切换后刷新 Migration 状态与最近动作；报告不再在冲突已解决后停留于过期的 `needs_reconciliation`，SQLite 仍为唯一控制真相源。 |
 | V2.0-B99 | 2026-07-22 | V1 兼容 API 的授权调用开始按工作区记录路由使用次数、最近调用时间与最小 actor 标识，供兼容窗口与下线条件审计；该遥测不提升 workspace revision、不生成领域事件，也不影响 V1/V2 控制状态或请求结果。V2 Snapshot 提供只读使用摘要。 |
 | V2.0-B100 | 2026-07-22 | 迁移面板展示当前工作区 V1 兼容 API 的累计调用与最近观测时间，使管理员在切换和下线评审中可直接看到兼容适配器是否仍被使用。 |
-| V2.0-B101 | 2026-07-22 | `control.db` schema 升级为 14。`quality.revalidate` 在受 CommandGateway 控制的重验成功后，按当前权威 Issue 快照记录不可变 GateEvaluation（command、输入 fingerprint、稳定 Finding 标识、来源 revision 与 verdict）；Issue 仍是可处理投影，后续状态变化不会改写既有评估证据。 |
+| V2.0-B101 | 2026-07-22 | `control.db` schema 升级为 14。`quality.revalidate` 在受 CommandGateway 控制的重验后，按当前权威 Issue 快照记录不可变 GateEvaluation（command、输入 fingerprint、稳定 Finding 标识、来源 revision 与 verdict）；block 或 evaluator 异常也留下 fail-closed 评估证据。Issue 仍是可处理投影，后续状态变化不会改写既有评估证据。 |

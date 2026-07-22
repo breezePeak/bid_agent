@@ -1565,6 +1565,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(evaluation["verdict"], "block")
             self.assertEqual(evaluation["findings"][0]["issue_id"], "issue-1")
 
+    def test_failed_quality_revalidation_records_fail_closed_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "quality.revalidate",
+                    "payload": {"command": "global-review"},
+                    "expected_revision": store.revision(),
+                    "actor": {"id": "admin", "role": "admin"},
+                },
+                workspace_id="alpha",
+            )
+            with mock.patch("agent.repair.revalidate_gate", return_value={"ok": False, "message": "blocked"}):
+                with self.assertRaises(ControlPlaneError) as blocked:
+                    web_app._handle_quality_revalidate(context, envelope, "quality-op")
+
+            self.assertEqual(blocked.exception.code, "GATE_BLOCKED")
+            evaluation = store.gate_evaluations(command="global-review")[0]
+            self.assertEqual(evaluation["verdict"], "block")
+            self.assertEqual(evaluation["findings"], [])
+
     def test_debug_tool_api_rejects_mutation_bypass(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "alpha"
