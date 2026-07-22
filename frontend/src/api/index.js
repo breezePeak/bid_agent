@@ -226,7 +226,7 @@ export function previewIssueRepair(runId, issueId) {
 
 export function executeIssueRepair(runId, issueId, { dryRun = false } = {}) {
   if (dryRun) {
-    return api.post(`/issues/${encodeURIComponent(issueId)}/actions/execute`, { dry_run: true })
+    return previewIssueRepair(runId, issueId)
   }
   return submitWorkspaceCommand(runId, 'repair.issues', { issue_ids: [issueId] })
 }
