@@ -250,7 +250,7 @@ async function refresh() {
 
 watch(() => props.runId, () => {
   localLogs.value = []
-  deferredCount.value = 0
+  deferredCountLocal.value = 0
   materialsExists.value = false
   tab.value = 'office'
   refresh()
