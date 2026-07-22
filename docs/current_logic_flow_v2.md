@@ -645,3 +645,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B159 | 2026-07-22 | V2 Chat 最近事件改为按 `workspace_events.seq` 倒序限量读取后恢复升序，不再错误地用 workspace revision 充当 Event Stream 游标，避免遗漏首条或同 revision 的事件。 |
 | V2.0-B160 | 2026-07-22 | V2 暂停/取消通过 checkpoint PID 终止 Worker 前，必须校验 `operation_id` 与 fencing token 同 `control.db` 当前 Operation 一致；不匹配时 fail-closed，避免旧 checkpoint 误杀无关进程。 |
 | V2.0-B161 | 2026-07-22 | V2 Chat 日志流中的状态事件改读 `control.db.workspace_events`，按 seq 增量推送 `workspace_event`；V1 `run_events.jsonl` 仅保留给无 workspace 路径的兼容日志流。 |
+| V2.0-B162 | 2026-07-22 | V2 Materials Checklist 查询不再解析 `materials_checklist.json` 作为基础数据；条目、汇总与可回填判断来自 `control.db.material_states`，章节缺口只作为文件 Artifact 扫描。旧清单损坏不会覆盖或拖垮已迁移状态。 |

@@ -2804,6 +2804,77 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(store.v1_import_pending("materials"))
             self.assertEqual(store.revision(), 0)
 
+    def test_v2_materials_read_does_not_parse_legacy_checklist(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.ensure_material_states(
+                [
+                    {
+                        "item_id": "license",
+                        "response_status": "ready",
+                        "lifecycle_status": "verified",
+                        "evidence_status": "verified",
+                        "verified_at": "2026-07-22T00:00:00Z",
+                    }
+                ]
+            )
+            (workspace / "materials_checklist.json").write_text("{invalid", encoding="utf-8")
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch(
+                    "materials_checklist.load_materials_checklist",
+                    side_effect=AssertionError("legacy checklist read"),
+                ):
+                    payload = _body(web_app.api_materials_checklist("alpha"))
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["source"], "control.db")
+            self.assertEqual(payload["items"][0]["item_id"], "license")
+
+    def test_v2_material_refill_plan_requires_verified_control_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            chapters = root / "workspace" / "chapters"
+            chapters.mkdir(parents=True)
+            (chapters / "1.1.md").write_text(
+                "<!-- MATERIAL_GAP:item_id=license status=uploaded -->\n<!-- /MATERIAL_GAP -->",
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.ensure_material_states(
+                [
+                    {
+                        "item_id": "license",
+                        "response_status": "ready",
+                        "lifecycle_status": "uploaded",
+                        "evidence_status": "submitted",
+                    }
+                ]
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                unverified = _body(web_app.api_materials_checklist("alpha"))
+                store.upsert_material_state(
+                    {
+                        "item_id": "license",
+                        "response_status": "ready",
+                        "lifecycle_status": "verified",
+                        "evidence_status": "verified",
+                        "verified_at": "2026-07-22T00:00:00Z",
+                    }
+                )
+                verified = _body(web_app.api_materials_checklist("alpha"))
+
+            self.assertEqual(unverified["refill_plans"], [])
+            self.assertEqual(verified["refill_plans"][0]["ready_item_ids"], ["license"])
+
     def test_v2_snapshot_exposes_latest_quality_evaluations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

@@ -4096,13 +4096,10 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
     context = _workspace_context(workspace_id) if workspace_id else _workspace_context(ACTIVE_RUN_ID or _active_root().name)
     root = context.root
     try:
-        from materials_checklist import (
-            chapters_ready_for_refill,
-            chapters_with_material_gaps,
-            load_materials_checklist,
-        )
+        from materials_checklist import chapters_ready_for_refill, chapters_with_material_gaps, load_materials_checklist
 
-        data = load_materials_checklist(root)
+        v2_read_only = bool(workspace_id)
+        data = {} if v2_read_only else load_materials_checklist(root)
         store = ControlStore(context)
         material_import_pending = (
             store.v1_import_pending("materials")
@@ -4133,7 +4130,27 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
             "waived": sum(1 for item in authoritative_items if item.get("response_status") == "waived"),
         }
         data = {**data, "items": authoritative_items, "summary": summary}
-        exists = (root / "workspace" / "materials_checklist.json").exists()
+        exists = bool(authoritative_items) if v2_read_only else (root / "workspace" / "materials_checklist.json").exists()
+        gap_chapters = {} if material_import_pending else chapters_with_material_gaps(root)
+        if material_import_pending:
+            refill_plans: list[dict[str, Any]] = []
+        elif v2_read_only:
+            verified_ids = {
+                str(item.get("item_id") or "")
+                for item in authoritative_items
+                if _material_fulfillment_verified(item)
+            }
+            refill_plans = [
+                {
+                    "chapter_id": chapter_id,
+                    "ready_item_ids": [item_id for item_id in gap_ids if item_id in verified_ids],
+                    "all_gap_ids": gap_ids,
+                }
+                for chapter_id, gap_ids in gap_chapters.items()
+                if any(item_id in verified_ids for item_id in gap_ids)
+            ]
+        else:
+            refill_plans = chapters_ready_for_refill(root)
         return JSONResponse(
             {
                 "ok": True,
@@ -4141,8 +4158,8 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
                 "checklist": data,
                 "summary": summary,
                 "items": authoritative_items,
-                "gap_chapters": {} if material_import_pending else chapters_with_material_gaps(root),
-                "refill_plans": [] if material_import_pending else chapters_ready_for_refill(root),
+                "gap_chapters": gap_chapters,
+                "refill_plans": refill_plans,
                 "source": "migration_required" if material_import_pending else "control.db",
             }
         )
