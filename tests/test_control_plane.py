@@ -176,6 +176,23 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(history[0]["actor"]["id"], "owner")
             self.assertNotIn("staged_path", history[0])
 
+    def test_latest_gate_evaluations_uses_persisted_insertion_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.record_gate_evaluation(
+                command="global-review", verdict="error", input_fingerprint="first", findings=[], source="test"
+            )
+            latest = store.record_gate_evaluation(
+                command="global-review", verdict="pass", input_fingerprint="second", findings=[], source="test"
+            )
+            store.record_gate_evaluation(
+                command="compliance-check", verdict="block", input_fingerprint="third", findings=[], source="test"
+            )
+            by_command = {item["command"]: item for item in store.latest_gate_evaluations()}
+            self.assertEqual(by_command["global-review"]["evaluation_id"], latest["evaluation_id"])
+            self.assertEqual(by_command["compliance-check"]["verdict"], "block")
+
     def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

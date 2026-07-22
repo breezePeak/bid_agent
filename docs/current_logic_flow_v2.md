@@ -590,3 +590,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B104 | 2026-07-22 | `control.db` schema 升级为 16，新增不可变 MaterialSubmission 审计表。已消费的 workspace upload token 会写入材料 ID、文件名、hash、大小、最小 actor 与来源 Command，不保存服务器暂存绝对路径；提交记录与后续 MaterialVerification 分离，uploaded 不等于 verified。 |
 | V2.0-B105 | 2026-07-22 | V2 材料清单读取接口与主材料面板开始展示 SQLite 权威的提交次数、最近提交与最近核验结论；用户不再只能从 V1 投影推断上传或人工确认是否发生。 |
 | V2.0-B106 | 2026-07-22 | 正式出稿预检开始检查每个命令最新的 GateEvaluation；最新 verdict 为 `block` 或 `error` 时分别以 GATE_BLOCKED 或 STATE_UNAVAILABLE fail-closed，必须重新完成成功的重验，历史较早失败记录不会覆盖同命令后续评估。 |
+| V2.0-B107 | 2026-07-22 | 最新 GateEvaluation 的查询改为按 SQLite 持久化插入顺序逐命令取值，不再依赖有限条数的内存筛选；高频重验不会因历史记录超过读取上限而遗漏某个命令的最新阻断结论。 |

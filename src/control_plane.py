@@ -1253,6 +1253,25 @@ class ControlStore:
             result.append(item)
         return result
 
+    def latest_gate_evaluations(self) -> list[dict[str, Any]]:
+        """Return the most recently persisted evaluation for every gate command."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM gate_evaluations
+                WHERE rowid IN (
+                    SELECT MAX(rowid) FROM gate_evaluations GROUP BY command
+                )
+                ORDER BY command
+                """
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["findings"] = _decode(item.pop("findings_json", ""), [])
+            result.append(item)
+        return result
+
     def issue_gate_receipt(
         self,
         *,

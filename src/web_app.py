@@ -5694,13 +5694,8 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
                 status_code=409,
                 details={"expected_fingerprint": expected_fingerprint, "current_fingerprint": current_fingerprint},
             )
-    latest_evaluations: dict[str, dict[str, Any]] = {}
-    for evaluation in store.gate_evaluations(limit=200):
-        command = str(evaluation.get("command") or "")
-        if command and command not in latest_evaluations:
-            latest_evaluations[command] = evaluation
     failed_evaluations = [
-        evaluation for evaluation in latest_evaluations.values()
+        evaluation for evaluation in store.latest_gate_evaluations()
         if str(evaluation.get("verdict") or "") in {"block", "error"}
     ]
     if failed_evaluations:
