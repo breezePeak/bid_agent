@@ -187,6 +187,7 @@ class ControlStore:
         "workspace.run_utility",
         "workspace.archive",
         "workspace.clean",
+        "migration.scan",
         "migration.reconcile",
     }
     BLOCKED_REMEDIATION_KINDS = {
@@ -2116,7 +2117,7 @@ class ControlStore:
                     connection.commit()
                     return self._receipt_from_row(duplicate, duplicate=True), False
 
-                if envelope.kind != "migration.reconcile":
+                if envelope.kind not in {"migration.scan", "migration.reconcile"}:
                     open_conflicts = int(connection.execute(
                         "SELECT COUNT(*) FROM migration_conflicts WHERE status = 'open'"
                     ).fetchone()[0])

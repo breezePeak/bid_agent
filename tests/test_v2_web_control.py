@@ -2787,6 +2787,32 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(store.revision(), revision)
             self.assertIsNone(store.goal_state())
 
+    def test_migration_scan_imports_candidates_and_persists_root_orphan_conflict(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "workspace" / "agent").mkdir(parents=True)
+            (root / "workspace" / "agent" / "goal_state.json").write_text(
+                json.dumps({"goal_id": "legacy", "status": "in_progress"}), encoding="utf-8"
+            )
+            (root / "goal_state.json").write_text("{}", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "migration.scan",
+                    "payload": {},
+                    "expected_revision": store.revision(),
+                    "actor": {"id": "admin", "role": "admin"},
+                },
+                workspace_id="alpha",
+            )
+            result = web_app._handle_migration_scan(context, envelope, "scan-op")
+            self.assertTrue(result["accepted"])
+            self.assertEqual(store.goal_state()["goal_id"], "legacy")
+            self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
+            self.assertEqual(store.migration_conflicts()[0]["domain"], "orphan")
+
 
 if __name__ == "__main__":
     unittest.main()

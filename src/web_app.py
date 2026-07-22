@@ -7117,6 +7117,58 @@ def _handle_migration_reconcile(
     }
 
 
+def _handle_migration_scan(
+    context: WorkspaceContext,
+    envelope: CommandEnvelope,
+    operation_id: str,
+) -> dict[str, Any]:
+    actor = dict(envelope.actor or {})
+    if str(actor.get("role") or "").strip().lower() != "admin":
+        raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以扫描旧工作区迁移状态。", status_code=403)
+    store = ControlStore(context)
+    dry_run = _v1_migration_dry_run(context)
+    inventory = dry_run.get("inventory") if isinstance(dry_run.get("inventory"), dict) else {}
+    imported = 0
+    for item in inventory.get("importable") or []:
+        if not isinstance(item, dict):
+            continue
+        domain = str(item.get("domain") or "")
+        legacy = item.get("legacy")
+        if domain == "goal":
+            imported += store.ensure_goal_state(legacy if isinstance(legacy, dict) else None)
+        elif domain == "materials":
+            imported += store.ensure_material_states(legacy if isinstance(legacy, list) else [])
+        elif domain == "issues":
+            imported += store.ensure_issue_states(legacy if isinstance(legacy, list) else [])
+    detected = 0
+    for item in inventory.get("conflicts") or []:
+        if not isinstance(item, dict):
+            continue
+        store.record_migration_conflict(
+            domain=str(item.get("domain") or "unknown"),
+            legacy=item.get("legacy"),
+            authoritative=item.get("authoritative"),
+            reason="管理员迁移扫描发现 V1 与 control.db 状态不一致。",
+        )
+        detected += 1
+    for category, reason in (("orphans", "旧根目录控制状态未绑定到工作区。"), ("unrecognized", "旧状态文件无法识别。")):
+        for item in inventory.get(category) or []:
+            store.record_migration_conflict(
+                domain="orphan" if category == "orphans" else "unrecognized",
+                legacy=item,
+                authoritative={},
+                reason=reason,
+            )
+            detected += 1
+    state = store.migration_state()
+    return {
+        "accepted": True,
+        "operation_status": "succeeded",
+        "message": f"迁移扫描完成：导入 {imported} 项，发现 {detected} 项待协调状态。",
+        "migration": state,
+    }
+
+
 def _command_gateway(context: WorkspaceContext) -> CommandGateway:
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     return CommandGateway(
@@ -7147,6 +7199,7 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.rebuild": _handle_materials_rebuild,
             "materials.refill": _handle_materials_refill,
             "gate.revalidate": _handle_gate_revalidate,
+            "migration.scan": _handle_migration_scan,
             "migration.reconcile": _handle_migration_reconcile,
         },
     )
@@ -7503,6 +7556,7 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "workspace.run_utility": "确认执行工作区维护命令",
                 "workspace.archive": "确认归档工作区",
                 "workspace.clean": "确认清理工作区产物",
+                "migration.scan": "确认扫描并登记旧工作区迁移状态",
                 "migration.reconcile": "确认处理 V1/V2 迁移冲突",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")

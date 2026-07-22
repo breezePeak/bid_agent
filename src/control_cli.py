@@ -136,6 +136,9 @@ def build_parser() -> argparse.ArgumentParser:
     migration = commands.add_parser("migration-dry-run", help="只读盘点 V1 导入、冲突和 orphan")
     migration.add_argument("--workspace", required=True)
 
+    scan = commands.add_parser("migration-scan", help="创建管理员旧工作区迁移扫描 Action")
+    scan.add_argument("--workspace", required=True)
+
     reconcile = commands.add_parser("reconcile", help="创建管理员迁移冲突处理 Action")
     reconcile.add_argument("--workspace", required=True)
     reconcile.add_argument("--conflict-id", required=True)
@@ -172,6 +175,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = client.snapshot(args.workspace)
         elif args.control_command == "migration-dry-run":
             result = client.migration_dry_run(args.workspace)
+        elif args.control_command == "migration-scan":
+            snapshot = client.snapshot(args.workspace)
+            revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
+            result = client.submit(
+                args.workspace,
+                kind="migration.scan",
+                payload={},
+                expected_revision=revision,
+                idempotency_key=f"cli:migration-scan:{uuid.uuid4()}",
+            )
         elif args.control_command == "reconcile":
             snapshot = client.snapshot(args.workspace)
             revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
