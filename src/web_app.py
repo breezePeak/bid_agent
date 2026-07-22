@@ -2575,13 +2575,6 @@ def _trigger_repair_job(
                     issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
                     progress_callback=_progress,
                 )
-                if control_operation_id:
-                    from artifact_manifest import record_external_chapter_mutation
-
-                    record_external_chapter_mutation(
-                        _workspace_context(root.name),
-                        disposition="issue_repair",
-                    )
             except Exception as exc:
                 failure = exc
                 result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
@@ -2598,6 +2591,23 @@ def _trigger_repair_job(
             terminal_status = "partial"
         else:
             terminal_status = "completed"
+
+        if control_operation_id and terminal_status == "completed":
+            from artifact_manifest import record_external_chapter_mutation
+
+            repair_artifacts = record_external_chapter_mutation(
+                _workspace_context(root.name),
+                disposition="issue_repair",
+            )
+            if repair_artifacts:
+                _record_v2_stage_lifecycle(
+                    _workspace_context(root.name),
+                    control_operation_id,
+                    "write-all",
+                    "succeeded",
+                    "issue_repair",
+                    None,
+                )
 
         resume_command = str(job.get("resume_command") or "")
         resume_started = False
@@ -2802,19 +2812,28 @@ def _trigger_rewrite_targets_inline(
                 from concurrency import workers_default
 
                 result = run_rewrite_all(worker_root, workers=workers_default(), chapter_ids=chapters)
-                if control_operation_id:
-                    from artifact_manifest import record_external_chapter_mutation
-
-                    record_external_chapter_mutation(
-                        _workspace_context(worker_root.name),
-                        disposition="chapter_rewrite",
-                    )
                 failed = result.get("failed", [])
                 state_status = "ok" if not failed else "error"
                 state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
                 operation_status = "succeeded" if not failed else "blocked"
                 if failed:
                     operation_error = {"failed_chapters": failed}
+                elif control_operation_id:
+                    from artifact_manifest import record_external_chapter_mutation
+
+                    rewritten = record_external_chapter_mutation(
+                        _workspace_context(worker_root.name),
+                        disposition="chapter_rewrite",
+                    )
+                    if rewritten:
+                        _record_v2_stage_lifecycle(
+                            _workspace_context(worker_root.name),
+                            control_operation_id,
+                            "write-all",
+                            "succeeded",
+                            "chapter_rewrite",
+                            None,
+                        )
             except Exception as exc:
                 state_status = "error"
                 state_message = f"定向改稿失败: {exc}"
@@ -6718,9 +6737,6 @@ def _handle_repair_issues(
     if len(issue_ids) > 100:
         raise ControlPlaneError("COMMAND_INVALID", "单次最多修复 100 个问题。", status_code=400)
     result = execute_repair_batch(context.root, issue_ids, confirm=True, dry_run=False)
-    from artifact_manifest import record_external_chapter_mutation
-
-    record_external_chapter_mutation(context, disposition="issue_repair")
     failed = result.get("failed") if isinstance(result.get("failed"), list) else []
     still_open = result.get("still_open") if isinstance(result.get("still_open"), list) else []
     if not result.get("ok") or failed or still_open:
@@ -6729,6 +6745,11 @@ def _handle_repair_issues(
             str(result.get("message") or "问题修复后仍有阻断项。"),
             details={"failed": failed, "still_open": still_open},
         )
+    from artifact_manifest import record_external_chapter_mutation
+
+    repaired = record_external_chapter_mutation(context, disposition="issue_repair")
+    if repaired:
+        _record_v2_stage_lifecycle(context, operation_id, "write-all", "succeeded", "issue_repair", None)
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -7814,9 +7835,6 @@ def _trigger_material_refill(
                     replan_jobs=replan_jobs,
                     max_chapters=max_chapters,
                 )
-                from artifact_manifest import record_external_chapter_mutation
-
-                record_external_chapter_mutation(context, disposition="materials_refill")
                 try:
                     result["revalidate"] = revalidate_issues_after_materials(context.root)
                     _project_quality_issues(context)
@@ -7826,6 +7844,19 @@ def _trigger_material_refill(
                 status = "succeeded" if result.get("ok") and not failed and not result.get("revalidate_error") else "blocked"
                 message = str(result.get("message") or "材料回填完成。")
                 error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
+                if status == "succeeded":
+                    from artifact_manifest import record_external_chapter_mutation
+
+                    refilled = record_external_chapter_mutation(context, disposition="materials_refill")
+                    if refilled:
+                        _record_v2_stage_lifecycle(
+                            context,
+                            operation_id,
+                            "write-all",
+                            "succeeded",
+                            "materials_refill",
+                            None,
+                        )
             except Exception as exc:
                 error = {"message": str(exc)}
                 message = f"材料回填失败: {exc}"
