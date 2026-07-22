@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v18_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
+    def test_schema_v19_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -111,7 +111,7 @@ class ControlPlaneTests(unittest.TestCase):
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "18")
+            self.assertEqual(schema_version, "19")
             self.assertIsNotNone(migration_table)
             self.assertIsNotNone(gate_evaluations)
             self.assertIsNotNone(material_verifications)
@@ -688,6 +688,19 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(store.snapshot()["stage_runs"][0]["stage_run_id"], running["stage_run_id"])
             self.assertEqual(store.latest_stage_run("operation-1", "build-md")["status"], "succeeded")
             self.assertIsNone(store.latest_stage_run("operation-1", "missing-stage"))
+
+    def test_stage_run_promotes_queued_attempt_without_creating_a_second_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+
+            queued = store.record_stage_run("operation-1", "build-md", "queued", disposition="queued")
+            running = store.record_stage_run("operation-1", "build-md", "running", disposition="started")
+            completed = store.record_stage_run("operation-1", "build-md", "succeeded", disposition="produced")
+
+            self.assertEqual(queued["stage_run_id"], running["stage_run_id"])
+            self.assertEqual(running["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(completed["attempt"], 1)
 
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

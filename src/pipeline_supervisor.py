@@ -287,6 +287,7 @@ class PipelineSupervisor:
                 )
         try:
             for command in commands:
+                record_stage(command, "queued", "queued")
                 if slot.cancel.is_set():
                     record_stage(command, "cancelled", "cancelled_before_start")
                     self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})

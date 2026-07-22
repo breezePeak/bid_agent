@@ -661,3 +661,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B175 | 2026-07-22 | V2 WorkspaceSnapshot 新增 `stage_runs`，控制台和 SSE 重新拉取后可读取 SQLite 阶段 attempt/终态，而不需要从 `pipeline_control.json` 推断已完成阶段。 |
 | V2.0-B176 | 2026-07-22 | Pipeline checkpoint 终态同步到 control.db 时，失败或取消的当前阶段同步写入 `stage_runs`；异常与取消原因进入该 StageRun 审计记录，补齐成功/复用之外的终态可观测性。 |
 | V2.0-B177 | 2026-07-22 | PipelineSupervisor 在每个阶段开始时写入 `StageRun.running`，并在复用、成功、门禁阻断、执行失败、产物不完整、取消或暂停时写入对应终态和原因；Artifact manifest 与 StageRun 分离记录但任一控制记录失败均 fail-closed。`control.db` schema 升级至 v18，以支持暂停阶段的审计终态。 |
+| V2.0-B178 | 2026-07-22 | StageRun 生命周期补齐计划中的 `queued → running → terminal`：Supervisor 在每个候选阶段先持久化 queued，进入执行前将同一 attempt 提升为 running；复用、失败、暂停和取消均终结该 attempt，不会把 queued/running 拆成两个 attempt。`control.db` schema 升级至 v19。 |

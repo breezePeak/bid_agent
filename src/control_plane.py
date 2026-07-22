@@ -179,7 +179,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 18
+    SCHEMA_VERSION = 19
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -2929,7 +2929,7 @@ class ControlStore:
         operation = str(operation_id or "").strip()
         command = str(stage_command or "").strip()
         state = str(status or "").strip().lower()
-        if not operation or not command or state not in {"running", "succeeded", "failed", "reused", "cancelled", "paused"}:
+        if not operation or not command or state not in {"queued", "running", "succeeded", "failed", "reused", "cancelled", "paused"}:
             raise ControlPlaneError("STATE_UNAVAILABLE", "StageRun 状态无效。", status_code=503)
         now = _now()
         terminal = state in {"succeeded", "failed", "reused", "cancelled", "paused"}
@@ -2941,7 +2941,7 @@ class ControlStore:
                     "ORDER BY attempt DESC LIMIT 1",
                     (operation, command),
                 ).fetchone()
-                if state == "running" or latest is None:
+                if latest is None or state == "queued" or (state == "running" and str(latest["status"]) != "queued"):
                     attempt = int(latest["attempt"] if latest else 0) + 1
                     run_id = str(uuid.uuid4())
                     connection.execute(

@@ -187,7 +187,10 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertEqual(payload["operation_id"], "op-cancel")
             self.assertTrue(any(item.get("status") == "cancelling" for item in events))
             self.assertTrue(any(item.get("status") == "cancelled" for item in events))
-            self.assertEqual(lifecycle, [("a", "running", "started"), ("a", "cancelled", "cancelled")])
+            self.assertEqual(
+                lifecycle,
+                [("a", "queued", "queued"), ("a", "running", "started"), ("a", "cancelled", "cancelled")],
+            )
 
     def test_workspaces_have_independent_supervisor_slots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -335,7 +338,10 @@ class PipelineSupervisorTests(unittest.TestCase):
 
             self.assertEqual(
                 lifecycle,
-                [("a", "running", "started"), ("a", "reused", "reused"), ("b", "running", "started"), ("b", "succeeded", "produced")],
+                [
+                    ("a", "queued", "queued"), ("a", "running", "started"), ("a", "reused", "reused"),
+                    ("b", "queued", "queued"), ("b", "running", "started"), ("b", "succeeded", "produced"),
+                ],
             )
 
     def test_v2_artifact_recorder_failure_stops_pipeline(self) -> None:
