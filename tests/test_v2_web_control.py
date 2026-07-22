@@ -340,6 +340,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(goal["resume_context"]["item_ids"], ["license"])
             self.assertTrue((root / "workspace" / "agent" / "goal_state.json").exists())
 
+    def test_material_verify_requires_goal_migration_before_verifier_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            agent_dir = root / "workspace" / "agent"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "goal_state.json").write_text(
+                json.dumps({"goal_id": "legacy-goal", "status": "blocked_human"}), encoding="utf-8"
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.ensure_material_states([{"item_id": "license", "response_status": "deferred"}])
+            envelope = CommandEnvelope.from_mapping(
+                {"kind": "materials.verify", "payload": {"item_id": "license"}, "expected_revision": store.revision(), "idempotency_key": "verify-legacy-goal"},
+                workspace_id="alpha",
+            )
+
+            with mock.patch("agent.material_verifier.verify_material") as verify:
+                with self.assertRaises(ControlPlaneError) as raised:
+                    web_app._handle_materials_verify(context, envelope, "operation-1")
+
+            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            verify.assert_not_called()
+
     def test_v2_gate_fails_closed_when_sqlite_state_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

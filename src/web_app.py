@@ -7272,6 +7272,11 @@ def _handle_materials_upload(
 ) -> dict[str, Any]:
     from materials_checklist import mark_material_uploaded
 
+    # A successful automatic verification may resume a blocked Goal.  Validate
+    # that goal's migration before recording any submission or changing the
+    # compatibility projection, so a legacy Goal cannot produce a partial V2
+    # material command.
+    _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
     _material_item(context, item_id)
     upload_token = str(envelope.payload.get("upload_token") or "").strip()
@@ -7333,6 +7338,8 @@ def _handle_materials_upload(
         source="materials.upload",
         material_state=_authoritative_material_state(projected),
     )
+    if lifecycle == "verified":
+        _resume_goal_for_verified_material(context, item_id, f"material_auto_verified:{item_id}")
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -7350,6 +7357,7 @@ def _handle_materials_verify(
     from agent.material_verifier import verify_material
     from materials_checklist import update_item_response
 
+    _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
     _material_item(context, item_id)
     result = verify_material(
@@ -7411,6 +7419,7 @@ def _handle_materials_confirm_verification(
     from agent.material_verifier import human_confirm_verification
     from materials_checklist import update_item_response
 
+    _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
     _material_item(context, item_id)
     accept = envelope.payload.get("accept", True)
