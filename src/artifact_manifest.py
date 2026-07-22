@@ -129,7 +129,10 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
     spec = stage_spec_by_command(command)
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
-    latest_run = store.latest_stage_run_for_command(command)
+    # The Supervisor creates the new queued attempt before asking whether an
+    # existing artifact may be reused. That in-flight record must not hide the
+    # preceding completed evidence that this decision is evaluating.
+    latest_run = store.latest_terminal_stage_run_for_command(command)
     fingerprint = stage_input_fingerprint(context.root, command)
     for artifact in spec.produces:
         current = describe_artifact(context.root, artifact)

@@ -132,6 +132,7 @@ class ArtifactManifestTests(unittest.TestCase):
             ControlStore(context).record_stage_run("pipeline-1", "split-docs", "failed", disposition="runner_failed")
             self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
             ControlStore(context).record_stage_run("pipeline-2", "split-docs", "succeeded", disposition="produced")
+            ControlStore(context).record_stage_run("pipeline-3", "split-docs", "queued", disposition="queued")
             self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
 
     def test_document_edit_refreshes_final_manifests_and_stales_quality_reports(self) -> None:

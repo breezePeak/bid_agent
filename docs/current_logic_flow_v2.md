@@ -667,3 +667,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B181 | 2026-07-22 | Issue 修复、定向改稿和材料回填产生章节 Artifact 时，仅在各自 Operation 真正成功后才写入 `write-all` 的成功 StageRun；partial/blocked/failed Worker 即使留下文件或 manifest 也没有成功执行证据，后续 Pipeline 不会复用该阶段。 |
 | V2.0-B182 | 2026-07-22 | StageRun 终态现在不可覆盖：相同终态重复投递按幂等处理且不提升 revision，不同终态一律返回 `STATE_CONFLICT`。只有新的 queued/running attempt 才能在后续重试中产生新记录，避免迟到 checkpoint 或 Worker 把既有成功审计改写成失败。 |
 | V2.0-B183 | 2026-07-22 | `Operation` 的 Worker 同步同样实施终态不可逆：成功、失败或取消后，同终态迟到心跳按幂等忽略，不同终态被 `STATE_CONFLICT` 拒绝。旧 Worker、checkpoint 或重启接管逻辑不能再把已完成 Operation 回退或反转。 |
+| V2.0-B184 | 2026-07-22 | Pipeline 在准备复用前已创建新的 queued StageRun；Artifact 复用判定现明确查询该命令最近的**终态** attempt，忽略当前 in-flight queued/running 重试。这样既保留“必须有成功历史 StageRun”的门槛，也不会让新 queued 记录错误遮蔽上一轮成功证据而强制无意义重跑。 |

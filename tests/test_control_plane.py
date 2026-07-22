@@ -717,6 +717,17 @@ class ControlPlaneTests(unittest.TestCase):
                 store.record_stage_run("operation-1", "build-md", "failed", disposition="late_failure")
             self.assertEqual(raised.exception.code, "STATE_CONFLICT")
 
+    def test_latest_terminal_stage_run_ignores_inflight_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.record_stage_run("operation-1", "build-md", "succeeded", disposition="produced")
+            store.record_stage_run("operation-2", "build-md", "queued", disposition="queued")
+
+            self.assertEqual(store.latest_stage_run_for_command("build-md")["status"], "queued")
+            terminal = store.latest_terminal_stage_run_for_command("build-md") or {}
+            self.assertEqual(terminal.get("status"), "succeeded")
+
     def test_operation_terminal_state_rejects_late_worker_transition(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
