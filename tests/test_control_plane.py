@@ -294,6 +294,27 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(by_command["global-review"]["evaluation_id"], latest["evaluation_id"])
             self.assertEqual(by_command["compliance-check"]["verdict"], "block")
 
+    def test_latest_gate_receipt_uses_persisted_insertion_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            first = store.issue_gate_receipt(
+                verdict="pass",
+                gate_input_fingerprint="first",
+                artifact_path="outputs/final.docx",
+                artifact_sha256="a" * 64,
+                rules_version="test",
+            )
+            latest = store.issue_gate_receipt(
+                verdict="pass",
+                gate_input_fingerprint="second",
+                artifact_path="outputs/final.docx",
+                artifact_sha256="b" * 64,
+                rules_version="test",
+            )
+            self.assertNotEqual(first["receipt_id"], latest["receipt_id"])
+            self.assertEqual(store.latest_gate_receipt()["receipt_id"], latest["receipt_id"])
+
     def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

@@ -605,3 +605,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B119 | 2026-07-22 | V2 Issue 根因解释与批量修复预览同样移除自动导入；待迁移工作区统一返回 409 `MIGRATION_SCAN_REQUIRED`。Issue 查询、预览、解释与门禁均不会再通过读取路径改变 control.db。 |
 | V2.0-B120 | 2026-07-22 | 移除残留的 V2 Issue 自动导入 helper 语义：风险接受与 GateEvaluation 写入在 Issue 未迁移时也统一拒绝，旧 `open.json` 只能由 `migration.scan` 导入。所有 V2 Issue 消费者不再有隐式迁移旁路。 |
 | V2.0-B121 | 2026-07-22 | V2 Gate 对 Issue 迁移状态与其他消费者共用同一判定：存在旧 `open.json` 且尚未迁移时拒绝；没有旧状态文件的新建工作区可使用空 SQLite Issue 快照继续执行，不会因缺少无意义的导入 marker 被误阻断。 |
+| V2.0-B122 | 2026-07-22 | 最新 GateReceipt 查询改为按 SQLite 插入顺序而非时间戳排序；同一时钟精度内连续签发时，正式稿下载和 UI “最新凭据”始终选取真正最后签发的 receipt。 |

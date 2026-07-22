@@ -1346,7 +1346,7 @@ class ControlStore:
     def latest_gate_receipt(self) -> dict[str, Any] | None:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT receipt_id FROM gate_receipts ORDER BY created_at DESC LIMIT 1"
+                "SELECT receipt_id FROM gate_receipts ORDER BY rowid DESC LIMIT 1"
             ).fetchone()
         return self.gate_receipt(str(row["receipt_id"])) if row is not None else None
 
