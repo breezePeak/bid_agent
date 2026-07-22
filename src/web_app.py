@@ -2094,21 +2094,32 @@ def _status_payload(
         "ready": 0,
         "waived": 0,
     }
-    try:
-        from materials_checklist import load_materials_checklist
-
-        checklist = load_materials_checklist(root)
-        summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
-        materials_path = root / "workspace" / "materials_checklist.json"
+    if v2_read_only:
+        material_states = v2_store.material_states()
         materials_summary = {
-            "exists": materials_path.exists(),
-            "total": int(summary.get("total") or 0),
-            "deferred": int(summary.get("deferred") or 0),
-            "ready": int(summary.get("ready") or 0),
-            "waived": int(summary.get("waived") or 0),
+            "exists": bool(material_states),
+            "total": len(material_states),
+            "deferred": sum(1 for item in material_states if item.get("response_status") == "deferred"),
+            "ready": sum(1 for item in material_states if item.get("response_status") == "ready"),
+            "waived": sum(1 for item in material_states if item.get("response_status") == "waived"),
+            "source": "control.db",
         }
-    except Exception:
-        pass
+    else:
+        try:
+            from materials_checklist import load_materials_checklist
+
+            checklist = load_materials_checklist(root)
+            summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
+            materials_path = root / "workspace" / "materials_checklist.json"
+            materials_summary = {
+                "exists": materials_path.exists(),
+                "total": int(summary.get("total") or 0),
+                "deferred": int(summary.get("deferred") or 0),
+                "ready": int(summary.get("ready") or 0),
+                "waived": int(summary.get("waived") or 0),
+            }
+        except Exception:
+            pass
 
     # Unified runtime view (single aggregator for goal/activity/repair/pipeline)
     runtime: dict[str, Any] = {}
