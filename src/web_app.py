@@ -6439,7 +6439,7 @@ def _handle_pipeline_start(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING or SUPERVISOR.is_running():
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。")
     start_command = str(envelope.payload.get("start_command") or "").strip()
     if envelope.kind == "pipeline.run_stage" and not start_command:
@@ -6531,7 +6531,7 @@ def _handle_pipeline_pause(
     if _same_path(CURRENT_RUN_ROOT, context.root):
         PAUSE_REQUESTED = True
     if SUPERVISOR.is_running(context.root):
-        SUPERVISOR.pause()
+        SUPERVISOR.pause(context.root)
         _append_log(f"[暂停] CommandGateway 正在停止: {context.workspace_id}/{CURRENT_TASK}")
         operation = ControlStore(context).operation(operation_id) or {}
         _terminate_workspace_process(
@@ -6552,7 +6552,7 @@ def _handle_pipeline_cancel(
     if _same_path(CURRENT_RUN_ROOT, context.root):
         PAUSE_REQUESTED = True
     if SUPERVISOR.is_running(context.root):
-        SUPERVISOR.cancel()
+        SUPERVISOR.cancel(context.root)
         _append_log(f"[取消] CommandGateway 正在终止: {context.workspace_id}/{CURRENT_TASK}")
         operation = ControlStore(context).operation(operation_id) or {}
         _terminate_workspace_process(
@@ -7094,7 +7094,7 @@ def _handle_workspace_run_utility(
     allowed = set(COMMANDS) - set(auto_run_commands())
     if command not in allowed:
         raise ControlPlaneError("COMMAND_INVALID", f"不支持的工作区 utility command: {command}", status_code=400)
-    if RUNNING or SUPERVISOR.is_running():
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。", status_code=409)
     if command not in {"validate", "init"}:
         gate = _v2_gate_can_proceed(context, command)

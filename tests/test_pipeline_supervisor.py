@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -175,6 +176,46 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertEqual(payload["operation_id"], "op-cancel")
             self.assertTrue(any(item.get("status") == "cancelling" for item in events))
             self.assertTrue(any(item.get("status") == "cancelled" for item in events))
+
+    def test_workspaces_have_independent_supervisor_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            alpha = Path(tmp) / "alpha"
+            beta = Path(tmp) / "beta"
+            alpha.mkdir()
+            beta.mkdir()
+            supervisor = PipelineSupervisor()
+            entered_alpha = threading.Event()
+            entered_beta = threading.Event()
+            release = threading.Event()
+            completed: set[tuple[Path, str]] = set()
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                (entered_alpha if run_id == "alpha" else entered_beta).set()
+                release.wait(timeout=3)
+                completed.add((run_root.resolve(), command))
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.stage_spec_by_command", return_value=SimpleNamespace(id="a", validator="")),
+                patch(
+                    "pipeline_supervisor.stage_outputs_ready",
+                    side_effect=lambda root, stage: (root.resolve(), stage) in completed,
+                ),
+            ):
+                self.assertTrue(supervisor.start("alpha", alpha, runner))
+                self.assertTrue(supervisor.start("beta", beta, runner))
+                self.assertTrue(entered_alpha.wait(timeout=2))
+                self.assertTrue(entered_beta.wait(timeout=2))
+                self.assertTrue(supervisor.is_running(alpha))
+                self.assertTrue(supervisor.is_running(beta))
+                supervisor.cancel(alpha)
+                release.set()
+                alpha_state = _wait_for_status(supervisor, alpha, "cancelled")
+                beta_state = _wait_for_status(supervisor, beta, "complete")
+
+            self.assertEqual(alpha_state["run_id"], "alpha")
+            self.assertEqual(beta_state["run_id"], "beta")
 
     def test_injected_v2_gate_blocks_stage_before_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

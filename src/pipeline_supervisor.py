@@ -4,6 +4,7 @@ import json
 import os
 import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
@@ -16,6 +17,17 @@ StatusListener = Callable[[Path, dict[str, Any]], None]
 GateEvaluator = Callable[[Path, str], dict[str, Any]]
 ArtifactRecorder = Callable[[Path, str, str], None]
 ArtifactReadinessEvaluator = Callable[[Path, str], bool]
+
+
+@dataclass
+class _RunSlot:
+    root: Path
+    run_id: str
+    operation_id: str = ""
+    fencing_token: int = 0
+    thread: threading.Thread | None = None
+    pause: threading.Event = field(default_factory=threading.Event)
+    cancel: threading.Event = field(default_factory=threading.Event)
 
 
 def _now() -> str:
@@ -70,14 +82,22 @@ class PipelineSupervisor:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._thread: threading.Thread | None = None
-        self._pause = threading.Event()
-        self._cancel = threading.Event()
-        self._run_root: Path | None = None
-        self._run_id = ""
-        self._operation_id = ""
-        self._fencing_token = 0
+        self._slots: dict[Path, _RunSlot] = {}
         self._status_listener: StatusListener | None = None
+
+    @staticmethod
+    def _slot_key(root: Path) -> Path:
+        return root.resolve()
+
+    def _active_slots(self) -> list[_RunSlot]:
+        return [slot for slot in self._slots.values() if slot.thread and slot.thread.is_alive()]
+
+    def _slot_for_control(self, root: Path | None = None) -> _RunSlot | None:
+        if root is not None:
+            slot = self._slots.get(self._slot_key(root))
+            return slot if slot and slot.thread and slot.thread.is_alive() else None
+        active = self._active_slots()
+        return active[0] if len(active) == 1 else None
 
     def set_status_listener(self, listener: StatusListener | None) -> None:
         with self._lock:
@@ -125,10 +145,9 @@ class PipelineSupervisor:
 
     def is_running(self, root: Path | None = None) -> bool:
         with self._lock:
-            alive = bool(self._thread and self._thread.is_alive())
-            if not alive:
-                return False
-            return root is None or (self._run_root is not None and self._run_root.resolve() == root.resolve())
+            if root is not None:
+                return self._slot_for_control(root) is not None
+            return bool(self._active_slots())
 
     def heartbeat(
         self,
@@ -181,20 +200,23 @@ class PipelineSupervisor:
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
     ) -> bool:
         with self._lock:
-            if self._thread and self._thread.is_alive():
+            key = self._slot_key(root)
+            existing = self._slots.get(key)
+            if existing and existing.thread and existing.thread.is_alive():
                 return False
-            self._pause.clear()
-            self._cancel.clear()
-            self._run_root = root
-            self._run_id = run_id
-            self._operation_id = operation_id
-            self._fencing_token = int(fencing_token or 0)
+            slot = _RunSlot(
+                root=root,
+                run_id=run_id,
+                operation_id=operation_id,
+                fencing_token=int(fencing_token or 0),
+            )
+            self._slots[key] = slot
             self._save(
                 root,
                 {
                     "run_id": run_id,
                     "operation_id": operation_id,
-                    "fencing_token": self._fencing_token,
+                    "fencing_token": slot.fencing_token,
                     "status": "running",
                     "requested_action": "run_stage" if single_command else "run_all",
                     "current_stage": start_command,
@@ -206,31 +228,32 @@ class PipelineSupervisor:
                     "error": "",
                 },
             )
-            self._thread = threading.Thread(
+            slot.thread = threading.Thread(
                 target=self._loop,
-                args=(run_id, root, runner, start_command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator),
+                args=(slot, runner, start_command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator),
                 daemon=True,
                 name=f"pipeline-{run_id}",
             )
-            self._thread.start()
+            slot.thread.start()
             return True
 
-    def pause(self) -> None:
-        self._pause.set()
+    def pause(self, root: Path | None = None) -> None:
         with self._lock:
-            if self._run_root:
-                self._save(self._run_root, {"status": "pausing", "message": "正在暂停流水线"})
+            slot = self._slot_for_control(root)
+            if slot:
+                slot.pause.set()
+                self._save(slot.root, {"status": "pausing", "message": "正在暂停流水线"})
 
-    def cancel(self) -> None:
-        self._cancel.set()
+    def cancel(self, root: Path | None = None) -> None:
         with self._lock:
-            if self._run_root:
-                self._save(self._run_root, {"status": "cancelling", "message": "正在取消流水线"})
+            slot = self._slot_for_control(root)
+            if slot:
+                slot.cancel.set()
+                self._save(slot.root, {"status": "cancelling", "message": "正在取消流水线"})
 
     def _loop(
         self,
-        run_id: str,
-        root: Path,
+        slot: _RunSlot,
         runner: RunStage,
         start_command: str,
         single_command: bool = False,
@@ -238,6 +261,8 @@ class PipelineSupervisor:
         artifact_recorder: ArtifactRecorder | None = None,
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
     ) -> None:
+        run_id = slot.run_id
+        root = slot.root
         commands = auto_run_commands()
         if single_command and start_command in commands:
             commands = [start_command]
@@ -245,10 +270,10 @@ class PipelineSupervisor:
             commands = commands[commands.index(start_command) :]
         try:
             for command in commands:
-                if self._cancel.is_set():
+                if slot.cancel.is_set():
                     self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})
                     return
-                if self._pause.is_set():
+                if slot.pause.is_set():
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
                 # quality gate: open block issues stop progression before next stage
@@ -340,10 +365,10 @@ class PipelineSupervisor:
                     },
                 )
                 exit_code = runner(command, run_id, root)
-                if self._cancel.is_set():
+                if slot.cancel.is_set():
                     self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})
                     return
-                if self._pause.is_set():
+                if slot.pause.is_set():
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
                 if exit_code != 0:
@@ -398,10 +423,9 @@ class PipelineSupervisor:
             self._save(root, {"status": "failed", "worker_pid": 0, "error": str(exc)})
         finally:
             with self._lock:
-                self._run_root = None
-                self._run_id = ""
-                self._operation_id = ""
-                self._fencing_token = 0
+                key = self._slot_key(root)
+                if self._slots.get(key) is slot:
+                    self._slots.pop(key, None)
 
     def reconcile(
         self,
@@ -436,19 +460,24 @@ class PipelineSupervisor:
             pid = 0
         if alive:
             with self._lock:
-                if self._thread and self._thread.is_alive():
+                key = self._slot_key(root)
+                existing = self._slots.get(key)
+                if existing and existing.thread and existing.thread.is_alive():
                     return False
-                self._run_root = root
-                self._run_id = run_id
-                self._operation_id = operation_id
-                self._fencing_token = fencing_token
-                self._thread = threading.Thread(
+                slot = _RunSlot(
+                    root=root,
+                    run_id=run_id,
+                    operation_id=operation_id,
+                    fencing_token=fencing_token,
+                )
+                self._slots[key] = slot
+                slot.thread = threading.Thread(
                     target=self._monitor_then_resume,
-                    args=(pid, run_id, root, runner, command, operation_id, fencing_token, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator),
+                    args=(slot, pid, runner, command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator),
                     daemon=True,
                     name=f"pipeline-reconcile-{run_id}",
                 )
-                self._thread.start()
+                slot.thread.start()
                 return True
         self._save(root, {"status": "interrupted", "worker_pid": 0, "message": "检测到服务中断，正在断点恢复"})
         return self.start(
@@ -466,36 +495,36 @@ class PipelineSupervisor:
 
     def _monitor_then_resume(
         self,
+        slot: _RunSlot,
         pid: int,
-        run_id: str,
-        root: Path,
         runner: RunStage,
         command: str,
-        operation_id: str = "",
-        fencing_token: int = 0,
         single_command: bool = False,
         gate_evaluator: GateEvaluator | None = None,
         artifact_recorder: ArtifactRecorder | None = None,
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
     ) -> None:
+        root = slot.root
         self._save(root, {"status": "running", "message": f"重新接管仍在运行的进程 {pid}"})
-        while _pid_alive(pid) and not self._pause.wait(5) and not self._cancel.is_set():
+        while _pid_alive(pid) and not slot.pause.wait(5) and not slot.cancel.is_set():
             self.heartbeat(root, command=command, worker_pid=pid, message="监控重启前遗留进程")
         with self._lock:
-            self._thread = None
-        if self._cancel.is_set():
+            key = self._slot_key(root)
+            if self._slots.get(key) is slot:
+                self._slots.pop(key, None)
+        if slot.cancel.is_set():
             self._save(root, {"status": "cancelled", "worker_pid": 0})
             return
-        if self._pause.is_set():
+        if slot.pause.is_set():
             self._save(root, {"status": "paused", "worker_pid": 0})
             return
         self.start(
-            run_id,
+            slot.run_id,
             root,
             runner,
             start_command=command,
-            operation_id=operation_id,
-            fencing_token=fencing_token,
+            operation_id=slot.operation_id,
+            fencing_token=slot.fencing_token,
             single_command=single_command,
             gate_evaluator=gate_evaluator,
             artifact_recorder=artifact_recorder,
