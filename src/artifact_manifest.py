@@ -129,6 +129,7 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
     spec = stage_spec_by_command(command)
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
+    latest_run = store.latest_stage_run_for_command(command)
     fingerprint = stage_input_fingerprint(context.root, command)
     for artifact in spec.produces:
         current = describe_artifact(context.root, artifact)
@@ -144,7 +145,15 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
             return False
         if state.get("input_fingerprint") != fingerprint:
             return False
-    return True
+    if latest_run is not None:
+        return str(latest_run.get("status") or "") in {"succeeded", "reused"}
+    # One compatibility release may bootstrap a V1 stage exactly once, but
+    # never after the workspace has completed cutover and never if a manifest
+    # already claims authority without a corresponding successful StageRun.
+    cutover = store.migration_state().get("cutover")
+    if isinstance(cutover, dict) and cutover.get("status") == "active":
+        return False
+    return all(str(artifact.path).replace("\\", "/") not in states for artifact in spec.produces)
 
 
 def record_document_edit_artifacts(context: WorkspaceContext) -> None:

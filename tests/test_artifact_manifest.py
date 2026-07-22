@@ -109,9 +109,30 @@ class ArtifactManifestTests(unittest.TestCase):
 
             self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
             record_stage_artifacts(context, "split-docs")
+            store = ControlStore(context)
+            store.record_stage_run("pipeline-1", "split-docs", "succeeded", disposition="produced")
             self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
             (root / "inputs" / "tender.md").write_text("changed", encoding="utf-8")
             self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+
+    def test_reuse_rejects_manifest_without_successful_stage_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "inputs").mkdir(parents=True)
+            (root / "workspace" / "chunks").mkdir(parents=True)
+            (root / "inputs" / "tender.md").write_text("tender", encoding="utf-8")
+            (root / "inputs" / "company.md").write_text("company", encoding="utf-8")
+            (root / "workspace" / "chunks" / "tender_chunks.json").write_text("[]", encoding="utf-8")
+            (root / "workspace" / "chunks" / "company_chunks.json").write_text("[]", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+
+            record_stage_artifacts(context, "split-docs")
+            self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+            ControlStore(context).record_stage_run("pipeline-1", "split-docs", "failed", disposition="runner_failed")
+            self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+            ControlStore(context).record_stage_run("pipeline-2", "split-docs", "succeeded", disposition="produced")
+            self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
 
     def test_document_edit_refreshes_final_manifests_and_stales_quality_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

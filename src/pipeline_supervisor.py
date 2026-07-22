@@ -336,7 +336,6 @@ class PipelineSupervisor:
                     )
                     return
                 spec = stage_spec_by_command(command)
-                record_stage(command, "running", "started")
                 outputs_ready = stage_outputs_ready(root, spec.id)
                 if outputs_ready and artifact_readiness_evaluator is not None:
                     try:
@@ -383,6 +382,7 @@ class PipelineSupervisor:
                         },
                     )
                     continue
+                record_stage(command, "running", "started")
                 self._save(
                     root,
                     {

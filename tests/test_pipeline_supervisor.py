@@ -339,7 +339,7 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertEqual(
                 lifecycle,
                 [
-                    ("a", "queued", "queued"), ("a", "running", "started"), ("a", "reused", "reused"),
+                    ("a", "queued", "queued"), ("a", "reused", "reused"),
                     ("b", "queued", "queued"), ("b", "running", "started"), ("b", "succeeded", "produced"),
                 ],
             )
