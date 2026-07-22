@@ -885,6 +885,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(trigger.call_args.kwargs["run_id"], "alpha")
             self.assertEqual(trigger.call_args.kwargs["control_operation_id"], operation_id)
 
+    def test_v2_rewrite_can_queue_behind_other_workspace_executor(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            web_app.RUNNING = True
+            web_app.CURRENT_RUN_ROOT = beta
+
+            with mock.patch.object(web_app.SUPERVISOR, "is_running", return_value=False), mock.patch.object(
+                web_app.threading, "Thread"
+            ) as worker:
+                result = web_app._trigger_rewrite_targets_inline(
+                    [{"chapter_id": "1.1"}],
+                    root=alpha,
+                    run_id="alpha",
+                    control_operation_id="rewrite-alpha",
+                    control_fencing_token=1,
+                )
+
+            self.assertTrue(result["ok"])
+            worker.return_value.start.assert_called_once()
+
     def test_chat_rewrite_proposes_v2_action_without_starting_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

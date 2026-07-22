@@ -2743,20 +2743,19 @@ def _trigger_rewrite_targets_inline(
     control_operation_id: str = "",
     control_fencing_token: int = 0,
 ) -> dict[str, Any]:
-    global RUNNING
     if not targets:
         return {"ok": False, "message": "没有定向改稿目标。"}
     if not str(control_operation_id or "").strip() or int(control_fencing_token or 0) <= 0:
         return {"ok": False, "message": "定向改稿缺少权威 Operation/fencing token，已拒绝执行。"}
-    if RUNNING:
-        return {"ok": False, "message": "当前已有任务正在运行，请等待完成。"}
     if root is None and ACTIVE_RUN_ROOT is None:
         return {"ok": False, "message": "请先创建本次运行工作空间。"}
+    run_root = root or _active_root()
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, run_root)) or SUPERVISOR.is_running(run_root):
+        return {"ok": False, "message": "当前工作空间已有任务正在运行，请等待完成。"}
     chapter_ids = [str(t.get("chapter_id")) for t in targets if t.get("chapter_id")]
     if not chapter_ids:
         return {"ok": False, "message": "改稿目标缺少 chapter_id。"}
-    run_root = root or _active_root()
-    resolved_run_id = run_id or ACTIVE_RUN_ID or run_root.name
+    resolved_run_id = run_id or run_root.name
 
     def _sync_control(status: str, message: str, error: Any = None) -> None:
         if not control_operation_id:
@@ -2771,71 +2770,59 @@ def _trigger_rewrite_targets_inline(
         )
 
     def _run_rewrite_sync(chapters: list[str], worker_root: Path) -> None:
-        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
-        RUNNING = True
-        CURRENT_TASK = "dispatch-rewrite"
-        CURRENT_RUN_ID = resolved_run_id
-        CURRENT_RUN_ROOT = worker_root
-        PAUSE_REQUESTED = False
         operation_status = "failed"
         operation_error: dict[str, Any] | None = None
         state_status = "error"
         state_message = "定向改稿未启动。"
-        try:
-            save_run_state(
-                worker_root,
-                {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
-                stage="review-fix-all",
-                status="running",
-                message=f"定向改稿: {chapters}",
-            )
-            # The authoritative Operation must be writable before any artifact
-            # mutation starts; otherwise the worker fails closed.
-            _sync_control("running", f"正在定向改稿: {chapters}")
-            _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
-            from subagent_runner import run_rewrite_all
-
-            from concurrency import workers_default
-
-            result = run_rewrite_all(worker_root, workers=workers_default(), chapter_ids=chapters)
-            if control_operation_id:
-                from artifact_manifest import record_external_chapter_mutation
-
-                record_external_chapter_mutation(
-                    _workspace_context(worker_root.name),
-                    disposition="chapter_rewrite",
+        with _legacy_execution_scope("dispatch-rewrite", resolved_run_id, worker_root):
+            try:
+                save_run_state(
+                    worker_root,
+                    {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
+                    stage="review-fix-all",
+                    status="running",
+                    message=f"定向改稿: {chapters}",
                 )
-            failed = result.get("failed", [])
-            state_status = "ok" if not failed else "error"
-            state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
-            operation_status = "succeeded" if not failed else "blocked"
-            if failed:
-                operation_error = {"failed_chapters": failed}
-        except Exception as exc:
-            state_status = "error"
-            state_message = f"定向改稿失败: {exc}"
-            operation_error = {"message": str(exc)}
-            _append_log(f"[错误] 定向改稿异常: {exc}")
-        try:
-            save_run_state(
-                worker_root,
-                {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
-                stage="review-fix-all",
-                status=state_status,
-                message=state_message,
-            )
-        except Exception as exc:
-            operation_status = "failed"
-            operation_error = {"message": f"run state write failed: {exc}"}
-            state_message = f"定向改稿终态保存失败: {exc}"
-            _append_log(f"[错误] {state_message}")
-        finally:
-            # Publish the terminal Operation only after the in-process worker
-            # state is terminal too, so observers never see succeeded + RUNNING.
-            RUNNING = False
-            CURRENT_TASK = ""
-            CURRENT_RUN_ID = ""
-            CURRENT_RUN_ROOT = None
+                # The authoritative Operation must be writable before any artifact
+                # mutation starts; otherwise the worker fails closed.
+                _sync_control("running", f"正在定向改稿: {chapters}")
+                _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
+                from subagent_runner import run_rewrite_all
+
+                from concurrency import workers_default
+
+                result = run_rewrite_all(worker_root, workers=workers_default(), chapter_ids=chapters)
+                if control_operation_id:
+                    from artifact_manifest import record_external_chapter_mutation
+
+                    record_external_chapter_mutation(
+                        _workspace_context(worker_root.name),
+                        disposition="chapter_rewrite",
+                    )
+                failed = result.get("failed", [])
+                state_status = "ok" if not failed else "error"
+                state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
+                operation_status = "succeeded" if not failed else "blocked"
+                if failed:
+                    operation_error = {"failed_chapters": failed}
+            except Exception as exc:
+                state_status = "error"
+                state_message = f"定向改稿失败: {exc}"
+                operation_error = {"message": str(exc)}
+                _append_log(f"[错误] 定向改稿异常: {exc}")
+            try:
+                save_run_state(
+                    worker_root,
+                    {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
+                    stage="review-fix-all",
+                    status=state_status,
+                    message=state_message,
+                )
+            except Exception as exc:
+                operation_status = "failed"
+                operation_error = {"message": f"run state write failed: {exc}"}
+                state_message = f"定向改稿终态保存失败: {exc}"
+                _append_log(f"[错误] {state_message}")
         try:
             _sync_control(operation_status, state_message, operation_error)
         except Exception as exc:
