@@ -2493,6 +2493,42 @@ class V2WebControlTests(unittest.TestCase):
             sync_review.assert_not_called()
             write_register.assert_not_called()
 
+    def test_v2_materials_checklist_exposes_submission_and_verification_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "license", "requirement": "营业执照", "response_status": "submitted"}]}),
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.ensure_material_states([{"item_id": "license", "requirement": "营业执照", "response_status": "submitted"}])
+            store.record_material_submission(
+                item_id="license",
+                upload={"upload_token": "token-1", "filename": "license.pdf", "sha256": "b" * 64, "size_bytes": 99},
+                actor={"id": "owner"},
+                source="test",
+            )
+            store.record_material_verification(
+                item_id="license",
+                verification_type="human",
+                verdict="verified",
+                verification={"reason": "checked"},
+                actor={"id": "reviewer"},
+                source="test",
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_materials_checklist("alpha"))
+
+            item = payload["items"][0]
+            self.assertEqual(item["submission_count"], 1)
+            self.assertEqual(item["latest_submission"]["filename"], "license.pdf")
+            self.assertEqual(item["latest_verification"]["verdict"], "verified")
+
     def test_v2_export_preflight_fails_closed_on_malformed_quality_reports(self) -> None:
         for filename, content in (
             ("global_review.json", "{broken"),

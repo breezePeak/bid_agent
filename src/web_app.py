@@ -3941,6 +3941,27 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
 
         data = load_materials_checklist(root)
         authoritative_items = _material_items(context)
+        store = ControlStore(context)
+        submissions_by_item: dict[str, list[dict[str, Any]]] = {}
+        for submission in store.material_submissions(limit=500):
+            submissions_by_item.setdefault(str(submission.get("item_id") or ""), []).append(submission)
+        verifications_by_item: dict[str, list[dict[str, Any]]] = {}
+        for verification in store.material_verifications(limit=500):
+            verifications_by_item.setdefault(str(verification.get("item_id") or ""), []).append(verification)
+        enriched_items: list[dict[str, Any]] = []
+        for item in authoritative_items:
+            item_id = str(item.get("item_id") or "")
+            submissions = submissions_by_item.get(item_id) or []
+            verifications = verifications_by_item.get(item_id) or []
+            enriched_items.append(
+                {
+                    **item,
+                    "submission_count": len(submissions),
+                    "latest_submission": submissions[0] if submissions else None,
+                    "latest_verification": verifications[0] if verifications else None,
+                }
+            )
+        authoritative_items = enriched_items
         summary = {
             "total": len(authoritative_items),
             "ready": sum(1 for item in authoritative_items if item.get("response_status") == "ready"),

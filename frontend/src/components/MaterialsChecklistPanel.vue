@@ -64,6 +64,8 @@
         <div class="mcp-req">{{ item.requirement }}</div>
         <div class="mcp-meta">
           <span>证据 {{ evidenceLabel(item.evidence_status) }}</span>
+          <span v-if="item.submission_count">已提交 {{ item.submission_count }} 次</span>
+          <span v-if="item.latest_verification">最新核验：{{ verificationLabel(item.latest_verification) }}</span>
           <span v-if="item.suggested_attachment">建议：{{ item.suggested_attachment }}</span>
         </div>
         <div class="mcp-reason" v-if="item.reason">{{ item.reason }}</div>
@@ -153,6 +155,11 @@ function severityLabel(s) {
 }
 function evidenceLabel(s) {
   return ({ missing: '缺失', weak: '弱', satisfied: '足' })[s] || s || '—'
+}
+function verificationLabel(verification) {
+  const type = verification?.verification_type === 'human' ? '人工' : '自动'
+  const verdict = verification?.verdict === 'verified' ? '通过' : verification?.verdict === 'rejected' ? '拒绝' : '已提交'
+  return `${type}${verdict}`
 }
 function notePlaceholder(st) {
   if (st === 'waived') return '可选：放弃原因'
