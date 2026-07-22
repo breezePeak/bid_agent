@@ -7209,6 +7209,7 @@ def _handle_migration_scan(
             legacy=item.get("legacy"),
             authoritative=item.get("authoritative"),
             reason="管理员迁移扫描发现 V1 与 control.db 状态不一致。",
+            exclude_operation_id=operation_id,
         )
         detected += 1
     for category, reason in (("orphans", "旧根目录控制状态未绑定到工作区。"), ("unrecognized", "旧状态文件无法识别。")):
@@ -7218,6 +7219,7 @@ def _handle_migration_scan(
                 legacy=item,
                 authoritative={},
                 reason=reason,
+                exclude_operation_id=operation_id,
             )
             detected += 1
     store.record_migration_scan(

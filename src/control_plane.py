@@ -726,6 +726,7 @@ class ControlStore:
         legacy: Any,
         authoritative: Any,
         reason: str,
+        exclude_operation_id: str = "",
     ) -> dict[str, Any]:
         domain_name = str(domain or "").strip()
         if not domain_name:
@@ -750,15 +751,19 @@ class ControlStore:
                 )
                 if int(cursor.rowcount or 0):
                     placeholders = ",".join("?" for _ in self.ACTIVE_OPERATION_STATES)
-                    blocked = connection.execute(
-                        f"UPDATE operations SET status = 'blocked', updated_at = ?, "
-                        "message = ? WHERE status IN (" + placeholders + ")",
-                        (
-                            now,
-                            "检测到 V1/V2 状态迁移冲突，等待管理员协调。",
-                            *self.ACTIVE_OPERATION_STATES,
-                        ),
+                    blocked_sql = (
+                        f"UPDATE operations SET status = 'blocked', updated_at = ?, message = ? "
+                        "WHERE status IN (" + placeholders + ")"
                     )
+                    blocked_args: tuple[Any, ...] = (
+                        now,
+                        "检测到 V1/V2 状态迁移冲突，等待管理员协调。",
+                        *self.ACTIVE_OPERATION_STATES,
+                    )
+                    if exclude_operation_id:
+                        blocked_sql += " AND operation_id <> ?"
+                        blocked_args += (exclude_operation_id,)
+                    blocked = connection.execute(blocked_sql, blocked_args)
                     revision = self._bump_revision(connection)
                     self._event(
                         connection, revision, "MigrationConflictDetected", "MigrationConflict",
