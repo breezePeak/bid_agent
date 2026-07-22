@@ -2656,6 +2656,24 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertNotEqual(before, after)
 
+    def test_formal_gate_fingerprint_tracks_latest_gate_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            before, _ = web_app._formal_gate_fingerprint(context)
+            store.record_gate_evaluation(
+                command="global-review",
+                verdict="pass",
+                input_fingerprint="quality-v1",
+                findings=[],
+                source="test",
+            )
+            after, _ = web_app._formal_gate_fingerprint(context)
+
+            self.assertNotEqual(before, after)
+
     def test_migration_snapshot_marks_active_cutover_stale_when_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

@@ -5907,6 +5907,7 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
         "issue_states": store.issue_states(),
         "policy_decisions": store.policy_decisions(),
         "artifact_states": store.artifact_states(),
+        "latest_gate_evaluations": store.latest_gate_evaluations(),
         "migration": migration_state,
     }
     cutover = migration_state.get("cutover") if isinstance(migration_state, dict) else None
