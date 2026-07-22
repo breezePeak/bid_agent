@@ -127,6 +127,23 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual(client.submit.call_args.kwargs["expected_revision"], 9)
         self.assertEqual(client.submit.call_args.kwargs["payload"]["conflict_id"], "c1")
 
+    def test_migration_backup_drill_uses_workspace_scoped_client(self) -> None:
+        client = mock.Mock()
+        client.login.return_value = {"ok": True}
+        client.drill_migration_backup.return_value = {"ok": True, "backup": {"recovery_drill": "passed"}}
+        with mock.patch.object(control_cli, "ControlApiClient", return_value=client):
+            with mock.patch("sys.stdout", io.StringIO()):
+                exit_code = control_cli.main(
+                    [
+                        "--password", "secret", "migration-backup-drill", "--workspace", "alpha",
+                        "--path", "workspace/migration_backups/control-before-test.db",
+                    ]
+                )
+        self.assertEqual(exit_code, 0)
+        client.drill_migration_backup.assert_called_once_with(
+            "alpha", "workspace/migration_backups/control-before-test.db"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
