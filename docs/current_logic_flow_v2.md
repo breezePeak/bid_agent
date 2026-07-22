@@ -574,3 +574,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B88 | 2026-07-22 | `migration.scan` 现在在工作区写入原子 `workspace/migration_report.json` 兼容审计报告，包含 source fingerprint/manifest、导入清单、冲突/orphan/unrecognized 盘点、导入与发现数量和当前 Migration 状态。SQLite 仍是控制真相源；该报告只作为可审阅的迁移证据，不参与反向状态同步。历史 Operation 的结构化导入与受控恢复演练仍待后续切片。 |
 | V2.0-B89 | 2026-07-22 | 新增显式 workspace_id 的 V2 迁移报告读取 API/CLI；报告必须存在、可解析且 workspace_id 匹配，否则 fail-closed 返回 404/503。迁移审计不再需要通过全局 active workspace 或直接文件访问获取。历史 Operation 的结构化导入与受控恢复演练仍待后续切片。 |
 | V2.0-B90 | 2026-07-22 | MigrationConflict 归一 active Operation 时增加发起扫描的 Operation 排除项：管理员 `migration.scan` 可登记冲突并完成自身审计 Operation，不会被自己的 fail-closed 规则误标记 blocked；同工作区其他活动变更 Operation 仍会被阻断。 |
+| V2.0-B91 | 2026-07-22 | 主 Vue 控制台新增“迁移”面板：管理员可查看 V2 Snapshot 中的 Migration 状态与 open conflict，提出扫描、cutover 或逐项协调 Action，并在界面上明确点击确认后调用同一 V2 Confirmation API。前端不直接修改迁移状态，也不自动确认高风险 Action。 |

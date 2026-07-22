@@ -12,6 +12,7 @@
         <span v-if="deferredCount > 0" class="ip-badge-alert" :title="`待补 ${deferredCount} 条材料`">{{ deferredCount }}</span>
       </button>
       <button class="ip-tab" :class="{ on: tab === 'logs' }" @click="tab = 'logs'">日志</button>
+      <button class="ip-tab" :class="{ on: tab === 'migration' }" @click="tab = 'migration'">迁移</button>
       <button class="ip-tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
     </div>
 
@@ -48,6 +49,10 @@
         </div>
       </div>
       <div v-else class="ip-empty-soft" style="padding:12px">暂无日志。启动流水线后会实时汇入。</div>
+    </div>
+
+    <div v-else-if="tab === 'migration'" class="ip-issues">
+      <MigrationPanel :run-id="runId" />
     </div>
 
     <div v-else-if="tab === 'issues'" class="ip-issues">
@@ -111,6 +116,7 @@ import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import FileExplorer from './FileExplorer.vue'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
+import MigrationPanel from './MigrationPanel.vue'
 import { fetchComplianceReport, fetchMaterialsChecklist } from '../api'
 import { useWorkspaceRuntime } from '../composables/useWorkspaceRuntime'
 
