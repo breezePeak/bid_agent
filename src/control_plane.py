@@ -56,6 +56,16 @@ class ControlPlaneError(RuntimeError):
         }
 
 
+def _parse_utc_timestamp(value: Any, *, label: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ControlPlaneError("STATE_UNAVAILABLE", f"{label}无效。", status_code=503) from exc
+    if parsed.tzinfo is None:
+        raise ControlPlaneError("STATE_UNAVAILABLE", f"{label}缺少时区。", status_code=503)
+    return parsed
+
+
 @dataclass(frozen=True)
 class WorkspaceContext:
     workspace_id: str
@@ -1426,10 +1436,7 @@ class ControlStore:
                     raise ControlPlaneError("UPLOAD_TOKEN_INVALID", "上传 token 不存在。", status_code=404)
                 if str(row["status"]) != "pending":
                     raise ControlPlaneError("UPLOAD_TOKEN_CONSUMED", "上传 token 已使用。", status_code=409)
-                try:
-                    expires_at = datetime.fromisoformat(str(row["expires_at"]))
-                except ValueError as exc:
-                    raise ControlPlaneError("STATE_UNAVAILABLE", "上传 token 到期时间无效。", status_code=503) from exc
+                expires_at = _parse_utc_timestamp(row["expires_at"], label="上传 token 到期时间")
                 if expires_at <= datetime.now(timezone.utc):
                     revision = self._bump_revision(connection)
                     connection.execute(
@@ -1514,10 +1521,7 @@ class ControlStore:
                         status_code=409,
                     )
                 if consume_upload:
-                    try:
-                        expires_at = datetime.fromisoformat(str(upload_row["expires_at"]))
-                    except ValueError as exc:
-                        raise ControlPlaneError("STATE_UNAVAILABLE", "上传 token 到期时间无效。", status_code=503) from exc
+                    expires_at = _parse_utc_timestamp(upload_row["expires_at"], label="上传 token 到期时间")
                     if expires_at <= datetime.now(timezone.utc):
                         raise ControlPlaneError("UPLOAD_TOKEN_EXPIRED", "上传 token 已过期。", status_code=409)
                 if (
@@ -3378,7 +3382,7 @@ class ControlStore:
                             "只能由创建该 Action 的认证主体确认或拒绝。",
                             status_code=403,
                         )
-                expires_at = datetime.fromisoformat(str(row["expires_at"]))
+                expires_at = _parse_utc_timestamp(row["expires_at"], label="Action 到期时间")
                 if expires_at <= datetime.now(timezone.utc):
                     connection.execute(
                         "UPDATE confirmations SET status = 'expired', consumed_at = ? WHERE confirmation_id = ?",

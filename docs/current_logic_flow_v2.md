@@ -609,3 +609,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B123 | 2026-07-22 | 正式稿下载在校验 GateReceipt 时固定只接受 `outputs/final.docx`，拒绝任意其他或越界 artifact_path；即使控制库中存在异常凭据，也不能将其作为下载其他工作区文件的路径授权。 |
 | V2.0-B124 | 2026-07-22 | GateReceipt 签发入口也开始拒绝空、绝对或包含 `..` 的 artifact_path；不安全路径无法进入控制库，下载侧的正式稿固定路径校验继续作为纵深防御。 |
 | V2.0-B125 | 2026-07-22 | 前端测试使用 Node 内置 test runner，前端包声明 Node >=18 运行时要求；控制台构建/契约回归不再依赖开发机上可能不支持 `node --test` 的旧 Node 14。 |
+| V2.0-B126 | 2026-07-22 | 控制面统一解析 upload token 与 Action 的到期时间：损坏或缺少时区的时间戳一律以 `STATE_UNAVAILABLE` fail-closed，避免 SQLite 异常值触发 naive/aware 时间比较错误后走入不确定状态。 |
