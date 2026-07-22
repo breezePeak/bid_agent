@@ -1276,6 +1276,26 @@ class V2WebControlTests(unittest.TestCase):
                 "manifest_missing_after_cutover",
             )
 
+    def test_formal_material_gate_allows_clean_cutover_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            preview = web_app._v1_migration_dry_run(context)
+            store.record_migration_scan(
+                fingerprint=preview["source_fingerprint"],
+                manifest=preview["source_manifest"],
+                actor={"id": "admin", "role": "admin"},
+            )
+            store.activate_migration_cutover(
+                fingerprint=preview["source_fingerprint"],
+                actor={"id": "admin", "role": "admin"},
+            )
+
+            web_app._assert_formal_materials_verified(context)
+
     def test_formal_gate_fails_closed_without_docx(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

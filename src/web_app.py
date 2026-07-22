@@ -5997,7 +5997,8 @@ def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
     store = ControlStore(context)
     if store.v1_import_pending("materials"):
         cutover = store.migration_state().get("cutover") or {}
-        if str(cutover.get("status") or "") == "active":
+        legacy_materials_path = context.root / "workspace" / "materials_checklist.json"
+        if str(cutover.get("status") or "") == "active" and legacy_materials_path.exists():
             raise ControlPlaneError(
                 "MIGRATION_SCAN_REQUIRED",
                 "材料权威状态尚未迁移，已拒绝签发 GateReceipt。",
