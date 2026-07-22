@@ -2344,6 +2344,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(payload["snapshot"]["materials"]["source"], "migration_required")
             self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "migration_required")
 
+    def test_v2_materials_read_does_not_import_legacy_material_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "materials_checklist.json").write_text(
+                json.dumps({"items": [{"item_id": "legacy-material", "response_status": "ready"}]}),
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_materials_checklist("alpha"))
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["source"], "migration_required")
+            self.assertEqual(payload["items"], [])
+            self.assertEqual(payload["gap_chapters"], {})
+            self.assertEqual(payload["refill_plans"], [])
+            self.assertTrue(store.v1_import_pending("materials"))
+            self.assertEqual(store.revision(), 0)
+
     def test_v2_snapshot_exposes_latest_quality_evaluations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

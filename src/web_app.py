@@ -3971,8 +3971,15 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
         )
 
         data = load_materials_checklist(root)
-        authoritative_items = _material_items(context)
         store = ControlStore(context)
+        material_import_pending = (
+            store.v1_import_pending("materials")
+            and (root / "workspace" / "materials_checklist.json").exists()
+        )
+        # This V2 read endpoint must never promote the legacy projection into
+        # SQLite.  Only the administrator-confirmed migration.scan Command may
+        # do that; while it is pending, return an explicit empty V2 snapshot.
+        authoritative_items = [] if material_import_pending else store.material_states()
         audit_summary = store.material_audit_summary()
         enriched_items: list[dict[str, Any]] = []
         for item in authoritative_items:
@@ -4002,8 +4009,9 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
                 "checklist": data,
                 "summary": summary,
                 "items": authoritative_items,
-                "gap_chapters": chapters_with_material_gaps(root),
-                "refill_plans": chapters_ready_for_refill(root),
+                "gap_chapters": {} if material_import_pending else chapters_with_material_gaps(root),
+                "refill_plans": [] if material_import_pending else chapters_ready_for_refill(root),
+                "source": "migration_required" if material_import_pending else "control.db",
             }
         )
     except Exception as exc:
