@@ -7638,10 +7638,11 @@ def _trigger_material_refill(
             record_external_chapter_mutation(context, disposition="materials_refill")
             try:
                 result["revalidate"] = revalidate_issues_after_materials(context.root)
+                _project_quality_issues(context)
             except Exception as exc:
                 result["revalidate_error"] = str(exc)
             failed = result.get("failed") if isinstance(result.get("failed"), list) else []
-            status = "succeeded" if result.get("ok") and not failed else "blocked"
+            status = "succeeded" if result.get("ok") and not failed and not result.get("revalidate_error") else "blocked"
             message = str(result.get("message") or "材料回填完成。")
             error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
         except Exception as exc:
@@ -7673,6 +7674,10 @@ def _handle_materials_refill(
 ) -> dict[str, Any]:
     from materials_checklist import load_materials_checklist
 
+    # The worker revalidates material-related issues, which still emits the
+    # one-version V1 projection before this explicit command projects it back
+    # to SQLite.  Refuse to start if the existing projection was not migrated.
+    _ensure_v2_issue_import(context)
     items = _material_items(context)
     projection = load_materials_checklist(context.root)
     projection_items = projection.get("items") if isinstance(projection.get("items"), list) else []

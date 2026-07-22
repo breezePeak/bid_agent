@@ -1573,6 +1573,28 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(payload["ok"])
             self.assertEqual(payload["receipt"]["error"]["code"], "GATE_BLOCKED")
 
+    def test_material_refill_requires_explicit_issue_migration_before_worker_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            issues_dir = workspace / "issues"
+            issues_dir.mkdir(parents=True)
+            (workspace / "materials_checklist.json").write_text(json.dumps({"items": []}), encoding="utf-8")
+            (issues_dir / "open.json").write_text(json.dumps([]), encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            envelope = CommandEnvelope.from_mapping(
+                {"kind": "materials.refill", "payload": {}, "expected_revision": 0, "idempotency_key": "refill-legacy-issues"},
+                workspace_id="alpha",
+            )
+
+            with mock.patch.object(web_app, "_trigger_material_refill") as trigger:
+                with self.assertRaises(ControlPlaneError) as raised:
+                    web_app._handle_materials_refill(context, envelope, "operation-1")
+
+            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            trigger.assert_not_called()
+
     def test_formal_gate_blocks_unverified_qualification_material(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"

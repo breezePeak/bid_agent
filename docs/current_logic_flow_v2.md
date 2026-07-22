@@ -635,3 +635,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B149 | 2026-07-22 | `goal.resume` 移除 V1 Goal loader 与材料回填 helper 的隐式导入/重验路径：旧 `goal_state.json` 未迁移时 fail-closed；已迁移 Goal 直接先更新 SQLite 权威状态，再刷新一次兼容文件投影，不再由旧状态机反向决定 V2 恢复。 |
 | V2.0-B150 | 2026-07-22 | `quality.revalidate` 在运行前先检查 Issue 迁移状态；重验成功后由该显式 V2 Command 将 Gate 输出投影为 `control.db.issue_states`，再生成不可变 GateEvaluation。普通读取仍不导入 `open.json`，重验结果不会继续停留在 V1 Issue 投影。 |
 | V2.0-B151 | 2026-07-22 | 材料验证成功后的 Goal 恢复移除 V1 Goal loader/状态机旁路：直接更新 `control.db.goal_state`，再刷新 `goal_state.json` 兼容投影；旧 Goal 未完成显式迁移时 fail-closed。 |
+| V2.0-B152 | 2026-07-22 | 材料回填在启动前检查 Issue 迁移；异步回填后的 Issue 重验结果立即显式投影到 `control.db.issue_states`。重验或投影异常会把 Operation 置为 blocked，避免旧 `open.json` 与 SQLite 门禁状态分叉。 |
