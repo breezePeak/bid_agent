@@ -18,6 +18,7 @@ describe('statusFromV2Snapshot', () => {
         latest_gate_evaluations: [{ command: 'global-review', verdict: 'pass' }],
       },
       artifacts: [{ artifact_key: 'outputs/final.docx', status: 'ready' }],
+      stage_runs: [{ stage_command: 'build-docx', status: 'succeeded', attempt: 1 }],
       artifact_files: { outputs: { final_docx: true } },
       presentation: {
         running: false,
@@ -36,6 +37,7 @@ describe('statusFromV2Snapshot', () => {
     assert.equal(status.quality.latest_gate_evaluations[0].verdict, 'pass')
     assert.deepEqual(status.workflow, [{ command: 'write-all' }])
     assert.equal(status.artifacts[0].artifact_key, 'outputs/final.docx')
+    assert.equal(status.stage_runs[0].stage_command, 'build-docx')
     assert.equal(status.artifact_files.outputs.final_docx, true)
     assert.equal(status.control_source, 'control.db')
   })
