@@ -1299,6 +1299,7 @@ class ControlStore:
             verdict not in {"pass", "block"}
             or not gate_input_fingerprint
             or not artifact_sha256
+            or not str(rules_version or "").strip()
             or not artifact_value
             or Path(artifact_value).is_absolute()
             or ".." in artifact_parts
@@ -1324,7 +1325,7 @@ class ControlStore:
                         gate_input_fingerprint,
                         artifact_value,
                         artifact_sha256,
-                        rules_version,
+                        str(rules_version).strip(),
                         _json(findings or []),
                         _json(policy_decisions or []),
                         created_at,
