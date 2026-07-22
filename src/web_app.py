@@ -7101,7 +7101,7 @@ def _handle_workspace_archive(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING or SUPERVISOR.is_running(context.root):
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "运行中的工作区不能归档。", status_code=409)
     runs_root = RUNS_DIR.resolve()
     source = context.root.resolve()
@@ -7139,7 +7139,7 @@ def _handle_workspace_clean(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING or SUPERVISOR.is_running(context.root):
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "运行中的工作区不能清理。", status_code=409)
     root = context.root.resolve()
     trash_root = (root / ".trash").resolve()

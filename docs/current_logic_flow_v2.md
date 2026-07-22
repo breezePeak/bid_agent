@@ -648,3 +648,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B162 | 2026-07-22 | V2 Materials Checklist 查询不再解析 `materials_checklist.json` 作为基础数据；条目、汇总与可回填判断来自 `control.db.material_states`，章节缺口只作为文件 Artifact 扫描。旧清单损坏不会覆盖或拖垮已迁移状态。 |
 | V2.0-B163 | 2026-07-22 | 文档编辑 ActionProposal 的 workspace 由目标文档根目录解析并校验，不再使用进程级 `ACTIVE_RUN_ID`；V2 撤销等路径在当前 UI 工作区变化时也不会把确认操作写入其他 workspace。 |
 | V2.0-B164 | 2026-07-22 | `document.apply_edit` 执行并发边界只由目标工作区的 CommandGateway Operation 与 SQLite lease 控制，不再被其他工作区的进程级 `RUNNING` 标志误阻断；终稿编辑保持 workspace 隔离。 |
+| V2.0-B165 | 2026-07-22 | 工作区归档与清理只检查目标 workspace 的 Worker/Supervisor 状态；其他工作区的进程级执行标志不再误阻断维护 Action，目标范围仍由 CommandGateway lease 和路径边界双重约束。 |

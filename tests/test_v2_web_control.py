@@ -3132,6 +3132,38 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(final_md.read_text(encoding="utf-8"), "after\n")
             record_artifacts.assert_called_once_with(context)
 
+    def test_v2_workspace_maintenance_ignores_other_workspace_process_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            alpha = runs / "alpha"
+            beta = runs / "beta"
+            alpha.mkdir(parents=True)
+            beta.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "workspace.archive",
+                    "payload": {},
+                    "expected_revision": 0,
+                    "idempotency_key": "workspace-maintenance-other-workspace-running",
+                    "actor": {"type": "user", "id": "owner"},
+                },
+                workspace_id="alpha",
+            )
+            web_app.RUNNING = True
+            web_app.CURRENT_RUN_ROOT = beta
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs), mock.patch.object(
+                web_app.SUPERVISOR, "is_running", return_value=False
+            ):
+                archive = web_app._handle_workspace_archive(context, envelope, "archive-alpha")
+                clean = web_app._handle_workspace_clean(context, envelope, "clean-alpha")
+
+            self.assertTrue(archive["accepted"])
+            self.assertTrue(clean["accepted"])
+            self.assertTrue(callable(archive["_after_commit"]))
+            self.assertTrue(callable(clean["_after_commit"]))
+
     def test_v2_document_proposal_busy_state_is_workspace_scoped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
