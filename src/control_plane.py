@@ -3642,7 +3642,22 @@ class CommandGateway:
                 error=error.as_dict(),
             )
         if callable(after_commit):
-            after_commit()
+            try:
+                after_commit()
+            except Exception as exc:
+                error = ControlPlaneError(
+                    "COMMAND_POST_COMMIT_FAILED",
+                    f"Command 已提交但后续执行未能启动: {exc}",
+                    status_code=500,
+                )
+                return self.store.finish_dispatch(
+                    envelope,
+                    operation_id,
+                    success=False,
+                    operation_status="failed",
+                    message=error.message,
+                    error=error.as_dict(),
+                )
         return receipt
 
     def propose(self, envelope: CommandEnvelope, *, label: str, risk: str) -> dict[str, Any]:

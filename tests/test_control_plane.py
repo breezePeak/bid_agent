@@ -648,6 +648,29 @@ class ControlPlaneTests(unittest.TestCase):
                 gateway.store.events()[-1]["seq"],
             )
 
+    def test_post_commit_start_failure_marks_running_operation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+
+            def start(ctx, envelope, operation_id):
+                def fail_start() -> None:
+                    raise RuntimeError("worker thread unavailable")
+
+                return {
+                    "accepted": True,
+                    "operation_status": "running",
+                    "message": "worker queued",
+                    "_after_commit": fail_start,
+                }
+
+            gateway = CommandGateway(context, {"pipeline.start": start})
+            receipt = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+
+            self.assertEqual(receipt.status, "rejected")
+            self.assertEqual(operation["status"], "failed")
+            self.assertEqual(receipt.error["code"], "COMMAND_POST_COMMIT_FAILED")
+
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

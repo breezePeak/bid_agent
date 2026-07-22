@@ -656,3 +656,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B170 | 2026-07-22 | V2 定向改稿同样在执行期进入旧执行锁，并将忙碌检查限定为目标 workspace；其他工作区正在运行时可安全排队，改稿 Operation、fencing 和 Artifact 更新仍保留在各自控制状态。 |
 | V2.0-B171 | 2026-07-22 | V2 材料回填改为执行期进入旧执行锁，启动检查仅看目标 workspace；不同工作区的回填 Command 可独立入队并各自回写 Operation，旧全局运行字段不再作为跨工作区互斥源。 |
 | V2.0-B172 | 2026-07-22 | V2 Repair、定向改稿与材料回填 Worker 均改为在 CommandGateway 成功提交 Operation 终态后才启动；不再出现后台线程先写运行状态、随后 Command 完成写回覆盖的竞态，CommandReceipt 与 Worker 生命周期保持一致。 |
+| V2.0-B173 | 2026-07-22 | CommandGateway 的 post-commit Worker 启动回调若抛出异常，会将尚在运行态的 Operation 与 CommandReceipt 归为失败并记录 `COMMAND_POST_COMMIT_FAILED`；不再把“已接受但 Worker 未启动”误报为成功。 |
