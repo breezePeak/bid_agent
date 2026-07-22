@@ -173,6 +173,7 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
     request.state.principal = principal
     try:
         workspace_id = ""
+        context: WorkspaceContext | None = None
         prefix = "/api/v2/workspaces/"
         if path.startswith(prefix):
             workspace_id = path[len(prefix):].split("/", 1)[0]
@@ -195,6 +196,13 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
     except ControlPlaneError as exc:
         return _command_error_response(exc)
     response = await call_next(request)
+    if _is_v1_compat_api(path) and context is not None:
+        try:
+            ControlStore(context).record_compatibility_usage(path, principal)
+        except Exception:
+            # Compatibility telemetry is advisory; it cannot make an otherwise
+            # valid legacy request fail or become a second control authority.
+            pass
     return _mark_v1_compat_response(path, response)
 
 
@@ -7831,6 +7839,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         context = _workspace_context(workspace_id)
         store = ControlStore(context)
         snapshot = _migration_snapshot_with_source_state(context, store.snapshot())
+        snapshot["compatibility_usage"] = store.compatibility_usage()
         compatibility = _status_payload(
             context.root,
             context.workspace_id,

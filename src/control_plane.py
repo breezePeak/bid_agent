@@ -477,6 +477,50 @@ class ControlStore:
             "cutover": _decode(str(cutover["value"]), None) if cutover is not None else None,
         }
 
+    def record_compatibility_usage(self, route: str, actor: dict[str, Any]) -> None:
+        """Track V1 adapter usage without changing control revision or domain state."""
+        route_name = str(route or "").strip()[:256]
+        if not route_name:
+            return
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT value FROM control_meta WHERE key = 'compatibility_usage'"
+                ).fetchone()
+                usage = _decode(str(row["value"]), {}) if row is not None else {}
+                usage = usage if isinstance(usage, dict) else {}
+                routes = usage.get("routes") if isinstance(usage.get("routes"), dict) else {}
+                current = routes.get(route_name) if isinstance(routes.get(route_name), dict) else {}
+                routes[route_name] = {
+                    "calls": int(current.get("calls") or 0) + 1,
+                    "last_called_at": now,
+                    "last_actor": {
+                        "id": str(actor.get("id") or "")[:128],
+                        "type": str(actor.get("type") or "")[:64],
+                    },
+                }
+                usage["routes"] = routes
+                usage["updated_at"] = now
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('compatibility_usage', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_json(usage),),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def compatibility_usage(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'compatibility_usage'"
+            ).fetchone()
+        usage = _decode(str(row["value"]), {}) if row is not None else {}
+        return usage if isinstance(usage, dict) else {}
+
     def migration_backups(self) -> list[dict[str, Any]]:
         backup_dir = (self.path.parent / "migration_backups").resolve()
         if not backup_dir.exists():

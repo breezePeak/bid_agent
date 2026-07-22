@@ -1676,6 +1676,10 @@ class V2WebControlTests(unittest.TestCase):
                                 params={"workspace_id": "alpha"},
                             )
                             self.assertEqual(query_allowed.status_code, 200)
+                            self.assertEqual(
+                                ControlStore(context).compatibility_usage()["routes"]["/api/materials-checklist"]["calls"],
+                                1,
+                            )
                             query_forbidden = await client.get(
                                 "/api/materials-checklist",
                                 params={"workspace_id": "beta"},

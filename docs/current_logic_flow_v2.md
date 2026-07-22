@@ -582,3 +582,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B96 | 2026-07-22 | V2 Snapshot 与迁移面板显式展示 active cutover 的源 fingerprint 健康状态；旧状态源在切换后变化时只读快照标记 `cutover_stale`，提示管理员重新扫描并切换，避免 UI 将已失效切换误显示为就绪。 |
 | V2.0-B97 | 2026-07-22 | 旧 `pipeline_control.json` 继续默认作为 orphan 隔离；管理员经迁移协调选择 `bind_legacy` 时，仅可把已结束的 checkpoint 导入为不可恢复执行的 `pipeline.legacy_checkpoint` 历史 Operation。running/recovering 等活动状态一律拒绝导入，必须经显式 V2 Command 建立新的受 lease/fencing 保护的执行链。 |
 | V2.0-B98 | 2026-07-22 | `migration_report.json` 作为 SQLite 迁移审计的只读投影，会在管理员协调或切换后刷新 Migration 状态与最近动作；报告不再在冲突已解决后停留于过期的 `needs_reconciliation`，SQLite 仍为唯一控制真相源。 |
+| V2.0-B99 | 2026-07-22 | V1 兼容 API 的授权调用开始按工作区记录路由使用次数、最近调用时间与最小 actor 标识，供兼容窗口与下线条件审计；该遥测不提升 workspace revision、不生成领域事件，也不影响 V1/V2 控制状态或请求结果。V2 Snapshot 提供只读使用摘要。 |

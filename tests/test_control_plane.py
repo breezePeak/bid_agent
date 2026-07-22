@@ -105,6 +105,18 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(schema_version, "13")
             self.assertIsNotNone(migration_table)
 
+    def test_compatibility_usage_does_not_advance_control_revision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            revision = store.revision()
+            store.record_compatibility_usage("/api/status", {"id": "owner", "type": "session"})
+            store.record_compatibility_usage("/api/status", {"id": "owner", "type": "session"})
+            usage = store.compatibility_usage()
+            self.assertEqual(usage["routes"]["/api/status"]["calls"], 2)
+            self.assertEqual(usage["routes"]["/api/status"]["last_actor"]["id"], "owner")
+            self.assertEqual(store.revision(), revision)
+
     def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
