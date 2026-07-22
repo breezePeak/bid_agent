@@ -702,6 +702,21 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(running["stage_run_id"], completed["stage_run_id"])
             self.assertEqual(completed["attempt"], 1)
 
+    def test_stage_run_terminal_state_is_immutable_and_duplicate_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.record_stage_run("operation-1", "build-md", "running", disposition="started")
+            completed = store.record_stage_run("operation-1", "build-md", "succeeded", disposition="produced")
+            revision = store.revision()
+
+            duplicate = store.record_stage_run("operation-1", "build-md", "succeeded", disposition="ignored")
+            self.assertEqual(duplicate["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(store.revision(), revision)
+            with self.assertRaises(ControlPlaneError) as raised:
+                store.record_stage_run("operation-1", "build-md", "failed", disposition="late_failure")
+            self.assertEqual(raised.exception.code, "STATE_CONFLICT")
+
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

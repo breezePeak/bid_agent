@@ -665,3 +665,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B179 | 2026-07-22 | 阶段复用现在同时要求当前 Artifact manifest/hash/input fingerprint 有效，且该阶段最近一次跨 Operation 的 StageRun 为 `succeeded` 或 `reused`；只有尚未存在任何 manifest 的未切换 V1 工作区可进行一次兼容 bootstrap。已切换工作区或已有 manifest 却缺少成功 StageRun 时一律重跑，防止仅凭文件或孤立 manifest 误判完成。 |
 | V2.0-B180 | 2026-07-22 | `document.apply_edit` 重建 `build-docx` 后会把同一 Command Operation 写为 `StageRun.succeeded(document_edit_rebuild)`；手工终稿编辑产生的 DOCX manifest 因此拥有与执行记录一致的可复用证据，不再依赖更早 Pipeline 的 StageRun 或被误判为孤立 Artifact。 |
 | V2.0-B181 | 2026-07-22 | Issue 修复、定向改稿和材料回填产生章节 Artifact 时，仅在各自 Operation 真正成功后才写入 `write-all` 的成功 StageRun；partial/blocked/failed Worker 即使留下文件或 manifest 也没有成功执行证据，后续 Pipeline 不会复用该阶段。 |
+| V2.0-B182 | 2026-07-22 | StageRun 终态现在不可覆盖：相同终态重复投递按幂等处理且不提升 revision，不同终态一律返回 `STATE_CONFLICT`。只有新的 queued/running attempt 才能在后续重试中产生新记录，避免迟到 checkpoint 或 Worker 把既有成功审计改写成失败。 |

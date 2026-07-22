@@ -2941,6 +2941,30 @@ class ControlStore:
                     "ORDER BY attempt DESC LIMIT 1",
                     (operation, command),
                 ).fetchone()
+                latest_state = str(latest["status"]) if latest else ""
+                latest_terminal = latest_state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+                if latest is not None and terminal and latest_terminal:
+                    if latest_state == state:
+                        connection.commit()
+                        return {
+                            "stage_run_id": str(latest["stage_run_id"]),
+                            "operation_id": operation,
+                            "stage_command": command,
+                            "attempt": int(latest["attempt"]),
+                            "status": latest_state,
+                            "disposition": str(latest["disposition"] or ""),
+                        }
+                    raise ControlPlaneError(
+                        "STATE_CONFLICT",
+                        "StageRun 已处于终态，拒绝覆盖审计记录。",
+                        status_code=409,
+                        details={
+                            "operation_id": operation,
+                            "stage_command": command,
+                            "current_status": latest_state,
+                            "requested_status": state,
+                        },
+                    )
                 if latest is None or state == "queued" or (state == "running" and str(latest["status"]) != "queued"):
                     attempt = int(latest["attempt"] if latest else 0) + 1
                     run_id = str(uuid.uuid4())
