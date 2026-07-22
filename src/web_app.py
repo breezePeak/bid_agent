@@ -7914,6 +7914,26 @@ def api_v2_migration_report(workspace_id: str) -> JSONResponse:
         )
 
 
+@app.post("/api/v2/workspaces/{workspace_id}/migration/backups/drill")
+async def api_v2_migration_backup_drill(workspace_id: str, request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ControlPlaneError("COMMAND_INVALID", "请求体必须是 JSON 对象。", status_code=400)
+        context = _workspace_context(workspace_id)
+        principal = _request_principal(request)
+        if str(principal.get("role") or "").lower() != "admin":
+            raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以执行恢复演练。", status_code=403)
+        result = ControlStore(context).drill_migration_backup(str(body.get("path") or ""))
+        return JSONResponse({"ok": True, "backup": result})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"迁移恢复演练失败: {exc}", status_code=503, retryable=True)
+        )
+
+
 @app.get("/api/v2/workspaces/{workspace_id}/gates/latest")
 def api_v2_latest_gate_receipt(workspace_id: str) -> JSONResponse:
     try:

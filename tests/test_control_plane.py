@@ -215,6 +215,9 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertTrue(backups[0]["verified"])
             self.assertEqual(backups[0]["integrity"], "ok")
             self.assertTrue(backups[0]["schema_version"])
+            drill = store.drill_migration_backup(backups[0]["path"])
+            self.assertEqual(drill["recovery_drill"], "passed")
+            self.assertIn("workspace_events", drill["restored_tables"])
 
     def test_migration_cutover_requires_current_scan_and_no_open_conflicts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

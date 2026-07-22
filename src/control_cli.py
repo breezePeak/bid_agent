@@ -99,6 +99,13 @@ class ControlApiClient:
             f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/report",
         )
 
+    def drill_migration_backup(self, workspace_id: str, path: str) -> dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/backups/drill",
+            {"path": path},
+        )
+
     def submit(
         self,
         workspace_id: str,
@@ -154,6 +161,10 @@ def build_parser() -> argparse.ArgumentParser:
     report = commands.add_parser("migration-report", help="读取工作区迁移审计报告")
     report.add_argument("--workspace", required=True)
 
+    drill = commands.add_parser("migration-backup-drill", help="无破坏性验证迁移备份可恢复")
+    drill.add_argument("--workspace", required=True)
+    drill.add_argument("--path", required=True)
+
     scan = commands.add_parser("migration-scan", help="创建管理员旧工作区迁移扫描 Action")
     scan.add_argument("--workspace", required=True)
 
@@ -200,6 +211,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = client.migration_backups(args.workspace)
         elif args.control_command == "migration-report":
             result = client.migration_report(args.workspace)
+        elif args.control_command == "migration-backup-drill":
+            result = client.drill_migration_backup(args.workspace, args.path)
         elif args.control_command == "migration-scan":
             snapshot = client.snapshot(args.workspace)
             revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)

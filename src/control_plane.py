@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
@@ -512,6 +513,45 @@ class ControlStore:
                 item["error"] = str(exc)
             result.append(item)
         return result
+
+    def drill_migration_backup(self, relative_path: str) -> dict[str, Any]:
+        backup_dir = (self.path.parent / "migration_backups").resolve()
+        candidate = (self.context.root / str(relative_path or "")).resolve()
+        if (
+            not candidate.is_relative_to(backup_dir)
+            or candidate.name != Path(relative_path).name
+            or candidate.suffix.lower() != ".db"
+            or not candidate.exists()
+            or not candidate.is_file()
+        ):
+            raise ControlPlaneError("MIGRATION_BACKUP_NOT_FOUND", "迁移备份不存在或路径无效。", status_code=404)
+        verified = next((item for item in self.migration_backups() if item["path"] == candidate.relative_to(self.context.root).as_posix()), None)
+        if not verified or not verified.get("verified"):
+            raise ControlPlaneError("MIGRATION_BACKUP_INVALID", "迁移备份未通过完整性校验。", status_code=409)
+        with tempfile.TemporaryDirectory(prefix="bid-agent-migration-drill-") as tmp:
+            restored_path = Path(tmp) / "restored-control.db"
+            source = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
+            destination = sqlite3.connect(str(restored_path))
+            try:
+                source.backup(destination)
+            finally:
+                destination.close()
+                source.close()
+            restored = sqlite3.connect(f"file:{restored_path.as_posix()}?mode=ro", uri=True)
+            try:
+                integrity = restored.execute("PRAGMA integrity_check").fetchone()
+                tables = {
+                    str(row[0])
+                    for row in restored.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+                }
+            finally:
+                restored.close()
+        ok = bool(integrity and str(integrity[0]).lower() == "ok") and {
+            "control_meta", "operations", "workspace_events"
+        }.issubset(tables)
+        if not ok:
+            raise ControlPlaneError("MIGRATION_RECOVERY_DRILL_FAILED", "迁移备份恢复演练失败。", status_code=503)
+        return {**verified, "recovery_drill": "passed", "restored_tables": sorted(tables)}
 
     def record_migration_scan(self, *, fingerprint: str, manifest: list[dict[str, Any]], actor: dict[str, Any]) -> None:
         if not fingerprint:
