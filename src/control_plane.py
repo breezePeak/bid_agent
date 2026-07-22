@@ -3726,16 +3726,21 @@ class ControlStore:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         for stage_run in stage_runs:
             stage_run["error"] = _decode(stage_run.pop("error_json", None), None)
+        current_operation = next(
+            (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
+            operations[0] if operations else None,
+        )
+        current_operation_id = str((current_operation or {}).get("operation_id") or "")
         return {
             "workspace_id": self.context.workspace_id,
             "revision": revision,
-            "operation": next(
-                (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
-                operations[0] if operations else None,
-            ),
+            "operation": current_operation,
             "operations": operations,
             "commands": commands,
             "stage_runs": stage_runs,
+            "current_stage_runs": [
+                item for item in stage_runs if current_operation_id and str(item.get("operation_id") or "") == current_operation_id
+            ],
             "confirmations": confirmations,
             "lease": dict(lease_row) if lease_row else None,
             "artifacts": [self._artifact_row(row) for row in artifact_rows],

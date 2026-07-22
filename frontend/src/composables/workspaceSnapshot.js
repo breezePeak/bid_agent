@@ -34,6 +34,7 @@ export function statusFromV2Snapshot(snapshot) {
     },
     artifacts: Array.isArray(snapshot.artifacts) ? snapshot.artifacts : [],
     stage_runs: Array.isArray(snapshot.stage_runs) ? snapshot.stage_runs : [],
+    current_stage_runs: Array.isArray(snapshot.current_stage_runs) ? snapshot.current_stage_runs : [],
     artifact_files: snapshot.artifact_files && typeof snapshot.artifact_files === 'object'
       ? snapshot.artifact_files
       : {},

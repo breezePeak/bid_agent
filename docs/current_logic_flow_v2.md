@@ -670,3 +670,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B184 | 2026-07-22 | Pipeline 在准备复用前已创建新的 queued StageRun；Artifact 复用判定现明确查询该命令最近的**终态** attempt，忽略当前 in-flight queued/running 重试。这样既保留“必须有成功历史 StageRun”的门槛，也不会让新 queued 记录错误遮蔽上一轮成功证据而强制无意义重跑。 |
 | V2.0-B185 | 2026-07-22 | pause/cancel 与 Pipeline 完成竞态时，若控制 Command 到达时目标 Operation 已是 succeeded/failed/cancelled，Gateway 持久化 `CommandNoOp` 并返回 `no_op`，不再报状态冲突或重新取得 lease。该结果可幂等重放并保留审计事件。 |
 | V2.0-B186 | 2026-07-22 | Pipeline 重启恢复发现 checkpoint Worker 已丢失时，会先将其当前 StageRun 以 `failed(worker_lost)` 终结，再创建新的 queued attempt 断点重试；StageRun 中断审计失败则 Pipeline fail-closed，不会留下未说明的 running 阶段或将半成品作为可复用输出。 |
+| V2.0-B187 | 2026-07-22 | WorkspaceSnapshot 保留 `stage_runs` 作为最近审计历史，并新增 `current_stage_runs` 精确绑定当前展示 Operation。控制台可同时展示当前流水线 attempt 与历史排障记录，避免不同 Operation 的同名阶段混入当前进度判断。 |
