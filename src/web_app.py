@@ -6193,6 +6193,16 @@ def _record_v2_stage_artifacts(context: WorkspaceContext, command: str, disposit
     from artifact_manifest import record_stage_artifacts
 
     record_stage_artifacts(context, command, disposition=disposition)
+    store = ControlStore(context)
+    operation = store.snapshot().get("operation")
+    if not isinstance(operation, dict) or not str(operation.get("operation_id") or ""):
+        raise ControlPlaneError("STATE_UNAVAILABLE", "缺少 Pipeline Operation，不能记录 StageRun。", status_code=503)
+    store.record_stage_run(
+        str(operation["operation_id"]),
+        command,
+        "reused" if disposition == "reused" else "succeeded",
+        disposition=disposition,
+    )
 
 
 def _v2_stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:

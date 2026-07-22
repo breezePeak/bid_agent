@@ -671,6 +671,21 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(operation["status"], "failed")
             self.assertEqual(receipt.error["code"], "COMMAND_POST_COMMIT_FAILED")
 
+    def test_stage_run_records_attempt_and_terminal_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            running = store.record_stage_run("operation-1", "build-md", "running")
+            completed = store.record_stage_run(
+                "operation-1", "build-md", "succeeded", disposition="produced"
+            )
+            runs = store.stage_runs("operation-1")
+
+            self.assertEqual(running["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(runs[0]["attempt"], 1)
+            self.assertEqual(runs[0]["status"], "succeeded")
+            self.assertEqual(runs[0]["disposition"], "produced")
+
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

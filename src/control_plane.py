@@ -285,6 +285,20 @@ class ControlStore:
                         message TEXT NOT NULL DEFAULT '',
                         error_json TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS stage_runs (
+                        stage_run_id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL,
+                        stage_command TEXT NOT NULL,
+                        attempt INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        disposition TEXT NOT NULL DEFAULT '',
+                        error_json TEXT,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        UNIQUE(operation_id, stage_command, attempt)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_stage_runs_operation
+                        ON stage_runs(operation_id, stage_command, attempt DESC);
                     CREATE TABLE IF NOT EXISTS workspace_lease (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         lease_id TEXT NOT NULL,
@@ -2902,6 +2916,69 @@ class ControlStore:
     def revision(self) -> int:
         with self._connection() as connection:
             return self._revision(connection)
+
+    def record_stage_run(
+        self,
+        operation_id: str,
+        stage_command: str,
+        status: str,
+        *,
+        disposition: str = "",
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operation = str(operation_id or "").strip()
+        command = str(stage_command or "").strip()
+        state = str(status or "").strip().lower()
+        if not operation or not command or state not in {"running", "succeeded", "failed", "reused", "cancelled"}:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "StageRun 状态无效。", status_code=503)
+        now = _now()
+        terminal = state in {"succeeded", "failed", "reused", "cancelled"}
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                latest = connection.execute(
+                    "SELECT * FROM stage_runs WHERE operation_id = ? AND stage_command = ? "
+                    "ORDER BY attempt DESC LIMIT 1",
+                    (operation, command),
+                ).fetchone()
+                if state == "running" or latest is None:
+                    attempt = int(latest["attempt"] if latest else 0) + 1
+                    run_id = str(uuid.uuid4())
+                    connection.execute(
+                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, error_json, started_at, completed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, operation, command, attempt, state, disposition, _json(error) if error else None, now, now if terminal else None),
+                    )
+                else:
+                    run_id = str(latest["stage_run_id"])
+                    attempt = int(latest["attempt"])
+                    connection.execute(
+                        "UPDATE stage_runs SET status = ?, disposition = ?, error_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                        (state, disposition, _json(error) if error else None, now if terminal else None, run_id),
+                    )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection, revision, "StageRunRecorded", "StageRun", run_id,
+                    {"operation_id": operation, "command": command, "attempt": attempt, "status": state, "disposition": disposition},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {"stage_run_id": run_id, "operation_id": operation, "stage_command": command, "attempt": attempt, "status": state, "disposition": disposition}
+
+    def stage_runs(self, operation_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM stage_runs WHERE operation_id = ? ORDER BY stage_command, attempt",
+                (str(operation_id or ""),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["error"] = _decode(item.pop("error_json", None), None)
+            result.append(item)
+        return result
 
     def document_undo(self) -> dict[str, Any] | None:
         """Return the durable one-step document undo pointer for this workspace."""
