@@ -70,10 +70,10 @@
             · 最高 {{ severityLabel(report.max_severity) }}
           </div>
         </div>
+        <div v-else class="ip-empty-soft">{{ emptyMsg }}</div>
         <div v-if="qualityEvaluations.length" class="ip-empty-soft">
           V2 门禁证据：通过 {{ qualityPassedCount }} · 阻断/异常 {{ qualityFailedCount }}
         </div>
-        <div v-else class="ip-empty-soft">{{ emptyMsg }}</div>
       </div>
 
       <div class="ip-filters" v-if="report.exists">
