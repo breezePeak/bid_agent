@@ -2894,6 +2894,11 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual({item["kind"] for item in result["inventory"]["orphans"]}, {
                 "legacy_pipeline_checkpoint", "legacy_stale_state",
             })
+            checkpoint = next(
+                item for item in result["inventory"]["orphans"]
+                if item["kind"] == "legacy_pipeline_checkpoint"
+            )
+            self.assertEqual(checkpoint["state"]["status"], "running")
 
     def test_migration_scan_imports_candidates_and_persists_root_orphan_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -237,6 +237,58 @@ class ControlPlaneTests(unittest.TestCase):
                 store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
             self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
 
+    def test_reconciliation_imports_only_terminal_legacy_pipeline_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            conflict = store.record_migration_conflict(
+                domain="orphan",
+                legacy={
+                    "path": "workspace/pipeline_control.json",
+                    "kind": "legacy_pipeline_checkpoint",
+                    "state": {"status": "complete", "current_stage": "build-docx"},
+                },
+                authoritative={},
+                reason="legacy checkpoint requires explicit review",
+            )
+            resolved = store.resolve_migration_conflict(
+                conflict["conflict_id"],
+                resolution="bind_legacy",
+                actor={"id": "admin", "role": "admin"},
+                reason="retain terminal history",
+            )
+            operation = next(
+                item for item in store.snapshot()["operations"]
+                if item["kind"] == "pipeline.legacy_checkpoint"
+            )
+            self.assertEqual(operation["status"], "succeeded")
+            self.assertEqual(operation["start_command"], "build-docx")
+            self.assertEqual(resolved["resolution"]["state_effect"], "legacy_terminal_pipeline_imported")
+
+    def test_reconciliation_rejects_running_legacy_pipeline_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            conflict = store.record_migration_conflict(
+                domain="orphan",
+                legacy={
+                    "path": "workspace/pipeline_control.json",
+                    "kind": "legacy_pipeline_checkpoint",
+                    "state": {"status": "running", "current_stage": "write-all"},
+                },
+                authoritative={},
+                reason="legacy checkpoint requires explicit review",
+            )
+            with self.assertRaises(ControlPlaneError) as blocked:
+                store.resolve_migration_conflict(
+                    conflict["conflict_id"],
+                    resolution="bind_legacy",
+                    actor={"id": "admin", "role": "admin"},
+                    reason="attempt unsafe import",
+                )
+            self.assertEqual(blocked.exception.code, "COMMAND_INVALID")
+            self.assertEqual(store.migration_conflicts(status="open")[0]["conflict_id"], conflict["conflict_id"])
+
     def test_lazy_v1_import_detects_existing_authoritative_conflicts_without_overwrite(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

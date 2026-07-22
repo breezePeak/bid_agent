@@ -5446,7 +5446,15 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
                 "import_pending": True,
             }
         )
-        orphans.append({"path": path.relative_to(context.root).as_posix(), "kind": kind, "reason": reason})
+        orphan = {"path": path.relative_to(context.root).as_posix(), "kind": kind, "reason": reason}
+        if kind == "legacy_pipeline_checkpoint":
+            try:
+                checkpoint = json.loads(content.decode("utf-8"))
+            except Exception:
+                checkpoint = None
+            if isinstance(checkpoint, dict):
+                orphan["state"] = checkpoint
+        orphans.append(orphan)
     result = store.migration_dry_run(
         domains,
         orphans=orphans,

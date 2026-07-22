@@ -1009,6 +1009,51 @@ class ControlStore:
                             "ON CONFLICT(key) DO UPDATE SET value = '1'"
                         )
                         state_effect = "legacy_bound"
+                    elif domain == "orphan" and isinstance(legacy, dict) and str(legacy.get("kind") or "") == "legacy_pipeline_checkpoint":
+                        checkpoint = legacy.get("state")
+                        if not isinstance(checkpoint, dict):
+                            raise ControlPlaneError(
+                                "STATE_UNAVAILABLE",
+                                "旧 Pipeline checkpoint 缺少可审计状态，不能导入。",
+                                status_code=503,
+                            )
+                        legacy_status = str(checkpoint.get("status") or "").strip().lower()
+                        terminal_status = {
+                            "complete": "succeeded",
+                            "completed": "succeeded",
+                            "failed": "failed",
+                            "cancelled": "cancelled",
+                            "paused": "paused",
+                        }.get(legacy_status)
+                        if terminal_status is None:
+                            raise ControlPlaneError(
+                                "COMMAND_INVALID",
+                                "仅能导入已结束的旧 Pipeline checkpoint；运行中状态必须保留 orphan 并由显式 V2 Command 恢复。",
+                                status_code=409,
+                            )
+                        imported_operation_id = str(uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{self.context.workspace_id}:legacy-pipeline-checkpoint:{conflict_id}",
+                        ))
+                        connection.execute(
+                            """
+                            INSERT OR IGNORE INTO operations(
+                                operation_id, parent_operation_id, kind, status, start_command,
+                                fencing_token, created_at, updated_at, completed_at, message, error_json
+                            ) VALUES (?, NULL, 'pipeline.legacy_checkpoint', ?, ?, 0, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                imported_operation_id,
+                                terminal_status,
+                                str(checkpoint.get("current_stage") or ""),
+                                now,
+                                now,
+                                now,
+                                "由已确认的 V1 Pipeline checkpoint 导入；仅供历史审计，不可恢复执行。",
+                                _json({"source": "migration_reconciliation", "legacy_status": legacy_status}),
+                            ),
+                        )
+                        state_effect = "legacy_terminal_pipeline_imported"
                     else:
                         raise ControlPlaneError("COMMAND_INVALID", f"不支持绑定迁移领域: {domain}", status_code=400)
                 elif resolution_name == "mark_failed" and domain == "goal":
