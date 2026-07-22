@@ -2931,6 +2931,25 @@ class V2WebControlTests(unittest.TestCase):
             report = json.loads((root / "workspace" / "migration_report.json").read_text(encoding="utf-8"))
             self.assertEqual(report["source_fingerprint"], scan["fingerprint"])
             self.assertEqual(report["migration"]["status"], "needs_reconciliation")
+            conflict = store.migration_conflicts(status="open")[0]
+            reconcile = CommandEnvelope.from_mapping(
+                {
+                    "kind": "migration.reconcile",
+                    "payload": {
+                        "conflict_id": conflict["conflict_id"],
+                        "resolution": "keep_orphan",
+                        "reason": "retain legacy root evidence",
+                    },
+                    "expected_revision": store.revision(),
+                    "actor": {"id": "admin", "role": "admin"},
+                },
+                workspace_id="alpha",
+            )
+            reconciled = web_app._handle_migration_reconcile(context, reconcile, "reconcile-op")
+            self.assertTrue(reconciled["accepted"])
+            refreshed_report = json.loads((root / "workspace" / "migration_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(refreshed_report["migration"]["status"], "ready")
+            self.assertEqual(refreshed_report["last_action"]["kind"], "migration.reconcile")
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 response = _body(web_app.api_v2_migration_report("alpha"))
             self.assertTrue(response["ok"])

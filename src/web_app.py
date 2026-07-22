@@ -5499,6 +5499,25 @@ def _migration_snapshot_with_source_state(
     return updated
 
 
+def _refresh_migration_report(
+    context: WorkspaceContext,
+    migration: dict[str, Any],
+    *,
+    action: dict[str, Any],
+) -> None:
+    """Keep the file audit projection current after a SQLite migration mutation."""
+    path = context.root / "workspace" / "migration_report.json"
+    report = _read_json_file(path)
+    if not isinstance(report, dict) or str(report.get("workspace_id") or "") != context.workspace_id:
+        return
+    report["migration"] = migration
+    report["last_action"] = action
+    report["updated_at"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
+    from utils import write_json
+
+    write_json(path, report)
+
+
 def _request_actor(request: Request, *, source: str) -> dict[str, str]:
     """Bind Command actors on the server; never trust actor fields in JSON payloads."""
     state = getattr(request, "state", None)
@@ -7212,16 +7231,29 @@ def _handle_migration_reconcile(
     reason = str(envelope.payload.get("reason") or "").strip()
     if not conflict_id:
         raise ControlPlaneError("COMMAND_INVALID", "迁移协调缺少 conflict_id。", status_code=400)
-    conflict = ControlStore(context).resolve_migration_conflict(
+    store = ControlStore(context)
+    conflict = store.resolve_migration_conflict(
         conflict_id,
         resolution=resolution,
         actor=actor,
         reason=reason,
     )
+    state = store.migration_state()
+    _refresh_migration_report(
+        context,
+        state,
+        action={
+            "kind": "migration.reconcile",
+            "conflict_id": conflict["conflict_id"],
+            "resolution": resolution,
+            "actor": actor,
+        },
+    )
     return {
         "accepted": True,
         "operation_status": "succeeded",
         "message": f"迁移冲突已处理: {conflict['conflict_id']}",
+        "migration": state,
     }
 
 
@@ -7313,7 +7345,14 @@ def _handle_migration_cutover(
         raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以切换工作区至 V2 控制面。", status_code=403)
     dry_run = _v1_migration_dry_run(context)
     fingerprint = str(dry_run.get("source_fingerprint") or "")
-    cutover = ControlStore(context).activate_migration_cutover(fingerprint=fingerprint, actor=actor)
+    store = ControlStore(context)
+    cutover = store.activate_migration_cutover(fingerprint=fingerprint, actor=actor)
+    state = store.migration_state()
+    _refresh_migration_report(
+        context,
+        state,
+        action={"kind": "migration.cutover", "fingerprint": fingerprint, "actor": actor},
+    )
     return {
         "accepted": True,
         "operation_status": "succeeded",
