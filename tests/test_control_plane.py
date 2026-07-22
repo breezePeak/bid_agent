@@ -642,6 +642,11 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(snapshot["operation"]["status"], "running")
             self.assertEqual(len(snapshot["operations"]), 1)
             self.assertEqual(len(gateway.store.events()), 2)
+            self.assertEqual(gateway.store.recent_events(limit=10), gateway.store.events())
+            self.assertEqual(
+                gateway.store.recent_events(limit=1)[0]["seq"],
+                gateway.store.events()[-1]["seq"],
+            )
 
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

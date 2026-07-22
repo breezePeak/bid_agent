@@ -3505,6 +3505,22 @@ class ControlStore:
             events.append(item)
         return events
 
+    def recent_events(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the newest events in ascending sequence order."""
+        capped_limit = max(1, min(int(limit), 2000))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM workspace_events ORDER BY seq DESC LIMIT ?",
+                (capped_limit,),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in reversed(rows):
+            item = dict(row)
+            item["workspace_id"] = self.context.workspace_id
+            item["payload"] = _decode(item.pop("payload_json", None), {})
+            events.append(item)
+        return events
+
 
 class CommandGateway:
     def __init__(self, context: WorkspaceContext, handlers: dict[str, CommandHandler]) -> None:

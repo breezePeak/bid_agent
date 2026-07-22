@@ -1849,7 +1849,7 @@ def _status_payload(
             "updated_at": pipeline_control["updated_at"],
             "summary": {},
         }
-        run_events = v2_store.events(max(1, v2_snapshot.get("revision", 0) - 20), limit=20)
+        run_events = v2_store.recent_events(limit=20)
     else:
         run_state = _read_run_state(root)
         run_events = load_run_events(root)
@@ -2434,8 +2434,12 @@ def _trigger_repair_job(
         current = load_v2_repair_job(root) if control_operation_id else load_repair_job(root)
         if str(current.get("status") or "") in RUNNING_REPAIR_STATUSES:
             return {"ok": True, "duplicate": True, "job": current, "message": current.get("message", "修复任务正在执行")}
-        pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
-        pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
+        # V2 authorization already owns the workspace lease in control.db. A
+        # stale V1 checkpoint must not veto that confirmed Operation.
+        pipeline_busy = False
+        if not control_operation_id:
+            pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
+            pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
         if RUNNING or SUPERVISOR.is_running() or pipeline_busy:
             return {"ok": False, "busy": True, "job": current, "message": "当前已有任务正在运行，修复确认已保留，请稍后重试"}
         claimed = (

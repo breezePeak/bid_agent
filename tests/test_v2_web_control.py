@@ -322,6 +322,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(status["pipeline"]["current_stage"], "build-md")
             self.assertEqual(status["materials_summary"]["ready"], 1)
             self.assertEqual(status["materials_summary"]["source"], "control.db")
+            self.assertEqual(status["run_events_tail"][0]["seq"], 1)
 
     def test_v2_goal_resume_updates_control_state_without_legacy_goal_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -760,6 +761,35 @@ class V2WebControlTests(unittest.TestCase):
                                 started["_worker_thread"].join(timeout=2)
             self.assertEqual(current.get("status"), "succeeded")
             resume.assert_not_called()
+
+    def test_v2_repair_start_ignores_stale_pipeline_projection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "runs" / "alpha"
+            root.mkdir(parents=True)
+            web_app.RUNNING = False
+            web_app.CURRENT_RUN_ROOT = None
+
+            with mock.patch.object(web_app, "load_v2_repair_job", return_value={"status": "awaiting_v2_operation"}):
+                with mock.patch.object(web_app.SUPERVISOR, "load", side_effect=AssertionError("legacy pipeline read")):
+                    with mock.patch.object(web_app.SUPERVISOR, "is_running", return_value=False):
+                        with mock.patch.object(
+                            web_app,
+                            "claim_repair_job_authorized",
+                            return_value={
+                                "ok": True,
+                                "duplicate": True,
+                                "job": {"status": "running", "message": "already claimed"},
+                            },
+                        ):
+                            result = web_app._trigger_repair_job(
+                                root,
+                                "",
+                                control_operation_id="operation-v2",
+                                control_fencing_token=1,
+                            )
+
+            self.assertTrue(result["ok"])
+            self.assertTrue(result["duplicate"])
 
     def test_v2_rewrite_requires_confirmation_and_passes_workspace_context(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
