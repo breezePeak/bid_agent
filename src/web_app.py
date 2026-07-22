@@ -5376,6 +5376,8 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
         "goal": context.root / "workspace" / "agent" / "goal_state.json",
         "materials": context.root / "workspace" / "materials_checklist.json",
         "issues": context.root / "workspace" / "issues" / "open.json",
+        "repair_job": context.root / "workspace" / "repair_job.json",
+        "agent_activity": context.root / "workspace" / "agent" / "activity.json",
     }
     for domain, path in sources.items():
         if not path.exists():
@@ -5398,7 +5400,7 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
                 payload = payload.get("items") if isinstance(payload, dict) else payload
             elif domain == "issues":
                 payload = payload.get("issues") if isinstance(payload, dict) else payload
-            valid = isinstance(payload, dict) if domain == "goal" else isinstance(payload, list)
+            valid = isinstance(payload, dict) if domain in {"goal", "repair_job", "agent_activity"} else isinstance(payload, list)
             if not valid:
                 raise ValueError("unexpected JSON shape")
             domains[domain] = payload
@@ -7176,6 +7178,10 @@ def _handle_migration_scan(
             imported += store.ensure_material_states(legacy if isinstance(legacy, list) else [])
         elif domain == "issues":
             imported += store.ensure_issue_states(legacy if isinstance(legacy, list) else [])
+        elif domain == "repair_job":
+            imported += store.ensure_repair_job_state(legacy if isinstance(legacy, dict) else None)
+        elif domain == "agent_activity":
+            imported += store.ensure_agent_activity_state(legacy if isinstance(legacy, dict) else None)
     detected = 0
     for item in inventory.get("conflicts") or []:
         if not isinstance(item, dict):

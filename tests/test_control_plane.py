@@ -239,6 +239,30 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(dry_run["counts"]["orphans"], 0)
             self.assertEqual(dry_run["counts"]["acknowledged"], 1)
 
+    def test_repair_and_activity_v1_import_conflicts_preserve_sqlite_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.upsert_repair_job_state({"job_id": "v2-job", "status": "running", "phase": "repair"}, source="test")
+            store.upsert_agent_activity_state({"status": "working", "phase": "repair"}, source="test")
+            connection = sqlite3.connect(store.path)
+            try:
+                connection.execute(
+                    "DELETE FROM control_meta WHERE key IN ('repair_job_v1_imported', 'agent_activity_v1_imported')"
+                )
+                connection.commit()
+            finally:
+                connection.close()
+            with self.assertRaises(ControlPlaneError) as repair_conflict:
+                store.ensure_repair_job_state({"job_id": "v1-job", "status": "succeeded", "phase": "done"})
+            with self.assertRaises(ControlPlaneError) as activity_conflict:
+                store.ensure_agent_activity_state({"status": "idle", "phase": ""})
+            self.assertEqual(repair_conflict.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+            self.assertEqual(activity_conflict.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+            self.assertEqual(store.repair_job_state()["job_id"], "v2-job")
+            self.assertEqual(store.agent_activity_state()["status"], "working")
+            self.assertEqual({item["domain"] for item in store.migration_conflicts()}, {"repair_job", "agent_activity"})
+
     def test_command_is_durable_idempotent_and_emits_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

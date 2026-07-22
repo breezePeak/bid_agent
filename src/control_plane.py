@@ -505,6 +505,8 @@ class ControlStore:
             "goal": "goal_v1_imported",
             "materials": "materials_v1_imported",
             "issues": "issue_v1_imported",
+            "repair_job": "repair_job_v1_imported",
+            "agent_activity": "agent_activity_v1_imported",
         }
         marker = markers.get(str(domain or ""))
         if not marker:
@@ -526,12 +528,23 @@ class ControlStore:
             "goal": self.goal_state(),
             "materials": self.material_states(),
             "issues": self.issue_states(),
+            "repair_job": self.repair_job_state(),
+            "agent_activity": self.agent_activity_state(),
         }
 
         def projection(domain: str, value: Any) -> Any:
             if domain == "goal":
                 item = value if isinstance(value, dict) else {}
                 return (str(item.get("goal_id") or item.get("id") or ""), str(item.get("status") or "pending"))
+            if domain == "repair_job":
+                item = value if isinstance(value, dict) else {}
+                return (
+                    str(item.get("job_id") or ""), str(item.get("status") or "awaiting_confirmation"),
+                    str(item.get("phase") or "awaiting_confirmation"),
+                )
+            if domain == "agent_activity":
+                item = value if isinstance(value, dict) else {}
+                return (str(item.get("status") or "idle"), str(item.get("phase") or ""))
             rows = value if isinstance(value, list) else []
             if domain == "materials":
                 return sorted(
@@ -587,7 +600,7 @@ class ControlStore:
                     inventory["unrecognized"].append(item)
                 continue
             current = authoritative[domain]
-            current_empty = current is None if domain == "goal" else not current
+            current_empty = current is None if domain in {"goal", "agent_activity"} else not current
             item = {"domain": domain, "legacy": candidate, "authoritative": current}
             if current_empty:
                 inventory["importable"].append(item)
@@ -737,6 +750,47 @@ class ControlStore:
                             "ON CONFLICT(key) DO UPDATE SET value = '1'"
                         )
                         state_effect = "legacy_bound_goal_success_normalized" if status != legacy_status else "legacy_bound"
+                    elif domain == "repair_job":
+                        if not isinstance(legacy, dict) or not str(legacy.get("job_id") or "").strip():
+                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 RepairJob 证据无效。", status_code=503)
+                        connection.execute(
+                            """
+                            INSERT INTO repair_job_state(
+                                singleton, job_id, status, phase, job_json, source, created_at, updated_at
+                            ) VALUES (1, ?, ?, ?, ?, 'migration_reconciliation', ?, ?)
+                            ON CONFLICT(singleton) DO UPDATE SET
+                                job_id = excluded.job_id, status = excluded.status, phase = excluded.phase,
+                                job_json = excluded.job_json, source = excluded.source, updated_at = excluded.updated_at
+                            """,
+                            (
+                                str(legacy["job_id"]), str(legacy.get("status") or "awaiting_confirmation"),
+                                str(legacy.get("phase") or "awaiting_confirmation"), _json(legacy), now, now,
+                            ),
+                        )
+                        connection.execute(
+                            "INSERT INTO control_meta(key, value) VALUES ('repair_job_v1_imported', '1') "
+                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                        )
+                        state_effect = "legacy_bound"
+                    elif domain == "agent_activity":
+                        if not isinstance(legacy, dict):
+                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 AgentActivity 证据无效。", status_code=503)
+                        connection.execute(
+                            """
+                            INSERT INTO agent_activity_state(
+                                singleton, status, phase, activity_json, source, created_at, updated_at
+                            ) VALUES (1, ?, ?, ?, 'migration_reconciliation', ?, ?)
+                            ON CONFLICT(singleton) DO UPDATE SET
+                                status = excluded.status, phase = excluded.phase, activity_json = excluded.activity_json,
+                                source = excluded.source, updated_at = excluded.updated_at
+                            """,
+                            (str(legacy.get("status") or "idle"), str(legacy.get("phase") or ""), _json(legacy), now, now),
+                        )
+                        connection.execute(
+                            "INSERT INTO control_meta(key, value) VALUES ('agent_activity_v1_imported', '1') "
+                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
+                        )
+                        state_effect = "legacy_bound"
                     elif domain == "materials":
                         if not isinstance(legacy, list):
                             raise ControlPlaneError("STATE_UNAVAILABLE", "迁移材料证据无效。", status_code=503)
@@ -1837,8 +1891,29 @@ class ControlStore:
                 if imported is not None:
                     connection.commit()
                     return 0
+                existing = connection.execute(
+                    "SELECT job_id, status, phase, job_json FROM repair_job_state WHERE singleton = 1"
+                ).fetchone()
+                if existing is not None and value is not None:
+                    legacy_projection = (
+                        str(value.get("job_id") or ""), str(value.get("status") or "awaiting_confirmation"),
+                        str(value.get("phase") or "awaiting_confirmation"),
+                    )
+                    authoritative_projection = (str(existing["job_id"]), str(existing["status"]), str(existing["phase"]))
+                    if legacy_projection != authoritative_projection:
+                        connection.rollback()
+                        conflict = self.record_migration_conflict(
+                            domain="repair_job", legacy=value,
+                            authoritative=_decode(str(existing["job_json"]), {}),
+                            reason="V1 RepairJob 与 control.db 权威状态不一致。",
+                        )
+                        raise ControlPlaneError(
+                            "MIGRATION_RECONCILIATION_REQUIRED",
+                            "检测到 V1/V2 RepairJob 状态冲突，需管理员处理。",
+                            details={"conflict_id": conflict["conflict_id"]},
+                        )
                 inserted = 0
-                if value is not None:
+                if value is not None and existing is None:
                     job_id = str(value.get("job_id") or "").strip()
                     if not job_id:
                         raise ControlPlaneError("STATE_UNAVAILABLE", "V1 RepairJob 缺少 job_id。", status_code=503)
@@ -1963,8 +2038,26 @@ class ControlStore:
                 if imported is not None:
                     connection.commit()
                     return 0
+                existing = connection.execute(
+                    "SELECT status, phase, activity_json FROM agent_activity_state WHERE singleton = 1"
+                ).fetchone()
+                if existing is not None and value is not None:
+                    legacy_projection = (str(value.get("status") or "idle"), str(value.get("phase") or ""))
+                    authoritative_projection = (str(existing["status"]), str(existing["phase"]))
+                    if legacy_projection != authoritative_projection:
+                        connection.rollback()
+                        conflict = self.record_migration_conflict(
+                            domain="agent_activity", legacy=value,
+                            authoritative=_decode(str(existing["activity_json"]), {}),
+                            reason="V1 AgentActivity 与 control.db 权威状态不一致。",
+                        )
+                        raise ControlPlaneError(
+                            "MIGRATION_RECONCILIATION_REQUIRED",
+                            "检测到 V1/V2 AgentActivity 状态冲突，需管理员处理。",
+                            details={"conflict_id": conflict["conflict_id"]},
+                        )
                 inserted = 0
-                if value is not None:
+                if value is not None and existing is None:
                     connection.execute(
                         """
                         INSERT INTO agent_activity_state(
