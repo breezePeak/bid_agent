@@ -682,6 +682,7 @@ class V2WebControlTests(unittest.TestCase):
                 json.dumps(checklist),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(checklist["items"])
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
             web_app.RUNNING = False
@@ -758,6 +759,14 @@ class V2WebControlTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
+                [{
+                    "item_id": "unsafe",
+                    "response_status": "ready",
+                    "evidence_status": "missing",
+                    "lifecycle_status": "uploaded",
+                }]
+            )
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
             context = WorkspaceContext.resolve(runs, "alpha")
@@ -770,7 +779,7 @@ class V2WebControlTests(unittest.TestCase):
                                 {
                                     "kind": "materials.refill",
                                     "payload": {},
-                                    "expected_revision": 0,
+                                    "expected_revision": ControlStore(context).revision(),
                                     "idempotency_key": "unsafe-refill",
                                 }
                             ),
@@ -820,6 +829,9 @@ class V2WebControlTests(unittest.TestCase):
                 json.dumps({"items": [{"item_id": "mat-upload", "response_status": "deferred"}]}),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
+                [{"item_id": "mat-upload", "response_status": "deferred"}]
+            )
             outside = Path(tmp) / "outside.txt"
             outside.write_text("not workspace owned", encoding="utf-8")
             web_app.ACTIVE_RUN_ID = "alpha"
@@ -834,7 +846,7 @@ class V2WebControlTests(unittest.TestCase):
                                 {
                                     "kind": "materials.upload",
                                     "payload": {"item_id": "mat-upload", "uploaded_path": str(outside)},
-                                    "expected_revision": 0,
+                                    "expected_revision": ControlStore(WorkspaceContext.resolve(runs, "alpha")).revision(),
                                     "idempotency_key": "upload-outside",
                                 }
                             ),
@@ -860,6 +872,9 @@ class V2WebControlTests(unittest.TestCase):
                 json.dumps({"items": [{"item_id": "mat-review", "response_status": "deferred"}]}),
                 encoding="utf-8",
             )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
+                [{"item_id": "mat-review", "response_status": "deferred"}]
+            )
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
 
@@ -877,7 +892,7 @@ class V2WebControlTests(unittest.TestCase):
                                         "operator": "spoofed-operator",
                                     },
                                     "actor": {"type": "user", "id": "reviewer-7"},
-                                    "expected_revision": 0,
+                                    "expected_revision": ControlStore(WorkspaceContext.resolve(runs, "alpha")).revision(),
                                     "idempotency_key": "confirm-material",
                                 }
                             ),
@@ -942,6 +957,9 @@ class V2WebControlTests(unittest.TestCase):
             (workspace / "materials_checklist.json").write_text(
                 json.dumps({"items": [{"item_id": "mat-token", "response_status": "deferred"}]}),
                 encoding="utf-8",
+            )
+            ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
+                [{"item_id": "mat-token", "response_status": "deferred"}]
             )
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
@@ -1032,21 +1050,10 @@ class V2WebControlTests(unittest.TestCase):
                             _Request({}, principal={"type": "user", "id": "legacy-owner"})
                         )
             payload = _body(response)
-            self.assertEqual(response.status_code, 202)
-            self.assertTrue(payload["ok"])
-            self.assertEqual(payload["receipt"]["status"], "accepted")
-            rebuild.assert_called_once()
-            self.assertTrue(web_app._same_path(rebuild.call_args.args[0], root))
-            connection = sqlite3.connect(root / "workspace" / "control.db")
-            try:
-                row = connection.execute(
-                    "SELECT actor_json FROM commands WHERE command_id = ?",
-                    (payload["receipt"]["command_id"],),
-                ).fetchone()
-            finally:
-                connection.close()
-            actor = json.loads(str(row[0] if row else "{}"))
-            self.assertEqual(actor, {"type": "user", "id": "legacy-owner"})
+            self.assertEqual(response.status_code, 409)
+            self.assertFalse(payload["ok"])
+            self.assertEqual(payload["receipt"]["error"]["code"], "MIGRATION_SCAN_REQUIRED")
+            rebuild.assert_not_called()
 
     def test_formal_export_requires_current_gate_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

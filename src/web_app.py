@@ -5413,6 +5413,19 @@ def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
     return store
 
 
+def _ensure_v2_material_import(context: WorkspaceContext) -> ControlStore:
+    """Return material authority only after explicit migration when legacy data exists."""
+    store = ControlStore(context)
+    legacy_path = context.root / "workspace" / "materials_checklist.json"
+    if store.v1_import_pending("materials") and legacy_path.exists():
+        raise ControlPlaneError(
+            "MIGRATION_SCAN_REQUIRED",
+            "材料权威状态尚未迁移，请先执行管理员 migration.scan。",
+            status_code=409,
+        )
+    return store
+
+
 def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     """Inventory legacy control files without mutating SQLite or compatibility files."""
     store = ControlStore(context)
@@ -6954,15 +6967,10 @@ def _authoritative_material_state(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _material_items(context: WorkspaceContext) -> list[dict[str, Any]]:
-    from materials_checklist import load_materials_checklist
-
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
-    store = ControlStore(context)
-    store.ensure_material_states(
-        [_authoritative_material_state(dict(item)) for item in items if isinstance(item, dict)]
-    )
-    return store.material_states()
+    # V2 Commands must not silently convert their V1 projection into authority.
+    # migration.scan is the sole import boundary; command handlers may still
+    # update the projection after a successful V2 state transition.
+    return _ensure_v2_material_import(context).material_states()
 
 
 def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
