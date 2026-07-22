@@ -6984,7 +6984,6 @@ def _handle_materials_upload(
             or datetime.now().isoformat(timespec="seconds")
         )
         projected["verification_confidence"] = verification.get("confidence")
-    store.upsert_material_state(_authoritative_material_state(projected))
     verification_receipt = store.record_material_verification(
         item_id=item_id,
         verification_type="auto_upload",
@@ -6998,6 +6997,7 @@ def _handle_materials_upload(
         },
         actor=envelope.actor if isinstance(envelope.actor, dict) else {},
         source="materials.upload",
+        material_state=_authoritative_material_state(projected),
     )
     return {
         "accepted": True,
@@ -7045,7 +7045,6 @@ def _handle_materials_verify(
         projected["evidence_status"] = "verified"
         projected["verified_at"] = result.get("verified_at") or datetime.now().isoformat(timespec="seconds")
     store = ControlStore(context)
-    store.upsert_material_state(_authoritative_material_state(projected))
     verification_receipt = store.record_material_verification(
         item_id=item_id,
         verification_type="automatic",
@@ -7058,6 +7057,7 @@ def _handle_materials_verify(
         },
         actor=envelope.actor if isinstance(envelope.actor, dict) else {},
         source="materials.verify",
+        material_state=_authoritative_material_state(projected),
     )
     if lifecycle == "verified":
         _resume_goal_for_verified_material(context, item_id, f"material_verified:{item_id}")
@@ -7112,7 +7112,6 @@ def _handle_materials_confirm_verification(
     if accept:
         projected["verified_at"] = datetime.now().isoformat(timespec="seconds")
     store = ControlStore(context)
-    store.upsert_material_state(_authoritative_material_state(projected))
     verification_receipt = store.record_material_verification(
         item_id=item_id,
         verification_type="human",
@@ -7120,6 +7119,7 @@ def _handle_materials_confirm_verification(
         verification={"accepted": accept, "reason": reason, "operator": operator},
         actor=actor,
         source="materials.confirm_verification",
+        material_state=_authoritative_material_state(projected),
     )
     if accept:
         _resume_goal_for_verified_material(context, item_id, f"material_human_verified:{item_id}")

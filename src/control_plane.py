@@ -1669,6 +1669,7 @@ class ControlStore:
         verification: dict[str, Any],
         actor: dict[str, Any],
         source: str,
+        material_state: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         material_id = str(item_id or "").strip()
         kind = str(verification_type or "").strip()
@@ -1678,6 +1679,9 @@ class ControlStore:
         verification_id = str(uuid.uuid4())
         created_at = _now()
         payload = dict(verification) if isinstance(verification, dict) else {}
+        state_payload = dict(material_state) if isinstance(material_state, dict) else None
+        if state_payload is not None and str(state_payload.get("item_id") or "").strip() != material_id:
+            raise ControlPlaneError("COMMAND_INVALID", "材料核验状态与材料 ID 不一致。", status_code=400)
         actor_value = {
             "type": str(actor.get("type") or "")[:64],
             "id": str(actor.get("id") or "")[:128],
@@ -1686,6 +1690,34 @@ class ControlStore:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                if state_payload is not None:
+                    existing = connection.execute(
+                        "SELECT created_at FROM material_states WHERE item_id = ?",
+                        (material_id,),
+                    ).fetchone()
+                    state_created_at = str(existing["created_at"]) if existing is not None else created_at
+                    connection.execute(
+                        """
+                        INSERT INTO material_states(
+                            item_id, response_status, lifecycle_status, evidence_status,
+                            item_json, source, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(item_id) DO UPDATE SET
+                            response_status = excluded.response_status,
+                            lifecycle_status = excluded.lifecycle_status,
+                            evidence_status = excluded.evidence_status,
+                            item_json = excluded.item_json,
+                            source = excluded.source,
+                            updated_at = excluded.updated_at
+                        """,
+                        (
+                            material_id,
+                            str(state_payload.get("response_status") or "deferred"),
+                            str(state_payload.get("lifecycle_status") or "missing"),
+                            str(state_payload.get("evidence_status") or "missing"),
+                            _json(state_payload), str(source or "v2_command"), state_created_at, created_at,
+                        ),
+                    )
                 connection.execute(
                     """
                     INSERT INTO material_verifications(
@@ -1703,6 +1735,11 @@ class ControlStore:
                     connection, revision, "MaterialVerified", "MaterialVerification", verification_id,
                     {"item_id": material_id, "verification_type": kind, "verdict": decision},
                 )
+                if state_payload is not None:
+                    self._event(
+                        connection, revision, "MaterialStateChanged", "Material", material_id,
+                        {"response_status": str(state_payload.get("response_status") or "deferred"), "source": source},
+                    )
                 connection.commit()
             except Exception:
                 connection.rollback()

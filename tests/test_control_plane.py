@@ -154,6 +154,35 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(history[0]["actor"]["id"], "admin")
             self.assertTrue(any(event["kind"] == "MaterialVerified" for event in store.events()))
 
+    def test_material_verification_can_commit_current_state_in_same_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            receipt = store.record_material_verification(
+                item_id="qualification-license",
+                verification_type="human",
+                verdict="verified",
+                verification={"reason": "checked original"},
+                actor={"id": "admin", "role": "admin"},
+                source="materials.confirm_verification",
+                material_state={
+                    "item_id": "qualification-license",
+                    "response_status": "ready",
+                    "lifecycle_status": "verified",
+                    "evidence_status": "verified",
+                },
+            )
+            state = store.material_state("qualification-license")
+            verification_event = next(
+                event for event in store.events() if event["aggregate_id"] == receipt["verification_id"]
+            )
+            state_event = next(
+                event for event in store.events()
+                if event["kind"] == "MaterialStateChanged" and event["aggregate_id"] == "qualification-license"
+            )
+            self.assertEqual(state["response_status"], "ready")
+            self.assertEqual(verification_event["workspace_revision"], state_event["workspace_revision"])
+
     def test_material_submission_keeps_hash_and_actor_without_staged_path(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
