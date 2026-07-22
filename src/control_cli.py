@@ -93,6 +93,12 @@ class ControlApiClient:
             f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/backups",
         )
 
+    def migration_report(self, workspace_id: str) -> dict[str, Any]:
+        return self._request(
+            "GET",
+            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/report",
+        )
+
     def submit(
         self,
         workspace_id: str,
@@ -145,6 +151,9 @@ def build_parser() -> argparse.ArgumentParser:
     backups = commands.add_parser("migration-backups", help="读取并校验迁移 SQLite 备份")
     backups.add_argument("--workspace", required=True)
 
+    report = commands.add_parser("migration-report", help="读取工作区迁移审计报告")
+    report.add_argument("--workspace", required=True)
+
     scan = commands.add_parser("migration-scan", help="创建管理员旧工作区迁移扫描 Action")
     scan.add_argument("--workspace", required=True)
 
@@ -189,6 +198,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = client.migration_dry_run(args.workspace)
         elif args.control_command == "migration-backups":
             result = client.migration_backups(args.workspace)
+        elif args.control_command == "migration-report":
+            result = client.migration_report(args.workspace)
         elif args.control_command == "migration-scan":
             snapshot = client.snapshot(args.workspace)
             revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)

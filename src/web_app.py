@@ -7893,6 +7893,25 @@ def api_v2_migration_backups(workspace_id: str) -> JSONResponse:
         )
 
 
+@app.get("/api/v2/workspaces/{workspace_id}/migration/report")
+def api_v2_migration_report(workspace_id: str) -> JSONResponse:
+    try:
+        context = _workspace_context(workspace_id)
+        path = context.root / "workspace" / "migration_report.json"
+        if not path.exists() or not path.is_file():
+            raise ControlPlaneError("MIGRATION_REPORT_NOT_FOUND", "尚未执行迁移扫描。", status_code=404)
+        report = _read_json_file(path)
+        if not isinstance(report, dict) or str(report.get("workspace_id") or "") != context.workspace_id:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移审计报告无效。", status_code=503)
+        return JSONResponse({"ok": True, "report": report})
+    except ControlPlaneError as exc:
+        return _command_error_response(exc)
+    except Exception as exc:
+        return _command_error_response(
+            ControlPlaneError("STATE_UNAVAILABLE", f"迁移报告读取失败: {exc}", status_code=503, retryable=True)
+        )
+
+
 @app.get("/api/v2/workspaces/{workspace_id}/gates/latest")
 def api_v2_latest_gate_receipt(workspace_id: str) -> JSONResponse:
     try:
