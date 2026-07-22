@@ -313,7 +313,8 @@ class V2WebControlTests(unittest.TestCase):
             )
 
             with mock.patch.object(web_app.SUPERVISOR, "load", side_effect=AssertionError("legacy pipeline read")):
-                status = web_app._status_payload(root, "alpha", v2_read_only=True, persist_manual_review_summary=False)
+                with mock.patch.object(web_app, "manual_review_summary", side_effect=AssertionError("legacy review read")):
+                    status = web_app._status_payload(root, "alpha", v2_read_only=True, persist_manual_review_summary=False)
 
             self.assertEqual(status["pipeline"]["status"], "queued")
             self.assertEqual(status["pipeline"]["current_stage"], "build-md")

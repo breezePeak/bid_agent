@@ -1855,7 +1855,11 @@ def _status_payload(
         run_events = load_run_events(root)
         pipeline_control = SUPERVISOR.load(root)
     project_profile = load_project_profile(root)
-    review_summary = manual_review_summary(root) if persist_manual_review_summary else {}
+    review_summary = (
+        _v2_manual_review_summary(WorkspaceContext.resolve(root.parent, root.name))
+        if v2_read_only
+        else (manual_review_summary(root) if persist_manual_review_summary else {})
+    )
     repair_job = load_v2_repair_job(root) if v2_read_only else load_repair_job(root)
     pending_confirmation = None
     if str(repair_job.get("status") or "") == "awaiting_confirmation":
