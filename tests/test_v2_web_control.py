@@ -133,8 +133,17 @@ class V2WebControlTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             root = runs / "alpha"
-            root.mkdir(parents=True)
+            agent_dir = root / "workspace" / "agent"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "goal_state.json").write_text(
+                json.dumps({"goal_id": "legacy-goal", "status": "pending"}), encoding="utf-8"
+            )
+            (root / "workspace" / "repair_job.json").write_text(
+                json.dumps({"job_id": "legacy-repair", "status": "awaiting_confirmation"}),
+                encoding="utf-8",
+            )
             plan = {"reply": "当前状态正常", "actions": []}
+            store = ControlStore(WorkspaceContext.resolve(runs, "alpha"))
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.object(web_app, "load_messages", return_value=[]):
@@ -153,6 +162,9 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(response["ok"])
             summary.assert_not_called()
             self.assertFalse((root / "workspace" / "manual_review" / "summary.json").exists())
+            self.assertTrue(store.v1_import_pending("goal"))
+            self.assertTrue(store.v1_import_pending("repair_job"))
+            self.assertEqual(store.revision(), 0)
 
     def test_v2_minimal_repair_candidates_read_authoritative_issue_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

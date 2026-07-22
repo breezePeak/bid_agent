@@ -630,3 +630,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B144 | 2026-07-22 | V2 Chat 的最小修复候选、确认后的 Repair Worker 和 `repair.start` 均直接读取 `control.db.issue_states`；不再同步或读取 V1 `open.json`。旧 Issue 存在但尚未扫描时，聊天明确返回 `MIGRATION_SCAN_REQUIRED` 且不创建 legacy RepairJob。 |
 | V2.0-B145 | 2026-07-22 | 已确认的 V2 `repair.start` 直接创建绑定 Operation ID 的 `awaiting_v2_operation` RepairJob，记录为空 `confirmation_id`；Worker 仅接受该 Operation claim，不再先创建或校验 V1 最小修复确认 token。遗留 awaiting-confirmation Job 仅保留一个版本的 claim 兼容。 |
 | V2.0-B146 | 2026-07-22 | V2 RepairJob 读取与 Worker claim 移除 `repair_job.json` 的隐式导入：存在旧 Job 且未迁移时，`repair.start` 在创建新 Job 前 fail-closed 为 `MIGRATION_SCAN_REQUIRED`；V1 兼容 RepairJob API 继续保留原导入行为。 |
+| V2.0-B147 | 2026-07-22 | V2 Chat 状态聚合不再通过 V1 Runtime/Goal/RepairJob/Issue loader 读取或导入旧控制文件；聊天查询直接使用 SQLite Goal、RepairJob、Issue 与 AgentActivity 快照，并继续避免写入人工复核摘要。存在旧控制状态时查询保持只读，必须由 `migration.scan` 导入。 |

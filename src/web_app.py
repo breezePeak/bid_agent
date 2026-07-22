@@ -1825,13 +1825,14 @@ def _status_payload(
     run_id: str,
     *,
     persist_manual_review_summary: bool = True,
+    v2_read_only: bool = False,
 ) -> dict[str, Any]:
     run_state = _read_run_state(root)
     run_events = load_run_events(root)
     project_profile = load_project_profile(root)
     review_summary = manual_review_summary(root) if persist_manual_review_summary else {}
     pipeline_control = SUPERVISOR.load(root)
-    repair_job = load_repair_job(root)
+    repair_job = load_v2_repair_job(root) if v2_read_only else load_repair_job(root)
     pending_confirmation = None
     if str(repair_job.get("status") or "") == "awaiting_confirmation":
         pending_confirmation = {
@@ -1974,8 +1975,12 @@ def _status_payload(
         "project_profile": project_profile,
         "project_profile_choices": project_profile_choices(),
         "llm_config": _active_llm_summary(),
-        "agent_activity": _safe_agent_activity(root),
-        "issues_summary": _safe_issues_summary(root),
+        "agent_activity": (
+            ControlStore(WorkspaceContext.resolve(root.parent, root.name)).agent_activity_state()
+            if v2_read_only
+            else _safe_agent_activity(root)
+        ),
+        "issues_summary": _v2_issues_summary(root) if v2_read_only else _safe_issues_summary(root),
         "pending_confirmation": pending_confirmation,
         "repair_job": repair_job or None,
         "manual_review_summary": review_summary,
@@ -2079,19 +2084,24 @@ def _status_payload(
 
     # Unified runtime view (single aggregator for goal/activity/repair/pipeline)
     runtime: dict[str, Any] = {}
-    try:
-        from agent.runtime_status import build_runtime_status
+    if not v2_read_only:
+        try:
+            from agent.runtime_status import build_runtime_status
 
-        runtime = build_runtime_status(root, reevaluate_goal=False)
-    except Exception as exc:
-        runtime = {"ok": False, "message": str(exc), "warnings": [], "consistent": True}
+            runtime = build_runtime_status(root, reevaluate_goal=False)
+        except Exception as exc:
+            runtime = {"ok": False, "message": str(exc), "warnings": [], "consistent": True}
 
     goal_view: dict[str, Any] | None = None
     goal_full: dict[str, Any] | None = None
     try:
-        from agent.goal import load_goal, goal_summary
+        if v2_read_only:
+            g = ControlStore(WorkspaceContext.resolve(root.parent, root.name)).goal_state()
+            goal_summary = lambda value: str(value.get("summary") or "")  # noqa: E731
+        else:
+            from agent.goal import load_goal, goal_summary
 
-        g = load_goal(root)
+            g = load_goal(root)
         if g:
             goal_full = g
             goal_view = {
@@ -3006,6 +3016,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             # Chat queries are read-only in V2.  The compatibility summary
             # writer remains available only to the legacy chat adapter.
             persist_manual_review_summary=not is_v2_workspace_chat,
+            v2_read_only=is_v2_workspace_chat,
         )
         review_context = _load_review_context(root)
         # Frontend confirm buttons: tool_scope only when tool is present (PR-1)
@@ -3266,7 +3277,7 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             or resolved.get("thinking")
             or ""
         ).strip()
-        response_repair_job = load_repair_job(root)
+        response_repair_job = load_v2_repair_job(root) if is_v2_workspace_chat else load_repair_job(root)
         extra: dict[str, Any] = {
             "action": resolved.get("action", "chat"),
             "intent": resolved.get("intent", ""),
@@ -4556,6 +4567,33 @@ def _safe_issues_summary(root: Path | None = None) -> dict:
         return issues_summary(root or _active_root())
     except Exception:
         return {"open_count": 0, "block_count": 0, "can_proceed": True}
+
+
+def _v2_issues_summary(root: Path) -> dict[str, Any]:
+    """Read Issue authority for V2 presentation without invoking the V1 loader."""
+    try:
+        from agent.issues import quality_gate_mode
+
+        issues = ControlStore(WorkspaceContext.resolve(root.parent, root.name)).issue_states()
+        open_issues = [
+            item for item in issues
+            if str(item.get("status") or "") in {"open", "in_progress"}
+        ]
+        blocks = [item for item in open_issues if str(item.get("severity") or "") == "block"]
+        warns = [item for item in open_issues if str(item.get("severity") or "") == "warn"]
+        mode = quality_gate_mode()
+        return {
+            "open_count": len(open_issues),
+            "block_count": len(blocks),
+            "warn_count": len(warns),
+            "can_proceed": mode == "soft" or not blocks,
+            "mode": mode,
+            "source": "control.db",
+        }
+    except Exception:
+        # A read-side control failure must not let Chat infer that a blocked
+        # workspace is clear; keep the result explicitly non-proceedable.
+        return {"open_count": 0, "block_count": 0, "can_proceed": False, "source": "unavailable"}
 
 
 def _safe_agent_activity(root: Path | None = None) -> dict:
