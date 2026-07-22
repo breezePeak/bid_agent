@@ -2182,6 +2182,7 @@ def api_workflow_step_detail(command: str = Query(..., min_length=1), workspace_
         root,
         workspace_id or ACTIVE_RUN_ID or root.name,
         persist_manual_review_summary=context is None,
+        v2_read_only=context is not None,
     )
     workflow = status.get("workflow", []) if isinstance(status, dict) else []
     step_status = next((item for item in workflow if isinstance(item, dict) and item.get("command") == command), {})

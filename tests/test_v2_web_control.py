@@ -3392,7 +3392,12 @@ class V2WebControlTests(unittest.TestCase):
                     batch_result = _body(asyncio.run(web_app.api_batch_preview_repair(_Request({"issue_ids": ["issue-1"]}), "alpha")))
 
             resolved = alpha.resolve()
-            status.assert_called_once_with(resolved, "alpha", persist_manual_review_summary=False)
+            status.assert_called_once_with(
+                resolved,
+                "alpha",
+                persist_manual_review_summary=False,
+                v2_read_only=True,
+            )
             detail_summary.assert_called_once()
             self.assertEqual(detail["manual_review_summary"], {"alpha": True})
             self.assertEqual(Path(detail["run_root"]), resolved)

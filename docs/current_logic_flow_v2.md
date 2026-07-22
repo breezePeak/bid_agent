@@ -640,3 +640,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B154 | 2026-07-22 | V2 Chat 状态读取改由 `control.db` 的 Operation、Event 与 AgentActivity 构成，不再读取 `pipeline_control.json`、`run_state.json` 或 Supervisor 作为运行权威；旧投影只保留给 V1 兼容界面。 |
 | V2.0-B155 | 2026-07-22 | V2 Chat 的人工复核摘要改走 V2 摘要适配器，不再调用 V1 `manual_review_summary`；聊天状态读取保持在 V2 视图与兼容投影之间清晰分界。 |
 | V2.0-B156 | 2026-07-22 | V2 Workspace Snapshot 调用只读 V2 状态聚合器，并移除 Supervisor 兼容回退；Pipeline 快照仅由 `control.db` Operation 与 V2 状态视图构成。 |
+| V2.0-B157 | 2026-07-22 | V2 Workflow Step Detail 同样强制使用只读 V2 状态聚合，避免详情面板通过共享路由重新触发 V1 Runtime/状态投影读取。 |
