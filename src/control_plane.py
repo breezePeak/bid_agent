@@ -169,7 +169,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 15
+    SCHEMA_VERSION = 16
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -340,6 +340,19 @@ class ControlStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_material_verifications_item
                         ON material_verifications(item_id, created_at);
+                    CREATE TABLE IF NOT EXISTS material_submissions (
+                        submission_id TEXT PRIMARY KEY,
+                        item_id TEXT NOT NULL,
+                        upload_token TEXT NOT NULL UNIQUE,
+                        filename TEXT NOT NULL,
+                        sha256 TEXT NOT NULL,
+                        size_bytes INTEGER NOT NULL,
+                        actor_json TEXT NOT NULL,
+                        source TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_material_submissions_item
+                        ON material_submissions(item_id, created_at);
                     CREATE TABLE IF NOT EXISTS workspace_acl (
                         principal_id TEXT PRIMARY KEY,
                         role TEXT NOT NULL,
@@ -1431,6 +1444,87 @@ class ControlStore:
                 if connection.in_transaction:
                     connection.rollback()
                 raise
+
+    def record_material_submission(
+        self,
+        *,
+        item_id: str,
+        upload: dict[str, Any],
+        actor: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        material_id = str(item_id or "").strip()
+        token = str(upload.get("upload_token") or "").strip()
+        filename = str(upload.get("filename") or "").strip()[:255]
+        sha256 = str(upload.get("sha256") or "").strip()
+        try:
+            size_bytes = int(upload.get("size_bytes") or 0)
+        except (TypeError, ValueError):
+            size_bytes = 0
+        if not material_id or not token or not filename or not sha256 or size_bytes <= 0:
+            raise ControlPlaneError("COMMAND_INVALID", "材料提交记录无效。", status_code=400)
+        submission_id = str(uuid.uuid4())
+        created_at = _now()
+        actor_value = {
+            "type": str(actor.get("type") or "")[:64],
+            "id": str(actor.get("id") or "")[:128],
+            "role": str(actor.get("role") or "")[:32],
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO material_submissions(
+                        submission_id, item_id, upload_token, filename, sha256,
+                        size_bytes, actor_json, source, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        submission_id, material_id, token, filename, sha256,
+                        size_bytes, _json(actor_value), str(source or "materials.upload"), created_at,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection, revision, "MaterialSubmitted", "MaterialSubmission", submission_id,
+                    {"item_id": material_id, "filename": filename, "sha256": sha256, "size_bytes": size_bytes},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "submission_id": submission_id,
+            "item_id": material_id,
+            "upload_token": token,
+            "filename": filename,
+            "sha256": sha256,
+            "size_bytes": size_bytes,
+            "actor": actor_value,
+            "source": str(source or "materials.upload"),
+            "created_at": created_at,
+        }
+
+    def material_submissions(self, *, item_id: str = "", limit: int = 100) -> list[dict[str, Any]]:
+        capped_limit = max(1, min(int(limit), 500))
+        with self._connection() as connection:
+            if item_id:
+                rows = connection.execute(
+                    "SELECT * FROM material_submissions WHERE item_id = ? ORDER BY created_at DESC LIMIT ?",
+                    (str(item_id), capped_limit),
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT * FROM material_submissions ORDER BY created_at DESC LIMIT ?",
+                    (capped_limit,),
+                ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["actor"] = _decode(item.pop("actor_json", ""), {})
+            result.append(item)
+        return result
 
     def ensure_material_states(self, items: list[dict[str, Any]]) -> int:
         rows = [dict(item) for item in items if isinstance(item, dict) and str(item.get("item_id") or "").strip()]

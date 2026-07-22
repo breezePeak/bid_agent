@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v15_adds_control_migration_gate_and_material_verification_tables(self) -> None:
+    def test_schema_v16_adds_control_migration_gate_and_material_history_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -104,14 +104,18 @@ class ControlPlaneTests(unittest.TestCase):
                 material_verifications = migrated.execute(
                     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'material_verifications'"
                 ).fetchone()
+                material_submissions = migrated.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'material_submissions'"
+                ).fetchone()
             finally:
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "15")
+            self.assertEqual(schema_version, "16")
             self.assertIsNotNone(migration_table)
             self.assertIsNotNone(gate_evaluations)
             self.assertIsNotNone(material_verifications)
+            self.assertIsNotNone(material_submissions)
 
     def test_compatibility_usage_does_not_advance_control_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -149,6 +153,28 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual([item["verification_id"] for item in history], [second["verification_id"], first["verification_id"]])
             self.assertEqual(history[0]["actor"]["id"], "admin")
             self.assertTrue(any(event["kind"] == "MaterialVerified" for event in store.events()))
+
+    def test_material_submission_keeps_hash_and_actor_without_staged_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            submission = store.record_material_submission(
+                item_id="qualification-license",
+                upload={
+                    "upload_token": "token-1",
+                    "filename": "license.pdf",
+                    "sha256": "a" * 64,
+                    "size_bytes": 123,
+                    "staged_path": "workspace/material_uploads/secret.pdf",
+                },
+                actor={"id": "owner", "role": "operator"},
+                source="materials.upload",
+            )
+            history = store.material_submissions(item_id="qualification-license")
+            self.assertEqual(history[0]["submission_id"], submission["submission_id"])
+            self.assertEqual(history[0]["sha256"], "a" * 64)
+            self.assertEqual(history[0]["actor"]["id"], "owner")
+            self.assertNotIn("staged_path", history[0])
 
     def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
