@@ -7023,7 +7023,6 @@ def _handle_document_apply_edit(
             rollback = _backup_final_md(context.root, path.read_text(encoding="utf-8"), "undo_operation")
             path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
             result = {"review": {"backup_path": str(rollback.relative_to(context.root)).replace("\\", "/")}}
-            _LAST_BACKUP.pop(context.root.resolve(), None)
         else:
             raise ValueError("不支持的文档编辑模式。")
     except (OSError, ValueError) as exc:
@@ -7040,6 +7039,15 @@ def _handle_document_apply_edit(
     from artifact_manifest import record_document_edit_artifacts
 
     record_document_edit_artifacts(context)
+    store = ControlStore(context)
+    if mode == "undo":
+        store.clear_document_undo()
+        _LAST_BACKUP.pop(context.root.resolve(), None)
+    else:
+        backup_path = str(result.get("review", {}).get("backup_path") or "").strip()
+        if not backup_path:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "文档编辑缺少可审计撤销备份。", status_code=503)
+        store.set_document_undo(backup_path, operation_id=operation_id)
 
     _PENDING_LINE_EDITS.pop(context.root.resolve(), None)
     _PENDING_DOC_EDIT.pop(context.root.resolve(), None)
@@ -9899,6 +9907,13 @@ def api_final_doc_undo_rewrite(request: Request, workspace_id: str = "") -> JSON
     root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     key = root.resolve()
     backup_path = _LAST_BACKUP.get(key)
+    if not backup_path:
+        undo_state = ControlStore(_workspace_context(root.name)).document_undo()
+        relative = str((undo_state or {}).get("backup_path") or "").strip()
+        candidate = (root / relative).resolve() if relative else None
+        allowed = (root / "workspace" / "manual_line_edits").resolve()
+        if candidate and candidate.is_relative_to(allowed) and candidate.is_file():
+            backup_path = candidate
     if not backup_path or not backup_path.exists():
         return JSONResponse({"ok": False, "message": "没有可撤销的改写。"}, status_code=404)
     try:

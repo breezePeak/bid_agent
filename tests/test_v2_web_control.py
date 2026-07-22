@@ -3131,6 +3131,38 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(result["accepted"])
             self.assertEqual(final_md.read_text(encoding="utf-8"), "after\n")
             record_artifacts.assert_called_once_with(context)
+            undo_state = ControlStore(context).document_undo()
+            self.assertIsNotNone(undo_state)
+            self.assertTrue(str(undo_state["backup_path"]).startswith("workspace/manual_line_edits/"))
+
+            web_app._LAST_BACKUP.pop(alpha.resolve(), None)
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                undo_response = web_app.api_final_doc_undo_rewrite(_Request({}), "alpha")
+            undo_payload = _body(undo_response)
+            self.assertEqual(undo_response.status_code, 202)
+            self.assertEqual(undo_payload["action"]["workspace_id"], "alpha")
+
+            undo_envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "document.apply_edit",
+                    "payload": {
+                        "mode": "undo",
+                        "backup_path": undo_state["backup_path"],
+                        "base_sha256": hashlib.sha256(final_md.read_bytes()).hexdigest(),
+                    },
+                    "expected_revision": ControlStore(context).revision(),
+                    "idempotency_key": "document-undo-after-restart",
+                    "actor": {"type": "user", "id": "owner"},
+                },
+                workspace_id="alpha",
+            )
+            with mock.patch.object(web_app, "_run_sync", return_value=0), mock.patch(
+                "artifact_manifest.record_document_edit_artifacts"
+            ):
+                undo_result = web_app._handle_document_apply_edit(context, undo_envelope, "undo-alpha")
+            self.assertTrue(undo_result["accepted"])
+            self.assertEqual(final_md.read_text(encoding="utf-8"), "before\n")
+            self.assertIsNone(ControlStore(context).document_undo())
 
     def test_v2_workspace_maintenance_ignores_other_workspace_process_flag(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

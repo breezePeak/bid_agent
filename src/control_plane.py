@@ -2903,6 +2903,69 @@ class ControlStore:
         with self._connection() as connection:
             return self._revision(connection)
 
+    def document_undo(self) -> dict[str, Any] | None:
+        """Return the durable one-step document undo pointer for this workspace."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'document_undo_state'"
+            ).fetchone()
+        value = _decode(str(row[0]), None) if row else None
+        return dict(value) if isinstance(value, dict) else None
+
+    def set_document_undo(self, backup_path: str, *, operation_id: str = "") -> dict[str, Any]:
+        relative_path = str(backup_path or "").strip()
+        if not relative_path:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "文档撤销备份路径不能为空。", status_code=503)
+        state = {
+            "backup_path": relative_path,
+            "operation_id": str(operation_id or "").strip(),
+            "updated_at": _now(),
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('document_undo_state', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_json(state),),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "DocumentUndoAvailable",
+                    "Document",
+                    "final.md",
+                    {"backup_path": relative_path, "operation_id": state["operation_id"]},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return state
+
+    def clear_document_undo(self) -> None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                deleted = connection.execute(
+                    "DELETE FROM control_meta WHERE key = 'document_undo_state'"
+                ).rowcount
+                if deleted:
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection,
+                        revision,
+                        "DocumentUndoCleared",
+                        "Document",
+                        "final.md",
+                        {},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     @staticmethod
     def _receipt_from_row(row: sqlite3.Row, *, duplicate: bool = False) -> CommandReceipt:
         return CommandReceipt(
