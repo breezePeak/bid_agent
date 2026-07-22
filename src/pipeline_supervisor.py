@@ -17,6 +17,7 @@ StatusListener = Callable[[Path, dict[str, Any]], None]
 GateEvaluator = Callable[[Path, str], dict[str, Any]]
 ArtifactRecorder = Callable[[Path, str, str], None]
 ArtifactReadinessEvaluator = Callable[[Path, str], bool]
+StageLifecycleRecorder = Callable[[Path, str, str, str, dict[str, Any] | None], None]
 
 
 @dataclass
@@ -198,6 +199,7 @@ class PipelineSupervisor:
         gate_evaluator: GateEvaluator | None = None,
         artifact_recorder: ArtifactRecorder | None = None,
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
+        stage_lifecycle_recorder: StageLifecycleRecorder | None = None,
     ) -> bool:
         with self._lock:
             key = self._slot_key(root)
@@ -230,7 +232,7 @@ class PipelineSupervisor:
             )
             slot.thread = threading.Thread(
                 target=self._loop,
-                args=(slot, runner, start_command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator),
+                args=(slot, runner, start_command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator, stage_lifecycle_recorder),
                 daemon=True,
                 name=f"pipeline-{run_id}",
             )
@@ -260,6 +262,7 @@ class PipelineSupervisor:
         gate_evaluator: GateEvaluator | None = None,
         artifact_recorder: ArtifactRecorder | None = None,
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
+        stage_lifecycle_recorder: StageLifecycleRecorder | None = None,
     ) -> None:
         run_id = slot.run_id
         root = slot.root
@@ -268,12 +271,28 @@ class PipelineSupervisor:
             commands = [start_command]
         elif start_command in commands:
             commands = commands[commands.index(start_command) :]
+        def record_stage(
+            command: str,
+            status: str,
+            disposition: str = "",
+            error: str = "",
+        ) -> None:
+            if stage_lifecycle_recorder is not None:
+                stage_lifecycle_recorder(
+                    root,
+                    command,
+                    status,
+                    disposition,
+                    {"message": error} if error else None,
+                )
         try:
             for command in commands:
                 if slot.cancel.is_set():
+                    record_stage(command, "cancelled", "cancelled_before_start")
                     self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})
                     return
                 if slot.pause.is_set():
+                    record_stage(command, "paused", "paused_before_start")
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
                 # quality gate: open block issues stop progression before next stage
@@ -288,42 +307,49 @@ class PipelineSupervisor:
                     if gate_evaluator is None:
                         gate = {"can_proceed": True}
                     else:
+                        message = f"质量门禁状态不可用，已拒绝执行: {exc}"
+                        record_stage(command, "failed", "gate_unavailable", message)
                         self._save(
                             root,
                             {
                                 "status": "failed",
                                 "current_stage": command,
                                 "worker_pid": 0,
-                                "error": f"质量门禁状态不可用，已拒绝执行: {exc}",
+                                "error": message,
                                 "message": "质量门禁状态不可用，已拒绝执行",
                             },
                         )
                         return
                 if not gate.get("can_proceed", gate_evaluator is None):
+                    message = gate.get("message") or f"质量门禁阻断，禁止执行 {command}"
+                    record_stage(command, "failed", "gate_blocked", str(message))
                     self._save(
                         root,
                         {
                             "status": "failed",
                             "current_stage": command,
                             "worker_pid": 0,
-                            "error": gate.get("message") or f"质量门禁阻断，禁止执行 {command}",
+                            "error": message,
                             "message": gate.get("message") or "质量门禁阻断",
                         },
                     )
                     return
                 spec = stage_spec_by_command(command)
+                record_stage(command, "running", "started")
                 outputs_ready = stage_outputs_ready(root, spec.id)
                 if outputs_ready and artifact_readiness_evaluator is not None:
                     try:
                         outputs_ready = artifact_readiness_evaluator(root, command)
                     except Exception as exc:
+                        message = f"Artifact readiness 状态不可用，已拒绝复用: {exc}"
+                        record_stage(command, "failed", "readiness_unavailable", message)
                         self._save(
                             root,
                             {
                                 "status": "failed",
                                 "current_stage": command,
                                 "worker_pid": 0,
-                                "error": f"Artifact readiness 状态不可用，已拒绝复用: {exc}",
+                                "error": message,
                             },
                         )
                         return
@@ -332,16 +358,19 @@ class PipelineSupervisor:
                         try:
                             artifact_recorder(root, command, "reused")
                         except Exception as exc:
+                            message = f"Artifact manifest 记录失败: {exc}"
+                            record_stage(command, "failed", "artifact_record_failed", message)
                             self._save(
                                 root,
                                 {
                                     "status": "failed",
                                     "current_stage": command,
                                     "worker_pid": 0,
-                                    "error": f"Artifact manifest 记录失败: {exc}",
+                                    "error": message,
                                 },
                             )
                             return
+                    record_stage(command, "reused", "reused")
                     self._save(
                         root,
                         {
@@ -366,30 +395,36 @@ class PipelineSupervisor:
                 )
                 exit_code = runner(command, run_id, root)
                 if slot.cancel.is_set():
+                    record_stage(command, "cancelled", "cancelled")
                     self._save(root, {"status": "cancelled", "current_stage": command, "worker_pid": 0})
                     return
                 if slot.pause.is_set():
+                    record_stage(command, "paused", "paused")
                     self._save(root, {"status": "paused", "current_stage": command, "worker_pid": 0})
                     return
                 if exit_code != 0:
+                    message = f"{command} 执行失败，exit_code={exit_code}"
+                    record_stage(command, "failed", "runner_failed", message)
                     self._save(
                         root,
                         {
                             "status": "failed",
                             "current_stage": command,
                             "worker_pid": 0,
-                            "error": f"{command} 执行失败，exit_code={exit_code}",
+                            "error": message,
                         },
                     )
                     return
                 if not stage_outputs_ready(root, spec.id):
+                    message = f"{command} 返回成功，但阶段产物不完整"
+                    record_stage(command, "failed", "outputs_incomplete", message)
                     self._save(
                         root,
                         {
                             "status": "failed",
                             "current_stage": command,
                             "worker_pid": 0,
-                            "error": f"{command} 返回成功，但阶段产物不完整",
+                            "error": message,
                         },
                     )
                     return
@@ -397,16 +432,19 @@ class PipelineSupervisor:
                     try:
                         artifact_recorder(root, command, "produced")
                     except Exception as exc:
+                        message = f"Artifact manifest 记录失败: {exc}"
+                        record_stage(command, "failed", "artifact_record_failed", message)
                         self._save(
                             root,
                             {
                                 "status": "failed",
                                 "current_stage": command,
                                 "worker_pid": 0,
-                                "error": f"Artifact manifest 记录失败: {exc}",
+                                "error": message,
                             },
                         )
                         return
+                record_stage(command, "succeeded", "produced")
             self._save(
                 root,
                 {
@@ -436,6 +474,7 @@ class PipelineSupervisor:
         gate_evaluator: GateEvaluator | None = None,
         artifact_recorder: ArtifactRecorder | None = None,
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
+        stage_lifecycle_recorder: StageLifecycleRecorder | None = None,
     ) -> bool:
         control = self.load(root)
         operation_id = str(control.get("operation_id") or "")
@@ -473,7 +512,7 @@ class PipelineSupervisor:
                 self._slots[key] = slot
                 slot.thread = threading.Thread(
                     target=self._monitor_then_resume,
-                    args=(slot, pid, runner, command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator),
+                    args=(slot, pid, runner, command, single_command, gate_evaluator, artifact_recorder, artifact_readiness_evaluator, stage_lifecycle_recorder),
                     daemon=True,
                     name=f"pipeline-reconcile-{run_id}",
                 )
@@ -491,6 +530,7 @@ class PipelineSupervisor:
             gate_evaluator=gate_evaluator,
             artifact_recorder=artifact_recorder,
             artifact_readiness_evaluator=artifact_readiness_evaluator,
+            stage_lifecycle_recorder=stage_lifecycle_recorder,
         )
 
     def _monitor_then_resume(
@@ -503,6 +543,7 @@ class PipelineSupervisor:
         gate_evaluator: GateEvaluator | None = None,
         artifact_recorder: ArtifactRecorder | None = None,
         artifact_readiness_evaluator: ArtifactReadinessEvaluator | None = None,
+        stage_lifecycle_recorder: StageLifecycleRecorder | None = None,
     ) -> None:
         root = slot.root
         self._save(root, {"status": "running", "message": f"重新接管仍在运行的进程 {pid}"})
@@ -513,9 +554,13 @@ class PipelineSupervisor:
             if self._slots.get(key) is slot:
                 self._slots.pop(key, None)
         if slot.cancel.is_set():
+            if command:
+                stage_lifecycle_recorder and stage_lifecycle_recorder(root, command, "cancelled", "cancelled", None)
             self._save(root, {"status": "cancelled", "worker_pid": 0})
             return
         if slot.pause.is_set():
+            if command:
+                stage_lifecycle_recorder and stage_lifecycle_recorder(root, command, "paused", "paused", None)
             self._save(root, {"status": "paused", "worker_pid": 0})
             return
         self.start(
@@ -529,4 +574,5 @@ class PipelineSupervisor:
             gate_evaluator=gate_evaluator,
             artifact_recorder=artifact_recorder,
             artifact_readiness_evaluator=artifact_readiness_evaluator,
+            stage_lifecycle_recorder=stage_lifecycle_recorder,
         )

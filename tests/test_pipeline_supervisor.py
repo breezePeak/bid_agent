@@ -157,6 +157,7 @@ class PipelineSupervisorTests(unittest.TestCase):
             root = Path(tmp)
             supervisor = PipelineSupervisor()
             events: list[dict] = []
+            lifecycle: list[tuple[str, str, str]] = []
             supervisor.set_status_listener(lambda event_root, payload: events.append(dict(payload)))
 
             def runner(command: str, run_id: str, run_root: Path) -> int:
@@ -168,7 +169,17 @@ class PipelineSupervisorTests(unittest.TestCase):
                 patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
                 patch("pipeline_supervisor.stage_outputs_ready", return_value=False),
             ):
-                self.assertTrue(supervisor.start("run-1", root, runner, operation_id="op-cancel"))
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        operation_id="op-cancel",
+                        stage_lifecycle_recorder=lambda run_root, command, status, disposition, error: lifecycle.append(
+                            (command, status, disposition)
+                        ),
+                    )
+                )
                 time.sleep(0.02)
                 supervisor.cancel()
                 payload = _wait_for_status(supervisor, root, "cancelled")
@@ -176,6 +187,7 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertEqual(payload["operation_id"], "op-cancel")
             self.assertTrue(any(item.get("status") == "cancelling" for item in events))
             self.assertTrue(any(item.get("status") == "cancelled" for item in events))
+            self.assertEqual(lifecycle, [("a", "running", "started"), ("a", "cancelled", "cancelled")])
 
     def test_workspaces_have_independent_supervisor_slots(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -292,6 +304,39 @@ class PipelineSupervisorTests(unittest.TestCase):
                 _wait_for_status(supervisor, root, "complete")
 
             self.assertEqual(recorded, [("a", "reused"), ("b", "produced")])
+
+    def test_v2_stage_lifecycle_records_running_and_terminal_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            completed = {"a"}
+            lifecycle: list[tuple[str, str, str]] = []
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                completed.add(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", side_effect=lambda r, stage: stage in completed),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        stage_lifecycle_recorder=lambda run_root, command, status, disposition, error: lifecycle.append(
+                            (command, status, disposition)
+                        ),
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(
+                lifecycle,
+                [("a", "running", "started"), ("a", "reused", "reused"), ("b", "running", "started"), ("b", "succeeded", "produced")],
+            )
 
     def test_v2_artifact_recorder_failure_stops_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

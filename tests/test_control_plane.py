@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v17_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
+    def test_schema_v18_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -111,7 +111,7 @@ class ControlPlaneTests(unittest.TestCase):
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "17")
+            self.assertEqual(schema_version, "18")
             self.assertIsNotNone(migration_table)
             self.assertIsNotNone(gate_evaluations)
             self.assertIsNotNone(material_verifications)

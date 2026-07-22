@@ -6193,15 +6193,24 @@ def _record_v2_stage_artifacts(context: WorkspaceContext, command: str, disposit
     from artifact_manifest import record_stage_artifacts
 
     record_stage_artifacts(context, command, disposition=disposition)
-    store = ControlStore(context)
-    operation = store.snapshot().get("operation")
-    if not isinstance(operation, dict) or not str(operation.get("operation_id") or ""):
+
+
+def _record_v2_stage_lifecycle(
+    context: WorkspaceContext,
+    operation_id: str,
+    command: str,
+    status: str,
+    disposition: str,
+    error: dict[str, Any] | None,
+) -> None:
+    if not operation_id:
         raise ControlPlaneError("STATE_UNAVAILABLE", "缺少 Pipeline Operation，不能记录 StageRun。", status_code=503)
-    store.record_stage_run(
-        str(operation["operation_id"]),
+    ControlStore(context).record_stage_run(
+        operation_id,
         command,
-        "reused" if disposition == "reused" else "succeeded",
+        status,
         disposition=disposition,
+        error=error,
     )
 
 
@@ -6526,6 +6535,9 @@ def _handle_pipeline_start(
             disposition,
         ),
         artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
+        stage_lifecycle_recorder=lambda _root, command, status, disposition, error: _record_v2_stage_lifecycle(
+            context, operation_id, command, status, disposition, error
+        ),
     )
     if not started:
         raise ControlPlaneError("LEASE_CONFLICT", "流水线未启动，已有调度线程正在运行。")
@@ -10348,6 +10360,9 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
             disposition,
         ),
         artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
+        stage_lifecycle_recorder=lambda _root, command, status, disposition, error: _record_v2_stage_lifecycle(
+            context, operation_id, command, status, disposition, error
+        ),
     )
 
 
