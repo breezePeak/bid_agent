@@ -64,6 +64,15 @@ def save_goal(root: Path | None, goal: dict[str, Any]) -> Path:
     return path
 
 
+def write_goal_projection(root: Path | None, goal: dict[str, Any]) -> Path:
+    """Refresh only the one-version V1 file projection after a V2 state write."""
+    root = (root or project_root()).resolve()
+    path = goal_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(dict(goal), ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
 def _criterion_artifact_exists(root: Path, path: str) -> dict[str, Any]:
     from pipeline_registry import RunArtifact
 

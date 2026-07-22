@@ -273,6 +273,52 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(gate["can_proceed"])
             self.assertEqual(gate["block_count"], 2)
 
+    def test_v2_goal_resume_requires_explicit_goal_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            agent_dir = root / "workspace" / "agent"
+            agent_dir.mkdir(parents=True)
+            (agent_dir / "goal_state.json").write_text(
+                json.dumps({"goal_id": "legacy-goal", "status": "blocked_human"}), encoding="utf-8"
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            envelope = CommandEnvelope.from_mapping(
+                {"kind": "goal.resume", "payload": {}, "expected_revision": 0, "idempotency_key": "goal-legacy"},
+                workspace_id="alpha",
+            )
+
+            with self.assertRaises(ControlPlaneError) as raised:
+                web_app._handle_goal_resume(context, envelope, "operation-1")
+
+            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertTrue(ControlStore(context).v1_import_pending("goal"))
+
+    def test_v2_goal_resume_updates_control_state_without_legacy_goal_loader(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.upsert_goal_state(
+                {"goal_id": "v2-goal", "status": "blocked_human", "blocked_reason": "need material"},
+                source="test",
+            )
+            envelope = CommandEnvelope.from_mapping(
+                {"kind": "goal.resume", "payload": {"note": "verified"}, "expected_revision": store.revision(), "idempotency_key": "goal-v2"},
+                workspace_id="alpha",
+            )
+
+            result = web_app._handle_goal_resume(context, envelope, "operation-2")
+
+            self.assertTrue(result["accepted"])
+            goal = store.goal_state() or {}
+            self.assertEqual(goal["status"], "in_progress")
+            self.assertEqual(goal["resume_note"], "verified")
+            self.assertEqual(goal["resume_context"]["reason"], "v2_explicit_resume")
+            self.assertTrue((root / "workspace" / "agent" / "goal_state.json").exists())
+
     def test_v2_gate_fails_closed_when_sqlite_state_is_unavailable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -1914,18 +1960,19 @@ class V2WebControlTests(unittest.TestCase):
             root.mkdir(parents=True)
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.upsert_goal_state(
+                {"goal_id": "goal-v2", "status": "blocked_human", "blocked_reason": "material missing"},
+                source="test",
+            )
             with mock.patch.object(web_app, "RUNS_DIR", runs):
-                with mock.patch("agent.goal.load_goal", return_value={"status": "blocked_human"}):
-                    with mock.patch(
-                        "agent.goal.resume_goal_after_materials",
-                        return_value={"status": "in_progress"},
-                    ) as resume:
-                        response = asyncio.run(web_app.api_agent_goal_resume(_Request({"note": "continue"})))
+                response = asyncio.run(web_app.api_agent_goal_resume(_Request({"note": "continue"})))
                 denied = asyncio.run(web_app.api_agent_goal_confirm(_Request({"all_mutations": True})))
             payload = _body(response)
             self.assertTrue(payload["ok"], payload)
             self.assertEqual(payload["receipt"]["status"], "accepted")
-            self.assertTrue(web_app._same_path(resume.call_args.args[0], root))
+            self.assertEqual(store.goal_state()["status"], "in_progress")
             denied_payload = _body(denied)
             self.assertEqual(denied.status_code, 410)
             self.assertEqual(denied_payload["error"]["code"], "POLICY_DENIED")

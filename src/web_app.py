@@ -5554,6 +5554,19 @@ def _ensure_v2_repair_import(context: WorkspaceContext) -> ControlStore:
     return store
 
 
+def _ensure_v2_goal_import(context: WorkspaceContext) -> ControlStore:
+    """Reject V2 Goal mutation until an existing V1 Goal is explicitly migrated."""
+    store = ControlStore(context)
+    legacy_path = context.root / "workspace" / "agent" / "goal_state.json"
+    if store.v1_import_pending("goal") and legacy_path.exists():
+        raise ControlPlaneError(
+            "MIGRATION_SCAN_REQUIRED",
+            "Goal 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            status_code=409,
+        )
+    return store
+
+
 def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
     """Inventory legacy control files without mutating SQLite or compatibility files."""
     store = ControlStore(context)
@@ -6777,9 +6790,10 @@ def _handle_goal_resume(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from agent.goal import load_goal, resume_goal_after_materials
+    from agent.goal import write_goal_projection
 
-    goal = load_goal(context.root)
+    store = _ensure_v2_goal_import(context)
+    goal = store.goal_state()
     if not isinstance(goal, dict):
         raise ControlPlaneError("GOAL_NOT_FOUND", "当前工作区没有可恢复的 Goal。", status_code=404)
     status = str(goal.get("status") or "")
@@ -6791,12 +6805,26 @@ def _handle_goal_resume(
         )
     if status == "in_progress":
         return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已在进行中。"}
-    resumed = resume_goal_after_materials(
-        context.root,
-        note=str(envelope.payload.get("note") or "v2_goal_resume"),
+    prev_reason = str(goal.get("blocked_reason") or "")
+    goal.update(
+        {
+            "status": "in_progress",
+            "blocked_reason": "",
+            "resume_note": str(envelope.payload.get("note") or "v2_goal_resume"),
+            "resumed_at": datetime.now(timezone.utc).isoformat(),
+            "resume_context": {
+                "reason": "v2_explicit_resume",
+                "skip_same_snapshot_once": True,
+                "prev_blocked_reason": prev_reason[:500],
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        }
     )
-    if not isinstance(resumed, dict) or str(resumed.get("status") or "") != "in_progress":
-        raise ControlPlaneError("GATE_BLOCKED", "Goal 恢复条件未满足。")
+    constraints = dict(goal.get("constraints") or {})
+    constraints["block_on_missing_materials"] = True
+    goal["constraints"] = constraints
+    resumed = store.upsert_goal_state(goal, source="v2_goal_resume")
+    write_goal_projection(context.root, resumed)
     return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已恢复为 in_progress。"}
 
 

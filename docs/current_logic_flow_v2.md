@@ -632,3 +632,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B146 | 2026-07-22 | V2 RepairJob 读取与 Worker claim 移除 `repair_job.json` 的隐式导入：存在旧 Job 且未迁移时，`repair.start` 在创建新 Job 前 fail-closed 为 `MIGRATION_SCAN_REQUIRED`；V1 兼容 RepairJob API 继续保留原导入行为。 |
 | V2.0-B147 | 2026-07-22 | V2 Chat 状态聚合不再通过 V1 Runtime/Goal/RepairJob/Issue loader 读取或导入旧控制文件；聊天查询直接使用 SQLite Goal、RepairJob、Issue 与 AgentActivity 快照，并继续避免写入人工复核摘要。存在旧控制状态时查询保持只读，必须由 `migration.scan` 导入。 |
 | V2.0-B148 | 2026-07-22 | V2 Chat 的“继续”与 `pipeline.resume` 不再读取 `pipeline_control.json`/`run_state.json` 推断阶段；恢复阶段只从此前 Pipeline Operation 的 `start_command` 获取，缺少可信 control.db 前序 Operation 时 fail-closed。V2 RepairJob 的恢复提示也改为读取同一 Operation 状态。 |
+| V2.0-B149 | 2026-07-22 | `goal.resume` 移除 V1 Goal loader 与材料回填 helper 的隐式导入/重验路径：旧 `goal_state.json` 未迁移时 fail-closed；已迁移 Goal 直接先更新 SQLite 权威状态，再刷新一次兼容文件投影，不再由旧状态机反向决定 V2 恢复。 |
