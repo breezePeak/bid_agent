@@ -2175,8 +2175,19 @@ def api_workflow_step_detail(command: str = Query(..., min_length=1), workspace_
     )
 
 
-def _minimal_repair_candidates(root: Path) -> list[dict[str, Any]]:
+def _minimal_repair_candidates(
+    root: Path,
+    *,
+    context: WorkspaceContext | None = None,
+) -> list[dict[str, Any]]:
     """Return actionable blocking issues for a chat-based minimal-repair prompt."""
+    if context is not None:
+        issues = _ensure_v2_issue_import(context).issue_states()
+        return [
+            issue for issue in issues
+            if str(issue.get("status")) in {"open", "in_progress"}
+            and str(issue.get("severity")) == "block"
+        ]
     try:
         from agent.issues import load_open_issues
         from agent.root_cause import sync_issues_from_compliance, sync_issues_from_global_review
@@ -2229,8 +2240,12 @@ def _issue_has_auto_repair(issue: dict[str, Any]) -> bool:
     return any(isinstance(action, dict) and str(action.get("type") or "") in auto_types for action in actions)
 
 
-def _ensure_minimal_repair_confirmation(root: Path) -> dict[str, Any]:
-    issues = _minimal_repair_candidates(root)
+def _ensure_minimal_repair_confirmation(
+    root: Path,
+    *,
+    context: WorkspaceContext | None = None,
+) -> dict[str, Any]:
+    issues = _minimal_repair_candidates(root, context=context)
     if not issues:
         current = load_repair_job(root)
         if str(current.get("status") or "") == "awaiting_confirmation":
@@ -2448,13 +2463,15 @@ def _trigger_repair_job(
         try:
             from agent.repair import execute_repair_batch
 
-            issues = _minimal_repair_candidates(root)
+            repair_context = _workspace_context(root.name) if control_operation_id else None
+            issues = _minimal_repair_candidates(root, context=repair_context)
             issue_ids = [str(issue.get("id") or "") for issue in issues if issue.get("id")]
             result = execute_repair_batch(
                 root,
                 issue_ids,
                 confirm=True,
                 dry_run=False,
+                issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
                 progress_callback=_progress,
             )
             if control_operation_id:
@@ -2917,7 +2934,21 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
             )
 
         if intent in {"confirm", "start"}:
-            candidates = _minimal_repair_candidates(root)
+            try:
+                candidates = _minimal_repair_candidates(
+                    root,
+                    context=_workspace_context(run_id) if is_v2_workspace_chat else None,
+                )
+            except ControlPlaneError as exc:
+                return _chat_response(
+                    root,
+                    run_id,
+                    exc.message,
+                    actions=[],
+                    intent="minimal_repair_error",
+                    triggered_repair=False,
+                    command_error=exc.as_dict(),
+                )
             if not candidates:
                 return _chat_response(
                     root,
@@ -6372,7 +6403,7 @@ def _handle_repair_start(
 ) -> dict[str, Any]:
     operation = ControlStore(context).operation(operation_id) or {}
     fencing_token = int(operation.get("fencing_token") or 0)
-    job = _ensure_minimal_repair_confirmation(context.root)
+    job = _ensure_minimal_repair_confirmation(context.root, context=context)
     confirmation_id = str(job.get("confirmation_id") or "")
     if not confirmation_id:
         return {

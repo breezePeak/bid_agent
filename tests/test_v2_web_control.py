@@ -154,6 +154,50 @@ class V2WebControlTests(unittest.TestCase):
             summary.assert_not_called()
             self.assertFalse((root / "workspace" / "manual_review" / "summary.json").exists())
 
+    def test_v2_minimal_repair_candidates_read_authoritative_issue_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            ControlStore(context).replace_issue_states(
+                [{"id": "v2-block", "status": "open", "severity": "block"}],
+                source="test",
+            )
+
+            with mock.patch("agent.issues.load_open_issues") as load_issues:
+                with mock.patch("agent.root_cause.sync_issues_from_compliance") as sync_compliance:
+                    with mock.patch("agent.root_cause.sync_issues_from_global_review") as sync_review:
+                        candidates = web_app._minimal_repair_candidates(root, context=context)
+
+            self.assertEqual([item["id"] for item in candidates], ["v2-block"])
+            load_issues.assert_not_called()
+            sync_compliance.assert_not_called()
+            sync_review.assert_not_called()
+
+    def test_v2_chat_repair_requires_issue_migration_without_creating_legacy_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            issues = root / "workspace" / "issues"
+            issues.mkdir(parents=True)
+            (issues / "open.json").write_text(
+                json.dumps({"issues": [{"id": "legacy-block", "status": "open", "severity": "block"}]}),
+                encoding="utf-8",
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "load_messages", return_value=[]):
+                    with mock.patch.object(web_app, "save_message", return_value={}):
+                        response = _body(
+                            asyncio.run(web_app.api_v2_chat_turn("alpha", _Request({"message": "自动修复"})))
+                        )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["intent"], "minimal_repair_error")
+            self.assertEqual(response["command_error"]["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertFalse((root / "workspace" / "repair_job.json").exists())
+
     def test_material_readiness_does_not_trust_legacy_ready_projection(self) -> None:
         self.assertFalse(
             web_app._material_fulfillment_verified(
