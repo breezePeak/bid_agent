@@ -1114,13 +1114,19 @@ class V2WebControlTests(unittest.TestCase):
             (root / "outputs").mkdir(parents=True)
             (root / "outputs" / "final.docx").write_bytes(b"docx")
             context = WorkspaceContext.resolve(runs, "alpha")
-            receipt = ControlStore(context).issue_gate_receipt(
+            store = ControlStore(context)
+            receipt = store.issue_gate_receipt(
                 verdict="pass",
                 gate_input_fingerprint="unused",
-                artifact_path="../outside.docx",
+                artifact_path="outputs/final.docx",
                 artifact_sha256="a" * 64,
                 rules_version=web_app._FORMAL_GATE_RULES_VERSION,
             )
+            with store._connection() as connection:
+                connection.execute(
+                    "UPDATE gate_receipts SET artifact_path = '../outside.docx' WHERE receipt_id = ?",
+                    (receipt["receipt_id"],),
+                )
 
             with self.assertRaises(ControlPlaneError) as raised:
                 web_app._validate_formal_gate_receipt(context, receipt["receipt_id"])

@@ -315,6 +315,19 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertNotEqual(first["receipt_id"], latest["receipt_id"])
             self.assertEqual(store.latest_gate_receipt()["receipt_id"], latest["receipt_id"])
 
+    def test_gate_receipt_rejects_unsafe_artifact_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            with self.assertRaises(ControlPlaneError) as raised:
+                ControlStore(context).issue_gate_receipt(
+                    verdict="pass",
+                    gate_input_fingerprint="fingerprint",
+                    artifact_path="../outside.docx",
+                    artifact_sha256="a" * 64,
+                    rules_version="test",
+                )
+            self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
+
     def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

@@ -1283,7 +1283,16 @@ class ControlStore:
         findings: list[Any] | None = None,
         policy_decisions: list[Any] | None = None,
     ) -> dict[str, Any]:
-        if verdict not in {"pass", "block"} or not gate_input_fingerprint or not artifact_sha256:
+        artifact_value = str(artifact_path or "").strip().replace("\\", "/")
+        artifact_parts = Path(artifact_value).parts
+        if (
+            verdict not in {"pass", "block"}
+            or not gate_input_fingerprint
+            or not artifact_sha256
+            or not artifact_value
+            or Path(artifact_value).is_absolute()
+            or ".." in artifact_parts
+        ):
             raise ControlPlaneError("STATE_UNAVAILABLE", "GateReceipt 输入无效，已拒绝签发。", status_code=503)
         receipt_id = str(uuid.uuid4())
         created_at = _now()
@@ -1303,7 +1312,7 @@ class ControlStore:
                         receipt_id,
                         verdict,
                         gate_input_fingerprint,
-                        artifact_path,
+                        artifact_value,
                         artifact_sha256,
                         rules_version,
                         _json(findings or []),
@@ -1320,7 +1329,7 @@ class ControlStore:
                     {
                         "verdict": verdict,
                         "gate_input_fingerprint": gate_input_fingerprint,
-                        "artifact_path": artifact_path,
+                        "artifact_path": artifact_value,
                         "rules_version": rules_version,
                     },
                 )
