@@ -5429,6 +5429,24 @@ def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
                     "reason": "根目录旧状态未绑定到工作区 Agent，不自动导入。",
                 }
             )
+    for relative, kind, reason in (
+        ("workspace/pipeline_control.json", "legacy_pipeline_checkpoint", "旧 Pipeline checkpoint 不自动绑定到 V2 Operation。"),
+        ("workspace/stale_artifacts.json", "legacy_stale_state", "旧 stale artifact 状态不自动覆盖 SQLite Artifact manifest。"),
+    ):
+        path = context.root / relative
+        if not path.exists() or not path.is_file():
+            continue
+        content = path.read_bytes()
+        manifest.append(
+            {
+                "path": path.relative_to(context.root).as_posix(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+                "domain": "orphan",
+                "import_pending": True,
+            }
+        )
+        orphans.append({"path": path.relative_to(context.root).as_posix(), "kind": kind, "reason": reason})
     result = store.migration_dry_run(
         domains,
         orphans=orphans,

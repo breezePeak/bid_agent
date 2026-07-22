@@ -2787,6 +2787,21 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(store.revision(), revision)
             self.assertIsNone(store.goal_state())
 
+    def test_migration_dry_run_quarantines_legacy_pipeline_and_stale_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            workspace = root / "workspace"
+            workspace.mkdir(parents=True)
+            (workspace / "pipeline_control.json").write_text('{"status":"running"}', encoding="utf-8")
+            (workspace / "stale_artifacts.json").write_text('{"stale":["final.docx"]}', encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+            result = web_app._v1_migration_dry_run(context)
+            self.assertEqual(result["status"], "needs_reconciliation")
+            self.assertEqual({item["kind"] for item in result["inventory"]["orphans"]}, {
+                "legacy_pipeline_checkpoint", "legacy_stale_state",
+            })
+
     def test_migration_scan_imports_candidates_and_persists_root_orphan_conflict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
