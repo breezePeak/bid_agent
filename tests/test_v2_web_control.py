@@ -207,7 +207,7 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertTrue(response["ok"])
             self.assertEqual(response["intent"], "minimal_repair_error")
-            self.assertEqual(response["command_error"]["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(response["command_error"]["code"], "V1_STATE_RETIRED")
             self.assertFalse((root / "workspace" / "repair_job.json").exists())
 
     def test_material_readiness_does_not_trust_legacy_ready_projection(self) -> None:
@@ -291,7 +291,7 @@ class V2WebControlTests(unittest.TestCase):
             with self.assertRaises(ControlPlaneError) as raised:
                 web_app._handle_goal_resume(context, envelope, "operation-1")
 
-            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(raised.exception.code, "V1_STATE_RETIRED")
             self.assertTrue(ControlStore(context).v1_import_pending("goal"))
 
     def test_v2_status_uses_control_db_not_pipeline_projection(self) -> None:
@@ -391,7 +391,7 @@ class V2WebControlTests(unittest.TestCase):
                 with self.assertRaises(ControlPlaneError) as raised:
                     web_app._handle_materials_verify(context, envelope, "operation-1")
 
-            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(raised.exception.code, "V1_STATE_RETIRED")
             verify.assert_not_called()
 
     def test_v2_gate_fails_closed_when_sqlite_state_is_unavailable(self) -> None:
@@ -431,7 +431,7 @@ class V2WebControlTests(unittest.TestCase):
             with self.assertRaises(ControlPlaneError) as raised:
                 web_app._v2_gate_can_proceed(context, "build-md")
 
-            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(raised.exception.code, "V1_STATE_RETIRED")
             self.assertTrue(ControlStore(context).issue_v1_import_pending())
             self.assertEqual(ControlStore(context).revision(), 0)
 
@@ -446,7 +446,7 @@ class V2WebControlTests(unittest.TestCase):
 
             with self.assertRaises(ControlPlaneError) as raised:
                 web_app._v2_gate_can_proceed(context, "build-md")
-            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(raised.exception.code, "V1_STATE_RETIRED")
             self.assertTrue(ControlStore(context).issue_v1_import_pending())
 
     def test_v2_start_snapshot_pause_and_cancel_confirmation(self) -> None:
@@ -1455,7 +1455,7 @@ class V2WebControlTests(unittest.TestCase):
             payload = _body(response)
             self.assertEqual(response.status_code, 409)
             self.assertFalse(payload["ok"])
-            self.assertEqual(payload["receipt"]["error"]["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(payload["receipt"]["error"]["code"], "V1_STATE_RETIRED")
             rebuild.assert_not_called()
 
     def test_formal_export_requires_current_gate_receipt(self) -> None:
@@ -1748,7 +1748,7 @@ class V2WebControlTests(unittest.TestCase):
                 with self.assertRaises(ControlPlaneError) as raised:
                     web_app._handle_materials_refill(context, envelope, "operation-1")
 
-            self.assertEqual(raised.exception.code, "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(raised.exception.code, "V1_STATE_RETIRED")
             trigger.assert_not_called()
 
     def test_v2_material_refill_can_queue_behind_other_workspace_executor(self) -> None:
@@ -2910,8 +2910,8 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(store.issue_v1_import_pending())
             self.assertTrue(store.v1_import_pending("materials"))
             self.assertEqual(store.revision(), 0)
-            self.assertEqual(payload["snapshot"]["materials"]["source"], "migration_required")
-            self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "migration_required")
+            self.assertEqual(payload["snapshot"]["materials"]["source"], "retired_v1_state")
+            self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "retired_v1_state")
 
     def test_v2_materials_read_does_not_import_legacy_material_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2930,7 +2930,7 @@ class V2WebControlTests(unittest.TestCase):
                 payload = _body(web_app.api_materials_checklist("alpha"))
 
             self.assertTrue(payload["ok"])
-            self.assertEqual(payload["source"], "migration_required")
+            self.assertEqual(payload["source"], "retired_v1_state")
             self.assertEqual(payload["items"], [])
             self.assertEqual(payload["gap_chapters"], {})
             self.assertEqual(payload["refill_plans"], [])
@@ -3056,13 +3056,13 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertTrue(listed["ok"])
             self.assertEqual(listed["issues"], [])
-            self.assertEqual(listed["summary"]["source"], "migration_required")
+            self.assertEqual(listed["summary"]["source"], "retired_v1_state")
             self.assertEqual(preview.status_code, 409)
-            self.assertEqual(_body(preview)["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(_body(preview)["code"], "V1_STATE_RETIRED")
             self.assertEqual(explained.status_code, 409)
-            self.assertEqual(_body(explained)["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(_body(explained)["code"], "V1_STATE_RETIRED")
             self.assertEqual(batch.status_code, 409)
-            self.assertEqual(_body(batch)["code"], "MIGRATION_SCAN_REQUIRED")
+            self.assertEqual(_body(batch)["code"], "V1_STATE_RETIRED")
             self.assertTrue(store.issue_v1_import_pending())
             self.assertEqual(store.revision(), 0)
 

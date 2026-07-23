@@ -3622,7 +3622,7 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
                     {"id": i.get("id"), "code": i.get("code"), "title": i.get("title"), "stage_id": i.get("stage_id")}
                     for i in blocks[:8]
                 ],
-                "source": "migration_required" if issue_import_pending else "control.db",
+                "source": "retired_v1_state" if issue_import_pending else "control.db",
             }
         else:
             from agent.issues import issues_summary, load_open_issues
@@ -4229,7 +4229,7 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
                 "items": authoritative_items,
                 "gap_chapters": gap_chapters,
                 "refill_plans": refill_plans,
-                "source": "migration_required" if material_import_pending else "control.db",
+                "source": "retired_v1_state" if material_import_pending else "control.db",
             }
         )
     except Exception as exc:
@@ -5651,52 +5651,52 @@ def _workspace_context(workspace_id: str) -> WorkspaceContext:
 
 
 def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
-    """Return migrated V2 Issue state; V1 imports only happen via migration.scan."""
+    """Reject retired V1 Issue state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "issues" / "open.json"
     if store.issue_v1_import_pending() and legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "Issue 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 Issue 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
 
 
 def _ensure_v2_material_import(context: WorkspaceContext) -> ControlStore:
-    """Return material authority only after explicit migration when legacy data exists."""
+    """Reject retired V1 material state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "materials_checklist.json"
     if store.v1_import_pending("materials") and legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "材料权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 材料状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
 
 
 def _ensure_v2_repair_import(context: WorkspaceContext) -> ControlStore:
-    """Reject V2 repair mutation until an existing V1 job is explicitly migrated."""
+    """Reject retired V1 RepairJob state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "repair_job.json"
     if store.v1_import_pending("repair_job") and legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "RepairJob 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 RepairJob 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
 
 
 def _ensure_v2_goal_import(context: WorkspaceContext) -> ControlStore:
-    """Reject V2 Goal mutation until an existing V1 Goal is explicitly migrated."""
+    """Reject retired V1 Goal state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "agent" / "goal_state.json"
     if store.v1_import_pending("goal") and legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "Goal 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 Goal 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
@@ -8654,7 +8654,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
             "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
             "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
-            "source": "migration_required" if material_import_pending else "control.db",
+            "source": "retired_v1_state" if material_import_pending else "control.db",
         }
         artifact_states = snapshot.get("artifacts") or []
         pipeline_snapshot = _pipeline_snapshot_from_control(
@@ -8724,7 +8724,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                             if str(item.get("status") or "") in {"open", "in_progress"}
                             and str(item.get("severity") or "") == "block"
                         ][:8],
-                "source": "migration_required" if issue_import_pending else "control.db",
+                "source": "retired_v1_state" if issue_import_pending else "control.db",
                     },
                     "issues": issue_states,
                 },

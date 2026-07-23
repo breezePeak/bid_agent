@@ -3,10 +3,10 @@
 > 版本：V2  
 > 状态：V2-only 切换进行中，V1 API 已废弃
 > 确认日期：2026-07-21  
-> 现行实现：[current_logic_flow_v1.md](./current_logic_flow_v1.md)  
+> 现行实现：[current_logic_flow.md](./current_logic_flow.md)
 > 版本导航：[current_logic_flow.md](./current_logic_flow.md)
 
-V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构，并按两阶段完成收敛与迁移。V1 API 已被明确废弃；迁移、回归和切换验收仍在进行，任何旧控制文件只能作为受控迁移输入，不能再作为运行时接口或控制真相源。
+V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构。V1 API 已被明确废弃；V1 工作区和控制文件不再迁移，发现后直接删除。回归、旧代码物理清理和发布验收仍在进行。
 
 ## 1. 背景与问题
 
@@ -675,3 +675,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B189 | 2026-07-23 | 主前端移除无工作区 Chat 的 `/api/chat/orchestrate` 回退，必须选择 workspace 后调用 V2 Chat；全局 Agent mode 读取迁至 `/api/v2/agent/flags`。V2-only 控制台不再主动请求任何 V1 路由。 |
 | V2.0-B190 | 2026-07-23 | V2 Artifact 复用与正式 GateReceipt 移除最后的 V1 bootstrap：每个正式输入必须有当前 SQLite manifest，复用还必须有成功的 V2 StageRun；检测到 `materials_checklist.json` 旧权威文件时正式门禁以 `V1_STATE_RETIRED` fail-closed，旧工作区应删除而非迁移。 |
 | V2.0-B191 | 2026-07-23 | V2 控制台移除“迁移”面板和迁移备份 API 调用，CommandGateway 不再注册 `migration.scan`、`migration.cutover` 或 `migration.reconcile`；V1 工作区不再提供导入/切换操作，应在工作区层直接删除。旧迁移代码仍待后续物理清理。 |
+| V2.0-B192 | 2026-07-23 | 所有仍会遇到 V1 Goal、RepairJob、Materials 或 Issue 文件的 V2 命令、聊天修复和门禁统一返回 `V1_STATE_RETIRED`，只读 Snapshot/列表以 `retired_v1_state` 标识空的 SQLite 视图；不再提示或暗示执行迁移扫描。 |
