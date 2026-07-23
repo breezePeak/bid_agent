@@ -689,3 +689,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B203 | 2026-07-23 | V2 `materials.update` 和 `materials.rebuild` 也移除 `materials_checklist.json` 双写/回读：前者直接更新 SQLite MaterialState；后者使用无副作用的需求推导器生成候选条目，并保留已有 SQLite 核验/提交生命周期后写回 control.db。旧文件写入包装器仅供待删除的 V1 Worker 使用。 |
 | V2.0-B204 | 2026-07-23 | V2 Pipeline 的 `build-materials-checklist` 阶段改为把无副作用的需求推导结果直接写入 `control.db.material_states`，其注册产物为虚拟控制状态而非 `materials_checklist.json`。断点复用还须确认 SQLite 中仍有材料状态，避免只凭旧运行事件把丢失的控制状态误判完成。 |
 | V2.0-B205 | 2026-07-23 | V2 材料回填将当前 SQLite MaterialState 显式传入重规划和章节改写，回填后把 injected/resolved 生命周期写回 control.db；不再重建材料 JSON、重验旧 Issue 投影或通过投影反写材料状态。 |
+| V2.0-B206 | 2026-07-23 | AgentActivity、Agent Snapshot 和 RuntimeStatus 的材料摘要统一读取 `control.db.material_states`；聊天/监控视图不再因旧 `materials_checklist.json` 缺失、滞后或损坏而显示错误的待补材料数量。 |

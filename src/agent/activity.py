@@ -263,11 +263,11 @@ def reconcile_interrupted_activity(root: Path | None = None) -> dict[str, Any]:
 
 def _materials_deferred_count(root: Path) -> int:
     try:
-        from materials_checklist import load_materials_checklist
-
-        checklist = load_materials_checklist(root)
-        summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
-        return max(0, int(summary.get("deferred") or 0))
+        return sum(
+            1
+            for item in _activity_control_store(root).material_states()
+            if str(item.get("response_status") or "deferred") == "deferred"
+        )
     except Exception:
         return 0
 
