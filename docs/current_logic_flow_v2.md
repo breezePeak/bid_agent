@@ -692,3 +692,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B206 | 2026-07-23 | AgentActivity、Agent Snapshot 和 RuntimeStatus 的材料摘要统一读取 `control.db.material_states`；聊天/监控视图不再因旧 `materials_checklist.json` 缺失、滞后或损坏而显示错误的待补材料数量。 |
 | V2.0-B207 | 2026-07-23 | V2 Pipeline 的章节任务规划读取当前 SQLite MaterialState 并将其写入任务包，后续章节写作继续使用该任务包生成材料留白；因此移除材料 JSON 后不会丢失资格/必交材料约束。Agent Snapshot 也不再把该旧文件当作 Artifact。 |
 | V2.0-B208 | 2026-07-23 | V2 命令和 Snapshot 对任何遗留 Goal、Material、Issue 或 RepairJob 控制文件一律标记/拒绝为 `V1_STATE_RETIRED`，不再根据 SQLite 中的历史 import 标记放行混合工作区。测试夹具同步改为直接建立 V2 SQLite 状态。 |
+| V2.0-B209 | 2026-07-23 | 已物理移除 Web 层遗留的迁移扫描、切换和冲突协调 Command handler；即使未来错误注册路由，服务端也不再具备将 V1 控制状态导入、切换或协调回 V2 的执行实现。 |
