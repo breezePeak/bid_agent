@@ -7422,7 +7422,7 @@ def _handle_materials_upload(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import mark_material_uploaded
+    from agent.material_verifier import verify_material
 
     # A successful automatic verification may resume a blocked Goal.  Validate
     # that goal's migration before recording any submission or changing the
@@ -7430,7 +7430,7 @@ def _handle_materials_upload(
     # material command.
     _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
-    _material_item(context, item_id)
+    material = _material_item(context, item_id)
     upload_token = str(envelope.payload.get("upload_token") or "").strip()
     if not upload_token:
         raise ControlPlaneError(
@@ -7453,18 +7453,17 @@ def _handle_materials_upload(
         source="materials.upload",
         consume_upload=True,
     )
-    result = mark_material_uploaded(
+    result = verify_material(
         context.root,
         item_id,
         uploaded_path=str(uploaded_path),
         note=str(envelope.payload.get("note") or envelope.payload.get("reason") or "").strip(),
-        rebuild=True,
-        auto_verify=True,
+        item=material,
     )
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "上传材料验证失败。"))
     lifecycle = str(result.get("lifecycle_status") or "uploaded")
-    projected = _sync_material_state_from_projection(context, item_id, persist=False)
+    projected = dict(material)
     projected["lifecycle_status"] = lifecycle
     verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
     if lifecycle == "verified":
@@ -7507,32 +7506,23 @@ def _handle_materials_verify(
     operation_id: str,
 ) -> dict[str, Any]:
     from agent.material_verifier import verify_material
-    from materials_checklist import update_item_response
 
     _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
-    _material_item(context, item_id)
+    material = _material_item(context, item_id)
     result = verify_material(
         context.root,
         item_id,
         uploaded_path="",
         note=str(envelope.payload.get("note") or "").strip(),
+        item=material,
     )
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "材料验证失败。"))
     lifecycle = str(result.get("lifecycle_status") or "uploaded").strip().lower()
     if lifecycle not in {"uploaded", "verified", "rejected"}:
         raise ControlPlaneError("STATE_UNAVAILABLE", "材料验证返回了未知生命周期，已拒绝更新。", status_code=503)
-    update = update_item_response(
-        context.root,
-        item_id,
-        response_status=lifecycle,
-        reason=str(result.get("message") or "材料自动验证"),
-        rebuild=True,
-    )
-    if not update.get("ok"):
-        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "验证状态保存失败。"))
-    projected = _sync_material_state_from_projection(context, item_id, persist=False)
+    projected = dict(material)
     projected["lifecycle_status"] = lifecycle
     projected["verification_confidence"] = result.get("confidence")
     if lifecycle == "verified":
@@ -7569,11 +7559,10 @@ def _handle_materials_confirm_verification(
     operation_id: str,
 ) -> dict[str, Any]:
     from agent.material_verifier import human_confirm_verification
-    from materials_checklist import update_item_response
 
     _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
-    _material_item(context, item_id)
+    material = _material_item(context, item_id)
     accept = envelope.payload.get("accept", True)
     if not isinstance(accept, bool):
         raise ControlPlaneError("COMMAND_INVALID", "accept 必须是布尔值。", status_code=400)
@@ -7592,16 +7581,7 @@ def _handle_materials_confirm_verification(
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "材料核验记录不存在。"))
     lifecycle = "verified" if accept else "rejected"
-    update = update_item_response(
-        context.root,
-        item_id,
-        response_status=lifecycle,
-        reason=reason or f"人工确认验证通过 by {operator}",
-        rebuild=True,
-    )
-    if not update.get("ok"):
-        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "核验结论保存失败。"))
-    projected = _sync_material_state_from_projection(context, item_id, persist=False)
+    projected = dict(material)
     projected["lifecycle_status"] = lifecycle
     projected["evidence_status"] = "verified" if accept else "rejected"
     if accept:

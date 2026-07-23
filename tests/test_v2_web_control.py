@@ -1391,20 +1391,16 @@ class V2WebControlTests(unittest.TestCase):
                         )
                     )
                 )
-                with mock.patch(
-                    "materials_checklist.mark_material_uploaded",
-                    return_value={"ok": True, "lifecycle_status": "uploaded", "message": "registered"},
-                ) as register:
-                    accepted = _body(
-                        web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
-                    )
+                accepted = _body(
+                    web_app.api_v2_confirm_action("alpha", proposed["action"]["action_id"], _Request({}))
+                )
                 self.assertTrue(accepted["ok"])
                 token_row = ControlStore(context).material_upload(staged["upload_token"])
                 self.assertEqual(token_row["status"], "consumed")
                 material_state = ControlStore(context).material_state("mat-token")
                 self.assertEqual(material_state["lifecycle_status"], "uploaded")
                 self.assertEqual(material_state["response_status"], "deferred")
-                registered_path = Path(register.call_args.kwargs["uploaded_path"])
+                registered_path = context.root / str(token_row["staged_path"])
                 self.assertTrue(web_app._same_path(registered_path.parent, workspace / "material_uploads" / "staging"))
 
                 replay = _body(

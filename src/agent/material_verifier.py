@@ -322,11 +322,12 @@ def verify_material(
     *,
     uploaded_path: str = "",
     note: str = "",
+    item: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Verify an uploaded material file against checklist item + company identity."""
     root = root or project_root()
     item_id = stringify(item_id)
-    item = _load_checklist_item(root, item_id)
+    item = dict(item) if isinstance(item, dict) else _load_checklist_item(root, item_id)
     path = Path(uploaded_path) if uploaded_path else None
     if path is None or not path.is_file():
         # try overrides path
