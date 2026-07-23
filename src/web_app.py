@@ -7319,9 +7319,7 @@ def _authoritative_material_state(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _material_items(context: WorkspaceContext) -> list[dict[str, Any]]:
-    # V2 Commands must not silently convert their V1 projection into authority.
-    # migration.scan is the sole import boundary; command handlers may still
-    # update the projection after a successful V2 state transition.
+    # V2 Commands only consume SQLite MaterialState authority.
     return _ensure_v2_material_import(context).material_states()
 
 
@@ -8264,9 +8262,6 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "workspace.run_utility": "确认执行工作区维护命令",
                 "workspace.archive": "确认归档工作区",
                 "workspace.clean": "确认清理工作区产物",
-                "migration.scan": "确认扫描并登记旧工作区迁移状态",
-                "migration.cutover": "确认切换工作区至 V2 控制面",
-                "migration.reconcile": "确认处理 V1/V2 迁移冲突",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
