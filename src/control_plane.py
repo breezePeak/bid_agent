@@ -3698,15 +3698,6 @@ class ControlStore:
             artifact_rows = connection.execute(
                 "SELECT * FROM artifact_states ORDER BY artifact_key"
             ).fetchall()
-            migration_rows = connection.execute(
-                "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
-            ).fetchall()
-            migration_scan = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
-            ).fetchone()
-            migration_cutover = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
-            ).fetchone()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         for stage_run in stage_runs:
@@ -3729,17 +3720,6 @@ class ControlStore:
             "confirmations": confirmations,
             "lease": dict(lease_row) if lease_row else None,
             "artifacts": [self._artifact_row(row) for row in artifact_rows],
-            "migration": {
-                "status": (
-                    "needs_reconciliation"
-                    if any(str(row["status"]) == "open" for row in migration_rows)
-                    else "ready"
-                ),
-                "open_count": sum(1 for row in migration_rows if str(row["status"]) == "open"),
-                "conflicts": [self._migration_conflict_row(row) for row in migration_rows],
-                "last_scan": _decode(str(migration_scan["value"]), None) if migration_scan else None,
-                "cutover": _decode(str(migration_cutover["value"]), None) if migration_cutover else None,
-            },
         }
 
     def operation(self, operation_id: str) -> dict[str, Any] | None:

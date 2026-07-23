@@ -359,7 +359,7 @@ class ControlPlaneTests(unittest.TestCase):
             )
             self.assertEqual(conflict["conflict_id"], duplicate["conflict_id"])
             self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
-            self.assertEqual(store.snapshot()["migration"]["open_count"], 1)
+            self.assertNotIn("migration", store.snapshot())
 
             gateway = CommandGateway(
                 context,
@@ -464,7 +464,6 @@ class ControlPlaneTests(unittest.TestCase):
             store.record_migration_scan(fingerprint="scan-1", manifest=[], actor={"id": "admin"})
             cutover = store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
             self.assertEqual(cutover["status"], "active")
-            self.assertEqual(store.snapshot()["migration"]["cutover"]["fingerprint"], "scan-1")
             store.record_migration_conflict(
                 domain="orphan", legacy={"path": "legacy.json"}, authoritative={}, reason="orphan"
             )
