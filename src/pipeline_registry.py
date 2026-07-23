@@ -128,8 +128,8 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
             _artifact("inputs/score.md", required_nonempty=False),
             _artifact("inputs/company.md", required_nonempty=False),
         ),
-        produces=(_artifact("workspace/materials_checklist.json"),),
-        runner="materials_checklist.build_materials_checklist",
+        produces=(_artifact("control.db:material_states", kind="virtual", required_nonempty=False, previewable=False),),
+        runner="materials_checklist.derive_materials_checklist",
         notes=(
             "解析后生成资格/废标/必交材料清单；缺材料默认 deferred，写作时结构化留白",
         ),

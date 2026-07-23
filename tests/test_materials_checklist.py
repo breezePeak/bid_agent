@@ -149,7 +149,7 @@ class MaterialsChecklistTests(unittest.TestCase):
         self.assertLess(ids.index("build_materials_checklist"), ids.index("build_template_evidence"))
         stage = stage_spec_by_id("build_materials_checklist")
         self.assertEqual(stage.command, "build-materials-checklist")
-        self.assertTrue(any("materials_checklist.json" in a.path for a in stage.produces))
+        self.assertTrue(any(a.path == "control.db:material_states" and a.kind == "virtual" for a in stage.produces))
 
     def test_update_item_response_and_refill_plan(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

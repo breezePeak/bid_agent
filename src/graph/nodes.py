@@ -35,7 +35,8 @@ from score_estimator import estimate_final_score
 from source_trace import build_source_trace_index
 from stage_validation import chapter_ids, context_ids, review_ids, summary_ids
 from subagent_runner import run_write_all as concurrent_write_all
-from materials_checklist import build_materials_checklist
+from control_plane import ControlStore, WorkspaceContext
+from materials_checklist import derive_materials_checklist
 from template_evidence import build_template_evidence
 from utils import ensure_dirs, ensure_file, project_root, read_json, stringify
 
@@ -342,9 +343,9 @@ def build_materials_checklist_node(state) -> dict:
     print(_stage_progress("build_materials_checklist") + "...")
     _start_stage(state, "build_materials_checklist", "生成材料/资格清单")
     try:
-        path = root / "workspace" / "materials_checklist.json"
-        if _is_resume(state) and stage_resume_ready(root, "build_materials_checklist"):
-            update = {"materials_checklist_path": str(path)}
+        store = ControlStore(WorkspaceContext(workspace_id=root.name, root=root))
+        if _is_resume(state) and stage_resume_ready(root, "build_materials_checklist") and store.material_states():
+            update = {"material_state_store": "control.db"}
             _persist_state(
                 state,
                 update,
@@ -353,8 +354,22 @@ def build_materials_checklist_node(state) -> dict:
                 message="resume: 复用材料/资格清单",
             )
             return update
-        path = build_materials_checklist(root)
-        update = {"materials_checklist_path": str(path)}
+        checklist = derive_materials_checklist(root)
+        items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+        existing = {str(item.get("item_id") or ""): item for item in store.material_states()}
+        preserved_fields = {
+            "response_status", "lifecycle_status", "evidence_status", "reason",
+            "suggested_attachment", "suggested_placeholder_language", "uploaded_path",
+            "verification", "verification_history", "submission", "submission_history",
+        }
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            merged = dict(item)
+            prior = existing.get(str(item.get("item_id") or ""), {})
+            merged.update({key: prior[key] for key in preserved_fields if key in prior})
+            store.upsert_material_state(merged, source="pipeline.build_materials_checklist")
+        update = {"material_state_store": "control.db", "material_count": len(items)}
         _persist_state(state, update, stage="build_materials_checklist")
         return update
     except Exception as exc:

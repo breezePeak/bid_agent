@@ -687,3 +687,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B201 | 2026-07-23 | V2 Snapshot 判定旧控制文件时改为固定的文件存在性检查，不再调用任何 V1 migration dry-run、解析或冲突逻辑；发现旧状态只展示空的 V2 兼容视图，不能触发导入。 |
 | V2.0-B202 | 2026-07-23 | V2 材料上传、自动核验和人工核验不再通过 `materials_checklist.json` 更新或回读当前材料状态；核验器接收 SQLite MaterialState 作为需求上下文，提交和核验审计在 control.db 中原子更新。 |
 | V2.0-B203 | 2026-07-23 | V2 `materials.update` 和 `materials.rebuild` 也移除 `materials_checklist.json` 双写/回读：前者直接更新 SQLite MaterialState；后者使用无副作用的需求推导器生成候选条目，并保留已有 SQLite 核验/提交生命周期后写回 control.db。旧文件写入包装器仅供待删除的 V1 Worker 使用。 |
+| V2.0-B204 | 2026-07-23 | V2 Pipeline 的 `build-materials-checklist` 阶段改为把无副作用的需求推导结果直接写入 `control.db.material_states`，其注册产物为虚拟控制状态而非 `materials_checklist.json`。断点复用还须确认 SQLite 中仍有材料状态，避免只凭旧运行事件把丢失的控制状态误判完成。 |
