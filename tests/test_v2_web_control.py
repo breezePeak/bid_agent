@@ -2656,7 +2656,7 @@ class V2WebControlTests(unittest.TestCase):
             reconcile.assert_not_called()
             operation = gateway.store.operation(receipt.operation_id or "") or {}
             self.assertEqual(operation["status"], "blocked")
-            self.assertEqual(operation["error"]["code"], "STATE_CONFLICT")
+            self.assertEqual(operation["error"]["code"], "ORPHANED_AFTER_RESTART")
 
     def test_pipeline_failure_sync_records_terminal_stage_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2748,7 +2748,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(stage_run["disposition"], "outputs_incomplete")
             self.assertEqual(stage_run["error"]["message"], "artifact missing")
 
-    def test_restart_reconcile_uses_matching_v2_operation_identity(self) -> None:
+    def test_restart_reconcile_requires_explicit_v2_resume(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
@@ -2769,27 +2769,15 @@ class V2WebControlTests(unittest.TestCase):
                 )
             )
             operation = gateway.store.operation(receipt.operation_id or "") or {}
-            checkpoint = context.root / "workspace" / "pipeline_control.json"
-            checkpoint.write_text(
-                json.dumps(
-                    {
-                        "status": "running",
-                        "operation_id": receipt.operation_id,
-                        "fencing_token": operation["fencing_token"],
-                        "current_stage": "build-md",
-                    }
-                ),
-                encoding="utf-8",
-            )
-
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.object(web_app.SUPERVISOR, "reconcile", return_value=True) as reconcile:
                     resumed = web_app._reconcile_pipeline_from_control(context)
 
-            self.assertTrue(resumed)
-            self.assertEqual(reconcile.call_args.args, ("alpha", context.root, web_app._run_sync))
-            evaluator = reconcile.call_args.kwargs.get("gate_evaluator")
-            self.assertTrue(callable(evaluator))
+            self.assertFalse(resumed)
+            reconcile.assert_not_called()
+            updated = gateway.store.operation(receipt.operation_id or "") or {}
+            self.assertEqual(updated["status"], "blocked")
+            self.assertEqual(updated["error"]["code"], "ORPHANED_AFTER_RESTART")
 
     def test_v2_snapshot_uses_sqlite_authority_for_control_domains(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

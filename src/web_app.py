@@ -10215,10 +10215,9 @@ def api_clean_workspace(request: Request) -> JSONResponse:
 
 
 def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
-    """Use control.db as restart authority and pipeline_control.json only as a worker checkpoint."""
+    """Fail closed after restart; explicit V2 resume owns all recovery."""
     store = ControlStore(context)
     operation = store.snapshot().get("operation")
-    checkpoint = SUPERVISOR.load(context.root)
     if not isinstance(operation, dict):
         return False
     status = str(operation.get("status") or "")
@@ -10243,47 +10242,14 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
     if status not in {"queued", "running"}:
         return False
 
-    checkpoint_operation = str(checkpoint.get("operation_id") or "")
-    checkpoint_fencing = int(checkpoint.get("fencing_token") or 0)
-    if not checkpoint or checkpoint_operation != operation_id or checkpoint_fencing != fencing_token:
-        store.sync_operation(
-            operation_id,
-            "blocked",
-            message="Pipeline checkpoint 与 control.db 不一致，已停止自动恢复。",
-            error={
-                "code": "STATE_CONFLICT",
-                "checkpoint_operation_id": checkpoint_operation,
-                "checkpoint_fencing_token": checkpoint_fencing,
-            },
-            fencing_token=fencing_token,
-        )
-        return False
-
-    if str(checkpoint.get("status") or "") not in {"running", "recovering", "retrying", "pausing"}:
-        SUPERVISOR._save(  # noqa: SLF001 - compatibility checkpoint is normalized from V2 authority here.
-            context.root,
-            {
-                "status": "recovering",
-                "operation_id": operation_id,
-                "fencing_token": fencing_token,
-                "message": "control.db 指示 Operation 仍在运行，准备断点恢复",
-            },
-        )
-    return SUPERVISOR.reconcile(
-        context.workspace_id,
-        context.root,
-        _run_sync,
-        gate_evaluator=lambda _root, command: _v2_gate_can_proceed(context, command),
-        artifact_recorder=lambda _root, command, disposition: _record_v2_stage_artifacts(
-            context,
-            command,
-            disposition,
-        ),
-        artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
-        stage_lifecycle_recorder=lambda _root, command, status, disposition, error: _record_v2_stage_lifecycle(
-            context, operation_id, command, status, disposition, error
-        ),
+    store.sync_operation(
+        operation_id,
+        "blocked",
+        message="服务重启后 Pipeline 未自动恢复；请通过 V2 Command 显式继续。",
+        error={"code": "ORPHANED_AFTER_RESTART", "previous_status": status},
+        fencing_token=fencing_token,
     )
+    return False
 
 
 def _reconcile_inactive_workspace(context: WorkspaceContext) -> dict[str, Any]:
