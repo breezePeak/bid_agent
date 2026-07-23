@@ -1081,10 +1081,6 @@ class V2WebControlTests(unittest.TestCase):
                     }
                 ],
             }
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps(checklist),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(checklist["items"])
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
@@ -1113,10 +1109,6 @@ class V2WebControlTests(unittest.TestCase):
 
             checklist["items"][0]["evidence_status"] = "verified"
             checklist["items"][0]["lifecycle_status"] = "verified"
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps(checklist),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).upsert_material_state(
                 checklist["items"][0],
                 source="test_verified",
@@ -1139,22 +1131,6 @@ class V2WebControlTests(unittest.TestCase):
             root = runs / "alpha"
             workspace = root / "workspace"
             workspace.mkdir(parents=True)
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps(
-                    {
-                        "summary": {"total": 1, "ready": 1},
-                        "items": [
-                            {
-                                "item_id": "unsafe",
-                                "response_status": "ready",
-                                "evidence_status": "missing",
-                                "lifecycle_status": "uploaded",
-                            }
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
                 [{
                     "item_id": "unsafe",
@@ -1221,10 +1197,6 @@ class V2WebControlTests(unittest.TestCase):
             root = runs / "alpha"
             workspace = root / "workspace"
             workspace.mkdir(parents=True)
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps({"items": [{"item_id": "mat-upload", "response_status": "deferred"}]}),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
                 [{"item_id": "mat-upload", "response_status": "deferred"}]
             )
@@ -1264,10 +1236,6 @@ class V2WebControlTests(unittest.TestCase):
             root = runs / "alpha"
             workspace = root / "workspace"
             workspace.mkdir(parents=True)
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps({"items": [{"item_id": "mat-review", "response_status": "deferred"}]}),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
                 [{"item_id": "mat-review", "response_status": "deferred"}]
             )
@@ -1350,10 +1318,6 @@ class V2WebControlTests(unittest.TestCase):
             root = runs / "alpha"
             workspace = root / "workspace"
             workspace.mkdir(parents=True)
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps({"items": [{"item_id": "mat-token", "response_status": "deferred"}]}),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).ensure_material_states(
                 [{"item_id": "mat-token", "response_status": "deferred"}]
             )
@@ -1857,20 +1821,6 @@ class V2WebControlTests(unittest.TestCase):
             root = runs / "alpha"
             issues = root / "workspace" / "issues"
             issues.mkdir(parents=True)
-            (issues / "open.json").write_text(
-                json.dumps(
-                    [
-                        {
-                            "id": "critical-1",
-                            "code": "CRITICAL_CONFLICT",
-                            "title": "critical conflict",
-                            "severity": "block",
-                            "status": "open",
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
             ControlStore(WorkspaceContext.resolve(runs, "alpha")).replace_issue_states(
                 [
                     {
@@ -1965,21 +1915,6 @@ class V2WebControlTests(unittest.TestCase):
                 "evidence": {"source": "quality-gate"},
             }
             ControlStore(context).replace_issue_states([authoritative], source="test")
-            # A conflicting V1 projection must not lower the authoritative risk class.
-            (issues_dir / "open.json").write_text(
-                json.dumps(
-                    [
-                        {
-                            **authoritative,
-                            "code": "LOW_RISK",
-                            "severity": "warn",
-                            "risk_class": "minor",
-                            "detail": "tampered projection",
-                        }
-                    ]
-                ),
-                encoding="utf-8",
-            )
             principal = {"type": "user", "id": "admin-1", "role": "admin"}
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.dict("os.environ", {"ISSUE_ACCEPT_RISK_ENABLED": "1"}):
@@ -2944,8 +2879,8 @@ class V2WebControlTests(unittest.TestCase):
                     payload = _body(web_app.api_materials_checklist("alpha"))
 
             self.assertTrue(payload["ok"])
-            self.assertEqual(payload["source"], "control.db")
-            self.assertEqual(payload["items"][0]["item_id"], "license")
+            self.assertEqual(payload["source"], "retired_v1_state")
+            self.assertEqual(payload["items"], [])
 
     def test_v2_material_refill_plan_requires_verified_control_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3492,17 +3427,6 @@ class V2WebControlTests(unittest.TestCase):
                 ],
                 source="test",
             )
-            tampered_projection = [
-                {
-                    "id": "fatal-from-file",
-                    "code": "FATAL",
-                    "severity": "fatal",
-                    "status": "open",
-                }
-            ]
-            (issues_dir / "open.json").write_text(
-                json.dumps(tampered_projection), encoding="utf-8"
-            )
 
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch("agent.root_cause.sync_issues_from_compliance") as sync_compliance:
@@ -3516,10 +3440,6 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(preflight["accepted_risks"][0]["id"], "accepted-1")
             self.assertEqual(preflight["accepted_risks"][0]["risk_class"], "critical")
             self.assertEqual(ControlStore(context).issue_states()[0]["status"], "accepted")
-            self.assertEqual(
-                json.loads((issues_dir / "open.json").read_text(encoding="utf-8")),
-                tampered_projection,
-            )
             sync_compliance.assert_not_called()
             sync_review.assert_not_called()
             write_register.assert_not_called()
@@ -3530,10 +3450,6 @@ class V2WebControlTests(unittest.TestCase):
             root = runs / "alpha"
             workspace = root / "workspace"
             workspace.mkdir(parents=True)
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps({"items": [{"item_id": "license", "requirement": "营业执照", "response_status": "submitted"}]}),
-                encoding="utf-8",
-            )
             context = WorkspaceContext.resolve(runs, "alpha")
             store = ControlStore(context)
             store.ensure_material_states([{"item_id": "license", "requirement": "营业执照", "response_status": "submitted"}])

@@ -4170,13 +4170,9 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
         v2_read_only = bool(workspace_id)
         data = {} if v2_read_only else load_materials_checklist(root)
         store = ControlStore(context)
-        material_import_pending = (
-            store.v1_import_pending("materials")
-            and (root / "workspace" / "materials_checklist.json").exists()
-        )
+        material_import_pending = (root / "workspace" / "materials_checklist.json").exists()
         # This V2 read endpoint must never promote the legacy projection into
-        # SQLite.  Only the administrator-confirmed migration.scan Command may
-        # do that; while it is pending, return an explicit empty V2 snapshot.
+        # SQLite. Retired workspaces return an explicit empty V2 snapshot.
         authoritative_items = [] if material_import_pending else store.material_states()
         audit_summary = store.material_audit_summary()
         enriched_items: list[dict[str, Any]] = []
@@ -5654,7 +5650,7 @@ def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
     """Reject retired V1 Issue state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "issues" / "open.json"
-    if store.issue_v1_import_pending() and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
             "V1_STATE_RETIRED",
             "检测到已废弃的 V1 Issue 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
@@ -5667,7 +5663,7 @@ def _ensure_v2_material_import(context: WorkspaceContext) -> ControlStore:
     """Reject retired V1 material state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "materials_checklist.json"
-    if store.v1_import_pending("materials") and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
             "V1_STATE_RETIRED",
             "检测到已废弃的 V1 材料状态文件；请删除旧工作区并在 V2 工作区重新执行。",
@@ -5680,7 +5676,7 @@ def _ensure_v2_repair_import(context: WorkspaceContext) -> ControlStore:
     """Reject retired V1 RepairJob state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "repair_job.json"
-    if store.v1_import_pending("repair_job") and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
             "V1_STATE_RETIRED",
             "检测到已废弃的 V1 RepairJob 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
@@ -5693,7 +5689,7 @@ def _ensure_v2_goal_import(context: WorkspaceContext) -> ControlStore:
     """Reject retired V1 Goal state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "agent" / "goal_state.json"
-    if store.v1_import_pending("goal") and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
             "V1_STATE_RETIRED",
             "检测到已废弃的 V1 Goal 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
@@ -8538,14 +8534,8 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
         issue_states = store.issue_states()
-        material_import_pending = (
-            store.v1_import_pending("materials")
-            and (context.root / "workspace" / "materials_checklist.json").exists()
-        )
-        issue_import_pending = (
-            store.v1_import_pending("issues")
-            and (context.root / "workspace" / "issues" / "open.json").exists()
-        )
+        material_import_pending = (context.root / "workspace" / "materials_checklist.json").exists()
+        issue_import_pending = (context.root / "workspace" / "issues" / "open.json").exists()
         material_items = store.material_states()
         material_summary = {
             "exists": bool(material_items),
