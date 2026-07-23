@@ -262,7 +262,6 @@ async function refresh() {
   } finally {
     loading.value = false
   }
-  await refreshMaterialsBadge()
 }
 
 watch(() => props.runId, () => {
