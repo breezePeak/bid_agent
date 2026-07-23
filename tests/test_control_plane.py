@@ -341,7 +341,7 @@ class ControlPlaneTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
 
-    def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
+    def test_retired_migration_conflict_does_not_block_v2_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             store = ControlStore(context)
@@ -365,9 +365,8 @@ class ControlPlaneTests(unittest.TestCase):
                 context,
                 {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
             )
-            with self.assertRaises(ControlPlaneError) as blocked:
-                gateway.submit(_envelope(context, store, "pipeline.start"))
-            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+            receipt = gateway.submit(_envelope(context, store, "pipeline.start"))
+            self.assertEqual(receipt.status, "accepted")
 
             resolved = store.resolve_migration_conflict(
                 conflict["conflict_id"],

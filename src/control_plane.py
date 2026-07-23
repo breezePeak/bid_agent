@@ -3138,18 +3138,6 @@ class ControlStore:
                     connection.commit()
                     return self._receipt_from_row(duplicate, duplicate=True), False
 
-                if envelope.kind not in {"migration.scan", "migration.reconcile"}:
-                    open_conflicts = int(connection.execute(
-                        "SELECT COUNT(*) FROM migration_conflicts WHERE status = 'open'"
-                    ).fetchone()[0])
-                    if open_conflicts:
-                        raise ControlPlaneError(
-                            "MIGRATION_RECONCILIATION_REQUIRED",
-                            "工作区存在未解决的 V1/V2 状态冲突，已拒绝变更操作。",
-                            status_code=409,
-                            details={"open_count": open_conflicts},
-                        )
-
                 if envelope.kind in self.CONFIRMATION_REQUIRED_KINDS:
                     if not envelope.confirmation_id:
                         raise ControlPlaneError("CONFIRMATION_REQUIRED", "该 Command 必须先完成确认。")
