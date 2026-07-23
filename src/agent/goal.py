@@ -2,6 +2,7 @@
 
 """Goal state machine + plan execution driver (PR-9/10)."""
 
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
