@@ -2303,12 +2303,12 @@ class V2WebControlTests(unittest.TestCase):
                             self.assertEqual(login.status_code, 200)
                             csrf_token = login.json()["csrf_token"]
                             csrf_denied = await client.post("/api/select-run", json={"run_id": "alpha"})
-                            self.assertEqual(csrf_denied.status_code, 403)
-                            self.assertEqual(csrf_denied.json()["error"]["code"], "CSRF_REQUIRED")
+                            self.assertEqual(csrf_denied.status_code, 410)
+                            self.assertEqual(csrf_denied.json()["error"]["code"], "V1_API_RETIRED")
                             csrf_headers = {"X-CSRF-Token": csrf_token}
                             runs_response = await client.get("/api/runs")
-                            self.assertEqual(runs_response.status_code, 200)
-                            self.assertEqual(runs_response.headers["deprecation"], "true")
+                            self.assertEqual(runs_response.status_code, 410)
+                            self.assertEqual(runs_response.json()["error"]["code"], "V1_API_RETIRED")
                             self.assertIn("successor-version", runs_response.headers["link"])
                             forbidden = await client.get("/api/v2/workspaces/alpha/snapshot")
                             self.assertEqual(forbidden.status_code, 403)
@@ -2317,27 +2317,24 @@ class V2WebControlTests(unittest.TestCase):
                             select_forbidden = await client.post(
                                 "/api/select-run", json={"run_id": "alpha"}, headers=csrf_headers
                             )
-                            self.assertEqual(select_forbidden.status_code, 403)
+                            self.assertEqual(select_forbidden.status_code, 410)
                             delete_forbidden = await client.post(
                                 "/api/delete-run", json={"run_id": "alpha"}, headers=csrf_headers
                             )
-                            self.assertEqual(delete_forbidden.status_code, 403)
+                            self.assertEqual(delete_forbidden.status_code, 410)
                             ControlStore(context).grant_workspace_access("tester", role="editor")
                             query_allowed = await client.get(
                                 "/api/materials-checklist",
                                 params={"workspace_id": "alpha"},
                             )
-                            self.assertEqual(query_allowed.status_code, 200)
-                            self.assertEqual(
-                                ControlStore(context).compatibility_usage()["routes"]["/api/materials-checklist"]["calls"],
-                                1,
-                            )
+                            self.assertEqual(query_allowed.status_code, 410)
+                            self.assertEqual(query_allowed.json()["error"]["code"], "V1_API_RETIRED")
                             query_forbidden = await client.get(
                                 "/api/materials-checklist",
                                 params={"workspace_id": "beta"},
                             )
-                            self.assertEqual(query_forbidden.status_code, 403)
-                            self.assertEqual(query_forbidden.json()["error"]["code"], "WORKSPACE_FORBIDDEN")
+                            self.assertEqual(query_forbidden.status_code, 410)
+                            self.assertEqual(query_forbidden.json()["error"]["code"], "V1_API_RETIRED")
                             self.assertTrue(root.exists())
 
         asyncio.run(scenario())

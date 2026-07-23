@@ -135,12 +135,10 @@ export function clearChatMessages(runId) {
 }
 
 export function orchestrateChat(message, { runId = '', selectedCommand = '', action = null } = {}) {
+  if (!runId) throw new Error('请先选择工作空间，再使用 V2 Chat')
   const payload = { message, run_id: runId, selected_command: selectedCommand }
   if (action && typeof action === 'object') payload.action = action
-  const path = runId
-    ? `/v2/workspaces/${encodeURIComponent(runId)}/chat/turn`
-    : '/chat/orchestrate'
-  return api.post(path, payload, { timeout: 120000 })
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/chat/turn`, payload, { timeout: 120000 })
 }
 
 function newCommandId() {
@@ -212,7 +210,7 @@ export function fetchAgentDecisions(runId, tail = 20) {
 }
 
 export function fetchAgentFlags() {
-  return api.get('/agent/flags')
+  return api.get('/v2/agent/flags')
 }
 
 

@@ -6,8 +6,8 @@
 
 - **业务使用**：如何上传资料、启动流程、拿到 Word → 看本文即可。
 - **3D 态势大屏**：炼丹阁可视化全流程与 Agent 活动 → 见 [frontend-3d/README.md](frontend-3d/README.md)。
-- **当前流程 V1**：现行阶段逻辑、Agent 编排与门禁 → 见 [docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)。
-- **目标架构 V2**：Agent 控制面、唯一执行内核与迁移计划 → 见 [docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)。
+- **当前控制架构 V2**：Agent 控制面、唯一执行内核与迁移验收 → 见 [docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)。
+- **V1 历史归档**：仅供迁移取证，不提供兼容接口 → 见 [docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)。
 
 ## 安装
 
@@ -43,7 +43,7 @@ python src/web_app.py
 
 打开 [http://127.0.0.1:7860](http://127.0.0.1:7860)
 
-Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V2 和兼容 API 请求都会校验会话及工作区权限。
+Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V2 API 请求都会校验会话及工作区权限；旧 V1 API 统一返回 `410 V1_API_RETIRED`。
 
 建议顺序：
 
@@ -166,8 +166,8 @@ python src/main.py control snapshot --workspace demo
 ## 进一步说明
 
 - 流程版本导航：[docs/current_logic_flow.md](docs/current_logic_flow.md)  
-- 当前流程 V1：[docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)  
-- 目标架构 V2：[docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)  
+- 当前控制架构 V2：[docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)
+- V1 历史归档：[docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)
 - 开发演进：[docs/bid_agent_development_plan.md](docs/bid_agent_development_plan.md)  
 - 历史 Agent 化阶段记录：[docs/agentization_development_plan.md](docs/agentization_development_plan.md)  
 - 3D 前端：[frontend-3d/README.md](frontend-3d/README.md)  

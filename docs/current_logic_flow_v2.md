@@ -1,12 +1,12 @@
 # 标书 Agent 控制面架构 V2
 
 > 版本：V2  
-> 状态：阶段 A/B 改造进行中，V2 尚未完成切换
+> 状态：V2-only 切换进行中，V1 API 已废弃
 > 确认日期：2026-07-21  
 > 现行实现：[current_logic_flow_v1.md](./current_logic_flow_v1.md)  
 > 版本导航：[current_logic_flow.md](./current_logic_flow.md)
 
-V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构，并按两阶段完成收敛与迁移。阶段 A/B 已进入代码改造，但迁移、回归和切换验收尚未完成；V1 仍是当前实现真相源。
+V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构，并按两阶段完成收敛与迁移。V1 API 已被明确废弃；迁移、回归和切换验收仍在进行，任何旧控制文件只能作为受控迁移输入，不能再作为运行时接口或控制真相源。
 
 ## 1. 背景与问题
 
@@ -671,3 +671,5 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B185 | 2026-07-22 | pause/cancel 与 Pipeline 完成竞态时，若控制 Command 到达时目标 Operation 已是 succeeded/failed/cancelled，Gateway 持久化 `CommandNoOp` 并返回 `no_op`，不再报状态冲突或重新取得 lease。该结果可幂等重放并保留审计事件。 |
 | V2.0-B186 | 2026-07-22 | Pipeline 重启恢复发现 checkpoint Worker 已丢失时，会先将其当前 StageRun 以 `failed(worker_lost)` 终结，再创建新的 queued attempt 断点重试；StageRun 中断审计失败则 Pipeline fail-closed，不会留下未说明的 running 阶段或将半成品作为可复用输出。 |
 | V2.0-B187 | 2026-07-22 | WorkspaceSnapshot 保留 `stage_runs` 作为最近审计历史，并新增 `current_stage_runs` 精确绑定当前展示 Operation。控制台可同时展示当前流水线 attempt 与历史排障记录，避免不同 Operation 的同名阶段混入当前进度判断。 |
+| V2.0-B188 | 2026-07-23 | 按发布决策进入 V2-only：所有非 `/api/v2/`、认证和模型设置的 V1 API 在认证后统一返回 `410 V1_API_RETIRED` 与 V2 successor Link，不再记录兼容遥测、解析活动工作区或执行任何 V1 适配逻辑。 |
+| V2.0-B189 | 2026-07-23 | 主前端移除无工作区 Chat 的 `/api/chat/orchestrate` 回退，必须选择 workspace 后调用 V2 Chat；全局 Agent mode 读取迁至 `/api/v2/agent/flags`。V2-only 控制台不再主动请求任何 V1 路由。 |

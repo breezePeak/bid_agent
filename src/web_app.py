@@ -156,6 +156,19 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
             {"ok": False, "error": {"code": "AUTH_REQUIRED", "message": "请先登录。"}, "message": "请先登录。"},
             status_code=401,
         )
+    if _is_v1_compat_api(path):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": {
+                    "code": "V1_API_RETIRED",
+                    "message": "V1 API 已废弃；请使用 workspace-scoped /api/v2/ 接口。",
+                },
+                "message": "V1 API 已废弃；请使用 workspace-scoped /api/v2/ 接口。",
+            },
+            status_code=410,
+            headers={"Link": '</api/v2/workspaces>; rel="successor-version"'},
+        )
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         expected_csrf = str(session.get("csrf_token") or "")
         header_csrf = str(request.headers.get("x-csrf-token") or "")
@@ -3506,7 +3519,7 @@ def api_concurrency_metrics() -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
-@app.get("/api/agent/flags")
+@app.get("/api/v2/agent/flags")
 def api_agent_flags() -> JSONResponse:
     """Expose runtime Agent mode for UI badge (PR-A3)."""
     try:
