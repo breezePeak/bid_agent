@@ -7346,28 +7346,6 @@ def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
     return item
 
 
-def _sync_material_state_from_projection(
-    context: WorkspaceContext,
-    item_id: str,
-    *,
-    persist: bool = True,
-) -> dict[str, Any]:
-    from materials_checklist import load_materials_checklist
-
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
-    item = next(
-        (dict(row) for row in items if isinstance(row, dict) and str(row.get("item_id") or "") == item_id),
-        None,
-    )
-    if item is None:
-        raise ControlPlaneError("STATE_UNAVAILABLE", f"材料 V1 投影缺少条目: {item_id}", status_code=503)
-    authoritative = _authoritative_material_state(item)
-    if not persist:
-        return authoritative
-    return ControlStore(context).upsert_material_state(authoritative)
-
-
 def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
     value = str(raw_path or "").strip()
     if not value:
@@ -7733,7 +7711,7 @@ def _trigger_material_refill(
         error: dict[str, Any] | None = None
         with _legacy_execution_scope("materials-refill", context.workspace_id, context.root):
             try:
-                from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
+                from materials_checklist import refill_material_gaps
 
                 ControlStore(context).sync_operation(
                     operation_id,
@@ -7741,21 +7719,30 @@ def _trigger_material_refill(
                     message="正在按已验证材料回填章节。",
                     fencing_token=fencing_token,
                 )
+                materials = _material_items(context)
                 result = refill_material_gaps(
                     context.root,
                     chapter_ids=chapter_ids,
                     replan_jobs=replan_jobs,
                     max_chapters=max_chapters,
+                    material_items=materials,
                 )
-                try:
-                    result["revalidate"] = revalidate_issues_after_materials(context.root)
-                    _project_quality_issues(context)
-                except Exception as exc:
-                    result["revalidate_error"] = str(exc)
+                for item_id in result.get("resolved_item_ids") or []:
+                    item = next((row for row in materials if str(row.get("item_id") or "") == str(item_id)), None)
+                    if isinstance(item, dict):
+                        updated = dict(item)
+                        updated["lifecycle_status"] = "resolved"
+                        ControlStore(context).upsert_material_state(updated, source="materials.refill")
+                for item_id in result.get("injected_item_ids") or []:
+                    item = next((row for row in materials if str(row.get("item_id") or "") == str(item_id)), None)
+                    if isinstance(item, dict):
+                        updated = dict(item)
+                        updated["lifecycle_status"] = "injected"
+                        ControlStore(context).upsert_material_state(updated, source="materials.refill")
                 failed = result.get("failed") if isinstance(result.get("failed"), list) else []
-                status = "succeeded" if result.get("ok") and not failed and not result.get("revalidate_error") else "blocked"
+                status = "succeeded" if result.get("ok") and not failed else "blocked"
                 message = str(result.get("message") or "材料回填完成。")
-                error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
+                error = {"failed": failed} if status == "blocked" else None
                 if status == "succeeded":
                     from artifact_manifest import record_external_chapter_mutation
 
@@ -7801,18 +7788,10 @@ def _handle_materials_refill(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import load_materials_checklist
-
-    # The worker revalidates material-related issues, which still emits the
-    # one-version V1 projection before this explicit command projects it back
-    # to SQLite.  Refuse to start if the existing projection was not migrated.
-    _ensure_v2_issue_import(context)
     items = _material_items(context)
-    projection = load_materials_checklist(context.root)
-    projection_items = projection.get("items") if isinstance(projection.get("items"), list) else []
     unsafe_ready = [
         str(item.get("item_id") or "")
-        for item in [*items, *projection_items]
+        for item in items
         if isinstance(item, dict)
         and str(item.get("response_status") or "") == "ready"
         and not _material_fulfillment_verified(item)

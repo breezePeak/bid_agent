@@ -62,11 +62,17 @@ def _evidence_for_chapter(chapter: dict[str, Any], evidence_map: dict[str, Any])
     return matched
 
 
-def _build_job(chapter: dict[str, Any], root: Path, evidence_map: dict[str, Any]) -> dict[str, Any]:
+def _build_job(
+    chapter: dict[str, Any],
+    root: Path,
+    evidence_map: dict[str, Any],
+    *,
+    material_items: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     chapter_id = stringify(chapter.get("id"))
     review_context = manual_review_context_for_chapter(root, chapter_id)
     writing_requirements = [stringify(item) for item in chapter.get("writing_requirements", []) if stringify(item)]
-    materials_items = items_for_chapter(root, chapter=chapter)
+    materials_items = items_for_chapter(root, chapter=chapter, material_items=material_items)
     compact_materials = [
         {
             "item_id": stringify(item.get("item_id")),
@@ -120,7 +126,11 @@ def _apply_score_coverage_overrides(jobs: list[dict[str, Any]], overrides: dict[
     return jobs
 
 
-def plan_chapter_jobs(root: Path | None = None) -> list[dict[str, Any]]:
+def plan_chapter_jobs(
+    root: Path | None = None,
+    *,
+    material_items: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     root = root or project_root()
     outline = load_outline(root)
     score_points = load_score_points(root)
@@ -133,7 +143,7 @@ def plan_chapter_jobs(root: Path | None = None) -> list[dict[str, Any]]:
 
     jobs: list[dict[str, Any]] = []
     for chapter in outline.get("chapters", []):
-        job = _build_job(chapter, root, evidence_map)
+        job = _build_job(chapter, root, evidence_map, material_items=material_items)
         invalid_ids = [score_id for score_id in job["score_point_ids"] if score_id not in score_ids]
         if invalid_ids:
             raise ValueError(f"章节 {job['chapter_id']} 绑定了不存在的评分点: {invalid_ids}")

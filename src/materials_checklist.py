@@ -488,11 +488,17 @@ def build_materials_checklist(root: Path | None = None) -> Path:
     return out
 
 
-def items_for_chapter(root: Path | None, chapter: dict[str, Any] | None = None, job: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+def items_for_chapter(
+    root: Path | None,
+    chapter: dict[str, Any] | None = None,
+    job: dict[str, Any] | None = None,
+    *,
+    material_items: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Pick checklist items relevant to a chapter/job for writing constraints."""
     root = root or project_root()
-    data = load_materials_checklist(root)
-    items = data.get("items") if isinstance(data.get("items"), list) else []
+    data = load_materials_checklist(root) if material_items is None else {}
+    items = material_items if material_items is not None else data.get("items") if isinstance(data.get("items"), list) else []
     if not items:
         return []
 
@@ -821,13 +827,17 @@ def chapters_with_material_gaps(root: Path | None = None) -> dict[str, list[str]
     return result
 
 
-def chapters_ready_for_refill(root: Path | None = None) -> list[dict[str, Any]]:
+def chapters_ready_for_refill(
+    root: Path | None = None,
+    *,
+    material_items: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
     """Chapters that still contain MATERIAL_GAP for items now marked ready."""
     root = root or project_root()
-    data = load_materials_checklist(root)
+    data = load_materials_checklist(root) if material_items is None else {}
     status_by_id = {
         stringify(i.get("item_id")): stringify(i.get("response_status"))
-        for i in data.get("items", [])
+        for i in (material_items if material_items is not None else data.get("items", []))
         if isinstance(i, dict)
     }
     plans: list[dict[str, Any]] = []
@@ -850,16 +860,19 @@ def refill_material_gaps(
     chapter_ids: list[str] | None = None,
     replan_jobs: bool = True,
     max_chapters: int = 20,
+    material_items: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """
     After user marks materials ready (and preferably re-uploads company docs),
     replan jobs and rewrite affected chapters so MATERIAL_GAP slots can be filled.
     """
     root = root or project_root()
-    # Always refresh checklist to honor latest overrides + company text
-    build_materials_checklist(root)
+    # Retired V1 callers still refresh their file projection. V2 supplies the
+    # SQLite material snapshot and must not recreate that projection.
+    if material_items is None:
+        build_materials_checklist(root)
 
-    plans = chapters_ready_for_refill(root)
+    plans = chapters_ready_for_refill(root, material_items=material_items)
     if chapter_ids is not None:
         wanted = {str(x) for x in chapter_ids}
         plans = [p for p in plans if p["chapter_id"] in wanted]
@@ -877,7 +890,7 @@ def refill_material_gaps(
         try:
             from job_planner import plan_chapter_jobs
 
-            plan_chapter_jobs(root)
+            plan_chapter_jobs(root, material_items=material_items)
         except Exception as exc:
             return {"ok": False, "message": f"重规划章节任务失败: {exc}", "plans": plans}
 
@@ -926,8 +939,8 @@ def refill_material_gaps(
     # mark lifecycle injected/resolved for ready items that no longer appear as gaps
     try:
         remaining_gaps = chapters_with_material_gaps(root)
-        data = load_materials_checklist(root)
-        items = data.get("items") if isinstance(data.get("items"), list) else []
+        data = load_materials_checklist(root) if material_items is None else {}
+        items = material_items if material_items is not None else data.get("items") if isinstance(data.get("items"), list) else []
         gap_item_ids = {gid for ids in remaining_gaps.values() for gid in ids}
         for item in items:
             if not isinstance(item, dict):
@@ -939,9 +952,10 @@ def refill_material_gaps(
                 item["lifecycle_status"] = "resolved"
             else:
                 item["lifecycle_status"] = "injected"
-        data["items"] = items
-        data["summary"] = _summarize(items)
-        write_json(checklist_path(root), data)
+        if material_items is None:
+            data["items"] = items
+            data["summary"] = _summarize(items)
+            write_json(checklist_path(root), data)
     except Exception:
         pass
 
@@ -949,7 +963,7 @@ def refill_material_gaps(
     try:
         from agent.goal import load_goal, resume_goal_after_materials
 
-        goal = load_goal(root)
+        goal = load_goal(root) if material_items is None else None
         if goal and str(goal.get("status")) == "blocked_human":
             resume_goal_after_materials(root, note="material_refill")
     except Exception:
@@ -960,6 +974,20 @@ def refill_material_gaps(
         "rewritten": rewritten,
         "failed": failed,
         "plans": plans,
+        "resolved_item_ids": [
+            stringify(item.get("item_id"))
+            for item in items
+            if isinstance(item, dict)
+            and stringify(item.get("response_status")) == "ready"
+            and stringify(item.get("item_id")) not in gap_item_ids
+        ],
+        "injected_item_ids": [
+            stringify(item.get("item_id"))
+            for item in items
+            if isinstance(item, dict)
+            and stringify(item.get("response_status")) == "ready"
+            and stringify(item.get("item_id")) in gap_item_ids
+        ],
         "recovery_plan": {
             "chapter_ids": rewritten,
             "invalidate": ["reviews", "summaries", "coverage", "export"],
