@@ -5984,26 +5984,11 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
     from agent.issues import classify_issue_risk
 
     store = ControlStore(context)
-    store.assert_migration_ready()
-    migration_preview = _v1_migration_dry_run(context)
-    if migration_preview.get("status") != "ready":
-        raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "旧工作区迁移预检发现未登记的状态，请先执行管理员迁移扫描。",
-            status_code=409,
-            details={"migration": migration_preview.get("counts") or {}},
-        )
-    cutover = (store.snapshot().get("migration") or {}).get("cutover")
-    if isinstance(cutover, dict) and cutover.get("status") == "active":
-        expected_fingerprint = str(cutover.get("fingerprint") or "")
-        current_fingerprint = str(migration_preview.get("source_fingerprint") or "")
-        if not expected_fingerprint or expected_fingerprint != current_fingerprint:
-            raise ControlPlaneError(
-                "MIGRATION_CUTOVER_STALE",
-                "V2 切换后的旧状态源已变化，请重新扫描并完成协调。",
-                status_code=409,
-                details={"expected_fingerprint": expected_fingerprint, "current_fingerprint": current_fingerprint},
-            )
+    _ensure_v2_goal_import(context)
+    _ensure_v2_repair_import(context)
+    _ensure_v2_material_import(context)
+    _ensure_v2_issue_import(context)
+    cutover = None
     failed_evaluations = [
         evaluation for evaluation in store.latest_gate_evaluations()
         if str(evaluation.get("verdict") or "") in {"block", "error"}
@@ -6271,20 +6256,13 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
     digest = hashlib.sha256()
     artifact_sha256 = ""
     store = ControlStore(context)
-    migration_state = store.migration_state()
     control_domains = {
         "material_states": store.material_states(),
         "issue_states": store.issue_states(),
         "policy_decisions": store.policy_decisions(),
         "artifact_states": store.artifact_states(),
         "latest_gate_evaluations": store.latest_gate_evaluations(),
-        "migration": migration_state,
     }
-    cutover = migration_state.get("cutover") if isinstance(migration_state, dict) else None
-    if isinstance(cutover, dict) and cutover.get("status") == "active":
-        control_domains["migration_source_fingerprint"] = (
-            _v1_migration_dry_run(context).get("source_fingerprint") or ""
-        )
     for domain, value in control_domains.items():
         digest.update(f"control.db:{domain}\0".encode("utf-8"))
         digest.update(

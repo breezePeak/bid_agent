@@ -1625,9 +1625,10 @@ class V2WebControlTests(unittest.TestCase):
             context = WorkspaceContext.resolve(runs, "alpha")
             store = ControlStore(context)
 
-            preflight = web_app._v2_export_preflight(context)
+            with self.assertRaises(ControlPlaneError) as blocked:
+                web_app._v2_export_preflight(context)
 
-            self.assertTrue(preflight["ok"])
+            self.assertEqual(blocked.exception.code, "V1_STATE_RETIRED")
             self.assertTrue(store.issue_v1_import_pending())
             self.assertEqual(store.revision(), 0)
 
@@ -3652,6 +3653,7 @@ class V2WebControlTests(unittest.TestCase):
                 preflight = web_app._v2_export_preflight(context)
             self.assertTrue(preflight["can_export"])
 
+    @unittest.skip("V1 migration cutover is retired in V2-only mode")
     def test_v2_cutover_preflight_requires_passed_quality_evaluations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3701,6 +3703,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(stale.exception.code, "GATE_BLOCKED")
             self.assertEqual(stale.exception.details["stale_gate_evaluations"], ["global-review"])
 
+    @unittest.skip("V1 migration cutover is retired in V2-only mode")
     def test_v2_export_preflight_rejects_stale_migration_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3734,7 +3737,7 @@ class V2WebControlTests(unittest.TestCase):
                 with self.assertRaises(ControlPlaneError) as blocked:
                     web_app._v2_export_preflight(context)
 
-            self.assertEqual(blocked.exception.code, "MIGRATION_CUTOVER_STALE")
+            self.assertEqual(blocked.exception.code, "GATE_BLOCKED")
 
     def test_formal_gate_fingerprint_tracks_active_cutover_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -3762,7 +3765,7 @@ class V2WebControlTests(unittest.TestCase):
             goal_path.write_text(json.dumps(legacy_goal), encoding="utf-8")
             after, _ = web_app._formal_gate_fingerprint(context)
 
-            self.assertNotEqual(before, after)
+            self.assertEqual(before, after)
 
     def test_formal_gate_fingerprint_tracks_latest_gate_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4096,6 +4099,7 @@ class V2WebControlTests(unittest.TestCase):
         self.assertEqual(payload["choices"], [{"project_type": "goods"}])
 
 
+    @unittest.skip("V1 migration reconciliation is retired in V2-only mode")
     def test_migration_reconciliation_requires_admin_and_formal_export_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -4111,7 +4115,7 @@ class V2WebControlTests(unittest.TestCase):
             with mock.patch.object(web_app, "_ensure_v2_issue_import", return_value=store):
                 with self.assertRaises(ControlPlaneError) as blocked:
                     web_app._v2_export_preflight(context)
-            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+            self.assertEqual(blocked.exception.code, "GATE_BLOCKED")
 
             user_envelope = CommandEnvelope.from_mapping(
                 {

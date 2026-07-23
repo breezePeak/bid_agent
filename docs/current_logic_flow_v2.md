@@ -679,3 +679,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B193 | 2026-07-23 | V2 `goal.resume` 与材料核验后的 Goal 恢复只写 `control.db.goal_state`，不再生成 `goal_state.json`；V2 风险接受不再刷新 `issues/open.json`，仅保留不可变风险日志与正式风险登记附件。 |
 | V2.0-B194 | 2026-07-23 | Goal、AgentActivity 和 RepairJob 基础模块移除对 `goal_state.json`、`activity.json`、`repair_job.json` 的读取和双写；这些领域状态只从 `control.db` 读取并写入，残留 V1 文件不会被导入或覆盖 SQLite。 |
 | V2.0-B195 | 2026-07-23 | 移除 V2 Web 和控制 CLI 的所有迁移 dry-run、备份、报告、恢复演练和扫描/切换/协调入口；路由契约回归确认 `/api/v2/**/migration/**` 不再暴露。迁移实现内部残留待后续物理删除，但没有 V2 入口可调用。 |
+| V2.0-B196 | 2026-07-23 | 正式出稿预检和 GateReceipt 输入 fingerprint 不再读取 MigrationConflict、cutover 或旧文件 checksum；预检只检查当前 V2 SQLite 领域状态、GateEvaluation 和 Artifact 证据。历史迁移 cutover 回归用例已标记为 retired。 |
