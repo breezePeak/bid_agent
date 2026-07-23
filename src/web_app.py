@@ -8574,8 +8574,9 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
     try:
         context = _workspace_context(workspace_id)
         store = ControlStore(context)
-        snapshot = _migration_snapshot_with_source_state(context, store.snapshot())
-        snapshot["compatibility_usage"] = store.compatibility_usage()
+        snapshot = store.snapshot()
+        snapshot.pop("migration", None)
+        snapshot.pop("compatibility_usage", None)
         snapshot["quality"] = {
             "latest_gate_evaluations": store.latest_gate_evaluations(),
             "source": "control.db",
