@@ -113,6 +113,39 @@ def _auth_credentials() -> tuple[str, str]:
     )
 
 
+def _issue_auth_session(username: str) -> JSONResponse:
+    token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
+    principal = {"type": "user", "id": username[:128], "role": "admin"}
+    with _AUTH_LOCK:
+        _AUTH_SESSIONS[token] = {
+            "principal": principal,
+            "csrf_token": csrf_token,
+            "expires_at": time.time() + _AUTH_SESSION_SECONDS,
+        }
+    response = JSONResponse({"ok": True, "principal": principal, "csrf_token": csrf_token})
+    secure_cookie = str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"}
+    response.set_cookie(
+        _AUTH_COOKIE,
+        token,
+        max_age=_AUTH_SESSION_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=secure_cookie,
+        path="/",
+    )
+    response.set_cookie(
+        _CSRF_COOKIE,
+        csrf_token,
+        max_age=_AUTH_SESSION_SECONDS,
+        httponly=False,
+        samesite="strict",
+        secure=secure_cookie,
+        path="/",
+    )
+    return response
+
+
 def _session_record(token: str) -> dict[str, Any] | None:
     value = str(token or "").strip()
     if not value:
@@ -238,36 +271,7 @@ async def api_auth_login(request: Request) -> JSONResponse:
         )
     if not (hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)):
         return JSONResponse({"ok": False, "message": "用户名或密码错误。"}, status_code=401)
-    token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
-    principal = {"type": "user", "id": username[:128], "role": "admin"}
-    with _AUTH_LOCK:
-        _AUTH_SESSIONS[token] = {
-            "principal": principal,
-            "csrf_token": csrf_token,
-            "expires_at": time.time() + _AUTH_SESSION_SECONDS,
-        }
-    response = JSONResponse({"ok": True, "principal": principal, "csrf_token": csrf_token})
-    secure_cookie = str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"}
-    response.set_cookie(
-        _AUTH_COOKIE,
-        token,
-        max_age=_AUTH_SESSION_SECONDS,
-        httponly=True,
-        samesite="strict",
-        secure=secure_cookie,
-        path="/",
-    )
-    response.set_cookie(
-        _CSRF_COOKIE,
-        csrf_token,
-        max_age=_AUTH_SESSION_SECONDS,
-        httponly=False,
-        samesite="strict",
-        secure=secure_cookie,
-        path="/",
-    )
-    return response
+    return _issue_auth_session(username)
 
 
 @app.post("/api/auth/logout")
