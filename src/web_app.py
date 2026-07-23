@@ -8649,7 +8649,28 @@ async def api_logs_stream(request: Request, workspace_id: str = "") -> Streaming
 # ---------------------------------------------------------------
 
 VALID_CATEGORIES = {"tender", "company", "template"}
-_SOURCE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _source_upload_max_bytes() -> int:
+    """Read the source-upload limit from the same project .env as Web auth."""
+    from config import _parse_env_file
+
+    file_values = _parse_env_file(ROOT / ".env")
+    raw_value = os.environ.get(
+        "BID_AGENT_SOURCE_UPLOAD_MAX_MB",
+        file_values.get("BID_AGENT_SOURCE_UPLOAD_MAX_MB", "512"),
+    )
+    try:
+        limit_mb = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        limit_mb = 512
+    # Keep an accidental configuration from disabling the guard or accepting
+    # impractically large files in a local Web process.
+    limit_mb = max(1, min(limit_mb, 2048))
+    return limit_mb * 1024 * 1024
+
+
+_SOURCE_UPLOAD_MAX_BYTES = _source_upload_max_bytes()
 _SOURCE_UPLOAD_DENIED_EXTENSIONS = {
     ".bat",
     ".cmd",
@@ -8701,11 +8722,6 @@ async def api_upload(
 
     saved: list[str] = []
     for f in files:
-        content = await f.read()
-        if not content:
-            return JSONResponse({"ok": False, "message": "上传文件为空。"}, status_code=400)
-        if len(content) > _SOURCE_UPLOAD_MAX_BYTES:
-            return JSONResponse({"ok": False, "message": "单个源文件不能超过 100 MB。"}, status_code=413)
         try:
             filename = _safe_source_filename(f.filename or "")
         except ControlPlaneError as exc:
@@ -8715,7 +8731,28 @@ async def api_upload(
             return JSONResponse({"ok": False, "message": "上传路径越界。"}, status_code=400)
         if dest.exists():
             dest = dest.with_name(f"{dest.stem}_{uuid.uuid4().hex[:8]}{dest.suffix}")
-        dest.write_bytes(content)
+        size_bytes = 0
+        limit_exceeded = False
+        try:
+            with dest.open("xb") as output:
+                while chunk := await f.read(1024 * 1024):
+                    size_bytes += len(chunk)
+                    if size_bytes > _SOURCE_UPLOAD_MAX_BYTES:
+                        limit_exceeded = True
+                        break
+                    output.write(chunk)
+        except FileExistsError:
+            return JSONResponse({"ok": False, "message": "上传文件名冲突，请重试。"}, status_code=409)
+        if limit_exceeded:
+            dest.unlink(missing_ok=True)
+            limit_mb = _SOURCE_UPLOAD_MAX_BYTES // (1024 * 1024)
+            return JSONResponse(
+                {"ok": False, "message": f"单个源文件不能超过 {limit_mb} MB。"},
+                status_code=413,
+            )
+        if not size_bytes:
+            dest.unlink(missing_ok=True)
+            return JSONResponse({"ok": False, "message": "上传文件为空。"}, status_code=400)
         saved.append(dest.name)
         _append_log(f"[上传] {category} → {dest.name}")
 
