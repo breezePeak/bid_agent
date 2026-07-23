@@ -305,8 +305,13 @@ def _summarize(items: list[dict[str, Any]]) -> dict[str, int]:
     return summary
 
 
-def build_materials_checklist(root: Path | None = None) -> Path:
-    """Build pre-write materials/qualification checklist for user triage and placeholders."""
+def derive_materials_checklist(root: Path | None = None) -> dict[str, Any]:
+    """Derive material requirements without creating a state projection.
+
+    V2 command handlers use this pure derivation and persist the resulting
+    authority in ``control.db``.  The file-writing wrapper below remains for
+    retired V1 worker code only.
+    """
     root = root or project_root()
     tender_req = load_tender_requirements(root)
     if not isinstance(tender_req, dict):
@@ -465,6 +470,13 @@ def build_materials_checklist(root: Path | None = None) -> Path:
         "summary": _summarize(items),
         "items": items,
     }
+    return payload
+
+
+def build_materials_checklist(root: Path | None = None) -> Path:
+    """Write the retired V1 checklist projection for legacy worker code."""
+    root = root or project_root()
+    payload = derive_materials_checklist(root)
     out = checklist_path(root)
     write_json(out, payload)
     print(

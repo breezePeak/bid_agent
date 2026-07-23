@@ -1123,22 +1123,15 @@ class V2WebControlTests(unittest.TestCase):
             )
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 second = _body(asyncio.run(propose("material-ready-verified")))
-                with mock.patch(
-                    "materials_checklist.update_item_response",
-                    return_value={"ok": True, "message": "updated"},
-                ) as update:
-                    with mock.patch(
-                        "materials_checklist.build_materials_checklist",
-                        return_value=workspace / "materials_checklist.json",
-                    ):
-                        accepted = _body(
-                            web_app.api_v2_confirm_action("alpha", second["action"]["action_id"], _Request({}))
-                        )
+                accepted = _body(
+                    web_app.api_v2_confirm_action("alpha", second["action"]["action_id"], _Request({}))
+                )
             self.assertTrue(accepted["ok"], accepted)
-            update.assert_called_once()
             operation_id = accepted["receipt"]["operation_id"]
             operation = ControlStore(WorkspaceContext.resolve(runs, "alpha")).operation(operation_id)
             self.assertEqual(operation["status"], "succeeded")
+            material = ControlStore(WorkspaceContext.resolve(runs, "alpha")).material_state("mat-cert")
+            self.assertEqual(material["response_status"], "ready")
 
     def test_material_refill_rejects_unverified_ready_item(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

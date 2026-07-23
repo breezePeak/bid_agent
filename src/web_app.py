@@ -7611,11 +7611,6 @@ def _handle_materials_update(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import (
-        build_materials_checklist,
-        update_item_response,
-    )
-
     raw_updates = envelope.payload.get("updates")
     if isinstance(raw_updates, list):
         updates = [dict(item) for item in raw_updates if isinstance(item, dict)]
@@ -7667,25 +7662,23 @@ def _handle_materials_update(
             }
         )
 
-    result: dict[str, Any] = {"ok": True}
+    store = ControlStore(context)
     for item in normalized:
-        result = update_item_response(
-            context.root,
-            item["item_id"],
-            response_status=item["persist_status"],
-            reason=item["reason"],
-            suggested_attachment=item["suggested_attachment"],
-            rebuild=False,
-        )
-        if not result.get("ok"):
-            raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(result.get("message") or "材料状态更新失败。"))
-    build_materials_checklist(context.root)
-    for item in normalized:
-        _sync_material_state_from_projection(context, item["item_id"])
+        current = dict(by_id[item["item_id"]])
+        status = item["response_status"]
+        current["response_status"] = status
+        current["reason"] = item["reason"]
+        if item["suggested_attachment"]:
+            current["suggested_attachment"] = item["suggested_attachment"]
+        if status == "waived":
+            current["lifecycle_status"] = "waived"
+        elif status == "deferred" and not _material_fulfillment_verified(current):
+            current["lifecycle_status"] = "requested"
+        store.upsert_material_state(_authoritative_material_state(current), source="materials.update")
     return {
         "accepted": True,
         "operation_status": "succeeded",
-        "message": str(result.get("message") or f"已更新 {len(normalized)} 条材料。"),
+        "message": f"已更新 {len(normalized)} 条材料。",
     }
 
 
@@ -7694,41 +7687,26 @@ def _handle_materials_rebuild(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import build_materials_checklist, load_materials_checklist, update_item_response
+    from materials_checklist import derive_materials_checklist
 
-    authoritative = _material_items(context)
-    path = build_materials_checklist(context.root)
-    for item in authoritative:
-        lifecycle = str(item.get("lifecycle_status") or "").strip().lower()
-        response_status = str(item.get("response_status") or "deferred").strip().lower()
-        persisted = (
-            lifecycle
-            if lifecycle
-            in {"verified", "uploaded", "rejected", "waived", "requested", "missing", "not_applicable"}
-            else response_status
-        )
-        result = update_item_response(
-            context.root,
-            str(item.get("item_id") or ""),
-            response_status=persisted,
-            reason=str(item.get("reason") or ""),
-            suggested_attachment=str(item.get("suggested_attachment") or ""),
-            rebuild=False,
-        )
-        if not result.get("ok"):
-            raise ControlPlaneError("STATE_UNAVAILABLE", str(result.get("message") or "材料投影更新失败。"), status_code=503)
-    if authoritative:
-        path = build_materials_checklist(context.root)
-    checklist = load_materials_checklist(context.root)
-    if not path.exists() or not isinstance(checklist, dict):
-        raise ControlPlaneError("STATE_UNAVAILABLE", "材料清单重建后状态不可用。", status_code=503)
+    store = ControlStore(context)
+    existing = {str(item.get("item_id") or ""): item for item in _material_items(context)}
+    checklist = derive_materials_checklist(context.root)
+    generated = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    preserved_fields = {
+        "response_status", "lifecycle_status", "evidence_status", "reason",
+        "suggested_attachment", "suggested_placeholder_language", "uploaded_path",
+        "verification", "verification_history", "submission", "submission_history",
+    }
+    for item in generated:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("item_id") or "")
+        prior = existing.get(item_id, {})
+        merged = dict(item)
+        merged.update({key: prior[key] for key in preserved_fields if key in prior})
+        store.upsert_material_state(_authoritative_material_state(merged), source="materials.rebuild")
     summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
-    for item in checklist.get("items") or []:
-        if isinstance(item, dict):
-            ControlStore(context).upsert_material_state(
-                _authoritative_material_state(item),
-                source="v1_projection",
-            )
     return {
         "accepted": True,
         "operation_status": "succeeded",
