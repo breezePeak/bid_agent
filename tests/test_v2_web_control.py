@@ -347,7 +347,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(goal["status"], "in_progress")
             self.assertEqual(goal["resume_note"], "verified")
             self.assertEqual(goal["resume_context"]["reason"], "v2_explicit_resume")
-            self.assertTrue((root / "workspace" / "agent" / "goal_state.json").exists())
+            self.assertFalse((root / "workspace" / "agent" / "goal_state.json").exists())
 
     def test_material_verification_resumes_v2_goal_without_legacy_loader(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -368,7 +368,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(goal["resume_note"], "material_verified:license")
             self.assertEqual(goal["resume_context"]["reason"], "material_verified")
             self.assertEqual(goal["resume_context"]["item_ids"], ["license"])
-            self.assertTrue((root / "workspace" / "agent" / "goal_state.json").exists())
+            self.assertFalse((root / "workspace" / "agent" / "goal_state.json").exists())
 
     def test_material_verify_requires_goal_migration_before_verifier_runs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

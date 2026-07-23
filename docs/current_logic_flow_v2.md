@@ -676,3 +676,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B190 | 2026-07-23 | V2 Artifact 复用与正式 GateReceipt 移除最后的 V1 bootstrap：每个正式输入必须有当前 SQLite manifest，复用还必须有成功的 V2 StageRun；检测到 `materials_checklist.json` 旧权威文件时正式门禁以 `V1_STATE_RETIRED` fail-closed，旧工作区应删除而非迁移。 |
 | V2.0-B191 | 2026-07-23 | V2 控制台移除“迁移”面板和迁移备份 API 调用，CommandGateway 不再注册 `migration.scan`、`migration.cutover` 或 `migration.reconcile`；V1 工作区不再提供导入/切换操作，应在工作区层直接删除。旧迁移代码仍待后续物理清理。 |
 | V2.0-B192 | 2026-07-23 | 所有仍会遇到 V1 Goal、RepairJob、Materials 或 Issue 文件的 V2 命令、聊天修复和门禁统一返回 `V1_STATE_RETIRED`，只读 Snapshot/列表以 `retired_v1_state` 标识空的 SQLite 视图；不再提示或暗示执行迁移扫描。 |
+| V2.0-B193 | 2026-07-23 | V2 `goal.resume` 与材料核验后的 Goal 恢复只写 `control.db.goal_state`，不再生成 `goal_state.json`；V2 风险接受不再刷新 `issues/open.json`，仅保留不可变风险日志与正式风险登记附件。 |

@@ -6763,7 +6763,6 @@ def _handle_accept_issue_risk(
         accept_risk_enabled,
         append_issue_log,
         classify_issue_risk,
-        write_open_issues_projection,
         write_risk_register,
     )
 
@@ -6840,14 +6839,12 @@ def _handle_accept_issue_risk(
         actor={"type": str(actor.get("type") or "authenticated_user"), "id": actor_id, "role": actor_role},
         source="v2_command",
     )
-    updated_issues = [found if str(item.get("id") or "") == issue_id else item for item in issues]
     projection_warning = ""
     try:
         append_issue_log(context.root, found)
-        write_open_issues_projection(context.root, updated_issues)
         write_risk_register(context.root)
     except Exception as exc:
-        projection_warning = f"；V1 兼容投影刷新失败: {exc}"
+        projection_warning = f"；风险审计附件刷新失败: {exc}"
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -7003,8 +7000,6 @@ def _handle_goal_resume(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from agent.goal import write_goal_projection
-
     store = _ensure_v2_goal_import(context)
     goal = store.goal_state()
     if not isinstance(goal, dict):
@@ -7036,8 +7031,7 @@ def _handle_goal_resume(
     constraints = dict(goal.get("constraints") or {})
     constraints["block_on_missing_materials"] = True
     goal["constraints"] = constraints
-    resumed = store.upsert_goal_state(goal, source="v2_goal_resume")
-    write_goal_projection(context.root, resumed)
+    store.upsert_goal_state(goal, source="v2_goal_resume")
     return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已恢复为 in_progress。"}
 
 
@@ -7426,13 +7420,9 @@ def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
 def _resume_goal_for_verified_material(context: WorkspaceContext, item_id: str, note: str) -> None:
     """Resume a blocked V2 Goal after material verification.
 
-    Material commands must not invoke the legacy Goal loader: it can import
-    ``goal_state.json`` and then mutate a second state machine.  SQLite is
-    updated first and the V1 file is refreshed only as a compatibility
-    projection, consistent with the explicit ``goal.resume`` command.
+    Material commands must not invoke or refresh the retired V1 Goal file.
+    SQLite is the only control-state write target.
     """
-    from agent.goal import write_goal_projection
-
     store = _ensure_v2_goal_import(context)
     goal = store.goal_state()
     if not isinstance(goal, dict) or str(goal.get("status") or "") != "blocked_human":
@@ -7456,8 +7446,7 @@ def _resume_goal_for_verified_material(context: WorkspaceContext, item_id: str, 
     constraints = dict(goal.get("constraints") or {})
     constraints["block_on_missing_materials"] = True
     goal["constraints"] = constraints
-    resumed = store.upsert_goal_state(goal, source="v2_material_verified")
-    write_goal_projection(context.root, resumed)
+    store.upsert_goal_state(goal, source="v2_material_verified")
 
 
 def _handle_materials_upload(
