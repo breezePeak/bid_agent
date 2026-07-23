@@ -1640,6 +1640,7 @@ class V2WebControlTests(unittest.TestCase):
                 "manifest_missing",
             )
 
+    @unittest.skip("V1 migration cutover is retired in V2-only mode")
     def test_formal_material_gate_allows_clean_cutover_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3632,6 +3633,7 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertEqual(blocked.exception.code, "GATE_BLOCKED")
 
+    @unittest.skip("V1 migration cutover is retired in V2-only mode")
     def test_formal_gate_fingerprint_tracks_active_cutover_sources(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3678,6 +3680,7 @@ class V2WebControlTests(unittest.TestCase):
 
             self.assertNotEqual(before, after)
 
+    @unittest.skip("V1 migration cutover is retired in V2-only mode")
     def test_migration_snapshot_marks_active_cutover_stale_when_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -4042,6 +4045,7 @@ class V2WebControlTests(unittest.TestCase):
         routes = {getattr(route, "path", "") for route in web_app.app.routes}
         self.assertFalse(any("/migration/" in route for route in routes))
 
+    @unittest.skip("V1 migration dry-run is retired in V2-only mode")
     def test_migration_dry_run_quarantines_legacy_pipeline_and_stale_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -4062,6 +4066,7 @@ class V2WebControlTests(unittest.TestCase):
             )
             self.assertEqual(checkpoint["state"]["status"], "running")
 
+    @unittest.skip("V1 migration scan is retired in V2-only mode")
     def test_migration_scan_hashes_legacy_artifacts_as_stale_until_v2_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
