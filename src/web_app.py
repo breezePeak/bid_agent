@@ -107,10 +107,24 @@ def _mark_v1_compat_response(path: str, response: Any) -> Any:
 
 
 def _auth_credentials() -> tuple[str, str]:
+    from config import _parse_env_file
+
+    # The Web server is often started by an IDE or service manager that does
+    # not import .env into os.environ. Read the same project-level source as
+    # the model settings so the login screen reflects the configured password.
+    file_values = _parse_env_file(ROOT / ".env")
     return (
-        str(os.environ.get("BID_AGENT_AUTH_USER") or "admin"),
-        str(os.environ.get("BID_AGENT_AUTH_PASSWORD") or ""),
+        str(os.environ["BID_AGENT_AUTH_USER"] if "BID_AGENT_AUTH_USER" in os.environ else file_values.get("BID_AGENT_AUTH_USER") or "admin"),
+        str(os.environ["BID_AGENT_AUTH_PASSWORD"] if "BID_AGENT_AUTH_PASSWORD" in os.environ else file_values.get("BID_AGENT_AUTH_PASSWORD") or ""),
     )
+
+
+def _auth_secure_cookie() -> bool:
+    from config import _parse_env_file
+
+    file_values = _parse_env_file(ROOT / ".env")
+    value = os.environ["BID_AGENT_AUTH_SECURE_COOKIE"] if "BID_AGENT_AUTH_SECURE_COOKIE" in os.environ else file_values.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0"
+    return str(value).lower() in {"1", "true", "yes"}
 
 
 def _issue_auth_session(username: str) -> JSONResponse:
@@ -124,7 +138,7 @@ def _issue_auth_session(username: str) -> JSONResponse:
             "expires_at": time.time() + _AUTH_SESSION_SECONDS,
         }
     response = JSONResponse({"ok": True, "principal": principal, "csrf_token": csrf_token})
-    secure_cookie = str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"}
+    secure_cookie = _auth_secure_cookie()
     response.set_cookie(
         _AUTH_COOKIE,
         token,
