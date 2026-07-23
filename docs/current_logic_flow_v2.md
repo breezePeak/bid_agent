@@ -683,3 +683,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B197 | 2026-07-23 | V2 WorkspaceSnapshot 不再公开 migration 或 compatibility_usage 字段，也不再对旧文件作 cutover 健康探测；控制台只消费当前工作区的 V2 控制状态与事件。 |
 | V2.0-B198 | 2026-07-23 | V2 Pipeline Snapshot 不再从 `pipeline_control.json` 读取 run ID、阶段、PID、消息或一致性结论；展示只由当前 Pipeline Operation 的 `control.db` 记录构成，过期 checkpoint 不会影响控制台状态。 |
 | V2.0-B199 | 2026-07-23 | 服务重启时不再依据 `pipeline_control.json` 自动恢复或接管 Pipeline；仍处于 queued/running 的 V2 Operation 统一以 `ORPHANED_AFTER_RESTART` 置为 blocked，用户必须提交显式 `pipeline.resume`，恢复起点只从 control.db 前序 Operation 获取。 |
+| V2.0-B200 | 2026-07-23 | `src/main.py` 的公开旧阶段 CLI 完全下线：除 `control` 外，非内部 ExecutionWorker 的任何命令都返回拒绝；Chat、按钮和命令行控制统一只能通过 V2 CommandGateway。 |
