@@ -695,3 +695,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B209 | 2026-07-23 | 已物理移除 Web 层遗留的迁移扫描、切换和冲突协调 Command handler；即使未来错误注册路由，服务端也不再具备将 V1 控制状态导入、切换或协调回 V2 的执行实现。 |
 | V2.0-B210 | 2026-07-23 | CommandGateway 不再读取或阻断历史 `migration_conflicts`；旧工作区应删除，遗留迁移审计记录不能让新的 V2 Command 无法执行且又没有可用协调入口。 |
 | V2.0-B211 | 2026-07-23 | `ControlStore.snapshot()` 移除 migration、scan、cutover 和 conflict 输出；所有 Snapshot 消费者只获得 V2 Operation、StageRun、Confirmation、Lease 与 Artifact 控制状态。 |
+| V2.0-B212 | 2026-07-23 | Web 层最后的 V1 migration dry-run 实现已删除；服务不再枚举、哈希、解析或分类任何旧控制文件来形成导入清单。遗留文件仅按 `V1_STATE_RETIRED` 拒绝。 |
