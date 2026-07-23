@@ -6,7 +6,7 @@
 
 | 版本 | 状态 | 定位 | 文档 |
 |---|---|---|---|
-| V1 | 已废弃 / 历史归档 | 仅供旧工作区迁移、取证和故障追溯；禁止作为运行时真相源 | [current_logic_flow_v1.md](./current_logic_flow_v1.md) |
+| V1 | 已废弃 / 历史归档 | 仅供历史取证和故障追溯；旧工作区应删除，禁止作为运行时真相源 | [current_logic_flow_v1.md](./current_logic_flow_v1.md) |
 | V2 | 当前运行架构 / 切换验收中 | Agent 控制面、唯一流水线执行内核、SQLite 控制状态与迁移验收 | [current_logic_flow_v2.md](./current_logic_flow_v2.md) |
 
 ## 当前应以哪个版本为准

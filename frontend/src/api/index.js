@@ -152,14 +152,6 @@ export function fetchWorkspaceSnapshot(runId) {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/snapshot`)
 }
 
-export function fetchMigrationBackups(runId) {
-  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/migration/backups`)
-}
-
-export function drillMigrationBackup(runId, path) {
-  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/migration/backups/drill`, { path })
-}
-
 export async function submitWorkspaceCommand(runId, kind, payload = {}, options = {}) {
   const snapshotResponse = await fetchWorkspaceSnapshot(runId)
   const revision = Number(snapshotResponse?.data?.snapshot?.revision || 0)

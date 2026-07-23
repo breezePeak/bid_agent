@@ -8171,9 +8171,6 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.rebuild": _handle_materials_rebuild,
             "materials.refill": _handle_materials_refill,
             "gate.revalidate": _handle_gate_revalidate,
-            "migration.scan": _handle_migration_scan,
-            "migration.cutover": _handle_migration_cutover,
-            "migration.reconcile": _handle_migration_reconcile,
         },
     )
 

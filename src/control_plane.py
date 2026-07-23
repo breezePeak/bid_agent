@@ -198,9 +198,6 @@ class ControlStore:
         "workspace.run_utility",
         "workspace.archive",
         "workspace.clean",
-        "migration.scan",
-        "migration.cutover",
-        "migration.reconcile",
     }
     BLOCKED_REMEDIATION_KINDS = {
         "repair.start",
