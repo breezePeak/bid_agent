@@ -433,7 +433,8 @@ def plan_chapter_jobs_node(state) -> dict:
                 update = {"chapter_jobs": existing_jobs, "jobs_dir": str(root / "workspace" / "jobs")}
                 _persist_state(state, update, stage="plan_chapter_jobs", status="ok", message="resume: 复用章节任务")
                 return update
-        jobs = plan_chapter_jobs(root)
+        materials = ControlStore(WorkspaceContext(workspace_id=root.name, root=root)).material_states()
+        jobs = plan_chapter_jobs(root, material_items=materials)
         update = {"chapter_jobs": jobs, "jobs_dir": str(root / "workspace" / "jobs")}
         _persist_state(state, update, stage="plan_chapter_jobs")
         return update

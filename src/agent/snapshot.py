@@ -74,7 +74,6 @@ def _collect_artifacts(root: Path) -> dict[str, list[str]]:
         "workspace/compliance_report.json",
         "workspace/score_coverage_matrix.json",
         "workspace/format_check_report.json",
-        "workspace/materials_checklist.json",
         "workspace/outline.json",
     ]
     ready: list[str] = []
