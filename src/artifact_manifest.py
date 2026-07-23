@@ -139,9 +139,8 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
         if current["status"] != "ready":
             return False
         state = states.get(current["artifact_key"])
-        # One compatibility release may bootstrap manifests for existing V1 output.
         if state is None:
-            continue
+            return False
         if state.get("status") != "ready":
             return False
         if state.get("sha256") != current.get("sha256"):
@@ -150,13 +149,9 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
             return False
     if latest_run is not None:
         return str(latest_run.get("status") or "") in {"succeeded", "reused"}
-    # One compatibility release may bootstrap a V1 stage exactly once, but
-    # never after the workspace has completed cutover and never if a manifest
-    # already claims authority without a corresponding successful StageRun.
-    cutover = store.migration_state().get("cutover")
-    if isinstance(cutover, dict) and cutover.get("status") == "active":
-        return False
-    return all(str(artifact.path).replace("\\", "/") not in states for artifact in spec.produces)
+    # V2 requires both manifest evidence and a successful V2 StageRun.  Files
+    # left by the retired V1 workflow are never reusable authority.
+    return False
 
 
 def record_document_edit_artifacts(context: WorkspaceContext, *, operation_id: str = "") -> None:

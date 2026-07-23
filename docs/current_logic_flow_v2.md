@@ -673,3 +673,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B187 | 2026-07-22 | WorkspaceSnapshot 保留 `stage_runs` 作为最近审计历史，并新增 `current_stage_runs` 精确绑定当前展示 Operation。控制台可同时展示当前流水线 attempt 与历史排障记录，避免不同 Operation 的同名阶段混入当前进度判断。 |
 | V2.0-B188 | 2026-07-23 | 按发布决策进入 V2-only：所有非 `/api/v2/`、认证和模型设置的 V1 API 在认证后统一返回 `410 V1_API_RETIRED` 与 V2 successor Link，不再记录兼容遥测、解析活动工作区或执行任何 V1 适配逻辑。 |
 | V2.0-B189 | 2026-07-23 | 主前端移除无工作区 Chat 的 `/api/chat/orchestrate` 回退，必须选择 workspace 后调用 V2 Chat；全局 Agent mode 读取迁至 `/api/v2/agent/flags`。V2-only 控制台不再主动请求任何 V1 路由。 |
+| V2.0-B190 | 2026-07-23 | V2 Artifact 复用与正式 GateReceipt 移除最后的 V1 bootstrap：每个正式输入必须有当前 SQLite manifest，复用还必须有成功的 V2 StageRun；检测到 `materials_checklist.json` 旧权威文件时正式门禁以 `V1_STATE_RETIRED` fail-closed，旧工作区应删除而非迁移。 |

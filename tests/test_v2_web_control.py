@@ -1468,10 +1468,6 @@ class V2WebControlTests(unittest.TestCase):
             outputs.mkdir(parents=True)
             (outputs / "final.md").write_text("formal markdown", encoding="utf-8")
             (outputs / "final.docx").write_bytes(b"formal-docx-v1")
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps({"items": []}),
-                encoding="utf-8",
-            )
             web_app.ACTIVE_RUN_ID = "alpha"
             web_app.ACTIVE_RUN_ROOT = root
 
@@ -1489,21 +1485,22 @@ class V2WebControlTests(unittest.TestCase):
                     return_value={"can_proceed": True, "block_count": 0, "blocks": []},
                 ):
                     with mock.patch.object(web_app, "_v2_export_preflight", return_value=preflight):
-                        issued = _body(
-                            asyncio.run(
-                                web_app.api_v2_submit_command(
-                                    "alpha",
-                                    _Request(
-                                        {
-                                            "kind": "gate.revalidate",
-                                            "payload": {},
-                                            "expected_revision": 0,
-                                            "idempotency_key": "formal-gate",
-                                        }
-                                    ),
+                        with mock.patch.object(web_app, "_assert_formal_artifacts_ready"):
+                            issued = _body(
+                                asyncio.run(
+                                    web_app.api_v2_submit_command(
+                                        "alpha",
+                                        _Request(
+                                            {
+                                                "kind": "gate.revalidate",
+                                                "payload": {},
+                                                "expected_revision": 0,
+                                                "idempotency_key": "formal-gate",
+                                            }
+                                        ),
+                                    )
                                 )
                             )
-                        )
                 self.assertTrue(issued["ok"])
                 latest = _body(web_app.api_v2_latest_gate_receipt("alpha"))["gate_receipt"]
                 allowed = web_app.api_v2_download_final("alpha", latest["receipt_id"])
@@ -1657,7 +1654,10 @@ class V2WebControlTests(unittest.TestCase):
                 web_app._assert_formal_artifacts_ready(context)
 
             self.assertEqual(raised.exception.code, "GATE_BLOCKED")
-            self.assertEqual(raised.exception.details["artifacts"][0]["reason"], "stale")
+            self.assertIn(
+                {"path": "outputs/final.docx", "reason": "stale"},
+                raised.exception.details["artifacts"],
+            )
 
     def test_formal_gate_requires_artifact_manifest_after_v2_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1683,7 +1683,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(raised.exception.code, "GATE_BLOCKED")
             self.assertEqual(
                 raised.exception.details["artifacts"][0]["reason"],
-                "manifest_missing_after_cutover",
+                "manifest_missing",
             )
 
     def test_formal_material_gate_allows_clean_cutover_workspace(self) -> None:
@@ -1787,22 +1787,18 @@ class V2WebControlTests(unittest.TestCase):
             outputs.mkdir(parents=True)
             (outputs / "final.md").write_text("draft", encoding="utf-8")
             (outputs / "final.docx").write_bytes(b"docx")
-            (workspace / "materials_checklist.json").write_text(
-                json.dumps(
+            store = ControlStore(WorkspaceContext.resolve(runs, "alpha"))
+            store.ensure_material_states(
+                [
                     {
-                        "items": [
-                            {
-                                "item_id": "qualification-gap",
-                                "category": "qualification",
-                                "severity": "block",
-                                "response_status": "deferred",
-                                "lifecycle_status": "missing",
-                                "evidence_status": "missing",
-                            }
-                        ]
+                        "item_id": "qualification-gap",
+                        "category": "qualification",
+                        "severity": "block",
+                        "response_status": "deferred",
+                        "lifecycle_status": "missing",
+                        "evidence_status": "missing",
                     }
-                ),
-                encoding="utf-8",
+                ]
             )
             with mock.patch.object(web_app, "RUNS_DIR", runs):
                 with mock.patch.object(
@@ -1817,7 +1813,7 @@ class V2WebControlTests(unittest.TestCase):
                                 {
                                     "kind": "gate.revalidate",
                                     "payload": {},
-                                    "expected_revision": 0,
+                                    "expected_revision": store.revision(),
                                     "idempotency_key": "qualification-gate",
                                 }
                             ),

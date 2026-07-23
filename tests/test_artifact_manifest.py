@@ -107,7 +107,7 @@ class ArtifactManifestTests(unittest.TestCase):
             (root / "workspace" / "chunks" / "company_chunks.json").write_text("[]", encoding="utf-8")
             context = WorkspaceContext.resolve(runs, "alpha")
 
-            self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
+            self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
             record_stage_artifacts(context, "split-docs")
             store = ControlStore(context)
             store.record_stage_run("pipeline-1", "split-docs", "succeeded", disposition="produced")

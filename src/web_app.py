@@ -6320,24 +6320,14 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
 
 def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
     store = ControlStore(context)
-    if store.v1_import_pending("materials"):
-        cutover = store.migration_state().get("cutover") or {}
-        legacy_materials_path = context.root / "workspace" / "materials_checklist.json"
-        if str(cutover.get("status") or "") == "active" and legacy_materials_path.exists():
-            raise ControlPlaneError(
-                "MIGRATION_SCAN_REQUIRED",
-                "材料权威状态尚未迁移，已拒绝签发 GateReceipt。",
-                status_code=409,
-            )
-        # One-version V1 compatibility: read the legacy projection without
-        # importing or writing it while a formal gate is being evaluated.
-        from materials_checklist import load_materials_checklist
-
-        checklist = load_materials_checklist(context.root)
-        items = checklist.get("items") if isinstance(checklist, dict) else []
-        items = [dict(item) for item in items if isinstance(item, dict)]
-    else:
-        items = store.material_states()
+    legacy_materials_path = context.root / "workspace" / "materials_checklist.json"
+    if legacy_materials_path.exists():
+        raise ControlPlaneError(
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 材料状态文件；请删除旧工作区并在 V2 工作区重新执行。",
+            status_code=409,
+        )
+    items = store.material_states()
     unsafe = [
         str(item.get("item_id") or "")
         for item in items
@@ -6361,17 +6351,11 @@ def _assert_formal_artifacts_ready(context: WorkspaceContext) -> None:
 
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
-    cutover_active = str((store.migration_state().get("cutover") or {}).get("status") or "") == "active"
     blocked: list[dict[str, str]] = []
     for relative in _FORMAL_GATE_INPUTS:
         state = states.get(relative)
-        # During the one-version V1 compatibility window, missing manifests are
-        # accepted and will be bootstrapped by the V2 Pipeline on first reuse.
-        # A workspace that has explicitly cut over to V2 can no longer use this
-        # exception: its formal outputs must have V2 manifest evidence.
         if state is None:
-            if cutover_active:
-                blocked.append({"path": relative, "reason": "manifest_missing_after_cutover"})
+            blocked.append({"path": relative, "reason": "manifest_missing"})
             continue
         current = describe_artifact(context.root, RunArtifact(relative))
         if state.get("status") != "ready":
