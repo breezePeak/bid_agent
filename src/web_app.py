@@ -8571,15 +8571,19 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "latest_gate_evaluations": store.latest_gate_evaluations(),
             "source": "control.db",
         }
-        migration_preview = _v1_migration_dry_run(context)
         legacy_import_pending = any(
-            bool(item.get("import_pending"))
-            for item in migration_preview.get("source_manifest") or []
-            if isinstance(item, dict)
+            (context.root / relative).exists()
+            for relative in (
+                "workspace/agent/goal_state.json",
+                "workspace/agent/activity.json",
+                "workspace/materials_checklist.json",
+                "workspace/issues/open.json",
+                "workspace/repair_job.json",
+            )
         )
         # The V1 presentation aggregator initializes several legacy control
-        # files. Never invoke it while actual V1 state still awaits an
-        # administrator migration scan; the Snapshot endpoint must stay read-only.
+        # files. Never invoke it when retired V1 state exists; the Snapshot
+        # endpoint must stay read-only and must not revive the old model.
         compatibility = (
             {
                 "goal": {}, "goal_full": {}, "agent_activity": {}, "repair_job": {},
