@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from utils import read_json, write_json
 
 
 ACTIVE_REPAIR_STATUSES = {"awaiting_confirmation", "running", "revalidating"}
@@ -80,16 +79,7 @@ def _job_lock(root: Path, *, timeout: float = 3.0) -> Iterator[None]:
 
 def load_repair_job(root: Path) -> dict[str, Any]:
     root = root.resolve()
-    path = repair_job_path(root)
-    imported: dict[str, Any] = {}
-    if path.exists():
-        try:
-            payload = read_json(path)
-        except Exception:
-            payload = {}
-        imported = payload if isinstance(payload, dict) else {}
     store = _repair_control_store(root)
-    store.ensure_repair_job_state(imported)
     return store.repair_job_state()
 
 
@@ -103,7 +93,6 @@ def _write_job(root: Path, job: dict[str, Any]) -> dict[str, Any]:
     payload = dict(job)
     payload["updated_at"] = _now()
     _repair_control_store(root).upsert_repair_job_state(payload)
-    write_json(repair_job_path(root), payload)
     return payload
 
 

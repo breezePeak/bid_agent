@@ -2,7 +2,6 @@
 
 """Goal state machine + plan execution driver (PR-9/10)."""
 
-import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -40,37 +39,18 @@ def _goal_control_store(root: Path):
 
 def load_goal(root: Path | None = None) -> dict[str, Any] | None:
     root = (root or project_root()).resolve()
-    path = goal_path(root)
-    imported: dict[str, Any] | None = None
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = None
-        imported = data if isinstance(data, dict) else None
     store = _goal_control_store(root)
-    store.ensure_goal_state(imported)
     return store.goal_state()
 
 
 def save_goal(root: Path | None, goal: dict[str, Any]) -> Path:
     root = (root or project_root()).resolve()
-    path = goal_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     goal = dict(goal)
     goal["updated_at"] = _now()
     _goal_control_store(root).upsert_goal_state(goal)
-    path.write_text(json.dumps(goal, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return goal_path(root)
 
 
-def write_goal_projection(root: Path | None, goal: dict[str, Any]) -> Path:
-    """Refresh only the one-version V1 file projection after a V2 state write."""
-    root = (root or project_root()).resolve()
-    path = goal_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(goal), ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
 
 
 def _criterion_artifact_exists(root: Path, path: str) -> dict[str, Any]:

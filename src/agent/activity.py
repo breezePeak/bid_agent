@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Live sub-agent activity ledger for UI (not log scraping)."""
 
-import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -51,16 +50,7 @@ def _empty() -> dict[str, Any]:
 
 def load_activity(root: Path | None = None) -> dict[str, Any]:
     root = (root or project_root()).resolve()
-    path = activity_path(root)
-    imported: dict[str, Any] | None = None
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            data = None
-        imported = data if isinstance(data, dict) else None
     store = _activity_control_store(root)
-    store.ensure_agent_activity_state(imported)
     data = store.agent_activity_state() or _empty()
     data.setdefault("agents", [])
     data.setdefault("summary", _empty()["summary"])
@@ -69,8 +59,6 @@ def load_activity(root: Path | None = None) -> dict[str, Any]:
 
 def _save(root: Path, data: dict[str, Any]) -> None:
     root = root.resolve()
-    path = activity_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     agents = data.get("agents") if isinstance(data.get("agents"), list) else []
     summary = {"total": len(agents), "running": 0, "done": 0, "failed": 0, "queued": 0}
     for a in agents:
@@ -84,9 +72,6 @@ def _save(root: Path, data: dict[str, Any]) -> None:
     data["summary"] = summary
     data["updated_at"] = _now()
     _activity_control_store(root).upsert_agent_activity_state(data)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
 
 
 def begin_phase(
