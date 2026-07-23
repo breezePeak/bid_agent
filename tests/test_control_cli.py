@@ -108,42 +108,6 @@ class ControlCliTests(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         client.submit.assert_not_called()
 
-    def test_reconcile_creates_confirmable_admin_action(self) -> None:
-        client = mock.Mock()
-        client.login.return_value = {"ok": True}
-        client.snapshot.return_value = {"ok": True, "snapshot": {"revision": 9}}
-        client.submit.return_value = {"ok": True, "action": {"action_id": "a1"}}
-        with mock.patch.object(control_cli, "ControlApiClient", return_value=client):
-            with mock.patch("sys.stdout", io.StringIO()):
-                exit_code = control_cli.main(
-                    [
-                        "--password", "secret", "reconcile", "--workspace", "alpha",
-                        "--conflict-id", "c1", "--resolution", "keep_orphan",
-                        "--reason", "preserve sqlite authority",
-                    ]
-                )
-        self.assertEqual(exit_code, 0)
-        self.assertEqual(client.submit.call_args.kwargs["kind"], "migration.reconcile")
-        self.assertEqual(client.submit.call_args.kwargs["expected_revision"], 9)
-        self.assertEqual(client.submit.call_args.kwargs["payload"]["conflict_id"], "c1")
-
-    def test_migration_backup_drill_uses_workspace_scoped_client(self) -> None:
-        client = mock.Mock()
-        client.login.return_value = {"ok": True}
-        client.drill_migration_backup.return_value = {"ok": True, "backup": {"recovery_drill": "passed"}}
-        with mock.patch.object(control_cli, "ControlApiClient", return_value=client):
-            with mock.patch("sys.stdout", io.StringIO()):
-                exit_code = control_cli.main(
-                    [
-                        "--password", "secret", "migration-backup-drill", "--workspace", "alpha",
-                        "--path", "workspace/migration_backups/control-before-test.db",
-                    ]
-                )
-        self.assertEqual(exit_code, 0)
-        client.drill_migration_backup.assert_called_once_with(
-            "alpha", "workspace/migration_backups/control-before-test.db"
-        )
-
 
 if __name__ == "__main__":
     unittest.main()

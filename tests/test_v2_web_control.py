@@ -4141,27 +4141,9 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(result["accepted"])
             self.assertEqual(store.migration_state()["status"], "ready")
 
-    def test_migration_dry_run_inventories_legacy_files_without_importing(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp) / "runs"
-            root = runs / "alpha"
-            (root / "workspace" / "agent").mkdir(parents=True)
-            (root / "workspace" / "agent" / "goal_state.json").write_text(
-                json.dumps({"goal_id": "legacy", "status": "in_progress"}),
-                encoding="utf-8",
-            )
-            (root / "goal_state.json").write_text("{}", encoding="utf-8")
-            context = WorkspaceContext.resolve(runs, "alpha")
-            store = ControlStore(context)
-            revision = store.revision()
-            with mock.patch.object(web_app, "RUNS_DIR", runs):
-                response = _body(web_app.api_v2_migration_dry_run("alpha"))
-            self.assertTrue(response["ok"])
-            self.assertTrue(response["dry_run"])
-            self.assertEqual(response["counts"]["importable"], 1)
-            self.assertEqual(response["counts"]["orphans"], 1)
-            self.assertEqual(store.revision(), revision)
-            self.assertIsNone(store.goal_state())
+    def test_v2_does_not_expose_migration_routes(self) -> None:
+        routes = {getattr(route, "path", "") for route in web_app.app.routes}
+        self.assertFalse(any("/migration/" in route for route in routes))
 
     def test_migration_dry_run_quarantines_legacy_pipeline_and_stale_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4182,61 +4164,6 @@ class V2WebControlTests(unittest.TestCase):
                 if item["kind"] == "legacy_pipeline_checkpoint"
             )
             self.assertEqual(checkpoint["state"]["status"], "running")
-
-    def test_migration_scan_imports_candidates_and_persists_root_orphan_conflict(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            runs = Path(tmp) / "runs"
-            root = runs / "alpha"
-            (root / "workspace" / "agent").mkdir(parents=True)
-            (root / "workspace" / "agent" / "goal_state.json").write_text(
-                json.dumps({"goal_id": "legacy", "status": "in_progress"}), encoding="utf-8"
-            )
-            (root / "goal_state.json").write_text("{}", encoding="utf-8")
-            context = WorkspaceContext.resolve(runs, "alpha")
-            store = ControlStore(context)
-            envelope = CommandEnvelope.from_mapping(
-                {
-                    "kind": "migration.scan",
-                    "payload": {},
-                    "expected_revision": store.revision(),
-                    "actor": {"id": "admin", "role": "admin"},
-                },
-                workspace_id="alpha",
-            )
-            result = web_app._handle_migration_scan(context, envelope, "scan-op")
-            self.assertTrue(result["accepted"])
-            self.assertEqual(store.goal_state()["goal_id"], "legacy")
-            self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
-            self.assertEqual(store.migration_conflicts()[0]["domain"], "orphan")
-            scan = store.snapshot()["migration"]["last_scan"]
-            self.assertTrue(scan["fingerprint"])
-            self.assertEqual(len(scan["manifest"]), 2)
-            report = json.loads((root / "workspace" / "migration_report.json").read_text(encoding="utf-8"))
-            self.assertEqual(report["source_fingerprint"], scan["fingerprint"])
-            self.assertEqual(report["migration"]["status"], "needs_reconciliation")
-            conflict = store.migration_conflicts(status="open")[0]
-            reconcile = CommandEnvelope.from_mapping(
-                {
-                    "kind": "migration.reconcile",
-                    "payload": {
-                        "conflict_id": conflict["conflict_id"],
-                        "resolution": "keep_orphan",
-                        "reason": "retain legacy root evidence",
-                    },
-                    "expected_revision": store.revision(),
-                    "actor": {"id": "admin", "role": "admin"},
-                },
-                workspace_id="alpha",
-            )
-            reconciled = web_app._handle_migration_reconcile(context, reconcile, "reconcile-op")
-            self.assertTrue(reconciled["accepted"])
-            refreshed_report = json.loads((root / "workspace" / "migration_report.json").read_text(encoding="utf-8"))
-            self.assertEqual(refreshed_report["migration"]["status"], "ready")
-            self.assertEqual(refreshed_report["last_action"]["kind"], "migration.reconcile")
-            with mock.patch.object(web_app, "RUNS_DIR", runs):
-                response = _body(web_app.api_v2_migration_report("alpha"))
-            self.assertTrue(response["ok"])
-            self.assertEqual(response["report"]["workspace_id"], "alpha")
 
     def test_migration_scan_hashes_legacy_artifacts_as_stale_until_v2_rebuild(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

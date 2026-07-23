@@ -678,3 +678,4 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B192 | 2026-07-23 | 所有仍会遇到 V1 Goal、RepairJob、Materials 或 Issue 文件的 V2 命令、聊天修复和门禁统一返回 `V1_STATE_RETIRED`，只读 Snapshot/列表以 `retired_v1_state` 标识空的 SQLite 视图；不再提示或暗示执行迁移扫描。 |
 | V2.0-B193 | 2026-07-23 | V2 `goal.resume` 与材料核验后的 Goal 恢复只写 `control.db.goal_state`，不再生成 `goal_state.json`；V2 风险接受不再刷新 `issues/open.json`，仅保留不可变风险日志与正式风险登记附件。 |
 | V2.0-B194 | 2026-07-23 | Goal、AgentActivity 和 RepairJob 基础模块移除对 `goal_state.json`、`activity.json`、`repair_job.json` 的读取和双写；这些领域状态只从 `control.db` 读取并写入，残留 V1 文件不会被导入或覆盖 SQLite。 |
+| V2.0-B195 | 2026-07-23 | 移除 V2 Web 和控制 CLI 的所有迁移 dry-run、备份、报告、恢复演练和扫描/切换/协调入口；路由契约回归确认 `/api/v2/**/migration/**` 不再暴露。迁移实现内部残留待后续物理删除，但没有 V2 入口可调用。 |
