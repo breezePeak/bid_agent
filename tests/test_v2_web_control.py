@@ -3111,9 +3111,9 @@ class V2WebControlTests(unittest.TestCase):
         self.assertEqual(pipeline["status"], "failed")
         self.assertEqual(pipeline["operation_id"], "op-current")
         self.assertEqual(pipeline["current_stage"], "build-docx")
-        self.assertEqual(pipeline["worker_pid"], 0)
-        self.assertFalse(pipeline["consistent"])
-        self.assertEqual(pipeline["checkpoint_source"], "ignored_mismatch")
+        self.assertNotIn("worker_pid", pipeline)
+        self.assertTrue(pipeline["consistent"])
+        self.assertNotIn("checkpoint_source", pipeline)
 
     def test_inactive_workspace_reconcile_blocks_orphaned_pipeline_and_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

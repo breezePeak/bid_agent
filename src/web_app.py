@@ -6393,7 +6393,7 @@ def _pipeline_status_to_operation(status: str) -> str:
 
 def _pipeline_snapshot_from_control(
     operations: list[dict[str, Any]],
-    checkpoint: dict[str, Any],
+    _checkpoint: dict[str, Any],
 ) -> dict[str, Any]:
     operation = next(
         (
@@ -6404,7 +6404,7 @@ def _pipeline_snapshot_from_control(
         None,
     )
     if not operation:
-        return {**checkpoint, "source": "v1_checkpoint", "consistent": True} if checkpoint else {}
+        return {}
     status = {
         "queued": "running",
         "running": "running",
@@ -6418,25 +6418,15 @@ def _pipeline_snapshot_from_control(
     }.get(str(operation.get("status") or ""), "failed")
     operation_id = str(operation.get("operation_id") or "")
     fencing_token = int(operation.get("fencing_token") or 0)
-    checkpoint_matches = bool(
-        checkpoint
-        and str(checkpoint.get("operation_id") or "") == operation_id
-        and int(checkpoint.get("fencing_token") or 0) == fencing_token
-    )
     return {
-        "run_id": str(checkpoint.get("run_id") or "") if checkpoint_matches else "",
         "operation_id": operation_id,
         "fencing_token": fencing_token,
         "status": status,
-        "current_stage": str(checkpoint.get("current_stage") or operation.get("start_command") or "")
-        if checkpoint_matches
-        else str(operation.get("start_command") or ""),
-        "worker_pid": int(checkpoint.get("worker_pid") or 0) if checkpoint_matches else 0,
-        "message": str(operation.get("message") or checkpoint.get("message") or ""),
+        "current_stage": str(operation.get("start_command") or ""),
+        "message": str(operation.get("message") or ""),
         "error": operation.get("error"),
         "source": "control.db",
-        "consistent": checkpoint_matches or not checkpoint,
-        "checkpoint_source": "pipeline_control.json" if checkpoint_matches else "ignored_mismatch",
+        "consistent": True,
     }
 
 
