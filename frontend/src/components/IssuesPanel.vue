@@ -113,7 +113,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import FileExplorer from './FileExplorer.vue'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
@@ -147,7 +147,7 @@ const deferredCount = computed(() => {
 })
 const report = ref({ exists: false, blocking: false, items: [], counts: {}, max_severity: '' })
 const emptyMsg = ref('暂无合规报告。跑完 compliance-check 后会显示失败/警告明细。')
-let materialsTimer = null
+let materialsBadgeRefresh = null
 
 const counts = computed(() => report.value.counts || {})
 const qualityEvaluations = computed(() => Array.isArray(quality.value?.latest_gate_evaluations)
@@ -219,19 +219,23 @@ function onMaterialsPanelStatus(payload) {
 }
 
 async function refreshMaterialsBadge() {
-  try {
-    const { data } = await fetchMaterialsChecklist(props.runId)
-    if (!data?.ok) return
-    const summary = data.summary || data.checklist?.summary || {}
-    publishMaterialsStatus({
-      exists: !!data.exists,
-      deferred: Number(summary.deferred || 0) || 0,
-      total: Number(summary.total || 0) || 0,
-      ready: Number(summary.ready || 0) || 0,
-      waived: Number(summary.waived || 0) || 0,
-      items: Array.isArray(data.items) ? data.items : [],
-    })
-  } catch (e) { /* ignore */ }
+  if (materialsBadgeRefresh) return materialsBadgeRefresh
+  materialsBadgeRefresh = (async () => {
+    try {
+      const { data } = await fetchMaterialsChecklist(props.runId)
+      if (!data?.ok) return
+      const summary = data.summary || data.checklist?.summary || {}
+      publishMaterialsStatus({
+        exists: !!data.exists,
+        deferred: Number(summary.deferred || 0) || 0,
+        total: Number(summary.total || 0) || 0,
+        ready: Number(summary.ready || 0) || 0,
+        waived: Number(summary.waived || 0) || 0,
+        items: Array.isArray(data.items) ? data.items : [],
+      })
+    } catch (e) { /* status refresh is best-effort */ }
+  })().finally(() => { materialsBadgeRefresh = null })
+  return materialsBadgeRefresh
 }
 
 async function refresh() {
@@ -289,10 +293,6 @@ watch(() => props.focus, (v) => {
 
 onMounted(() => {
   refresh()
-  materialsTimer = setInterval(refreshMaterialsBadge, 4000)
-})
-onBeforeUnmount(() => {
-  if (materialsTimer) clearInterval(materialsTimer)
 })
 
 defineExpose({
