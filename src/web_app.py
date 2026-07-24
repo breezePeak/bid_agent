@@ -6109,6 +6109,7 @@ FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
     "chapter_review_gate": ("CHAPTER_REVIEW_GATE", True),
     "global_review_gate": ("GLOBAL_REVIEW_GATE", True),
     "allow_accept_risk": ("ISSUE_ACCEPT_RISK_ENABLED", False),
+    "anti_fabrication_gate": ("BID_AGENT_ANTI_FABRICATION_GATE", True),
 }
 
 
