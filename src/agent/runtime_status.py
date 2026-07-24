@@ -3,7 +3,7 @@ from __future__ import annotations
 """Unified runtime status view + consistency checks.
 
 Product UI previously read 4+ independent stores with different lifecycles.
-V2 now owns Goal, Materials and Issues/Policy in control.db while V1 files remain projections.
+V2 owns Goal, Materials and Issues/Policy in control.db.
 
 This module is the single aggregator for "what is the system doing now".
 It does not replace domain stores; it composes them and surfaces conflicts.
@@ -156,20 +156,18 @@ def _pipeline_slice(root: Path) -> dict[str, Any]:
 
 def _materials_slice(root: Path) -> dict[str, Any]:
     try:
-        from materials_checklist import load_materials_checklist
+        from control_plane import ControlStore, WorkspaceContext
 
-        data = load_materials_checklist(root)
-        summary = data.get("summary") if isinstance(data.get("summary"), dict) else {}
+        items = ControlStore(WorkspaceContext(root.name, root)).material_states()
         return {
-            "exists": True,
-            "total": int(summary.get("total") or 0),
-            "deferred": int(summary.get("deferred") or 0),
-            "ready": int(summary.get("ready") or 0),
-            "missing": int(summary.get("missing") or 0),
+            "exists": bool(items),
+            "total": len(items),
+            "deferred": sum(1 for item in items if str(item.get("response_status") or "deferred") == "deferred"),
+            "ready": sum(1 for item in items if str(item.get("response_status") or "") == "ready"),
+            "missing": sum(1 for item in items if str(item.get("evidence_status") or "missing") == "missing"),
         }
     except Exception:
-        path = root / "workspace" / "materials_checklist.json"
-        return {"exists": path.exists(), "total": 0, "deferred": 0, "ready": 0, "missing": 0}
+        return {"exists": False, "total": 0, "deferred": 0, "ready": 0, "missing": 0}
 
 
 def _issues_slice(root: Path) -> dict[str, Any]:

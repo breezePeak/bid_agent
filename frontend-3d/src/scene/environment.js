@@ -170,14 +170,14 @@ export function createEnvironment(scene) {
   ring2.material.opacity = 0.05
   scene.add(ring2)
 
-  // 唐风大殿 + 宽阔御道
+  // 唐风三层大殿 + 宽阔御道（更大气）
   const pavilion = createPavilion(scene)
-  const HALL_SCALE = 1.15
+  const HALL_SCALE = 1.28
   pavilion.root.scale.setScalar(HALL_SCALE)
-  pavilion.root.position.set(0, 0, -8)
+  pavilion.root.position.set(0, 0, -10)
 
   // 外围山水庭院（建筑外：假山 / 小溪 / 绿植）
-  addOuterLandscape(scene, HALL_SCALE)
+  const outerLandscape = addOuterLandscape(scene, HALL_SCALE)
 
   const sx = (v) => v.clone().multiplyScalar(HALL_SCALE).add(pavilion.root.position)
   pavilion.hallCenter = sx(pavilion.hallCenter)
@@ -317,30 +317,97 @@ export function createEnvironment(scene) {
     flame,
     baguaRing,
     pavilion,
+    outerLandscape,
     meteors,
     update(t, progress = 0) {
+      const ritualBoost = pedestal.userData.ritualBoost || 0
       crystal.rotation.y = t * 0.5
-      crystal.position.y = 2.55 + Math.sin(t * 1.3) * 0.05
-      crystal.scale.setScalar(0.85 + progress * 0.5)
-      coreLight.intensity = 1.8 + progress * 1.5 + Math.sin(t * 2.8) * 0.25
+      // crystal 在盖组本地坐标（盖顶宝珠）
+      crystal.position.y = 0.95 + Math.sin(t * 1.3) * 0.04
+      crystal.scale.setScalar(0.85 + progress * 0.5 + ritualBoost * 0.2)
+      // 九龙头微动（仰首吐息）
+      const dragons = pedestal.userData.dragonHeads
+      if (dragons) {
+        dragons.children.forEach((h, i) => {
+          h.rotation.x = -0.55 + Math.sin(t * 1.6 + i * 0.7) * 0.05
+          h.position.y = 2.22 + Math.sin(t * 2.0 + i) * 0.015
+        })
+      }
       if (flame) {
-        flame.scale.y = 0.9 + Math.sin(t * 5) * 0.15 + progress * 0.3
-        flame.scale.x = 0.85 + Math.sin(t * 4.2) * 0.1
-        flame.scale.z = flame.scale.x
+        const uf = pedestal.userData.underFire
+        const mf = pedestal.userData.mouthFire
+        const sp = pedestal.userData.sparks
+        const ml = pedestal.userData.mouthLight
+        const flick = 0.88 + Math.sin(t * 7.5) * 0.1 + Math.sin(t * 13.2) * 0.06
+        const boost = 0.75 + progress * 0.55 + ritualBoost * 0.45
+        if (uf) {
+          uf.scale.set(0.95 + Math.sin(t * 4.5) * 0.08, 0.9 + Math.sin(t * 6) * 0.18 + progress * 0.35, 0.95 + Math.cos(t * 4.2) * 0.08)
+          uf.rotation.y = Math.sin(t * 2.2) * 0.08
+        }
+        if (mf) {
+          mf.scale.set(0.9 + Math.sin(t * 5.5) * 0.1, 0.85 + Math.sin(t * 8) * 0.2 + progress * 0.25, 0.9 + Math.cos(t * 5) * 0.1)
+        }
         flame.traverse((ch) => {
-          if (ch.material?.opacity != null && ch.material.transparent) {
+          if (ch.material?.opacity != null && ch.material.transparent && ch.isMesh) {
             const base = ch.userData.baseOpacity ?? ch.material.opacity
             ch.userData.baseOpacity = base
-            ch.material.opacity = base * (0.85 + progress * 0.35 + Math.sin(t * 3) * 0.12)
+            ch.material.opacity = Math.min(1, base * flick * boost)
           }
         })
+        if (sp?.geometry) {
+          const arr = sp.geometry.attributes.position.array
+          for (let i = 0; i < arr.length; i += 3) {
+            arr[i + 1] += (0.35 + progress * 0.4) * 0.016
+            if (arr[i + 1] > 1.15) {
+              const a = Math.random() * Math.PI * 2
+              const r = Math.random() * 0.4
+              arr[i] = Math.cos(a) * r
+              arr[i + 1] = 0.15 + Math.random() * 0.2
+              arr[i + 2] = Math.sin(a) * r
+            }
+          }
+          sp.geometry.attributes.position.needsUpdate = true
+          sp.material.opacity = 0.55 + progress * 0.35 + Math.sin(t * 9) * 0.1
+        }
+        coreLight.intensity = 2.2 + progress * 2.2 + Math.sin(t * 5.5) * 0.4
+        if (ml) ml.intensity = 1.4 + progress * 1.6 + Math.sin(t * 6.5) * 0.35
       }
       if (pedestal.userData.floorBagua) {
         pedestal.userData.floorBagua.rotation.z = -t * 0.12
-        pedestal.userData.floorBagua.material.opacity = 0.28 + progress * 0.2 + Math.sin(t * 1.5) * 0.05
+        pedestal.userData.floorBagua.material.opacity =
+          0.28 + progress * 0.2 + Math.sin(t * 1.5) * 0.05 + ritualBoost * 0.35
       }
       if (baguaRing) {
-        baguaRing.rotation.y = t * 0.35
+        baguaRing.rotation.y = t * (0.35 + ritualBoost * 1.2)
+      }
+      // 仪式八卦符文
+      const runes = pedestal.userData.ritualRunes
+      if (runes?.visible) {
+        const meshes = pedestal.userData.runeMeshes || []
+        const rings = pedestal.userData.ritualRings || []
+        const rays = pedestal.userData.ritualRays || []
+        runes.rotation.y = t * 0.55
+        for (let i = 0; i < meshes.length; i++) {
+          const m = meshes[i]
+          const a = m.userData.baseAngle + t * 0.4
+          const r = m.userData.radius + Math.sin(t * 2 + i) * 0.08
+          m.position.x = Math.cos(a) * r
+          m.position.z = Math.sin(a) * r
+          m.position.y = 0.2 + Math.sin(t * 2.5 + i * 0.7) * 0.12 + ritualBoost * 0.3
+          const s = 0.75 + Math.sin(t * 3 + i) * 0.08
+          m.scale.set(s, s, 1)
+          if (m.material) m.material.opacity = Math.min(1, 0.55 + ritualBoost * 0.45)
+        }
+        for (let i = 0; i < rings.length; i++) {
+          const ringM = rings[i]
+          ringM.rotation.z = t * (0.2 + i * 0.08) * (i % 2 ? -1 : 1)
+          if (ringM.material) {
+            ringM.material.opacity = Math.min(0.7, (0.15 + i * 0.08) * (0.4 + ritualBoost))
+          }
+        }
+        for (const ray of rays) {
+          if (ray.material) ray.material.opacity = Math.min(0.55, 0.12 + ritualBoost * 0.4)
+        }
       }
       ring.rotation.z = t * 0.02
       ring2.rotation.z = -t * 0.015
@@ -586,7 +653,7 @@ function makeFurnaceBodyTexture() {
   return tex
 }
 
-/** 经典八卦炉：三足 · 双耳 · 八卦盘 · 穹盖 · 炉火 */
+/** 九龙头炼丹炉：九龙环口 · 三足鼎身 · 可开合穹盖 · 八卦阵 */
 function createBaguaFurnace() {
   const root = new THREE.Group()
   root.name = 'baguaFurnace'
@@ -605,6 +672,13 @@ function createBaguaFurnace() {
     emissive: 0x2a1008,
     emissiveIntensity: 0.12,
   })
+  const bronzeLite = new THREE.MeshStandardMaterial({
+    color: 0xa87030,
+    metalness: 0.7,
+    roughness: 0.34,
+    emissive: 0x401808,
+    emissiveIntensity: 0.14,
+  })
   const gold = new THREE.MeshStandardMaterial({
     color: 0xd4a84a,
     metalness: 0.82,
@@ -619,56 +693,102 @@ function createBaguaFurnace() {
     emissive: 0xaa7018,
     emissiveIntensity: 0.45,
   })
+  const scaleMat = new THREE.MeshStandardMaterial({
+    color: 0x6a4020,
+    metalness: 0.55,
+    roughness: 0.45,
+    emissive: 0x2a1008,
+    emissiveIntensity: 0.12,
+  })
+  const eyeMat = new THREE.MeshStandardMaterial({
+    color: 0xffe060,
+    metalness: 0.4,
+    roughness: 0.2,
+    emissive: 0xff8020,
+    emissiveIntensity: 0.95,
+  })
+  const tongueMat = new THREE.MeshStandardMaterial({
+    color: 0xc01818,
+    metalness: 0.25,
+    roughness: 0.4,
+    emissive: 0x600808,
+    emissiveIntensity: 0.35,
+  })
 
   const bodyTex = makeFurnaceBodyTexture()
   const baguaTex = makeBaguaTexture()
 
-  // 底座圆台
-  const base = new THREE.Mesh(new THREE.CylinderGeometry(2.05, 2.35, 0.28, 32), bronzeDark)
-  base.position.y = 0.08
+  // 底座圆台（更厚重）
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(2.35, 2.65, 0.32, 36), bronzeDark)
+  base.position.y = 0.1
   root.add(base)
-
-  const baseRim = new THREE.Mesh(new THREE.TorusGeometry(2.15, 0.06, 8, 40), gold)
+  const base2 = new THREE.Mesh(new THREE.CylinderGeometry(2.05, 2.25, 0.18, 32), bronze)
+  base2.position.y = 0.32
+  root.add(base2)
+  const baseRim = new THREE.Mesh(new THREE.TorusGeometry(2.4, 0.07, 8, 48), gold)
   baseRim.rotation.x = Math.PI / 2
-  baseRim.position.y = 0.22
+  baseRim.position.y = 0.28
   root.add(baseRim)
 
-  // 三足（鼎足外撇）
+  // 三足（兽爪鼎足）
   for (let i = 0; i < 3; i++) {
     const a = (i / 3) * Math.PI * 2 + Math.PI / 6
     const legG = new THREE.Group()
-    const foot = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, 0.55, 8), bronzeDark)
-    foot.position.y = 0.22
-    foot.rotation.z = 0.18
-    legG.add(foot)
-    const pad = new THREE.Mesh(new THREE.SphereGeometry(0.18, 8, 8), gold)
-    pad.scale.set(1.2, 0.45, 1.2)
-    pad.position.set(0.08, 0.02, 0)
-    legG.add(pad)
-    const claw = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.08, 0.28), bronze)
-    claw.position.set(0.16, 0.04, 0)
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.22, 0.7, 8), bronzeDark)
+    thigh.position.set(0.12, 0.35, 0)
+    thigh.rotation.z = 0.28
+    legG.add(thigh)
+    const knee = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 8), gold)
+    knee.position.set(0.28, 0.12, 0)
+    legG.add(knee)
+    const claw = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.1, 0.36), bronze)
+    claw.position.set(0.38, 0.05, 0)
     legG.add(claw)
-    legG.position.set(Math.sin(a) * 1.05, 0, Math.cos(a) * 1.05)
+    for (const z of [-0.1, 0, 0.1]) {
+      const toe = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.18, 5), gold)
+      toe.rotation.z = -Math.PI / 2
+      toe.position.set(0.55, 0.06, z)
+      legG.add(toe)
+    }
+    legG.position.set(Math.sin(a) * 1.15, 0, Math.cos(a) * 1.15)
     legG.rotation.y = a
     root.add(legG)
   }
 
-  // 炉腹（鼓腹）
+  // 炉腹：鼓腹壳体（顶部开口接炉颈，勿用实心球冠封顶）
   const bellyMat = bronze.clone()
   bellyMat.map = bodyTex
   bellyMat.color = new THREE.Color(0xffffff)
-  const belly = new THREE.Mesh(new THREE.SphereGeometry(1.15, 28, 20, 0, Math.PI * 2, 0, Math.PI * 0.62), bellyMat)
-  belly.position.y = 1.05
-  belly.scale.set(1.05, 1.15, 1.05)
+  bellyMat.side = THREE.DoubleSide
+  // theta 从 ~0.55 起：跳过北极实心顶，形成敞口鼓腹
+  const belly = new THREE.Mesh(
+    new THREE.SphereGeometry(1.28, 32, 22, 0, Math.PI * 2, 0.55, Math.PI * 0.55),
+    bellyMat,
+  )
+  belly.position.y = 1.15
+  belly.scale.set(1.08, 1.15, 1.08)
   root.add(belly)
+  // 上口收边（环，不封口）
+  const bellyRim = new THREE.Mesh(new THREE.TorusGeometry(0.95, 0.06, 8, 32), gold)
+  bellyRim.rotation.x = Math.PI / 2
+  bellyRim.position.y = 1.85
+  root.add(bellyRim)
+  // 下收腹（空心管）
+  const lower = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.15, 1.35, 0.55, 28, 1, true),
+    bronzeDark.clone(),
+  )
+  lower.material.side = THREE.DoubleSide
+  lower.position.y = 0.55
+  root.add(lower)
 
-  // 腹中横箍
-  for (const [y, r] of [
-    [0.72, 1.18],
-    [1.15, 1.22],
-    [1.55, 1.05],
+  // 腹上龙纹箍
+  for (const [y, r, thick] of [
+    [0.78, 1.32, 0.05],
+    [1.25, 1.38, 0.055],
+    [1.72, 1.18, 0.05],
   ]) {
-    const band = new THREE.Mesh(new THREE.TorusGeometry(r, 0.045, 8, 40), gold)
+    const band = new THREE.Mesh(new THREE.TorusGeometry(r, thick, 8, 48), gold)
     band.rotation.x = Math.PI / 2
     band.position.y = y
     root.add(band)
@@ -677,94 +797,118 @@ function createBaguaFurnace() {
   // 八卦盘（腰部旋转）
   const baguaRing = new THREE.Group()
   baguaRing.name = 'baguaRing'
-  baguaRing.position.y = 1.35
+  baguaRing.position.y = 1.48
   const disc = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.55, 1.55, 0.08, 48),
+    new THREE.CylinderGeometry(1.72, 1.72, 0.09, 48),
     new THREE.MeshStandardMaterial({
       map: baguaTex,
       color: 0xffffff,
       metalness: 0.55,
       roughness: 0.35,
       emissive: 0x4a3010,
-      emissiveIntensity: 0.25,
+      emissiveIntensity: 0.28,
     }),
   )
   baguaRing.add(disc)
-  const discRim = new THREE.Mesh(new THREE.TorusGeometry(1.55, 0.05, 8, 48), goldBright)
+  const discRim = new THREE.Mesh(new THREE.TorusGeometry(1.72, 0.055, 8, 48), goldBright)
   discRim.rotation.x = Math.PI / 2
   baguaRing.add(discRim)
-  // 盘上立起八卦短柱装饰
   for (let i = 0; i < 8; i++) {
     const a = (i / 8) * Math.PI * 2
-    const peg = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, 0.18, 6), gold)
-    peg.position.set(Math.cos(a) * 1.48, 0.12, Math.sin(a) * 1.48)
+    const peg = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.055, 0.2, 6), gold)
+    peg.position.set(Math.cos(a) * 1.64, 0.14, Math.sin(a) * 1.64)
     baguaRing.add(peg)
   }
   root.add(baguaRing)
 
-  // 炉颈 / 炉口
-  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.72, 1.0, 0.45, 24), bronze)
-  neck.position.y = 1.95
+  // 炉颈 / 炉口 —— 必须是空心管，否则开盖仍像实心顶
+  const neck = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.88, 1.15, 0.55, 28, 1, true),
+    bronze.clone(),
+  )
+  neck.material.side = THREE.DoubleSide
+  neck.position.y = 2.12
   root.add(neck)
-  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.78, 0.08, 10, 32), gold)
+  // 外沿金口（环，不封顶）
+  const mouth = new THREE.Mesh(new THREE.TorusGeometry(0.9, 0.1, 10, 36), gold)
   mouth.rotation.x = Math.PI / 2
-  mouth.position.y = 2.18
+  mouth.position.y = 2.42
   root.add(mouth)
-  const mouthInner = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.62, 0.62, 0.12, 24),
+  // 口沿内圈（细环，仍不封口）
+  const mouthInner = new THREE.Mesh(new THREE.TorusGeometry(0.72, 0.04, 8, 28), goldBright)
+  mouthInner.rotation.x = Math.PI / 2
+  mouthInner.position.y = 2.4
+  root.add(mouthInner)
+  // 内壁（更深的空心管，看见炉膛）
+  const neckLiner = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.7, 0.85, 0.7, 24, 1, true),
     new THREE.MeshStandardMaterial({
       color: 0x1a0800,
-      metalness: 0.3,
-      roughness: 0.7,
-      emissive: 0xff4a10,
-      emissiveIntensity: 0.55,
+      metalness: 0.25,
+      roughness: 0.8,
+      emissive: 0xff3a10,
+      emissiveIntensity: 0.45,
+      side: THREE.DoubleSide,
     }),
   )
-  mouthInner.position.y = 2.12
-  root.add(mouthInner)
+  neckLiner.position.y = 2.05
+  root.add(neckLiner)
 
-  // 双耳（兽环耳）
-  for (const side of [-1, 1]) {
-    const ear = new THREE.Group()
-    const arm = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.07, 8, 20, Math.PI), bronze)
-    arm.rotation.z = side > 0 ? -Math.PI / 2 : Math.PI / 2
-    arm.rotation.y = Math.PI / 2
-    arm.position.set(side * 1.22, 1.55, 0)
-    ear.add(arm)
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.04, 8, 16), gold)
-    ring.position.set(side * 1.48, 1.35, 0)
-    ring.rotation.y = Math.PI / 2
-    ear.add(ring)
-    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), goldBright)
-    knob.position.set(side * 1.22, 1.78, 0)
-    ear.add(knob)
-    root.add(ear)
+  // ——— 九龙头环炉口（外翻仰首） ———
+  const dragonHeads = new THREE.Group()
+  dragonHeads.name = 'nineDragons'
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2
+    const head = makeDragonHead({ bronze, bronzeDark, bronzeLite, gold, goldBright, scaleMat, eyeMat, tongueMat })
+    // 颈接炉口，吻部外翻上扬
+    const r = 1.28
+    head.position.set(Math.sin(a) * r, 2.22, Math.cos(a) * r)
+    head.rotation.order = 'YXZ'
+    head.rotation.y = a
+    head.rotation.x = -0.55
+    head.rotation.z = 0
+    head.scale.setScalar(0.88)
+    dragonHeads.add(head)
   }
+  root.add(dragonHeads)
 
-  // 穹盖
+  // 穹盖：铰链在炉口后沿，掀开后整盖翻到后方，炉口完全露出
+  // lidPivot = 铰链点；lidGroup = 盖本体（相对铰链偏移）
+  const LID_Y = 2.48
+  const LID_HINGE_Z = -0.82
+  const lidPivot = new THREE.Group()
+  lidPivot.name = 'furnaceLidPivot'
+  lidPivot.position.set(0, LID_Y, LID_HINGE_Z)
+  root.add(lidPivot)
+
+  const lidGroup = new THREE.Group()
+  lidGroup.name = 'furnaceLid'
+  // 盖心相对铰链前移，合上时盖住炉口
+  lidGroup.position.set(0, 0.02, 0.82)
+  lidPivot.add(lidGroup)
+
   const lid = new THREE.Mesh(
-    new THREE.SphereGeometry(0.85, 24, 16, 0, Math.PI * 2, 0, Math.PI * 0.48),
+    new THREE.SphereGeometry(0.95, 28, 18, 0, Math.PI * 2, 0, Math.PI * 0.5),
     bronze.clone(),
   )
   lid.material.map = bodyTex
   lid.material.color = new THREE.Color(0xffffff)
-  lid.position.y = 2.22
-  root.add(lid)
+  lidGroup.add(lid)
 
-  // 盖棱（八瓣）
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2
-    const rib = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.08, 0.72), gold)
-    rib.position.set(Math.cos(a) * 0.38, 2.48, Math.sin(a) * 0.38)
+  // 盖棱（九瓣）
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2
+    const rib = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.09, 0.78), gold)
+    rib.position.set(Math.cos(a) * 0.42, 0.28, Math.sin(a) * 0.42)
     rib.rotation.y = -a
     rib.rotation.x = 0.55
-    root.add(rib)
+    lidGroup.add(rib)
   }
 
-  // 盖钮 + 宝珠
-  const finial = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 0.22, 10), gold)
-  finial.position.y = 2.78
-  root.add(finial)
+  // 盖顶宝珠（不再挂小龙头，开盖时轮廓更干净）
+  const finial = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, 0.2, 10), gold)
+  finial.position.y = 0.72
+  lidGroup.add(finial)
 
   const crystal = new THREE.Mesh(
     new THREE.SphereGeometry(0.28, 16, 16),
@@ -778,10 +922,9 @@ function createBaguaFurnace() {
       opacity: 0.95,
     }),
   )
-  crystal.position.y = 2.55
-  root.add(crystal)
+  crystal.position.y = 0.95
+  lidGroup.add(crystal)
 
-  // 盖顶小八卦盘
   const topDisc = new THREE.Mesh(
     new THREE.CircleGeometry(0.32, 24),
     new THREE.MeshStandardMaterial({
@@ -795,40 +938,200 @@ function createBaguaFurnace() {
     }),
   )
   topDisc.rotation.x = -Math.PI / 2
-  topDisc.position.y = 2.95
-  root.add(topDisc)
+  topDisc.position.y = 0.55
+  lidGroup.add(topDisc)
 
-  const coreLight = new THREE.PointLight(0xff8040, 2.8, 32, 2)
-  coreLight.position.set(0, 2.2, 0)
+  // 炉膛底（在开口下方，从上往下能看见）
+  const cavityFloor = new THREE.Mesh(
+    new THREE.CircleGeometry(0.68, 28),
+    new THREE.MeshStandardMaterial({
+      color: 0x2a0c04,
+      metalness: 0.25,
+      roughness: 0.75,
+      emissive: 0xff5018,
+      emissiveIntensity: 0.7,
+      side: THREE.DoubleSide,
+    }),
+  )
+  cavityFloor.rotation.x = -Math.PI / 2
+  cavityFloor.position.y = 1.72
+  root.add(cavityFloor)
+  // 膛内余火光
+  const cavityGlow = new THREE.Mesh(
+    new THREE.CircleGeometry(0.45, 20),
+    new THREE.MeshBasicMaterial({
+      color: 0xff8020,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+    }),
+  )
+  cavityGlow.rotation.x = -Math.PI / 2
+  cavityGlow.position.y = 1.74
+  root.add(cavityGlow)
+
+  const coreLight = new THREE.PointLight(0xff6020, 4.0, 38, 2)
+  coreLight.position.set(0, 0.65, 0)
   root.add(coreLight)
+  const mouthLight = new THREE.PointLight(0xffa040, 2.4, 20, 2)
+  mouthLight.position.set(0, 2.55, 0)
+  root.add(mouthLight)
 
-  // 炉内火苗（多层）
+  // 炉火
   const flame = new THREE.Group()
-  flame.position.y = 1.35
-  const flameMats = [
-    { color: 0xffd060, opacity: 0.5, s: 1, y: 0 },
-    { color: 0xff8020, opacity: 0.4, s: 0.72, y: 0.15 },
-    { color: 0xfff0a0, opacity: 0.35, s: 0.45, y: 0.28 },
-  ]
-  for (const f of flameMats) {
+  flame.name = 'furnaceFlame'
+
+  function addFlameCone(parent, { color, opacity, r, h, y, x = 0, z = 0, rotZ = 0 }) {
     const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(0.48 * f.s, 0.95 * f.s, 10, 1, true),
+      new THREE.ConeGeometry(r, h, 12, 1, true),
       new THREE.MeshBasicMaterial({
-        color: f.color,
+        color,
         transparent: true,
-        opacity: f.opacity,
+        opacity,
         side: THREE.DoubleSide,
         depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        fog: false,
       }),
     )
-    cone.position.y = f.y
-    flame.add(cone)
+    cone.position.set(x, y, z)
+    cone.rotation.z = rotZ
+    cone.renderOrder = 20
+    cone.userData.baseOpacity = opacity
+    parent.add(cone)
+    return cone
   }
+
+  const underFire = new THREE.Group()
+  underFire.position.y = 0.1
+  for (const L of [
+    { color: 0xff3a10, opacity: 0.75, r: 0.6, h: 0.9, y: 0.45 },
+    { color: 0xff8020, opacity: 0.7, r: 0.45, h: 1.1, y: 0.55 },
+    { color: 0xffd050, opacity: 0.65, r: 0.3, h: 1.25, y: 0.65 },
+    { color: 0xfff0a0, opacity: 0.55, r: 0.16, h: 1.0, y: 0.75 },
+  ]) {
+    addFlameCone(underFire, L)
+  }
+  const ember = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.75, 0.9, 0.1, 16),
+    new THREE.MeshBasicMaterial({
+      color: 0xff5018,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      fog: false,
+    }),
+  )
+  ember.position.y = 0.06
+  ember.userData.baseOpacity = 0.55
+  underFire.add(ember)
+  const sparkGeo = new THREE.BufferGeometry()
+  const sparkN = 32
+  const sparkPos = new Float32Array(sparkN * 3)
+  for (let i = 0; i < sparkN; i++) {
+    const a = Math.random() * Math.PI * 2
+    const r = Math.random() * 0.5
+    sparkPos[i * 3] = Math.cos(a) * r
+    sparkPos[i * 3 + 1] = 0.2 + Math.random() * 0.95
+    sparkPos[i * 3 + 2] = Math.sin(a) * r
+  }
+  sparkGeo.setAttribute('position', new THREE.BufferAttribute(sparkPos, 3))
+  const sparks = new THREE.Points(
+    sparkGeo,
+    new THREE.PointsMaterial({
+      color: 0xffd080,
+      size: 0.07,
+      transparent: true,
+      opacity: 0.9,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+      fog: false,
+    }),
+  )
+  underFire.add(sparks)
+  flame.add(underFire)
+
+  // 炉口火：从膛内向上冒，不封口
+  const mouthFire = new THREE.Group()
+  mouthFire.position.y = 1.85
+  for (const L of [
+    { color: 0xff6018, opacity: 0.5, r: 0.35, h: 0.7, y: 0.4 },
+    { color: 0xffc040, opacity: 0.55, r: 0.22, h: 0.9, y: 0.5 },
+    { color: 0xfff0b0, opacity: 0.45, r: 0.12, h: 0.7, y: 0.6 },
+  ]) {
+    addFlameCone(mouthFire, L)
+  }
+  flame.add(mouthFire)
   root.add(flame)
 
-  // 地面八卦阵纹（微光）
+  // 周遭八卦符文
+  const ritualRunes = new THREE.Group()
+  ritualRunes.name = 'ritualRunes'
+  ritualRunes.visible = false
+  ritualRunes.position.y = 0.05
+  const runeChars = ['乾', '坤', '震', '巽', '坎', '离', '艮', '兑']
+  const runeMeshes = []
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2
+    const rune = makeRuneSprite(runeChars[i])
+    rune.position.set(Math.cos(a) * 3.6, 0.15, Math.sin(a) * 3.6)
+    rune.scale.set(0.001, 0.001, 0.001)
+    rune.userData.baseAngle = a
+    rune.userData.radius = 3.6
+    ritualRunes.add(rune)
+    runeMeshes.push(rune)
+  }
+  const ringMats = []
+  for (const r of [3.2, 4.05, 4.85]) {
+    const ringMesh = new THREE.Mesh(
+      new THREE.TorusGeometry(r, 0.03, 8, 64),
+      new THREE.MeshBasicMaterial({
+        color: 0xe0b84a,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    )
+    ringMesh.rotation.x = Math.PI / 2
+    ringMesh.position.y = 0.04
+    ritualRunes.add(ringMesh)
+    ringMats.push(ringMesh)
+  }
+  const rayLines = []
+  for (let i = 0; i < 8; i++) {
+    const a = (i / 8) * Math.PI * 2
+    const geo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0.06, 0),
+      new THREE.Vector3(Math.cos(a) * 4.6, 0.06, Math.sin(a) * 4.6),
+    ])
+    const line = new THREE.Line(
+      geo,
+      new THREE.LineBasicMaterial({
+        color: 0xffd070,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    )
+    ritualRunes.add(line)
+    rayLines.push(line)
+  }
+  root.add(ritualRunes)
+
+  root.userData.underFire = underFire
+  root.userData.mouthFire = mouthFire
+  root.userData.sparks = sparks
+  root.userData.mouthLight = mouthLight
+  root.userData.dragonHeads = dragonHeads
+
   const floorBagua = new THREE.Mesh(
-    new THREE.CircleGeometry(2.6, 48),
+    new THREE.CircleGeometry(2.9, 48),
     new THREE.MeshBasicMaterial({
       map: baguaTex,
       transparent: true,
@@ -841,13 +1144,266 @@ function createBaguaFurnace() {
   floorBagua.position.y = 0.02
   root.add(floorBagua)
 
+  root.userData.lidOpen = 0
+  root.userData.lidGroup = lidGroup
+  root.userData.lidPivot = lidPivot
+  root.userData.lidClosedY = LID_Y
   root.userData.crystal = crystal
   root.userData.coreLight = coreLight
   root.userData.flame = flame
   root.userData.baguaRing = baguaRing
   root.userData.floorBagua = floorBagua
+  root.userData.ritualRunes = ritualRunes
+  root.userData.runeMeshes = runeMeshes
+  root.userData.ritualRings = ringMats
+  root.userData.ritualRays = rayLines
+  root.userData.ritualBoost = 0
+
+  /** 盖开合 k∈[0,1]：绕后沿铰链向后掀开约 125°，炉口完全敞开 */
+  root.userData.setLidOpen = (k) => {
+    const t = Math.max(0, Math.min(1, k))
+    root.userData.lidOpen = t
+    // ease 出一点加速感
+    const e = t * t * (3 - 2 * t)
+    lidPivot.rotation.x = -e * 2.2 // ~126°
+    lidPivot.position.y = LID_Y + e * 0.15
+  }
+  root.userData.setLidOpen(0)
 
   return root
+}
+
+/**
+ * 中式龙头（局部 +X 为吻部朝向）
+ * 圆润颅骨 + 细长吻 + 鹿角 + 鬃须 + 鳞颈
+ */
+function makeDragonHead({ bronze, bronzeDark, bronzeLite, gold, goldBright, scaleMat, eyeMat, tongueMat, crown = false }) {
+  const g = new THREE.Group()
+
+  // 颅骨（圆润）
+  const skull = new THREE.Mesh(new THREE.SphereGeometry(0.2, 14, 12), bronzeLite)
+  skull.position.set(0.02, 0.08, 0)
+  skull.scale.set(1.05, 0.95, 1.0)
+  g.add(skull)
+
+  // 后脑隆起
+  const occiput = new THREE.Mesh(new THREE.SphereGeometry(0.14, 10, 10), bronze)
+  occiput.position.set(-0.12, 0.1, 0)
+  occiput.scale.set(0.9, 0.85, 1.05)
+  g.add(occiput)
+
+  // 上吻（拉长椭圆）
+  const snoutTop = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 10), bronze)
+  snoutTop.position.set(0.28, 0.06, 0)
+  snoutTop.scale.set(1.55, 0.72, 0.78)
+  g.add(snoutTop)
+
+  // 鼻端
+  const nose = new THREE.Mesh(new THREE.SphereGeometry(0.07, 10, 8), bronzeDark)
+  nose.position.set(0.48, 0.05, 0)
+  nose.scale.set(1.1, 0.75, 0.85)
+  g.add(nose)
+  // 鼻翼
+  for (const z of [-0.05, 0.05]) {
+    const n = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), bronzeDark)
+    n.position.set(0.5, 0.04, z)
+    n.scale.set(1.2, 0.8, 0.9)
+    g.add(n)
+  }
+
+  // 下颌
+  const jaw = new THREE.Mesh(new THREE.SphereGeometry(0.11, 12, 10), bronzeDark)
+  jaw.position.set(0.26, -0.06, 0)
+  jaw.scale.set(1.45, 0.55, 0.7)
+  g.add(jaw)
+  const chin = new THREE.Mesh(new THREE.SphereGeometry(0.055, 8, 8), bronzeDark)
+  chin.position.set(0.42, -0.08, 0)
+  chin.scale.set(1.1, 0.6, 0.75)
+  g.add(chin)
+
+  // 口缝（金线）
+  const lip = new THREE.Mesh(new THREE.TorusGeometry(0.12, 0.012, 6, 16, Math.PI * 1.1), gold)
+  lip.position.set(0.38, 0.0, 0)
+  lip.rotation.y = Math.PI / 2
+  lip.rotation.z = 0.15
+  lip.scale.set(0.55, 1.0, 1.2)
+  g.add(lip)
+
+  // 鹿角（分段弯曲）
+  for (const side of [-1, 1]) {
+    const hornRoot = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.04, 0.12, 7), gold)
+    hornRoot.position.set(-0.02, 0.22, side * 0.07)
+    hornRoot.rotation.z = 0.25
+    hornRoot.rotation.x = side * 0.15
+    g.add(hornRoot)
+    const hornMid = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.028, 0.16, 7), gold)
+    hornMid.position.set(0.02, 0.36, side * 0.1)
+    hornMid.rotation.z = 0.55
+    hornMid.rotation.x = side * 0.25
+    g.add(hornMid)
+    const hornTip = new THREE.Mesh(new THREE.ConeGeometry(0.016, 0.14, 6), goldBright)
+    hornTip.position.set(0.08, 0.48, side * 0.13)
+    hornTip.rotation.z = 0.85
+    hornTip.rotation.x = side * 0.2
+    g.add(hornTip)
+    // 小分叉
+    const branch = new THREE.Mesh(new THREE.ConeGeometry(0.012, 0.1, 5), gold)
+    branch.position.set(-0.02, 0.34, side * 0.14)
+    branch.rotation.z = 0.2
+    branch.rotation.x = side * 0.9
+    g.add(branch)
+  }
+
+  // 额鬃 / 背鬃（几缕）
+  for (let i = 0; i < 5; i++) {
+    const a = (i - 2) * 0.22
+    const mane = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.2 + (i % 2) * 0.06, 6), goldBright)
+    mane.position.set(-0.08 - Math.abs(a) * 0.05, 0.18 + (i % 2) * 0.04, a * 0.12)
+    mane.rotation.z = 1.9
+    mane.rotation.y = a * 0.4
+    mane.scale.set(0.7, 1, 0.5)
+    g.add(mane)
+  }
+
+  // 腮须（长而弯）
+  for (const side of [-1, 1]) {
+    for (let k = 0; k < 3; k++) {
+      const w = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.012 - k * 0.002, 0.006, 0.28 + k * 0.06, 5),
+        k === 0 ? goldBright : gold,
+      )
+      w.position.set(0.32 + k * 0.04, -0.02 - k * 0.02, side * (0.1 + k * 0.03))
+      w.rotation.z = -1.1 - k * 0.15
+      w.rotation.y = side * (0.55 + k * 0.2)
+      g.add(w)
+    }
+  }
+
+  // 眼眶 + 金瞳
+  for (const side of [-1, 1]) {
+    const socket = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), bronzeDark)
+    socket.position.set(0.16, 0.12, side * 0.11)
+    socket.scale.set(1.1, 0.85, 0.7)
+    g.add(socket)
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.032, 10, 10), eyeMat)
+    eye.position.set(0.19, 0.125, side * 0.115)
+    g.add(eye)
+    const lid = new THREE.Mesh(new THREE.TorusGeometry(0.038, 0.008, 6, 12), gold)
+    lid.position.set(0.18, 0.13, side * 0.11)
+    lid.rotation.y = Math.PI / 2
+    lid.scale.set(0.7, 1, 1)
+    g.add(lid)
+  }
+
+  // 眉骨
+  for (const side of [-1, 1]) {
+    const brow = new THREE.Mesh(new THREE.SphereGeometry(0.04, 8, 6), bronze)
+    brow.position.set(0.12, 0.18, side * 0.1)
+    brow.scale.set(1.3, 0.4, 0.6)
+    brow.rotation.z = -0.2
+    g.add(brow)
+  }
+
+  // 口内火光（小）
+  const glow = new THREE.Mesh(
+    new THREE.SphereGeometry(0.05, 8, 8),
+    new THREE.MeshBasicMaterial({
+      color: 0xff6020,
+      transparent: true,
+      opacity: 0.55,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+    }),
+  )
+  glow.position.set(0.46, -0.01, 0)
+  g.add(glow)
+  const tongue = new THREE.Mesh(new THREE.ConeGeometry(0.028, 0.12, 5), tongueMat)
+  tongue.rotation.z = -Math.PI / 2
+  tongue.position.set(0.52, -0.02, 0)
+  g.add(tongue)
+
+  // 鳞颈（多节渐粗）
+  for (let i = 0; i < 3; i++) {
+    const seg = new THREE.Mesh(
+      new THREE.SphereGeometry(0.12 + i * 0.025, 10, 8),
+      i % 2 ? scaleMat : bronzeDark,
+    )
+    seg.position.set(-0.12 - i * 0.12, 0.02 - i * 0.01, 0)
+    seg.scale.set(1.1, 0.75, 0.9)
+    g.add(seg)
+  }
+
+  // 颈侧金环
+  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.13, 0.018, 6, 16), gold)
+  collar.position.set(-0.18, 0.02, 0)
+  collar.rotation.y = Math.PI / 2
+  g.add(collar)
+
+  // 额珠
+  if (crown) {
+    const pearl = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 12), goldBright)
+    pearl.position.set(0.06, 0.26, 0)
+    g.add(pearl)
+    const halo = new THREE.Mesh(
+      new THREE.TorusGeometry(0.09, 0.012, 6, 16),
+      gold,
+    )
+    halo.position.set(0.06, 0.26, 0)
+    halo.rotation.x = Math.PI / 2
+    g.add(halo)
+  } else {
+    const gem = new THREE.Mesh(new THREE.SphereGeometry(0.035, 8, 8), goldBright)
+    gem.position.set(0.08, 0.2, 0)
+    g.add(gem)
+  }
+
+  // 颊侧小鳞
+  for (const side of [-1, 1]) {
+    for (let i = 0; i < 3; i++) {
+      const sc = new THREE.Mesh(new THREE.SphereGeometry(0.03, 6, 6), scaleMat)
+      sc.position.set(0.1 + i * 0.08, 0.0, side * (0.14 - i * 0.01))
+      sc.scale.set(1.1, 0.5, 0.8)
+      g.add(sc)
+    }
+  }
+
+  return g
+}
+
+/** 八卦符文精灵 */
+function makeRuneSprite(char) {
+  const canvas = document.createElement('canvas')
+  canvas.width = 128
+  canvas.height = 128
+  const ctx = canvas.getContext('2d')
+  ctx.clearRect(0, 0, 128, 128)
+  // 金环底
+  ctx.beginPath()
+  ctx.arc(64, 64, 54, 0, Math.PI * 2)
+  ctx.fillStyle = 'rgba(40, 24, 8, 0.75)'
+  ctx.fill()
+  ctx.lineWidth = 4
+  ctx.strokeStyle = '#e0b84a'
+  ctx.stroke()
+  ctx.font = 'bold 64px "Noto Serif SC", "Songti SC", "SimSun", serif'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.shadowColor = 'rgba(255, 180, 40, 0.8)'
+  ctx.shadowBlur = 12
+  ctx.fillStyle = '#ffe8a0'
+  ctx.fillText(char, 64, 68)
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0,
+  })
+  const sp = new THREE.Sprite(mat)
+  sp.scale.set(0.9, 0.9, 1)
+  return sp
 }
 
 /** 建筑外围：假山 · 小溪 · 绿植（长方形庭院） */

@@ -27,9 +27,9 @@ export function createStageTrack(scene) {
   const radius = 22
   const arcStart = -Math.PI * 0.72
   const arcEnd = Math.PI * 0.72
-  // 大殿脊顶约 y≈19；整体略降，峰高仍越过屋顶
-  const Y_MIN = 11
-  const Y_MAX = 24
+  // 三层大殿脊顶约 y≈32（scale 后）；工序环绕更高
+  const Y_MIN = 16
+  const Y_MAX = 34
   const nodes = []
   const curvePoints = []
 

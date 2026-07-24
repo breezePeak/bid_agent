@@ -10,6 +10,14 @@ FORBIDDEN_CERTAINTY_PHRASES = ("已具备", "已提供", "已完成", "完全满
 SAFE_HEDGE_PHRASES = ("拟", "将", "按要求", "待", "计划", "可", "如需", "随投标文件附后")
 
 
+def anti_fabrication_enabled() -> bool:
+    """Whether write-time anti-fabrication blockers are enabled."""
+    import os
+
+    value = str(os.environ.get("BID_AGENT_ANTI_FABRICATION_GATE", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def validate_outline_score_coverage(outline: dict[str, Any], score_points: list[dict[str, Any]]) -> None:
     known = {stringify(item.get("id")) for item in score_points if stringify(item.get("id"))}
     covered: set[str] = set()
@@ -26,6 +34,8 @@ def validate_outline_score_coverage(outline: dict[str, Any], score_points: list[
 
 
 def validate_weak_evidence_language(job: dict[str, Any], chapter_markdown: str) -> None:
+    if not anti_fabrication_enabled():
+        return
     weak_terms: list[str] = []
     for task in job.get("template_tasks", []):
         if not isinstance(task, dict):
@@ -196,7 +206,7 @@ def validate_chapter_claims_gate(
         for item in (result.get("findings") or [])
         if isinstance(item, dict) and stringify(item.get("severity")) == "blocker"
     ]
-    if raise_on_blocker and blockers:
+    if raise_on_blocker and blockers and anti_fabrication_enabled():
         samples = [stringify(item.get("value") or item.get("description"))[:60] for item in blockers[:3]]
         raise ValueError(
             f"章节 {chapter_id} claim 防编造门禁失败（{len(blockers)} 项 blocker）: {samples}"

@@ -72,7 +72,7 @@ def _seed_chapter_file(root: Path, chapter_id: str = "4.1") -> None:
 
 
 class GoalStateTransitionTests(unittest.TestCase):
-    def test_v1_goal_file_is_imported_once_then_sqlite_remains_authoritative(self) -> None:
+    def test_v1_goal_file_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "workspace" / "agent" / "goal_state.json"
@@ -81,14 +81,13 @@ class GoalStateTransitionTests(unittest.TestCase):
                 json.dumps({"goal_id": "goal-legacy", "status": "in_progress", "raw_user_goal": "original"}),
                 encoding="utf-8",
             )
-            self.assertEqual(load_goal(root)["raw_user_goal"], "original")
+            self.assertIsNone(load_goal(root))
             path.write_text(
                 json.dumps({"goal_id": "goal-legacy", "status": "succeeded", "raw_user_goal": "stale"}),
                 encoding="utf-8",
             )
             current = load_goal(root)
-            self.assertEqual(current["status"], "in_progress")
-            self.assertEqual(current["raw_user_goal"], "original")
+            self.assertIsNone(current)
 
     def test_01_rewrite_success_does_not_succeed_goal_with_open_issue(self) -> None:
         """修复章节成功，不代表 Goal 成功。"""

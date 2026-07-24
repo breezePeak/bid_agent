@@ -3,11 +3,15 @@
     <div v-if="visible" class="dialog-overlay" @click.self="$emit('close')">
       <div class="dialog settings-dialog">
         <div class="dialog-header">
-          <h2>大模型设置</h2>
+          <h2>模型与流程设置</h2>
           <button class="btn btn-icon" @click="$emit('close')">&times;</button>
         </div>
         <div class="settings-dialog-body">
-        <div class="settings-layout">
+        <div class="settings-tabs" role="tablist" aria-label="设置分类">
+          <button class="btn btn-sm" :class="{ 'btn-primary': activeTab === 'model' }" role="tab" :aria-selected="activeTab === 'model'" @click="activeTab = 'model'">模型设置</button>
+          <button class="btn btn-sm" :class="{ 'btn-primary': activeTab === 'flow' }" role="tab" :aria-selected="activeTab === 'flow'" @click="activeTab = 'flow'">流程设置</button>
+        </div>
+        <div v-if="activeTab === 'model'" class="settings-layout">
           <div class="settings-list">
             <button class="btn btn-sm btn-block settings-add-btn" @click="startNewModel">
               + 添加模型
@@ -168,6 +172,29 @@
             </div>
           </form>
         </div>
+        <form v-else class="settings-form flow-settings-form" @submit.prevent="saveFlow">
+          <div class="settings-form-title">系统参数</div>
+          <p class="settings-hint">修改后仅作用于后续启动的阶段；不会改变正在执行的任务。</p>
+          <div class="form-row">
+            <div class="form-group"><label for="flow-workers">章节并发数</label><input id="flow-workers" v-model.number="flowForm.workers" type="number" min="1" max="10" /></div>
+            <div class="form-group"><label for="flow-llm">模型并发数</label><input id="flow-llm" v-model.number="flowForm.llm_concurrency" type="number" min="1" max="32" /></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label for="flow-retries">写作批次重试</label><input id="flow-retries" v-model.number="flowForm.write_batch_retries" type="number" min="0" max="20" /></div>
+            <div class="form-group"><label for="flow-repair">最大修复轮次</label><input id="flow-repair" v-model.number="flowForm.max_repair_rounds" type="number" min="0" max="10" /></div>
+          </div>
+          <div class="settings-form-title">审核与门禁</div>
+          <div class="form-check-group">
+            <label class="form-check"><input v-model="flowForm.chapter_review_gate" type="checkbox" /><span>启用章节审核门禁</span></label>
+            <label class="form-check"><input v-model="flowForm.global_review_gate" type="checkbox" /><span>启用全文审核门禁</span></label>
+            <label class="form-check"><input v-model="flowForm.anti_fabrication_gate" type="checkbox" /><span>启用防编造检查</span></label>
+            <label class="form-check"><input v-model="flowForm.allow_accept_risk" type="checkbox" /><span>允许用户接受可接受的失败风险</span></label>
+          </div>
+          <p class="settings-hint">关闭任一门禁只是不阻断后续流程，审核结果仍会保留。开启接受风险后仍需填写原因、二次确认；废标项与资格材料缺失不能接受。</p>
+          <p v-if="flowError" class="form-error" role="alert">{{ flowError }}</p>
+          <p v-if="flowSuccess" class="form-success">{{ flowSuccess }}</p>
+          <div class="settings-form-footer"><button type="button" class="btn" @click="$emit('close')">关闭</button><button type="submit" class="btn btn-primary" :disabled="flowSaving">{{ flowSaving ? '保存中...' : '保存流程设置' }}</button></div>
+        </form>
       </div>
     </div>
   </div>
@@ -176,7 +203,7 @@
 
 <script setup>
 import { ref, reactive, watch, computed } from 'vue'
-import { fetchLlmSettings,
+import { fetchLlmSettings, fetchFlowSettings, saveFlowSettings,
   saveLlmModel,
   activateLlmModel,
   deleteLlmModel, testLlmModel } from '../api'
@@ -231,6 +258,28 @@ const testResult = ref('')
 const testOk = ref(null)
 const error = ref('')
 const success = ref('')
+const activeTab = ref('model')
+const flowSaving = ref(false)
+const flowError = ref('')
+const flowSuccess = ref('')
+const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false })
+
+async function loadFlow() {
+  try {
+    const { data } = await fetchFlowSettings()
+    if (data?.ok && data.settings) Object.assign(flowForm, data.settings)
+  } catch (e) { flowError.value = '加载流程设置失败，请检查后端服务' }
+}
+
+async function saveFlow() {
+  flowSaving.value = true; flowError.value = ''; flowSuccess.value = ''
+  try {
+    const { data } = await saveFlowSettings({ ...flowForm })
+    if (!data?.ok) throw new Error(data?.message || '保存失败')
+    Object.assign(flowForm, data.settings || {})
+    flowSuccess.value = '流程设置已保存，后续启动的阶段会使用新参数。'
+  } catch (e) { flowError.value = e.response?.data?.message || e.message || '保存失败' } finally { flowSaving.value = false }
+}
 
 
 function emptyForm() {
@@ -466,6 +515,7 @@ watch(
   (visible) => {
     if (visible) {
       loadModels()
+      loadFlow()
     } else {
       error.value = ''
       success.value = ''

@@ -384,26 +384,33 @@ def _run_plan_jobs(root: Path) -> None:
     plan_chapter_jobs(root)
 
 
-def _run_select_context_all(root: Path) -> None:
+def _run_select_context_all(
+    root: Path,
+    workers: int | None = None,
+    max_retries: int = 0,
+    resume: bool = True,
+    force: bool = False,
+) -> None:
     from context_selector import select_contexts_for_jobs
-    from stage_validation import missing_ids_for_stage
 
     jobs_dir = root / "workspace" / "jobs"
     if not jobs_dir.exists() or not list(jobs_dir.glob("*.json")):
         raise FileNotFoundError(
             f"缺少章节任务目录: {jobs_dir}，请先执行 plan-jobs"
         )
-    missing_ids = set(missing_ids_for_stage(root, "select_contexts"))
     jobs = [
         read_json(f)
         for f in sorted(jobs_dir.glob("*.json"))
-        if f.stem in missing_ids
     ]
-    if not jobs:
-        print("[跳过] 所有章节上下文均已存在且有效。")
-        return
-    print(f"[执行] 补齐 {len(jobs)} 个缺失章节上下文...")
-    select_contexts_for_jobs(jobs, root)
+    print(f"[执行] 校验并派发 {len(jobs)} 个章节上下文任务...")
+    select_contexts_for_jobs(
+        jobs,
+        root,
+        workers=workers,
+        max_retries=max_retries,
+        resume=resume,
+        force=force,
+    )
 
 
 def _run_select_context(root: Path, chapter_id: str) -> None:
@@ -420,11 +427,12 @@ def _run_select_context(root: Path, chapter_id: str) -> None:
 
 
 def _run_write_all(root: Path, workers: int | None = None, max_retries: int = 0) -> None:
-    from stage_validation import context_ids, missing_ids_for_stage
+    from context_selector import valid_context_ids
+    from stage_validation import missing_ids_for_stage
     from subagent_runner import run_write_all as concurrent_write_all
 
     pending_ids = missing_ids_for_stage(root, "write_chapters")
-    missing_contexts = sorted(set(pending_ids) - context_ids(root))
+    missing_contexts = sorted(set(pending_ids) - valid_context_ids(root))
     if missing_contexts:
         raise FileNotFoundError(
             f"仍有 {len(missing_contexts)} 个章节缺少上下文，请先执行 select-context-all: {missing_contexts[:10]}"
@@ -463,7 +471,11 @@ def run_pipeline(root: Path | None = None, workers: int | None = None, max_retri
         "build_template_evidence": lambda: build_template_evidence(root),
         "generate_outline": lambda: generate_outline(root),
         "plan_chapter_jobs": lambda: _run_plan_jobs(root),
-        "select_contexts": lambda: _run_select_context_all(root),
+        "select_contexts": lambda: _run_select_context_all(
+            root,
+            workers=workers,
+            max_retries=max_retries,
+        ),
         "write_chapters": lambda: _run_write_all(root, workers=workers, max_retries=max_retries),
         "review_fix_chapters": lambda: review_fix_all(root, workers=workers),
         "build_source_trace_index": lambda: build_source_trace_index(root),
@@ -527,7 +539,18 @@ def build_parser() -> argparse.ArgumentParser:
     select_context_parser = subparsers.add_parser("select-context", help="为单个章节选择上下文")
     select_context_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
 
-    subparsers.add_parser("select-context-all", help="为所有章节选择上下文")
+    select_context_all_parser = subparsers.add_parser("select-context-all", help="并发派发子 Agent 为所有章节选择上下文")
+    select_context_all_parser.add_argument(
+        "--workers",
+        type=int,
+        default=None,
+        help=f"上下文选择 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
+    )
+    select_context_all_parser.add_argument("--max-retries", type=int, default=0, help="单章失败后的最大重试次数，默认 0")
+    resume_group = select_context_all_parser.add_mutually_exclusive_group()
+    resume_group.add_argument("--resume", dest="resume", action="store_true", default=True, help="复用输入指纹匹配的有效章节上下文（默认）")
+    resume_group.add_argument("--no-resume", dest="resume", action="store_false", help="不复用检查点，重新选择全部章节上下文")
+    select_context_all_parser.add_argument("--force", action="store_true", help="强制忽略全部上下文检查点")
 
     write_chapter_parser = subparsers.add_parser("write-chapter", help="生成单个章节（需要先执行 select-context）")
     write_chapter_parser.add_argument("--chapter", required=True, help="章节 ID，例如 01")
@@ -629,20 +652,15 @@ def main() -> int:
         return control_main(sys.argv[2:])
     root = project_root()
     args = build_parser().parse_args()
-    runs_root = Path(
-        os.environ.get("BID_AGENT_RUNS_ROOT")
-        or (Path(__file__).resolve().parent.parent / "runs")
-    ).resolve()
-    managed_workspace = root.resolve() != runs_root and root.resolve().is_relative_to(runs_root)
     execution_worker = str(os.environ.get("BID_AGENT_EXECUTION_WORKER") or "").lower() in {
         "1",
         "true",
         "yes",
     }
-    if managed_workspace and not execution_worker and args.command != "validate":
+    if not execution_worker:
         print(
-            "[拒绝] 受管 V2 工作区禁止通过旧阶段 CLI 直接执行 mutation；"
-            "请使用 `python src/main.py control ...` 提交 Command。"
+            "[拒绝] 旧阶段 CLI 已废弃；"
+            "请使用 `python src/main.py control ...` 通过 V2 CommandGateway 操作。"
         )
         return 2
 
@@ -681,7 +699,13 @@ def main() -> int:
     elif args.command == "select-context":
         _run_select_context(root, args.chapter)
     elif args.command == "select-context-all":
-        _run_select_context_all(root)
+        _run_select_context_all(
+            root,
+            workers=clamp_workers(args.workers),
+            max_retries=args.max_retries,
+            resume=args.resume,
+            force=args.force,
+        )
     elif args.command == "write-chapter":
         print(f"[执行] 生成章节 {args.chapter}...")
         write_chapter(args.chapter, root)

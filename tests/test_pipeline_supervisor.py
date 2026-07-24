@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -118,6 +119,48 @@ class PipelineSupervisorTests(unittest.TestCase):
 
             self.assertEqual(calls, ["b"])
 
+    def test_reconcile_marks_lost_worker_stage_before_retrying(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            lifecycle: list[tuple[str, str, str]] = []
+            completed: set[str] = set()
+            supervisor._save(
+                root,
+                {"run_id": "run-1", "status": "running", "current_stage": "b", "worker_pid": 0},
+            )
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                completed.add(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", side_effect=lambda r, stage: stage in completed),
+            ):
+                self.assertTrue(
+                    supervisor.reconcile(
+                        "run-1",
+                        root,
+                        runner,
+                        stage_lifecycle_recorder=lambda run_root, command, status, disposition, error: lifecycle.append(
+                            (command, status, disposition)
+                        ),
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(
+                lifecycle,
+                [
+                    ("b", "failed", "worker_lost"),
+                    ("b", "queued", "queued"),
+                    ("b", "running", "started"),
+                    ("b", "succeeded", "produced"),
+                ],
+            )
+
     def test_single_command_stops_after_requested_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -156,6 +199,7 @@ class PipelineSupervisorTests(unittest.TestCase):
             root = Path(tmp)
             supervisor = PipelineSupervisor()
             events: list[dict] = []
+            lifecycle: list[tuple[str, str, str]] = []
             supervisor.set_status_listener(lambda event_root, payload: events.append(dict(payload)))
 
             def runner(command: str, run_id: str, run_root: Path) -> int:
@@ -167,7 +211,17 @@ class PipelineSupervisorTests(unittest.TestCase):
                 patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
                 patch("pipeline_supervisor.stage_outputs_ready", return_value=False),
             ):
-                self.assertTrue(supervisor.start("run-1", root, runner, operation_id="op-cancel"))
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        operation_id="op-cancel",
+                        stage_lifecycle_recorder=lambda run_root, command, status, disposition, error: lifecycle.append(
+                            (command, status, disposition)
+                        ),
+                    )
+                )
                 time.sleep(0.02)
                 supervisor.cancel()
                 payload = _wait_for_status(supervisor, root, "cancelled")
@@ -175,6 +229,50 @@ class PipelineSupervisorTests(unittest.TestCase):
             self.assertEqual(payload["operation_id"], "op-cancel")
             self.assertTrue(any(item.get("status") == "cancelling" for item in events))
             self.assertTrue(any(item.get("status") == "cancelled" for item in events))
+            self.assertEqual(
+                lifecycle,
+                [("a", "queued", "queued"), ("a", "running", "started"), ("a", "cancelled", "cancelled")],
+            )
+
+    def test_workspaces_have_independent_supervisor_slots(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            alpha = Path(tmp) / "alpha"
+            beta = Path(tmp) / "beta"
+            alpha.mkdir()
+            beta.mkdir()
+            supervisor = PipelineSupervisor()
+            entered_alpha = threading.Event()
+            entered_beta = threading.Event()
+            release = threading.Event()
+            completed: set[tuple[Path, str]] = set()
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                (entered_alpha if run_id == "alpha" else entered_beta).set()
+                release.wait(timeout=3)
+                completed.add((run_root.resolve(), command))
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.stage_spec_by_command", return_value=SimpleNamespace(id="a", validator="")),
+                patch(
+                    "pipeline_supervisor.stage_outputs_ready",
+                    side_effect=lambda root, stage: (root.resolve(), stage) in completed,
+                ),
+            ):
+                self.assertTrue(supervisor.start("alpha", alpha, runner))
+                self.assertTrue(supervisor.start("beta", beta, runner))
+                self.assertTrue(entered_alpha.wait(timeout=2))
+                self.assertTrue(entered_beta.wait(timeout=2))
+                self.assertTrue(supervisor.is_running(alpha))
+                self.assertTrue(supervisor.is_running(beta))
+                supervisor.cancel(alpha)
+                release.set()
+                alpha_state = _wait_for_status(supervisor, alpha, "cancelled")
+                beta_state = _wait_for_status(supervisor, beta, "complete")
+
+            self.assertEqual(alpha_state["run_id"], "alpha")
+            self.assertEqual(beta_state["run_id"], "beta")
 
     def test_injected_v2_gate_blocks_stage_before_runner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -251,6 +349,42 @@ class PipelineSupervisorTests(unittest.TestCase):
                 _wait_for_status(supervisor, root, "complete")
 
             self.assertEqual(recorded, [("a", "reused"), ("b", "produced")])
+
+    def test_v2_stage_lifecycle_records_running_and_terminal_states(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            completed = {"a"}
+            lifecycle: list[tuple[str, str, str]] = []
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                completed.add(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b"]),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", side_effect=lambda r, stage: stage in completed),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        stage_lifecycle_recorder=lambda run_root, command, status, disposition, error: lifecycle.append(
+                            (command, status, disposition)
+                        ),
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertEqual(
+                lifecycle,
+                [
+                    ("a", "queued", "queued"), ("a", "reused", "reused"),
+                    ("b", "queued", "queued"), ("b", "running", "started"), ("b", "succeeded", "produced"),
+                ],
+            )
 
     def test_v2_artifact_recorder_failure_stops_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -41,7 +41,7 @@ def _json_response(response) -> dict:
 
 
 class RepairJobPersistenceTests(unittest.TestCase):
-    def test_v1_repair_job_file_is_imported_once_then_sqlite_is_authoritative(self) -> None:
+    def test_v1_repair_job_file_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "workspace" / "repair_job.json"
@@ -50,14 +50,13 @@ class RepairJobPersistenceTests(unittest.TestCase):
                 json.dumps({"job_id": "repair-legacy", "status": "running", "phase": "repairing"}),
                 encoding="utf-8",
             )
-            self.assertEqual(load_repair_job(root)["status"], "running")
+            self.assertEqual(load_repair_job(root), {})
             path.write_text(
                 json.dumps({"job_id": "repair-legacy", "status": "completed", "phase": "complete"}),
                 encoding="utf-8",
             )
             current = load_repair_job(root)
-            self.assertEqual(current["status"], "running")
-            self.assertEqual(current["phase"], "repairing")
+            self.assertEqual(current, {})
 
     def test_v2_repair_read_does_not_import_legacy_job_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

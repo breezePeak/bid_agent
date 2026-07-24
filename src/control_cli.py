@@ -81,31 +81,6 @@ class ControlApiClient:
     def snapshot(self, workspace_id: str) -> dict[str, Any]:
         return self._request("GET", f"/api/v2/workspaces/{quote(workspace_id, safe='')}/snapshot")
 
-    def migration_dry_run(self, workspace_id: str) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/dry-run",
-        )
-
-    def migration_backups(self, workspace_id: str) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/backups",
-        )
-
-    def migration_report(self, workspace_id: str) -> dict[str, Any]:
-        return self._request(
-            "GET",
-            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/report",
-        )
-
-    def drill_migration_backup(self, workspace_id: str, path: str) -> dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/migration/backups/drill",
-            {"path": path},
-        )
-
     def submit(
         self,
         workspace_id: str,
@@ -152,35 +127,6 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot = commands.add_parser("snapshot", help="读取工作区 V2 Snapshot")
     snapshot.add_argument("--workspace", required=True)
 
-    migration = commands.add_parser("migration-dry-run", help="只读盘点 V1 导入、冲突和 orphan")
-    migration.add_argument("--workspace", required=True)
-
-    backups = commands.add_parser("migration-backups", help="读取并校验迁移 SQLite 备份")
-    backups.add_argument("--workspace", required=True)
-
-    report = commands.add_parser("migration-report", help="读取工作区迁移审计报告")
-    report.add_argument("--workspace", required=True)
-
-    drill = commands.add_parser("migration-backup-drill", help="无破坏性验证迁移备份可恢复")
-    drill.add_argument("--workspace", required=True)
-    drill.add_argument("--path", required=True)
-
-    scan = commands.add_parser("migration-scan", help="创建管理员旧工作区迁移扫描 Action")
-    scan.add_argument("--workspace", required=True)
-
-    cutover = commands.add_parser("migration-cutover", help="创建管理员 V2 控制面切换 Action")
-    cutover.add_argument("--workspace", required=True)
-
-    reconcile = commands.add_parser("reconcile", help="创建管理员迁移冲突处理 Action")
-    reconcile.add_argument("--workspace", required=True)
-    reconcile.add_argument("--conflict-id", required=True)
-    reconcile.add_argument(
-        "--resolution",
-        required=True,
-        choices=("bind_legacy", "mark_failed", "keep_orphan"),
-    )
-    reconcile.add_argument("--reason", required=True)
-
     submit = commands.add_parser("submit", help="提交 Command；高风险命令返回持久化 Action")
     submit.add_argument("--workspace", required=True)
     submit.add_argument("--kind", required=True)
@@ -205,48 +151,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         client.login(str(args.username), password)
         if args.control_command == "snapshot":
             result = client.snapshot(args.workspace)
-        elif args.control_command == "migration-dry-run":
-            result = client.migration_dry_run(args.workspace)
-        elif args.control_command == "migration-backups":
-            result = client.migration_backups(args.workspace)
-        elif args.control_command == "migration-report":
-            result = client.migration_report(args.workspace)
-        elif args.control_command == "migration-backup-drill":
-            result = client.drill_migration_backup(args.workspace, args.path)
-        elif args.control_command == "migration-scan":
-            snapshot = client.snapshot(args.workspace)
-            revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
-            result = client.submit(
-                args.workspace,
-                kind="migration.scan",
-                payload={},
-                expected_revision=revision,
-                idempotency_key=f"cli:migration-scan:{uuid.uuid4()}",
-            )
-        elif args.control_command == "migration-cutover":
-            snapshot = client.snapshot(args.workspace)
-            revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
-            result = client.submit(
-                args.workspace,
-                kind="migration.cutover",
-                payload={},
-                expected_revision=revision,
-                idempotency_key=f"cli:migration-cutover:{uuid.uuid4()}",
-            )
-        elif args.control_command == "reconcile":
-            snapshot = client.snapshot(args.workspace)
-            revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
-            result = client.submit(
-                args.workspace,
-                kind="migration.reconcile",
-                payload={
-                    "conflict_id": args.conflict_id,
-                    "resolution": args.resolution,
-                    "reason": args.reason,
-                },
-                expected_revision=revision,
-                idempotency_key=f"cli:migration-reconcile:{uuid.uuid4()}",
-            )
         elif args.control_command == "submit":
             try:
                 payload = json.loads(args.payload or "{}")

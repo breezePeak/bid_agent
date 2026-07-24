@@ -74,7 +74,6 @@ def _collect_artifacts(root: Path) -> dict[str, list[str]]:
         "workspace/compliance_report.json",
         "workspace/score_coverage_matrix.json",
         "workspace/format_check_report.json",
-        "workspace/materials_checklist.json",
         "workspace/outline.json",
     ]
     ready: list[str] = []
@@ -144,10 +143,9 @@ def _issues_view(root: Path) -> dict[str, Any]:
 
 def _materials_view(root: Path) -> dict[str, Any]:
     try:
-        from materials_checklist import load_materials_checklist
+        from control_plane import ControlStore, WorkspaceContext
 
-        data = load_materials_checklist(root)
-        items = data.get("items") if isinstance(data.get("items"), list) else []
+        items = ControlStore(WorkspaceContext(root.name, root)).material_states()
         missing = []
         uploaded = []
         for item in items:
@@ -173,7 +171,12 @@ def _materials_view(root: Path) -> dict[str, Any]:
         return {
             "missing": missing[:30],
             "uploaded": uploaded[:30],
-            "summary": data.get("summary") or {},
+            "summary": {
+                "total": len(items),
+                "ready": sum(1 for item in items if str(item.get("response_status") or "") == "ready"),
+                "deferred": sum(1 for item in items if str(item.get("response_status") or "deferred") == "deferred"),
+                "waived": sum(1 for item in items if str(item.get("response_status") or "") == "waived"),
+            },
         }
     except Exception:
         return {"missing": [], "uploaded": [], "summary": {}}

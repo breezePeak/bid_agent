@@ -2,7 +2,6 @@ from __future__ import annotations
 
 """Live sub-agent activity ledger for UI (not log scraping)."""
 
-import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +13,7 @@ _lock = threading.RLock()
 
 ROLE_META = {
     "coordinator": {"label": "主 Agent", "emoji": "🧭", "color": "indigo"},
+    "chapter_context_selector": {"label": "上下文 Agent", "emoji": "🧩", "color": "cyan"},
     "chapter_writer": {"label": "写作 Agent", "emoji": "✍️", "color": "blue"},
     "chapter_reviewer": {"label": "审核 Agent", "emoji": "🔍", "color": "purple"},
     "chapter_rewriter": {"label": "改稿 Agent", "emoji": "📝", "color": "orange"},
@@ -45,22 +45,13 @@ def _empty() -> dict[str, Any]:
         "phase_label": "",
         "status": "idle",
         "agents": [],
-        "summary": {"total": 0, "running": 0, "done": 0, "failed": 0, "queued": 0},
+        "summary": {"total": 0, "running": 0, "done": 0, "failed": 0, "queued": 0, "interrupted": 0},
     }
 
 
 def load_activity(root: Path | None = None) -> dict[str, Any]:
     root = (root or project_root()).resolve()
-    path = activity_path(root)
-    imported: dict[str, Any] | None = None
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            data = None
-        imported = data if isinstance(data, dict) else None
     store = _activity_control_store(root)
-    store.ensure_agent_activity_state(imported)
     data = store.agent_activity_state() or _empty()
     data.setdefault("agents", [])
     data.setdefault("summary", _empty()["summary"])
@@ -69,10 +60,8 @@ def load_activity(root: Path | None = None) -> dict[str, Any]:
 
 def _save(root: Path, data: dict[str, Any]) -> None:
     root = root.resolve()
-    path = activity_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     agents = data.get("agents") if isinstance(data.get("agents"), list) else []
-    summary = {"total": len(agents), "running": 0, "done": 0, "failed": 0, "queued": 0}
+    summary = {"total": len(agents), "running": 0, "done": 0, "failed": 0, "queued": 0, "interrupted": 0}
     for a in agents:
         if not isinstance(a, dict):
             continue
@@ -84,9 +73,6 @@ def _save(root: Path, data: dict[str, Any]) -> None:
     data["summary"] = summary
     data["updated_at"] = _now()
     _activity_control_store(root).upsert_agent_activity_state(data)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(path)
 
 
 def begin_phase(
@@ -167,7 +153,7 @@ def mark_agent(
             found["attempt"] = attempt
         if status == "running" and not found.get("started_at"):
             found["started_at"] = _now()
-        if status in {"done", "failed"}:
+        if status in {"done", "failed", "interrupted"}:
             found["ended_at"] = _now()
         # phase status
         if any(str(a.get("status")) == "running" for a in agents if isinstance(a, dict)):
@@ -193,6 +179,32 @@ def end_phase(root: Path | None, *, status: str = "done", message: str = "") -> 
                 a["status"] = "skipped"
                 a["message"] = a.get("message") or "未执行"
                 a["ended_at"] = _now()
+        _save(root, data)
+        return data
+
+
+def set_context_selection_progress(
+    root: Path | None,
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose durable context-selection progress through the activity state bus."""
+    root = root or project_root()
+    expected = list(checkpoint.get("expected_chapter_ids") or [])
+    completed = list(checkpoint.get("completed_chapter_ids") or [])
+    failed = list(checkpoint.get("failed") or [])
+    progress = {
+        "batch_id": str(checkpoint.get("batch_id") or ""),
+        "status": str(checkpoint.get("status") or ""),
+        "expected": len(expected),
+        "completed": len(completed),
+        "remaining": max(0, len(expected) - len(completed)),
+        "failed": len(failed),
+        "effective_workers": int(checkpoint.get("effective_workers") or 0),
+        "message": str(checkpoint.get("message") or ""),
+    }
+    with _lock:
+        data = load_activity(root)
+        data["context_selection"] = progress
         _save(root, data)
         return data
 
@@ -254,7 +266,7 @@ def reconcile_interrupted_activity(root: Path | None = None) -> dict[str, Any]:
                 continue
             st = str(a.get("status") or "")
             if st == "running":
-                a["status"] = "failed"
+                a["status"] = "interrupted"
                 a["message"] = "服务重启中断，章节任务未完成"
                 a["ended_at"] = _now()
                 a["interrupted_by_restart"] = True
@@ -278,11 +290,11 @@ def reconcile_interrupted_activity(root: Path | None = None) -> dict[str, Any]:
 
 def _materials_deferred_count(root: Path) -> int:
     try:
-        from materials_checklist import load_materials_checklist
-
-        checklist = load_materials_checklist(root)
-        summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
-        return max(0, int(summary.get("deferred") or 0))
+        return sum(
+            1
+            for item in _activity_control_store(root).material_states()
+            if str(item.get("response_status") or "deferred") == "deferred"
+        )
     except Exception:
         return 0
 

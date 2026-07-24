@@ -9,7 +9,7 @@ from agents.outline_agent import run as outline_agent
 from agents.score_agent import run as score_agent
 from chapter_rewriter import review_fix_all
 from chapter_summarizer import summarize_chapter
-from context_selector import select_context_for_job
+from context_selector import ContextSelectionBatchError, select_contexts_for_jobs
 from docx_builder import build_docx, build_markdown
 from document_splitter import split_docs
 from compliance_checker import run_compliance_check
@@ -35,7 +35,8 @@ from score_estimator import estimate_final_score
 from source_trace import build_source_trace_index
 from stage_validation import chapter_ids, context_ids, review_ids, summary_ids
 from subagent_runner import run_write_all as concurrent_write_all
-from materials_checklist import build_materials_checklist
+from control_plane import ControlStore, WorkspaceContext
+from materials_checklist import derive_materials_checklist
 from template_evidence import build_template_evidence
 from utils import ensure_dirs, ensure_file, project_root, read_json, stringify
 
@@ -342,9 +343,9 @@ def build_materials_checklist_node(state) -> dict:
     print(_stage_progress("build_materials_checklist") + "...")
     _start_stage(state, "build_materials_checklist", "生成材料/资格清单")
     try:
-        path = root / "workspace" / "materials_checklist.json"
-        if _is_resume(state) and stage_resume_ready(root, "build_materials_checklist"):
-            update = {"materials_checklist_path": str(path)}
+        store = ControlStore(WorkspaceContext(workspace_id=root.name, root=root))
+        if _is_resume(state) and stage_resume_ready(root, "build_materials_checklist") and store.material_states():
+            update = {"material_state_store": "control.db"}
             _persist_state(
                 state,
                 update,
@@ -353,8 +354,22 @@ def build_materials_checklist_node(state) -> dict:
                 message="resume: 复用材料/资格清单",
             )
             return update
-        path = build_materials_checklist(root)
-        update = {"materials_checklist_path": str(path)}
+        checklist = derive_materials_checklist(root)
+        items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+        existing = {str(item.get("item_id") or ""): item for item in store.material_states()}
+        preserved_fields = {
+            "response_status", "lifecycle_status", "evidence_status", "reason",
+            "suggested_attachment", "suggested_placeholder_language", "uploaded_path",
+            "verification", "verification_history", "submission", "submission_history",
+        }
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            merged = dict(item)
+            prior = existing.get(str(item.get("item_id") or ""), {})
+            merged.update({key: prior[key] for key in preserved_fields if key in prior})
+            store.upsert_material_state(merged, source="pipeline.build_materials_checklist")
+        update = {"material_state_store": "control.db", "material_count": len(items)}
         _persist_state(state, update, stage="build_materials_checklist")
         return update
     except Exception as exc:
@@ -418,7 +433,8 @@ def plan_chapter_jobs_node(state) -> dict:
                 update = {"chapter_jobs": existing_jobs, "jobs_dir": str(root / "workspace" / "jobs")}
                 _persist_state(state, update, stage="plan_chapter_jobs", status="ok", message="resume: 复用章节任务")
                 return update
-        jobs = plan_chapter_jobs(root)
+        materials = ControlStore(WorkspaceContext(workspace_id=root.name, root=root)).material_states()
+        jobs = plan_chapter_jobs(root, material_items=materials)
         update = {"chapter_jobs": jobs, "jobs_dir": str(root / "workspace" / "jobs")}
         _persist_state(state, update, stage="plan_chapter_jobs")
         return update
@@ -432,34 +448,33 @@ def select_contexts_node(state) -> dict:
     print(_stage_progress("select_contexts") + "...")
     _start_stage(state, "select_contexts", "选择章节上下文")
     jobs = _state_jobs(state, root)
-    expected_chapter_ids = _chapter_ids_from_jobs(jobs)
-    existing_context_ids = sorted(context_ids(root))
-    if _is_resume(state):
-        pending_ids = _missing_ids(expected_chapter_ids, existing_context_ids)
-        if not pending_ids:
-            update = {
-                "chapter_jobs": jobs,
-                "contexts_dir": str(root / "workspace" / "contexts"),
-            }
-            _persist_state(state, update, stage="select_contexts", status="ok", message="resume: 复用章节上下文")
-            return update
-        jobs = [job for job in jobs if stringify(job.get("chapter_id")) in set(pending_ids)]
-
     errors: list[str] = []
+    try:
+        select_contexts_for_jobs(
+            jobs,
+            root,
+            workers=int(state.get("workers") or 1),
+            max_retries=int(state.get("max_retries") or 0),
+            resume=True,
+        )
+    except ContextSelectionBatchError as exc:
+        for item in exc.failed:
+            errors.append(
+                f"章节 {item.get('chapter_id', '')} 上下文选择失败: {item.get('error', '')}"
+            )
+    except Exception as exc:
+        errors.append(f"上下文选择批次失败: {exc}")
+
     for job in jobs:
         chapter_id = stringify(job.get("chapter_id"))
+        output_path = root / "workspace" / "contexts" / f"{chapter_id}_context.json"
         try:
-            output_path = select_context_for_job(job, root)
-            try:
-                context_data = read_json(output_path)
-            except Exception as exc:
-                errors.append(f"章节 {chapter_id} 上下文结果读取失败: {exc}")
-                continue
-
+            context_data = read_json(output_path)
             for warning in context_data.get("warnings", []):
                 errors.append(f"章节 {chapter_id} 上下文警告: {warning}")
         except Exception as exc:
-            errors.append(f"章节 {chapter_id} 上下文选择失败: {exc}")
+            if not any(f"章节 {chapter_id} " in item for item in errors):
+                errors.append(f"章节 {chapter_id} 上下文结果读取失败: {exc}")
 
     update = {
         "chapter_jobs": _state_jobs(state, root),

@@ -13,7 +13,7 @@ from agent.activity import activity_for_api, begin_phase, end_phase, load_activi
 
 
 class AgentActivityTests(unittest.TestCase):
-    def test_v1_activity_file_is_imported_once_then_sqlite_is_authoritative(self) -> None:
+    def test_v1_activity_file_is_ignored(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             path = root / "workspace" / "agent" / "activity.json"
@@ -25,11 +25,11 @@ class AgentActivityTests(unittest.TestCase):
                 "summary": {"total": 0, "running": 0, "done": 0, "failed": 0, "queued": 0},
             }
             path.write_text(json.dumps(original), encoding="utf-8")
-            self.assertEqual(load_activity(root)["phase"], "write")
+            self.assertEqual(load_activity(root)["phase"], "")
             path.write_text(json.dumps({**original, "status": "done", "phase": "stale"}), encoding="utf-8")
             current = load_activity(root)
-            self.assertEqual(current["status"], "running")
-            self.assertEqual(current["phase"], "write")
+            self.assertEqual(current["status"], "idle")
+            self.assertEqual(current["phase"], "")
 
     def test_phase_lifecycle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

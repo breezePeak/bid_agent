@@ -27,6 +27,7 @@ _JOB_KEYS = {
 }
 
 _JSONL_LOCK = threading.Lock()
+_METRICS_LOCK = threading.RLock()
 
 
 def _now() -> str:
@@ -252,32 +253,35 @@ def record_agent_run_artifact(
     artifact_path: Path,
     chapter_id: str = "",
 ) -> None:
-    metrics = _load_metrics(root)
-    run_id = _ensure_run_id(root)
-    metrics["run_id"] = run_id
-    stages = metrics.setdefault("stages", {})
-    stage_metrics = stages.setdefault(
-        stage,
-        {"attempts": 0, "duration_ms": 0, "llm_calls": 0, "input_tokens_est": 0, "output_tokens_est": 0, "agent_runs": []},
-    )
-    stage_metrics["llm_calls"] = int(stage_metrics.get("llm_calls", 0)) + int(payload.get("llm_calls", 0))
-    stage_metrics["input_tokens_est"] = int(stage_metrics.get("input_tokens_est", 0)) + int(payload.get("input_tokens_est", 0))
-    stage_metrics["output_tokens_est"] = int(stage_metrics.get("output_tokens_est", 0)) + int(payload.get("output_tokens_est", 0))
-    stage_metrics["duration_ms"] = int(stage_metrics.get("duration_ms", 0)) + int(payload.get("duration_ms", 0))
-    agent_runs = stage_metrics.setdefault("agent_runs", [])
-    agent_runs.append(
-        {
-            "agent_name": payload.get("agent_name", ""),
-            "chapter_id": chapter_id,
-            "artifact_path": str(artifact_path),
-            "prompt_file": payload.get("prompt_file", ""),
-            "prompt_version": payload.get("prompt_version", ""),
-            "prompt_checksum": payload.get("prompt_checksum", ""),
-            "model": payload.get("model", ""),
-            "temperature": payload.get("temperature"),
-        }
-    )
-    _save_metrics(root, metrics)
+    # Agent workers finish concurrently. Keep the complete read-modify-write
+    # transaction under one lock so token counts and agent_runs cannot be lost.
+    with _METRICS_LOCK:
+        metrics = _load_metrics(root)
+        run_id = _ensure_run_id(root)
+        metrics["run_id"] = run_id
+        stages = metrics.setdefault("stages", {})
+        stage_metrics = stages.setdefault(
+            stage,
+            {"attempts": 0, "duration_ms": 0, "llm_calls": 0, "input_tokens_est": 0, "output_tokens_est": 0, "agent_runs": []},
+        )
+        stage_metrics["llm_calls"] = int(stage_metrics.get("llm_calls", 0)) + int(payload.get("llm_calls", 0))
+        stage_metrics["input_tokens_est"] = int(stage_metrics.get("input_tokens_est", 0)) + int(payload.get("input_tokens_est", 0))
+        stage_metrics["output_tokens_est"] = int(stage_metrics.get("output_tokens_est", 0)) + int(payload.get("output_tokens_est", 0))
+        stage_metrics["duration_ms"] = int(stage_metrics.get("duration_ms", 0)) + int(payload.get("duration_ms", 0))
+        agent_runs = stage_metrics.setdefault("agent_runs", [])
+        agent_runs.append(
+            {
+                "agent_name": payload.get("agent_name", ""),
+                "chapter_id": chapter_id,
+                "artifact_path": str(artifact_path),
+                "prompt_file": payload.get("prompt_file", ""),
+                "prompt_version": payload.get("prompt_version", ""),
+                "prompt_checksum": payload.get("prompt_checksum", ""),
+                "model": payload.get("model", ""),
+                "temperature": payload.get("temperature"),
+            }
+        )
+        _save_metrics(root, metrics)
     record_stage_event(
         root,
         stage,

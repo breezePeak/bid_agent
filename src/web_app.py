@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 import hashlib
 import hmac
 import json
@@ -94,6 +95,7 @@ def _is_v1_compat_api(path: str) -> bool:
         path.startswith("/api/v2/")
         or path.startswith("/api/auth/")
         or path.startswith("/api/llm-settings")
+        or path.startswith("/api/flow-settings")
     )
 
 
@@ -106,10 +108,57 @@ def _mark_v1_compat_response(path: str, response: Any) -> Any:
 
 
 def _auth_credentials() -> tuple[str, str]:
+    from config import _parse_env_file
+
+    # The Web server is often started by an IDE or service manager that does
+    # not import .env into os.environ. Read the same project-level source as
+    # the model settings so the login screen reflects the configured password.
+    file_values = _parse_env_file(ROOT / ".env")
     return (
-        str(os.environ.get("BID_AGENT_AUTH_USER") or "admin"),
-        str(os.environ.get("BID_AGENT_AUTH_PASSWORD") or ""),
+        str(os.environ["BID_AGENT_AUTH_USER"] if "BID_AGENT_AUTH_USER" in os.environ else file_values.get("BID_AGENT_AUTH_USER") or "admin"),
+        str(os.environ["BID_AGENT_AUTH_PASSWORD"] if "BID_AGENT_AUTH_PASSWORD" in os.environ else file_values.get("BID_AGENT_AUTH_PASSWORD") or ""),
     )
+
+
+def _auth_secure_cookie() -> bool:
+    from config import _parse_env_file
+
+    file_values = _parse_env_file(ROOT / ".env")
+    value = os.environ["BID_AGENT_AUTH_SECURE_COOKIE"] if "BID_AGENT_AUTH_SECURE_COOKIE" in os.environ else file_values.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0"
+    return str(value).lower() in {"1", "true", "yes"}
+
+
+def _issue_auth_session(username: str) -> JSONResponse:
+    token = secrets.token_urlsafe(32)
+    csrf_token = secrets.token_urlsafe(32)
+    principal = {"type": "user", "id": username[:128], "role": "admin"}
+    with _AUTH_LOCK:
+        _AUTH_SESSIONS[token] = {
+            "principal": principal,
+            "csrf_token": csrf_token,
+            "expires_at": time.time() + _AUTH_SESSION_SECONDS,
+        }
+    response = JSONResponse({"ok": True, "principal": principal, "csrf_token": csrf_token})
+    secure_cookie = _auth_secure_cookie()
+    response.set_cookie(
+        _AUTH_COOKIE,
+        token,
+        max_age=_AUTH_SESSION_SECONDS,
+        httponly=True,
+        samesite="strict",
+        secure=secure_cookie,
+        path="/",
+    )
+    response.set_cookie(
+        _CSRF_COOKIE,
+        csrf_token,
+        max_age=_AUTH_SESSION_SECONDS,
+        httponly=False,
+        samesite="strict",
+        secure=secure_cookie,
+        path="/",
+    )
+    return response
 
 
 def _session_record(token: str) -> dict[str, Any] | None:
@@ -154,6 +203,19 @@ async def api_auth_and_workspace_acl(request: Request, call_next):
         return JSONResponse(
             {"ok": False, "error": {"code": "AUTH_REQUIRED", "message": "请先登录。"}, "message": "请先登录。"},
             status_code=401,
+        )
+    if _is_v1_compat_api(path):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": {
+                    "code": "V1_API_RETIRED",
+                    "message": "V1 API 已废弃；请使用 workspace-scoped /api/v2/ 接口。",
+                },
+                "message": "V1 API 已废弃；请使用 workspace-scoped /api/v2/ 接口。",
+            },
+            status_code=410,
+            headers={"Link": '</api/v2/workspaces>; rel="successor-version"'},
         )
     if request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         expected_csrf = str(session.get("csrf_token") or "")
@@ -224,36 +286,7 @@ async def api_auth_login(request: Request) -> JSONResponse:
         )
     if not (hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_password)):
         return JSONResponse({"ok": False, "message": "用户名或密码错误。"}, status_code=401)
-    token = secrets.token_urlsafe(32)
-    csrf_token = secrets.token_urlsafe(32)
-    principal = {"type": "user", "id": username[:128], "role": "admin"}
-    with _AUTH_LOCK:
-        _AUTH_SESSIONS[token] = {
-            "principal": principal,
-            "csrf_token": csrf_token,
-            "expires_at": time.time() + _AUTH_SESSION_SECONDS,
-        }
-    response = JSONResponse({"ok": True, "principal": principal, "csrf_token": csrf_token})
-    secure_cookie = str(os.environ.get("BID_AGENT_AUTH_SECURE_COOKIE") or "0").lower() in {"1", "true", "yes"}
-    response.set_cookie(
-        _AUTH_COOKIE,
-        token,
-        max_age=_AUTH_SESSION_SECONDS,
-        httponly=True,
-        samesite="strict",
-        secure=secure_cookie,
-        path="/",
-    )
-    response.set_cookie(
-        _CSRF_COOKIE,
-        csrf_token,
-        max_age=_AUTH_SESSION_SECONDS,
-        httponly=False,
-        samesite="strict",
-        secure=secure_cookie,
-        path="/",
-    )
-    return response
+    return _issue_auth_session(username)
 
 
 @app.post("/api/auth/logout")
@@ -275,6 +308,7 @@ LOG_LINES: list[str] = []
 LOG_MAX = 2000
 _LOG_CONTEXT = threading.local()
 _WORKSPACE_LOG_LOCK = threading.Lock()
+_EXECUTION_LOCK = threading.RLock()
 RUNNING = False
 CURRENT_TASK = ""
 _REPAIR_START_LOCK = threading.RLock()
@@ -288,6 +322,32 @@ SUPERVISOR = PipelineSupervisor()
 ACTIVE_RUN_ID = ""
 ACTIVE_RUN_ROOT: Path | None = None
 _PENDING_LINE_EDITS: dict[Path, dict[str, Any]] = {}
+
+
+@contextmanager
+def _legacy_execution_scope(task: str, run_id: str, run_root: Path):
+    """Serialize residual process-global runner state during V2 worker execution."""
+    global RUNNING, CURRENT_TASK, CURRENT_PROCESS, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
+    with _EXECUTION_LOCK:
+        RUNNING = True
+        CURRENT_TASK = task
+        CURRENT_PROCESS = None
+        CURRENT_RUN_ID = run_id
+        CURRENT_RUN_ROOT = run_root
+        PAUSE_REQUESTED = False
+        _LOG_CONTEXT.run_root = run_root
+        try:
+            yield
+        finally:
+            if _same_path(CURRENT_RUN_ROOT, run_root):
+                RUNNING = False
+                CURRENT_TASK = ""
+                CURRENT_PROCESS = None
+                CURRENT_RUN_ID = ""
+                CURRENT_RUN_ROOT = None
+                PAUSE_REQUESTED = False
+            if hasattr(_LOG_CONTEXT, "run_root"):
+                del _LOG_CONTEXT.run_root
 
 def _workflow_step_payload() -> list[dict[str, Any]]:
     steps: list[dict[str, Any]] = []
@@ -429,7 +489,10 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(value.strip())
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -1484,7 +1547,7 @@ def _workflow_timings(
             if started_at is not None:
                 timing["started_at"] = started_at.isoformat(timespec="seconds")
         if started_at is not None:
-            duration_seconds = max(0, (datetime.now() - started_at).total_seconds())
+            duration_seconds = max(0, (datetime.now(timezone.utc) - started_at).total_seconds())
             timing["duration_seconds"] = int(round(duration_seconds))
             timing["duration_label"] = _format_duration(duration_seconds)
         timing["status"] = "running"
@@ -1829,19 +1892,52 @@ def _status_payload(
 ) -> dict[str, Any]:
     v2_store = ControlStore(WorkspaceContext.resolve(root.parent, root.name)) if v2_read_only else None
     v2_snapshot = v2_store.snapshot() if v2_store is not None else {}
-    v2_operation = v2_snapshot.get("operation") if isinstance(v2_snapshot.get("operation"), dict) else {}
     if v2_read_only:
         # Control status must come from SQLite in V2.  V1 run_state.json and
         # pipeline_control.json are compatibility projections, not a fallback
         # authority for the Chat control surface.
-        pipeline_control = {
-            "operation_id": str(v2_operation.get("operation_id") or ""),
-            "kind": str(v2_operation.get("kind") or ""),
-            "status": str(v2_operation.get("status") or "idle"),
-            "current_stage": str(v2_operation.get("start_command") or ""),
-            "message": str(v2_operation.get("message") or ""),
-            "updated_at": str(v2_operation.get("updated_at") or ""),
-        }
+        pipeline_operation = next(
+            (
+                item for item in (v2_snapshot.get("operations") or [])
+                if str(item.get("kind") or "").startswith("pipeline.")
+            ),
+            None,
+        )
+        if pipeline_operation:
+            pipeline_operation_id = str(pipeline_operation.get("operation_id") or "")
+            latest_stage_run = next(
+                (
+                    item for item in (v2_snapshot.get("stage_runs") or [])
+                    if str(item.get("operation_id") or "") == pipeline_operation_id
+                ),
+                None,
+            )
+            pipeline_control = {
+                "operation_id": pipeline_operation_id,
+                "kind": str(pipeline_operation.get("kind") or ""),
+                "status": str(pipeline_operation.get("status") or "idle"),
+                "current_stage": str(
+                    (latest_stage_run or {}).get("stage_command")
+                    or pipeline_operation.get("start_command")
+                    or ""
+                ),
+                "message": str(pipeline_operation.get("message") or ""),
+                "error": pipeline_operation.get("error"),
+                "updated_at": str(pipeline_operation.get("updated_at") or ""),
+                "source": "control.db",
+                "consistent": True,
+            }
+        else:
+            pipeline_control = {
+                "operation_id": "",
+                "kind": "",
+                "status": "idle",
+                "current_stage": "",
+                "message": "",
+                "updated_at": "",
+                "source": "control.db",
+                "consistent": True,
+            }
         run_state = {
             "stage": pipeline_control["current_stage"],
             "status": pipeline_control["status"],
@@ -1849,7 +1945,7 @@ def _status_payload(
             "updated_at": pipeline_control["updated_at"],
             "summary": {},
         }
-        run_events = v2_store.events(max(1, v2_snapshot.get("revision", 0) - 20), limit=20)
+        run_events = v2_store.recent_events(limit=20)
     else:
         run_state = _read_run_state(root)
         run_events = load_run_events(root)
@@ -1861,6 +1957,12 @@ def _status_payload(
         else (manual_review_summary(root) if persist_manual_review_summary else {})
     )
     repair_job = load_v2_repair_job(root) if v2_read_only else load_repair_job(root)
+    if v2_read_only and repair_job and str(repair_job.get("status") or "") in RUNNING_REPAIR_STATUSES:
+        actual_resume_command = _v2_pipeline_resume_command(WorkspaceContext.resolve(root.parent, root.name))
+        if actual_resume_command:
+            # Keep the chat card aligned with control.db stage runs.  The Job's
+            # original resume command is historical and may be stale.
+            repair_job = {**repair_job, "resume_command": actual_resume_command}
     pending_confirmation = None
     if str(repair_job.get("status") or "") == "awaiting_confirmation":
         pending_confirmation = {
@@ -2273,13 +2375,32 @@ def _minimal_repair_resume_command(root: Path) -> str:
 
 
 def _v2_pipeline_resume_command(context: WorkspaceContext) -> str:
-    """Choose a resume stage from authoritative Pipeline Operations only."""
-    allowed = set(auto_run_commands())
+    """Choose the interrupted/incomplete stage from authoritative V2 records."""
+    commands = auto_run_commands()
+    allowed = set(commands)
     try:
-        operations = ControlStore(context).snapshot().get("operations") or []
+        store = ControlStore(context)
+        operations = store.snapshot().get("operations") or []
         for item in operations:
             if not isinstance(item, dict) or not str(item.get("kind") or "").startswith("pipeline."):
                 continue
+            operation_id = str(item.get("operation_id") or "").strip()
+            latest_by_command: dict[str, dict[str, Any]] = {}
+            for stage_run in (store.stage_runs(operation_id) if operation_id else []):
+                stage_command = str(stage_run.get("stage_command") or "").strip()
+                if stage_command not in allowed:
+                    continue
+                attempt = int(stage_run.get("attempt") or 0)
+                current = latest_by_command.get(stage_command)
+                if current is None or attempt >= int(current.get("attempt") or 0):
+                    latest_by_command[stage_command] = stage_run
+            # The operation's start command is only a historical boundary.
+            # Prefer the first unfinished recorded stage: a pipeline started
+            # at context selection may already have reached chapter writing.
+            for stage_command in commands:
+                stage_run = latest_by_command.get(stage_command)
+                if stage_run and str(stage_run.get("status") or "") not in {"succeeded", "reused"}:
+                    return stage_command
             command = str(item.get("start_command") or "").strip()
             if command in allowed:
                 return command
@@ -2415,6 +2536,62 @@ def _repair_result_count(result: dict[str, Any], key: str, count_key: str) -> in
         return 0
 
 
+def _sync_v2_repair_failure_details(context: WorkspaceContext, result: dict[str, Any]) -> int:
+    """Project per-issue repair failures into the V2 Issue authority.
+
+    The repair engine also writes a legacy compatibility issue log.  V2 panels
+    deliberately read control.db, so copying only that log made a failure
+    visible in the chat card but invisible on the Issues tab.
+    """
+    failed_rows = [
+        item for item in (result.get("results") or [])
+        if isinstance(item, dict)
+        and str(item.get("classification") or "") == "failed"
+        and str(item.get("issue_id") or "").strip()
+    ]
+    if not failed_rows:
+        return 0
+    store = ControlStore(context)
+    issues = store.issue_states()
+    by_id = {str(item.get("issue_id") or item.get("id") or ""): item for item in failed_rows}
+    changed = 0
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for issue in issues:
+        row = by_id.get(str(issue.get("id") or ""))
+        if row is None:
+            continue
+        reason = str(row.get("failure_reason") or row.get("message") or "修复动作执行失败").strip()[:1200]
+        evidence = dict(issue.get("evidence") or {})
+        evidence["last_repair_failure"] = {
+            "at": now,
+            "reason": reason,
+            "action_errors": [
+                str(item.get("message") or item.get("error") or "")[:600]
+                for item in (row.get("step_results") or [])
+                if isinstance(item, dict) and not item.get("ok")
+            ][:5],
+            "revalidation_errors": [
+                str(item.get("message") or item.get("error") or "")[:600]
+                for item in (row.get("revalidate_results") or [])
+                if isinstance(item, dict) and not item.get("ok")
+            ][:5],
+        }
+        detail = str(issue.get("detail") or "").split("\n\n最近一次最小修复失败：", 1)[0]
+        issue.update(
+            {
+                "status": "open",
+                "detail": f"{detail}\n\n最近一次最小修复失败：{reason}".strip(),
+                "failure_reason": reason,
+                "evidence": evidence,
+                "updated_at": now,
+            }
+        )
+        changed += 1
+    if changed:
+        store.replace_issue_states(issues, source="repair.failure")
+    return changed
+
+
 def _trigger_repair_job(
     root: Path,
     confirmation_id: str,
@@ -2423,6 +2600,7 @@ def _trigger_repair_job(
     control_operation_id: str = "",
     control_fencing_token: int = 0,
     resume_pipeline: bool = True,
+    defer_start: bool = False,
 ) -> dict[str, Any]:
     """Claim exactly one repair slot and run the persisted job in the background.
 
@@ -2434,9 +2612,18 @@ def _trigger_repair_job(
         current = load_v2_repair_job(root) if control_operation_id else load_repair_job(root)
         if str(current.get("status") or "") in RUNNING_REPAIR_STATUSES:
             return {"ok": True, "duplicate": True, "job": current, "message": current.get("message", "修复任务正在执行")}
-        pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
-        pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
-        if RUNNING or SUPERVISOR.is_running() or pipeline_busy:
+        # V2 authorization already owns the workspace lease in control.db. A
+        # stale V1 checkpoint must not veto that confirmed Operation.
+        pipeline_busy = False
+        if not control_operation_id:
+            pipeline_status = str(SUPERVISOR.load(root).get("status") or "")
+            pipeline_busy = pipeline_status in {"running", "recovering", "retrying", "pausing"}
+        v2_busy = (
+            (RUNNING and _same_path(CURRENT_RUN_ROOT, root))
+            or SUPERVISOR.is_running(root)
+        )
+        v1_busy = RUNNING or SUPERVISOR.is_running() or pipeline_busy
+        if (v2_busy if control_operation_id else v1_busy):
             return {"ok": False, "busy": True, "job": current, "message": "当前已有任务正在运行，修复确认已保留，请稍后重试"}
         claimed = (
             claim_repair_job_authorized(root, control_operation_id)
@@ -2469,12 +2656,7 @@ def _trigger_repair_job(
         if claimed.get("duplicate"):
             return {"ok": True, "duplicate": True, "job": job, "message": job.get("message", "已处理该修复确认")}
         job_id = str(job.get("job_id") or "")
-        job_run_id = ACTIVE_RUN_ID or root.name
-        RUNNING = True
-        CURRENT_TASK = "minimal-repair"
-        CURRENT_RUN_ID = job_run_id
-        CURRENT_RUN_ROOT = root
-        PAUSE_REQUESTED = False
+        job_run_id = root.name if control_operation_id else (ACTIVE_RUN_ID or root.name)
 
     def _progress(phase: str, progress: dict[str, Any] | None = None) -> None:
         details = progress if isinstance(progress, dict) else {}
@@ -2525,33 +2707,28 @@ def _trigger_repair_job(
                 raise RuntimeError(f"repair control state sync failed: {exc}") from exc
 
     def _run() -> None:
-        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
         result: dict[str, Any]
         failure: Exception | None = None
-        try:
-            from agent.repair import execute_repair_batch
+        with _legacy_execution_scope("minimal-repair", job_run_id, root):
+            try:
+                from agent.repair import execute_repair_batch
 
-            repair_context = _workspace_context(root.name) if control_operation_id else None
-            issues = _minimal_repair_candidates(root, context=repair_context)
-            issue_ids = [str(issue.get("id") or "") for issue in issues if issue.get("id")]
-            result = execute_repair_batch(
-                root,
-                issue_ids,
-                confirm=True,
-                dry_run=False,
-                issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
-                progress_callback=_progress,
-            )
-            if control_operation_id:
-                from artifact_manifest import record_external_chapter_mutation
-
-                record_external_chapter_mutation(
-                    _workspace_context(root.name),
-                    disposition="issue_repair",
+                repair_context = _workspace_context(root.name) if control_operation_id else None
+                issues = _minimal_repair_candidates(root, context=repair_context)
+                issue_ids = [str(issue.get("id") or "") for issue in issues if issue.get("id")]
+                result = execute_repair_batch(
+                    root,
+                    issue_ids,
+                    confirm=True,
+                    dry_run=False,
+                    issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
+                    progress_callback=_progress,
                 )
-        except Exception as exc:
-            failure = exc
-            result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
+                if repair_context:
+                    _sync_v2_repair_failure_details(repair_context, result)
+            except Exception as exc:
+                failure = exc
+                result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
 
         resolved_count = _repair_result_count(result, "resolved", "resolved_count")
         remaining_count = _repair_result_count(result, "still_open", "remaining_count")
@@ -2566,11 +2743,22 @@ def _trigger_repair_job(
         else:
             terminal_status = "completed"
 
-        with _REPAIR_START_LOCK:
-            RUNNING = False
-            CURRENT_TASK = ""
-            CURRENT_RUN_ID = ""
-            CURRENT_RUN_ROOT = None
+        if control_operation_id and terminal_status == "completed":
+            from artifact_manifest import record_external_chapter_mutation
+
+            repair_artifacts = record_external_chapter_mutation(
+                _workspace_context(root.name),
+                disposition="issue_repair",
+            )
+            if repair_artifacts:
+                _record_v2_stage_lifecycle(
+                    _workspace_context(root.name),
+                    control_operation_id,
+                    "write-all",
+                    "succeeded",
+                    "issue_repair",
+                    None,
+                )
 
         resume_command = str(job.get("resume_command") or "")
         resume_started = False
@@ -2653,14 +2841,22 @@ def _trigger_repair_job(
                 _append_log(f"[警告] 修复 Operation 状态回写失败: {exc}")
 
     worker_thread = threading.Thread(target=_run, daemon=True, name=f"repair-{job_id}")
-    worker_thread.start()
-    return {
+
+    def start_worker() -> None:
+        worker_thread.start()
+
+    result: dict[str, Any] = {
         "ok": True,
         "duplicate": False,
         "job": job,
         "message": "已开始最小修复，将按根因合并处理并统一重验",
         "_worker_thread": worker_thread,
     }
+    if defer_start:
+        result["_after_commit"] = start_worker
+    else:
+        start_worker()
+    return result
 
 
 @app.post("/api/chat")
@@ -2716,21 +2912,21 @@ def _trigger_rewrite_targets_inline(
     run_id: str = "",
     control_operation_id: str = "",
     control_fencing_token: int = 0,
+    defer_start: bool = False,
 ) -> dict[str, Any]:
-    global RUNNING
     if not targets:
         return {"ok": False, "message": "没有定向改稿目标。"}
     if not str(control_operation_id or "").strip() or int(control_fencing_token or 0) <= 0:
         return {"ok": False, "message": "定向改稿缺少权威 Operation/fencing token，已拒绝执行。"}
-    if RUNNING:
-        return {"ok": False, "message": "当前已有任务正在运行，请等待完成。"}
     if root is None and ACTIVE_RUN_ROOT is None:
         return {"ok": False, "message": "请先创建本次运行工作空间。"}
+    run_root = root or _active_root()
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, run_root)) or SUPERVISOR.is_running(run_root):
+        return {"ok": False, "message": "当前工作空间已有任务正在运行，请等待完成。"}
     chapter_ids = [str(t.get("chapter_id")) for t in targets if t.get("chapter_id")]
     if not chapter_ids:
         return {"ok": False, "message": "改稿目标缺少 chapter_id。"}
-    run_root = root or _active_root()
-    resolved_run_id = run_id or ACTIVE_RUN_ID or run_root.name
+    resolved_run_id = run_id or run_root.name
 
     def _sync_control(status: str, message: str, error: Any = None) -> None:
         if not control_operation_id:
@@ -2745,78 +2941,93 @@ def _trigger_rewrite_targets_inline(
         )
 
     def _run_rewrite_sync(chapters: list[str], worker_root: Path) -> None:
-        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
-        RUNNING = True
-        CURRENT_TASK = "dispatch-rewrite"
-        CURRENT_RUN_ID = resolved_run_id
-        CURRENT_RUN_ROOT = worker_root
-        PAUSE_REQUESTED = False
         operation_status = "failed"
         operation_error: dict[str, Any] | None = None
         state_status = "error"
         state_message = "定向改稿未启动。"
-        try:
-            save_run_state(
-                worker_root,
-                {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
-                stage="review-fix-all",
-                status="running",
-                message=f"定向改稿: {chapters}",
-            )
-            # The authoritative Operation must be writable before any artifact
-            # mutation starts; otherwise the worker fails closed.
-            _sync_control("running", f"正在定向改稿: {chapters}")
-            _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
-            from subagent_runner import run_rewrite_all
-
-            from concurrency import workers_default
-
-            result = run_rewrite_all(worker_root, workers=workers_default(), chapter_ids=chapters)
-            if control_operation_id:
-                from artifact_manifest import record_external_chapter_mutation
-
-                record_external_chapter_mutation(
-                    _workspace_context(worker_root.name),
-                    disposition="chapter_rewrite",
+        with _legacy_execution_scope("dispatch-rewrite", resolved_run_id, worker_root):
+            try:
+                save_run_state(
+                    worker_root,
+                    {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
+                    stage="review-fix-all",
+                    status="running",
+                    message=f"定向改稿: {chapters}",
                 )
-            failed = result.get("failed", [])
-            state_status = "ok" if not failed else "error"
-            state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
-            operation_status = "succeeded" if not failed else "blocked"
-            if failed:
-                operation_error = {"failed_chapters": failed}
-        except Exception as exc:
-            state_status = "error"
-            state_message = f"定向改稿失败: {exc}"
-            operation_error = {"message": str(exc)}
-            _append_log(f"[错误] 定向改稿异常: {exc}")
-        try:
-            save_run_state(
-                worker_root,
-                {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
-                stage="review-fix-all",
-                status=state_status,
-                message=state_message,
-            )
-        except Exception as exc:
-            operation_status = "failed"
-            operation_error = {"message": f"run state write failed: {exc}"}
-            state_message = f"定向改稿终态保存失败: {exc}"
-            _append_log(f"[错误] {state_message}")
-        finally:
-            # Publish the terminal Operation only after the in-process worker
-            # state is terminal too, so observers never see succeeded + RUNNING.
-            RUNNING = False
-            CURRENT_TASK = ""
-            CURRENT_RUN_ID = ""
-            CURRENT_RUN_ROOT = None
+                # The authoritative Operation must be writable before any artifact
+                # mutation starts; otherwise the worker fails closed.
+                _sync_control("running", f"正在定向改稿: {chapters}")
+                _append_log(f"--- [{time.strftime('%H:%M:%S')}] 定向改稿: {chapters} ---")
+                from subagent_runner import run_rewrite_all
+
+                from concurrency import workers_default
+
+                result = run_rewrite_all(worker_root, workers=workers_default(), chapter_ids=chapters)
+                failed = result.get("failed", [])
+                state_status = "ok" if not failed else "error"
+                state_message = f"定向改稿完成: 成功 {len(result.get('completed', []))}, 失败 {len(failed)}"
+                operation_status = "succeeded" if not failed else "blocked"
+                if failed:
+                    operation_error = {"failed_chapters": failed}
+                elif control_operation_id:
+                    from artifact_manifest import record_external_chapter_mutation
+
+                    rewritten = record_external_chapter_mutation(
+                        _workspace_context(worker_root.name),
+                        disposition="chapter_rewrite",
+                    )
+                    if rewritten:
+                        _record_v2_stage_lifecycle(
+                            _workspace_context(worker_root.name),
+                            control_operation_id,
+                            "write-all",
+                            "succeeded",
+                            "chapter_rewrite",
+                            None,
+                        )
+            except Exception as exc:
+                state_status = "error"
+                state_message = f"定向改稿失败: {exc}"
+                operation_error = {"message": str(exc)}
+                _append_log(f"[错误] 定向改稿异常: {exc}")
+            try:
+                save_run_state(
+                    worker_root,
+                    {"root_dir": str(worker_root), "current_command": "dispatch-rewrite"},
+                    stage="review-fix-all",
+                    status=state_status,
+                    message=state_message,
+                )
+            except Exception as exc:
+                operation_status = "failed"
+                operation_error = {"message": f"run state write failed: {exc}"}
+                state_message = f"定向改稿终态保存失败: {exc}"
+                _append_log(f"[错误] {state_message}")
         try:
             _sync_control(operation_status, state_message, operation_error)
         except Exception as exc:
             _append_log(f"[警告] 改稿 Operation 终态回写失败: {exc}")
 
-    threading.Thread(target=_run_rewrite_sync, args=(chapter_ids, run_root), daemon=True).start()
-    return {"ok": True, "message": f"定向改稿已启动: {chapter_ids}"}
+    worker_thread = threading.Thread(
+        target=_run_rewrite_sync,
+        args=(chapter_ids, run_root),
+        daemon=True,
+        name=f"rewrite-{resolved_run_id}",
+    )
+
+    def start_worker() -> None:
+        worker_thread.start()
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "message": f"定向改稿已启动: {chapter_ids}",
+        "_worker_thread": worker_thread,
+    }
+    if defer_start:
+        result["_after_commit"] = start_worker
+    else:
+        start_worker()
+    return result
 
 
 def _chat_response(
@@ -3043,6 +3254,26 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     },
                     workspace_id=run_id,
                 )
+                if is_v2_workspace_chat:
+                    # The user's explicit chat command is the authorization.
+                    # Retain a confirmed Command record for audit, but do not
+                    # ask the user to click a second confirmation button.
+                    proposal = gateway.propose(envelope, label="聊天指令：执行最小修复", risk="high")
+                    receipt = gateway.confirm(
+                        str(proposal.get("confirmation_id") or proposal.get("action_id") or ""),
+                        actor=_request_actor(request, source="chat"),
+                    )
+                    repair_job = load_v2_repair_job(root)
+                    return _chat_response(
+                        root,
+                        run_id,
+                        receipt.message or f"已开始处理 {len(candidates)} 个阻断问题。",
+                        actions=[],
+                        intent="minimal_repair",
+                        triggered_repair=True,
+                        repair_job=repair_job or None,
+                        command_receipts=[receipt.as_dict()],
+                    )
                 proposal = gateway.propose(envelope, label="确认执行最小修复", risk="high")
                 return _chat_response(
                     root,
@@ -3446,7 +3677,7 @@ def api_concurrency_metrics() -> JSONResponse:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
 
 
-@app.get("/api/agent/flags")
+@app.get("/api/v2/agent/flags")
 def api_agent_flags() -> JSONResponse:
     """Expose runtime Agent mode for UI badge (PR-A3)."""
     try:
@@ -3534,6 +3765,15 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
                 store.issue_v1_import_pending()
                 and (context.root / "workspace" / "issues" / "open.json").exists()
             )
+            # One-time-safe projection for repair jobs completed before the
+            # failure-detail synchronization was introduced.  The job itself
+            # is already V2 state, so this does not consult retired V1 files.
+            repair_result = store.repair_job_state().get("result")
+            if isinstance(repair_result, dict):
+                try:
+                    _sync_v2_repair_failure_details(context, repair_result)
+                except Exception:
+                    pass
             all_issues = store.issue_states()
             open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
             blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
@@ -3549,7 +3789,7 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
                     {"id": i.get("id"), "code": i.get("code"), "title": i.get("title"), "stage_id": i.get("stage_id")}
                     for i in blocks[:8]
                 ],
-                "source": "migration_required" if issue_import_pending else "control.db",
+                "source": "retired_v1_state" if issue_import_pending else "control.db",
             }
         else:
             from agent.issues import issues_summary, load_open_issues
@@ -4092,21 +4332,14 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
     context = _workspace_context(workspace_id) if workspace_id else _workspace_context(ACTIVE_RUN_ID or _active_root().name)
     root = context.root
     try:
-        from materials_checklist import (
-            chapters_ready_for_refill,
-            chapters_with_material_gaps,
-            load_materials_checklist,
-        )
+        from materials_checklist import chapters_ready_for_refill, chapters_with_material_gaps, load_materials_checklist
 
-        data = load_materials_checklist(root)
+        v2_read_only = bool(workspace_id)
+        data = {} if v2_read_only else load_materials_checklist(root)
         store = ControlStore(context)
-        material_import_pending = (
-            store.v1_import_pending("materials")
-            and (root / "workspace" / "materials_checklist.json").exists()
-        )
+        material_import_pending = (root / "workspace" / "materials_checklist.json").exists()
         # This V2 read endpoint must never promote the legacy projection into
-        # SQLite.  Only the administrator-confirmed migration.scan Command may
-        # do that; while it is pending, return an explicit empty V2 snapshot.
+        # SQLite. Retired workspaces return an explicit empty V2 snapshot.
         authoritative_items = [] if material_import_pending else store.material_states()
         audit_summary = store.material_audit_summary()
         enriched_items: list[dict[str, Any]] = []
@@ -4129,7 +4362,27 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
             "waived": sum(1 for item in authoritative_items if item.get("response_status") == "waived"),
         }
         data = {**data, "items": authoritative_items, "summary": summary}
-        exists = (root / "workspace" / "materials_checklist.json").exists()
+        exists = bool(authoritative_items) if v2_read_only else (root / "workspace" / "materials_checklist.json").exists()
+        gap_chapters = {} if material_import_pending else chapters_with_material_gaps(root)
+        if material_import_pending:
+            refill_plans: list[dict[str, Any]] = []
+        elif v2_read_only:
+            verified_ids = {
+                str(item.get("item_id") or "")
+                for item in authoritative_items
+                if _material_fulfillment_verified(item)
+            }
+            refill_plans = [
+                {
+                    "chapter_id": chapter_id,
+                    "ready_item_ids": [item_id for item_id in gap_ids if item_id in verified_ids],
+                    "all_gap_ids": gap_ids,
+                }
+                for chapter_id, gap_ids in gap_chapters.items()
+                if any(item_id in verified_ids for item_id in gap_ids)
+            ]
+        else:
+            refill_plans = chapters_ready_for_refill(root)
         return JSONResponse(
             {
                 "ok": True,
@@ -4137,9 +4390,9 @@ def api_materials_checklist(workspace_id: str = "") -> JSONResponse:
                 "checklist": data,
                 "summary": summary,
                 "items": authoritative_items,
-                "gap_chapters": {} if material_import_pending else chapters_with_material_gaps(root),
-                "refill_plans": [] if material_import_pending else chapters_ready_for_refill(root),
-                "source": "migration_required" if material_import_pending else "control.db",
+                "gap_chapters": gap_chapters,
+                "refill_plans": refill_plans,
+                "source": "retired_v1_state" if material_import_pending else "control.db",
             }
         )
     except Exception as exc:
@@ -5469,12 +5722,17 @@ def _attempt_auto_recovery(command: str, run_root: Path, error_lines: list[str])
 
 
 def _run_sync(command: str, run_id: str, run_root: Path) -> int:
-    _LOG_CONTEXT.run_root = run_root
-    try:
-        return _run_sync_impl(command, run_id, run_root)
-    finally:
-        if hasattr(_LOG_CONTEXT, "run_root"):
-            del _LOG_CONTEXT.run_root
+    # The legacy runner still owns process-global handles. Keep its critical
+    # section serialized while V2 CommandGateway provides workspace-scoped
+    # authorization and state, so a document rebuild cannot overwrite another
+    # workspace's live process handle.
+    with _EXECUTION_LOCK:
+        _LOG_CONTEXT.run_root = run_root
+        try:
+            return _run_sync_impl(command, run_id, run_root)
+        finally:
+            if hasattr(_LOG_CONTEXT, "run_root"):
+                del _LOG_CONTEXT.run_root
 
 
 def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
@@ -5511,6 +5769,26 @@ def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
         _append_log(f"[暂停] {command} 已暂停，可从断点继续。")
     elif exit_code != 0:
         _append_log(f"[错误] 流程已停止: {command} 执行失败，请查看上方报错。")
+    context_resume_summary: tuple[int, int] | None = None
+    if exit_code != 0 and command == "select-context-all":
+        # A stopped child process cannot update its final batch/activity state.
+        # Reconcile disk artifacts before any recovery attempt so the next
+        # explicit/automatic invocation dispatches only unfinished chapters.
+        try:
+            from agent.activity import reconcile_interrupted_activity
+            from context_selector import reconcile_interrupted_context_selection
+
+            checkpoint = reconcile_interrupted_context_selection(run_root)
+            reconcile_interrupted_activity(run_root)
+            completed = len(checkpoint.get("completed_chapter_ids") or [])
+            expected = len(checkpoint.get("expected_chapter_ids") or [])
+            context_resume_summary = (completed, expected)
+            _append_log(
+                f"[断点] 上下文选择已校正：已完成 {completed}/{expected}，"
+                f"剩余 {max(0, expected - completed)} 章。"
+            )
+        except Exception as exc:
+            _append_log(f"[警告] 上下文断点校正失败: {exc}")
     if record_state:
         state_status = "paused" if exit_code != 0 and was_paused else ("ok" if exit_code == 0 else "error")
         state_message = (
@@ -5526,14 +5804,22 @@ def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
                 _write_json_file(error_path, {"command": command, "exit_code": exit_code, "lines": error_lines})
             except Exception:
                 pass
-            recovered_exit = _attempt_auto_recovery(command, run_root, error_lines)
-            if recovered_exit == 0:
-                exit_code = 0
-                state_status = "ok"
-                state_message = f"{command} 自动恢复后执行完成"
-            elif recovered_exit is None and not was_paused:
-                state_status = "recovery_failed"
-                state_message = f"{command} 自动恢复未成功，exit_code={exit_code}"
+            if command == "select-context-all":
+                completed, expected = context_resume_summary or (0, 0)
+                state_status = "paused"
+                state_message = (
+                    f"上下文选择已中断：已完成 {completed}/{expected}，"
+                    "请点击“继续上下文选择”显式续跑"
+                )
+            else:
+                recovered_exit = _attempt_auto_recovery(command, run_root, error_lines)
+                if recovered_exit == 0:
+                    exit_code = 0
+                    state_status = "ok"
+                    state_message = f"{command} 自动恢复后执行完成"
+                elif recovered_exit is None and not was_paused:
+                    state_status = "recovery_failed"
+                    state_message = f"{command} 自动恢复未成功，exit_code={exit_code}"
         save_run_state(
             run_root,
             {"root_dir": str(run_root), "current_command": command},
@@ -5556,247 +5842,60 @@ def _workspace_context(workspace_id: str) -> WorkspaceContext:
 
 
 def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
-    """Return migrated V2 Issue state; V1 imports only happen via migration.scan."""
+    """Reject unscanned V1 Issue state without blocking a V2 compatibility projection."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "issues" / "open.json"
-    if store.issue_v1_import_pending() and legacy_path.exists():
+    # ``open.json`` remains a one-version compatibility projection for older
+    # pages.  It is not an authority in V2: once control.db has established
+    # issue state, its presence must not make the V2 workspace unusable.
+    # A file in a workspace with no recorded V2/migration state is still
+    # rejected fail-closed instead of being imported implicitly.
+    if legacy_path.exists() and store.issue_v1_import_pending():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "Issue 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 Issue 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
 
 
 def _ensure_v2_material_import(context: WorkspaceContext) -> ControlStore:
-    """Return material authority only after explicit migration when legacy data exists."""
+    """Reject retired V1 material state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "materials_checklist.json"
-    if store.v1_import_pending("materials") and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "材料权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 材料状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
 
 
 def _ensure_v2_repair_import(context: WorkspaceContext) -> ControlStore:
-    """Reject V2 repair mutation until an existing V1 job is explicitly migrated."""
+    """Reject retired V1 RepairJob state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "repair_job.json"
-    if store.v1_import_pending("repair_job") and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "RepairJob 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 RepairJob 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
 
 
 def _ensure_v2_goal_import(context: WorkspaceContext) -> ControlStore:
-    """Reject V2 Goal mutation until an existing V1 Goal is explicitly migrated."""
+    """Reject retired V1 Goal state before a V2 command can consume it."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "agent" / "goal_state.json"
-    if store.v1_import_pending("goal") and legacy_path.exists():
+    if legacy_path.exists():
         raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "Goal 权威状态尚未迁移，请先执行管理员 migration.scan。",
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 Goal 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
             status_code=409,
         )
     return store
-
-
-def _v1_migration_dry_run(context: WorkspaceContext) -> dict[str, Any]:
-    """Inventory legacy control files without mutating SQLite or compatibility files."""
-    store = ControlStore(context)
-    domains: dict[str, Any] = {}
-    unrecognized: list[dict[str, Any]] = []
-    manifest: list[dict[str, Any]] = []
-    sources = {
-        "goal": context.root / "workspace" / "agent" / "goal_state.json",
-        "materials": context.root / "workspace" / "materials_checklist.json",
-        "issues": context.root / "workspace" / "issues" / "open.json",
-        "repair_job": context.root / "workspace" / "repair_job.json",
-        "agent_activity": context.root / "workspace" / "agent" / "activity.json",
-    }
-    for domain, path in sources.items():
-        if not path.exists():
-            continue
-        content = path.read_bytes()
-        manifest.append(
-            {
-                "path": path.relative_to(context.root).as_posix(),
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "size_bytes": len(content),
-                "domain": domain,
-                "import_pending": store.v1_import_pending(domain),
-            }
-        )
-        if not store.v1_import_pending(domain):
-            continue
-        try:
-            payload = json.loads(content.decode("utf-8"))
-            if domain == "materials":
-                payload = payload.get("items") if isinstance(payload, dict) else payload
-            elif domain == "issues":
-                payload = payload.get("issues") if isinstance(payload, dict) else payload
-            valid = isinstance(payload, dict) if domain in {"goal", "repair_job", "agent_activity"} else isinstance(payload, list)
-            if not valid:
-                raise ValueError("unexpected JSON shape")
-            domains[domain] = payload
-        except Exception as exc:
-            unrecognized.append(
-                {"path": path.relative_to(context.root).as_posix(), "reason": str(exc)}
-            )
-    orphans: list[dict[str, Any]] = []
-    for name in ("goal_state.json", "decision_trace.json", "decision_trace.jsonl"):
-        path = context.root / name
-        if path.exists() and path.is_file():
-            content = path.read_bytes()
-            manifest.append(
-                {
-                    "path": path.relative_to(context.root).as_posix(),
-                    "sha256": hashlib.sha256(content).hexdigest(),
-                    "size_bytes": len(content),
-                    "domain": "orphan",
-                    "import_pending": True,
-                }
-            )
-            orphans.append(
-                {
-                    "path": path.relative_to(context.root).as_posix(),
-                    "kind": "root_legacy_control_state",
-                    "reason": "根目录旧状态未绑定到工作区 Agent，不自动导入。",
-                }
-            )
-    for relative, kind, reason in (
-        ("workspace/pipeline_control.json", "legacy_pipeline_checkpoint", "旧 Pipeline checkpoint 不自动绑定到 V2 Operation。"),
-        ("workspace/stale_artifacts.json", "legacy_stale_state", "旧 stale artifact 状态不自动覆盖 SQLite Artifact manifest。"),
-    ):
-        path = context.root / relative
-        if not path.exists() or not path.is_file():
-            continue
-        content = path.read_bytes()
-        manifest.append(
-            {
-                "path": path.relative_to(context.root).as_posix(),
-                "sha256": hashlib.sha256(content).hexdigest(),
-                "size_bytes": len(content),
-                "domain": "orphan",
-                "import_pending": True,
-            }
-        )
-        orphan = {"path": path.relative_to(context.root).as_posix(), "kind": kind, "reason": reason}
-        if kind == "legacy_pipeline_checkpoint":
-            try:
-                checkpoint = json.loads(content.decode("utf-8"))
-            except Exception:
-                checkpoint = None
-            if isinstance(checkpoint, dict):
-                orphan["state"] = checkpoint
-        orphans.append(orphan)
-    result = store.migration_dry_run(
-        domains,
-        orphans=orphans,
-        unrecognized=unrecognized,
-    )
-    result["sources"] = {
-        domain: path.relative_to(context.root).as_posix()
-        for domain, path in sources.items()
-        if path.exists()
-    }
-    result["source_manifest"] = manifest
-    result["source_fingerprint"] = hashlib.sha256(
-        json.dumps(manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-    return result
-
-
-def _migration_snapshot_with_source_state(
-    context: WorkspaceContext,
-    snapshot: dict[str, Any],
-) -> dict[str, Any]:
-    """Expose a read-only cutover health state without trusting legacy files."""
-    migration = snapshot.get("migration")
-    if not isinstance(migration, dict):
-        return snapshot
-    cutover = migration.get("cutover")
-    if not isinstance(cutover, dict) or cutover.get("status") != "active":
-        return snapshot
-    preview = _v1_migration_dry_run(context)
-    expected = str(cutover.get("fingerprint") or "")
-    current = str(preview.get("source_fingerprint") or "")
-    updated = dict(snapshot)
-    updated_migration = dict(migration)
-    updated_cutover = dict(cutover)
-    updated_cutover["current_fingerprint"] = current
-    updated_cutover["source_stale"] = not expected or expected != current
-    if updated_cutover["source_stale"]:
-        updated_cutover["status"] = "stale"
-        updated_migration["status"] = "cutover_stale"
-    updated_migration["cutover"] = updated_cutover
-    updated["migration"] = updated_migration
-    return updated
-
-
-def _register_legacy_artifact_inventory(context: WorkspaceContext, store: ControlStore) -> int:
-    """Hash existing V1 artifacts but never infer that they are reusable stage output."""
-    from artifact_manifest import describe_artifact
-    from pipeline_registry import workflow_stage_specs
-
-    existing = {item["artifact_key"] for item in store.artifact_states()}
-    manifests: list[dict[str, Any]] = []
-    for stage in workflow_stage_specs():
-        for artifact in stage.produces:
-            if artifact.kind == "virtual":
-                continue
-            current = describe_artifact(context.root, artifact)
-            artifact_key = str(current.get("artifact_key") or "")
-            if (
-                not artifact_key
-                or artifact_key in existing
-                or current.get("status") != "ready"
-                or not current.get("files")
-            ):
-                continue
-            manifests.append(
-                {
-                    **current,
-                    "status": "stale",
-                    "producer": stage.command,
-                    "stage_id": stage.id,
-                    "input_fingerprint": "",
-                    "disposition": "legacy_discovered",
-                    "legacy_artifact": True,
-                    "legacy_readiness": "unverified",
-                    "stale_reason": "V1 旧产物仅完成哈希盘点，缺少 V2 成功 StageRun 证据。",
-                }
-            )
-            existing.add(artifact_key)
-    if not manifests:
-        return 0
-    store.upsert_artifact_states(manifests)
-    return len(manifests)
-
-
-def _refresh_migration_report(
-    context: WorkspaceContext,
-    migration: dict[str, Any],
-    *,
-    action: dict[str, Any],
-) -> None:
-    """Keep the file audit projection current after a SQLite migration mutation."""
-    path = context.root / "workspace" / "migration_report.json"
-    report = _read_json_file(path)
-    if not isinstance(report, dict) or str(report.get("workspace_id") or "") != context.workspace_id:
-        return
-    report["migration"] = migration
-    report["last_action"] = action
-    report["updated_at"] = datetime.now().astimezone().isoformat(timespec="milliseconds")
-    from utils import write_json
-
-    write_json(path, report)
 
 
 def _request_actor(request: Request, *, source: str) -> dict[str, str]:
@@ -5889,26 +5988,11 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
     from agent.issues import classify_issue_risk
 
     store = ControlStore(context)
-    store.assert_migration_ready()
-    migration_preview = _v1_migration_dry_run(context)
-    if migration_preview.get("status") != "ready":
-        raise ControlPlaneError(
-            "MIGRATION_SCAN_REQUIRED",
-            "旧工作区迁移预检发现未登记的状态，请先执行管理员迁移扫描。",
-            status_code=409,
-            details={"migration": migration_preview.get("counts") or {}},
-        )
-    cutover = (store.snapshot().get("migration") or {}).get("cutover")
-    if isinstance(cutover, dict) and cutover.get("status") == "active":
-        expected_fingerprint = str(cutover.get("fingerprint") or "")
-        current_fingerprint = str(migration_preview.get("source_fingerprint") or "")
-        if not expected_fingerprint or expected_fingerprint != current_fingerprint:
-            raise ControlPlaneError(
-                "MIGRATION_CUTOVER_STALE",
-                "V2 切换后的旧状态源已变化，请重新扫描并完成协调。",
-                status_code=409,
-                details={"expected_fingerprint": expected_fingerprint, "current_fingerprint": current_fingerprint},
-            )
+    _ensure_v2_goal_import(context)
+    _ensure_v2_repair_import(context)
+    _ensure_v2_material_import(context)
+    _ensure_v2_issue_import(context)
+    cutover = None
     failed_evaluations = [
         evaluation for evaluation in store.latest_gate_evaluations()
         if str(evaluation.get("verdict") or "") in {"block", "error"}
@@ -6010,6 +6094,90 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
             ),
         }
     )
+
+
+# Flow settings are intentionally limited to parameters consumed at runtime.
+# Keep the allow-list here so this endpoint can never become an arbitrary .env
+# editor from the browser.
+FLOW_SETTING_SPECS: dict[str, tuple[str, Any, int, int]] = {
+    "workers": ("BID_AGENT_WORKERS_DEFAULT", 4, 1, 10),
+    "llm_concurrency": ("BID_AGENT_LLM_CONCURRENCY", 8, 1, 32),
+    "write_batch_retries": ("BID_AGENT_WRITE_BATCH_RETRIES", 5, 0, 20),
+    "max_repair_rounds": ("AGENT_MAX_REPAIR_ROUNDS", 2, 0, 10),
+}
+FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
+    "chapter_review_gate": ("CHAPTER_REVIEW_GATE", True),
+    "global_review_gate": ("GLOBAL_REVIEW_GATE", True),
+    "allow_accept_risk": ("ISSUE_ACCEPT_RISK_ENABLED", False),
+    "anti_fabrication_gate": ("BID_AGENT_ANTI_FABRICATION_GATE", True),
+}
+
+
+def _flow_settings() -> dict[str, Any]:
+    from config import _parse_env_file
+
+    values = _parse_env_file(_llm_env_path())
+    result: dict[str, Any] = {}
+    for alias, (key, default, low, high) in FLOW_SETTING_SPECS.items():
+        try:
+            result[alias] = max(low, min(high, int(values.get(key, os.environ.get(key, default)))))
+        except (TypeError, ValueError):
+            result[alias] = default
+    for alias, (key, default) in FLOW_REVIEW_SPECS.items():
+        raw = str(values.get(key, os.environ.get(key, "1" if default else "0"))).strip().lower()
+        result[alias] = raw not in {"0", "false", "no", "off"}
+    return result
+
+
+def _write_flow_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    current = _flow_settings()
+    for alias, (_key, _default, low, high) in FLOW_SETTING_SPECS.items():
+        if alias in settings:
+            try:
+                current[alias] = max(low, min(high, int(settings[alias])))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{alias} 必须是 {low}-{high} 的整数") from exc
+    for alias in FLOW_REVIEW_SPECS:
+        if alias in settings:
+            current[alias] = bool(settings[alias])
+    env_updates = {
+        key: str(current[alias]) for alias, (key, *_rest) in FLOW_SETTING_SPECS.items()
+    }
+    env_updates.update({key: "1" if current[alias] else "0" for alias, (key, _default) in FLOW_REVIEW_SPECS.items()})
+    path = _llm_env_path()
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    rendered: list[str] = []
+    for line in lines:
+        key = line.strip().split("=", 1)[0].strip() if "=" in line else ""
+        if key in env_updates:
+            rendered.append(f"{key}={env_updates[key]}")
+            seen.add(key)
+        else:
+            rendered.append(line)
+    rendered.extend(f"{key}={value}" for key, value in env_updates.items() if key not in seen)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+    temp.replace(path)
+    os.environ.update(env_updates)
+    return current
+
+
+@app.get("/api/flow-settings")
+def api_get_flow_settings() -> JSONResponse:
+    return JSONResponse({"ok": True, "settings": _flow_settings()})
+
+
+@app.post("/api/flow-settings")
+async def api_set_flow_settings(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        settings = body.get("settings") if isinstance(body, dict) else None
+        if not isinstance(settings, dict):
+            raise ValueError("缺少 settings 对象。")
+        return JSONResponse({"ok": True, "settings": _write_flow_settings(settings), "applied_live": True})
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
 
     compliance_path = context.root / "workspace" / "compliance_report.json"
     compliance = _read_json_file(compliance_path) if compliance_path.exists() else {}
@@ -6132,6 +6300,25 @@ def _record_v2_stage_artifacts(context: WorkspaceContext, command: str, disposit
     record_stage_artifacts(context, command, disposition=disposition)
 
 
+def _record_v2_stage_lifecycle(
+    context: WorkspaceContext,
+    operation_id: str,
+    command: str,
+    status: str,
+    disposition: str,
+    error: dict[str, Any] | None,
+) -> None:
+    if not operation_id:
+        raise ControlPlaneError("STATE_UNAVAILABLE", "缺少 Pipeline Operation，不能记录 StageRun。", status_code=503)
+    ControlStore(context).record_stage_run(
+        operation_id,
+        command,
+        status,
+        disposition=disposition,
+        error=error,
+    )
+
+
 def _v2_stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
     from artifact_manifest import stage_artifacts_reusable
 
@@ -6157,20 +6344,13 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
     digest = hashlib.sha256()
     artifact_sha256 = ""
     store = ControlStore(context)
-    migration_state = store.migration_state()
     control_domains = {
         "material_states": store.material_states(),
         "issue_states": store.issue_states(),
         "policy_decisions": store.policy_decisions(),
         "artifact_states": store.artifact_states(),
         "latest_gate_evaluations": store.latest_gate_evaluations(),
-        "migration": migration_state,
     }
-    cutover = migration_state.get("cutover") if isinstance(migration_state, dict) else None
-    if isinstance(cutover, dict) and cutover.get("status") == "active":
-        control_domains["migration_source_fingerprint"] = (
-            _v1_migration_dry_run(context).get("source_fingerprint") or ""
-        )
     for domain, value in control_domains.items():
         digest.update(f"control.db:{domain}\0".encode("utf-8"))
         digest.update(
@@ -6206,24 +6386,14 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
 
 def _assert_formal_materials_verified(context: WorkspaceContext) -> None:
     store = ControlStore(context)
-    if store.v1_import_pending("materials"):
-        cutover = store.migration_state().get("cutover") or {}
-        legacy_materials_path = context.root / "workspace" / "materials_checklist.json"
-        if str(cutover.get("status") or "") == "active" and legacy_materials_path.exists():
-            raise ControlPlaneError(
-                "MIGRATION_SCAN_REQUIRED",
-                "材料权威状态尚未迁移，已拒绝签发 GateReceipt。",
-                status_code=409,
-            )
-        # One-version V1 compatibility: read the legacy projection without
-        # importing or writing it while a formal gate is being evaluated.
-        from materials_checklist import load_materials_checklist
-
-        checklist = load_materials_checklist(context.root)
-        items = checklist.get("items") if isinstance(checklist, dict) else []
-        items = [dict(item) for item in items if isinstance(item, dict)]
-    else:
-        items = store.material_states()
+    legacy_materials_path = context.root / "workspace" / "materials_checklist.json"
+    if legacy_materials_path.exists():
+        raise ControlPlaneError(
+            "V1_STATE_RETIRED",
+            "检测到已废弃的 V1 材料状态文件；请删除旧工作区并在 V2 工作区重新执行。",
+            status_code=409,
+        )
+    items = store.material_states()
     unsafe = [
         str(item.get("item_id") or "")
         for item in items
@@ -6247,17 +6417,11 @@ def _assert_formal_artifacts_ready(context: WorkspaceContext) -> None:
 
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
-    cutover_active = str((store.migration_state().get("cutover") or {}).get("status") or "") == "active"
     blocked: list[dict[str, str]] = []
     for relative in _FORMAL_GATE_INPUTS:
         state = states.get(relative)
-        # During the one-version V1 compatibility window, missing manifests are
-        # accepted and will be bootstrapped by the V2 Pipeline on first reuse.
-        # A workspace that has explicitly cut over to V2 can no longer use this
-        # exception: its formal outputs must have V2 manifest evidence.
         if state is None:
-            if cutover_active:
-                blocked.append({"path": relative, "reason": "manifest_missing_after_cutover"})
+            blocked.append({"path": relative, "reason": "manifest_missing"})
             continue
         current = describe_artifact(context.root, RunArtifact(relative))
         if state.get("status") != "ready":
@@ -6317,7 +6481,8 @@ def _pipeline_status_to_operation(status: str) -> str:
 
 def _pipeline_snapshot_from_control(
     operations: list[dict[str, Any]],
-    checkpoint: dict[str, Any],
+    _checkpoint: dict[str, Any],
+    stage_runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     operation = next(
         (
@@ -6328,7 +6493,7 @@ def _pipeline_snapshot_from_control(
         None,
     )
     if not operation:
-        return {**checkpoint, "source": "v1_checkpoint", "consistent": True} if checkpoint else {}
+        return {}
     status = {
         "queued": "running",
         "running": "running",
@@ -6342,25 +6507,35 @@ def _pipeline_snapshot_from_control(
     }.get(str(operation.get("status") or ""), "failed")
     operation_id = str(operation.get("operation_id") or "")
     fencing_token = int(operation.get("fencing_token") or 0)
-    checkpoint_matches = bool(
-        checkpoint
-        and str(checkpoint.get("operation_id") or "") == operation_id
-        and int(checkpoint.get("fencing_token") or 0) == fencing_token
+    operation_stage_runs = [
+        item
+        for item in (stage_runs or [])
+        if str(item.get("operation_id") or "") == operation_id
+    ]
+    active_stage_run = next(
+        (
+            item
+            for item in operation_stage_runs
+            if str(item.get("status") or "") in {"queued", "running"}
+        ),
+        None,
     )
+    latest_stage_run = active_stage_run or (operation_stage_runs[0] if operation_stage_runs else None)
     return {
-        "run_id": str(checkpoint.get("run_id") or "") if checkpoint_matches else "",
         "operation_id": operation_id,
+        "kind": str(operation.get("kind") or ""),
         "fencing_token": fencing_token,
         "status": status,
-        "current_stage": str(checkpoint.get("current_stage") or operation.get("start_command") or "")
-        if checkpoint_matches
-        else str(operation.get("start_command") or ""),
-        "worker_pid": int(checkpoint.get("worker_pid") or 0) if checkpoint_matches else 0,
-        "message": str(operation.get("message") or checkpoint.get("message") or ""),
+        "current_stage": str(
+            (latest_stage_run or {}).get("stage_command")
+            or operation.get("start_command")
+            or ""
+        ),
+        "message": str(operation.get("message") or ""),
         "error": operation.get("error"),
+        "updated_at": str(operation.get("updated_at") or ""),
         "source": "control.db",
-        "consistent": checkpoint_matches or not checkpoint,
-        "checkpoint_source": "pipeline_control.json" if checkpoint_matches else "ignored_mismatch",
+        "consistent": True,
     }
 
 
@@ -6373,21 +6548,53 @@ def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
     if not _same_path(context.root, root):
         return
     error = payload.get("error")
-    ControlStore(context).sync_operation(
+    store = ControlStore(context)
+    store.sync_operation(
         operation_id,
         operation_status,
         message=str(payload.get("message") or ""),
         error={"message": str(error)} if error else None,
         fencing_token=int(payload.get("fencing_token") or 0),
     )
+    stage_command = str(payload.get("current_stage") or "").strip()
+    if stage_command and operation_status in {"failed", "cancelled"}:
+        latest = store.latest_stage_run(operation_id, stage_command)
+        # The Supervisor has already persisted detailed terminal dispositions
+        # (gate blocked, runner failure, artifact failure, etc.). Checkpoint
+        # synchronization only fills the crash/restart gap; it must not erase
+        # the more specific lifecycle audit record.
+        if latest is None or str(latest.get("status") or "") == "running":
+            store.record_stage_run(
+                operation_id,
+                stage_command,
+                "failed" if operation_status == "failed" else "cancelled",
+                disposition="pipeline_terminal",
+                error={"message": str(error)} if error else None,
+            )
 
 
-def _terminate_workspace_process(context: WorkspaceContext) -> None:
+def _terminate_workspace_process(
+    context: WorkspaceContext,
+    *,
+    operation_id: str,
+    fencing_token: int,
+) -> None:
     process = CURRENT_PROCESS if _same_path(CURRENT_RUN_ROOT, context.root) else None
     if process:
         _terminate_process_tree(process)
         return
     control = SUPERVISOR.load(context.root)
+    if (
+        not operation_id
+        or int(fencing_token or 0) <= 0
+        or str(control.get("operation_id") or "") != operation_id
+        or int(control.get("fencing_token") or 0) != int(fencing_token)
+    ):
+        raise ControlPlaneError(
+            "STATE_UNAVAILABLE",
+            "Pipeline Worker checkpoint 与 control.db Operation 不一致，已拒绝终止未知进程。",
+            status_code=503,
+        )
     _terminate_pid_tree(int(control.get("worker_pid", 0) or 0))
 
 
@@ -6396,7 +6603,7 @@ def _handle_pipeline_start(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING or SUPERVISOR.is_running():
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。")
     start_command = str(envelope.payload.get("start_command") or "").strip()
     if envelope.kind == "pipeline.run_stage" and not start_command:
@@ -6427,6 +6634,9 @@ def _handle_pipeline_start(
             disposition,
         ),
         artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
+        stage_lifecycle_recorder=lambda _root, command, status, disposition, error: _record_v2_stage_lifecycle(
+            context, operation_id, command, status, disposition, error
+        ),
     )
     if not started:
         raise ControlPlaneError("LEASE_CONFLICT", "流水线未启动，已有调度线程正在运行。")
@@ -6446,7 +6656,11 @@ def _handle_pipeline_resume(
     if not str(payload.get("start_command") or "").strip():
         previous_operation_id = str(payload.get("operation_id") or "").strip()
         previous = ControlStore(context).operation(previous_operation_id) if previous_operation_id else None
-        payload["start_command"] = str((previous or {}).get("start_command") or "")
+        payload["start_command"] = str(
+            (previous or {}).get("start_command")
+            or _v2_pipeline_resume_command(context)
+            or ""
+        )
         if not payload["start_command"]:
             raise ControlPlaneError(
                 "STATE_UNAVAILABLE",
@@ -6488,9 +6702,14 @@ def _handle_pipeline_pause(
     if _same_path(CURRENT_RUN_ROOT, context.root):
         PAUSE_REQUESTED = True
     if SUPERVISOR.is_running(context.root):
-        SUPERVISOR.pause()
+        SUPERVISOR.pause(context.root)
         _append_log(f"[暂停] CommandGateway 正在停止: {context.workspace_id}/{CURRENT_TASK}")
-        _terminate_workspace_process(context)
+        operation = ControlStore(context).operation(operation_id) or {}
+        _terminate_workspace_process(
+            context,
+            operation_id=operation_id,
+            fencing_token=int(operation.get("fencing_token") or 0),
+        )
         return {"accepted": True, "operation_status": "pausing", "message": "已发送暂停指令。"}
     return {"accepted": True, "operation_status": "paused", "message": "Operation 已处于暂停状态。"}
 
@@ -6504,9 +6723,14 @@ def _handle_pipeline_cancel(
     if _same_path(CURRENT_RUN_ROOT, context.root):
         PAUSE_REQUESTED = True
     if SUPERVISOR.is_running(context.root):
-        SUPERVISOR.cancel()
+        SUPERVISOR.cancel(context.root)
         _append_log(f"[取消] CommandGateway 正在终止: {context.workspace_id}/{CURRENT_TASK}")
-        _terminate_workspace_process(context)
+        operation = ControlStore(context).operation(operation_id) or {}
+        _terminate_workspace_process(
+            context,
+            operation_id=operation_id,
+            fencing_token=int(operation.get("fencing_token") or 0),
+        )
         return {"accepted": True, "operation_status": "cancelling", "message": "已发送取消指令。"}
     return {"accepted": True, "operation_status": "cancelled", "message": "Operation 已取消。"}
 
@@ -6562,6 +6786,7 @@ def _handle_repair_start(
         control_fencing_token=fencing_token,
         # V2 keeps repair and pipeline resume as separate audited Commands.
         resume_pipeline=False,
+        defer_start=True,
     )
     if not result.get("ok"):
         code = "LEASE_CONFLICT" if result.get("busy") else "GATE_BLOCKED"
@@ -6570,6 +6795,7 @@ def _handle_repair_start(
         "accepted": True,
         "operation_status": "running",
         "message": str(result.get("message") or "已开始最小修复。"),
+        "_after_commit": result.get("_after_commit"),
     }
 
 
@@ -6589,9 +6815,6 @@ def _handle_repair_issues(
     if len(issue_ids) > 100:
         raise ControlPlaneError("COMMAND_INVALID", "单次最多修复 100 个问题。", status_code=400)
     result = execute_repair_batch(context.root, issue_ids, confirm=True, dry_run=False)
-    from artifact_manifest import record_external_chapter_mutation
-
-    record_external_chapter_mutation(context, disposition="issue_repair")
     failed = result.get("failed") if isinstance(result.get("failed"), list) else []
     still_open = result.get("still_open") if isinstance(result.get("still_open"), list) else []
     if not result.get("ok") or failed or still_open:
@@ -6600,6 +6823,11 @@ def _handle_repair_issues(
             str(result.get("message") or "问题修复后仍有阻断项。"),
             details={"failed": failed, "still_open": still_open},
         )
+    from artifact_manifest import record_external_chapter_mutation
+
+    repaired = record_external_chapter_mutation(context, disposition="issue_repair")
+    if repaired:
+        _record_v2_stage_lifecycle(context, operation_id, "write-all", "succeeded", "issue_repair", None)
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -6616,7 +6844,6 @@ def _handle_accept_issue_risk(
         accept_risk_enabled,
         append_issue_log,
         classify_issue_risk,
-        write_open_issues_projection,
         write_risk_register,
     )
 
@@ -6693,14 +6920,12 @@ def _handle_accept_issue_risk(
         actor={"type": str(actor.get("type") or "authenticated_user"), "id": actor_id, "role": actor_role},
         source="v2_command",
     )
-    updated_issues = [found if str(item.get("id") or "") == issue_id else item for item in issues]
     projection_warning = ""
     try:
         append_issue_log(context.root, found)
-        write_open_issues_projection(context.root, updated_issues)
         write_risk_register(context.root)
     except Exception as exc:
-        projection_warning = f"；V1 兼容投影刷新失败: {exc}"
+        projection_warning = f"；风险审计附件刷新失败: {exc}"
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -6856,8 +7081,6 @@ def _handle_goal_resume(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from agent.goal import write_goal_projection
-
     store = _ensure_v2_goal_import(context)
     goal = store.goal_state()
     if not isinstance(goal, dict):
@@ -6889,8 +7112,7 @@ def _handle_goal_resume(
     constraints = dict(goal.get("constraints") or {})
     constraints["block_on_missing_materials"] = True
     goal["constraints"] = constraints
-    resumed = store.upsert_goal_state(goal, source="v2_goal_resume")
-    write_goal_projection(context.root, resumed)
+    store.upsert_goal_state(goal, source="v2_goal_resume")
     return {"accepted": True, "operation_status": "succeeded", "message": "Goal 已恢复为 in_progress。"}
 
 
@@ -6938,8 +7160,6 @@ def _handle_document_apply_edit(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING:
-        raise ControlPlaneError("LEASE_CONFLICT", "当前已有执行任务，不能并发修改终稿。", status_code=409)
     path = context.root / "outputs" / "final.md"
     if not path.exists() or not path.is_file():
         raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)
@@ -6978,7 +7198,6 @@ def _handle_document_apply_edit(
             rollback = _backup_final_md(context.root, path.read_text(encoding="utf-8"), "undo_operation")
             path.write_text(backup.read_text(encoding="utf-8"), encoding="utf-8")
             result = {"review": {"backup_path": str(rollback.relative_to(context.root)).replace("\\", "/")}}
-            _LAST_BACKUP.pop(context.root.resolve(), None)
         else:
             raise ValueError("不支持的文档编辑模式。")
     except (OSError, ValueError) as exc:
@@ -6994,7 +7213,16 @@ def _handle_document_apply_edit(
 
     from artifact_manifest import record_document_edit_artifacts
 
-    record_document_edit_artifacts(context)
+    record_document_edit_artifacts(context, operation_id=operation_id)
+    store = ControlStore(context)
+    if mode == "undo":
+        store.clear_document_undo()
+        _LAST_BACKUP.pop(context.root.resolve(), None)
+    else:
+        backup_path = str(result.get("review", {}).get("backup_path") or "").strip()
+        if not backup_path:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "文档编辑缺少可审计撤销备份。", status_code=503)
+        store.set_document_undo(backup_path, operation_id=operation_id)
 
     _PENDING_LINE_EDITS.pop(context.root.resolve(), None)
     _PENDING_DOC_EDIT.pop(context.root.resolve(), None)
@@ -7035,7 +7263,7 @@ def _handle_workspace_run_utility(
     allowed = set(COMMANDS) - set(auto_run_commands())
     if command not in allowed:
         raise ControlPlaneError("COMMAND_INVALID", f"不支持的工作区 utility command: {command}", status_code=400)
-    if RUNNING or SUPERVISOR.is_running():
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。", status_code=409)
     if command not in {"validate", "init"}:
         gate = _v2_gate_can_proceed(context, command)
@@ -7056,7 +7284,7 @@ def _handle_workspace_archive(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING or SUPERVISOR.is_running(context.root):
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "运行中的工作区不能归档。", status_code=409)
     runs_root = RUNS_DIR.resolve()
     source = context.root.resolve()
@@ -7094,7 +7322,7 @@ def _handle_workspace_clean(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    if RUNNING or SUPERVISOR.is_running(context.root):
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "运行中的工作区不能清理。", status_code=409)
     root = context.root.resolve()
     trash_root = (root / ".trash").resolve()
@@ -7155,6 +7383,7 @@ def _handle_rewrite_chapters(
         run_id=context.workspace_id,
         control_operation_id=operation_id,
         control_fencing_token=fencing_token,
+        defer_start=True,
     )
     if not result.get("ok"):
         code = "LEASE_CONFLICT" if "正在运行" in str(result.get("message") or "") else "COMMAND_DISPATCH_FAILED"
@@ -7163,6 +7392,7 @@ def _handle_rewrite_chapters(
         "accepted": True,
         "operation_status": "running",
         "message": str(result.get("message") or "已开始定向改稿。"),
+        "_after_commit": result.get("_after_commit"),
     }
 
 
@@ -7206,9 +7436,7 @@ def _authoritative_material_state(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _material_items(context: WorkspaceContext) -> list[dict[str, Any]]:
-    # V2 Commands must not silently convert their V1 projection into authority.
-    # migration.scan is the sole import boundary; command handlers may still
-    # update the projection after a successful V2 state transition.
+    # V2 Commands only consume SQLite MaterialState authority.
     return _ensure_v2_material_import(context).material_states()
 
 
@@ -7227,28 +7455,6 @@ def _material_item(context: WorkspaceContext, item_id: str) -> dict[str, Any]:
     if item is None:
         raise ControlPlaneError("COMMAND_INVALID", f"材料项不存在: {value}", status_code=404)
     return item
-
-
-def _sync_material_state_from_projection(
-    context: WorkspaceContext,
-    item_id: str,
-    *,
-    persist: bool = True,
-) -> dict[str, Any]:
-    from materials_checklist import load_materials_checklist
-
-    checklist = load_materials_checklist(context.root)
-    items = checklist.get("items") if isinstance(checklist.get("items"), list) else []
-    item = next(
-        (dict(row) for row in items if isinstance(row, dict) and str(row.get("item_id") or "") == item_id),
-        None,
-    )
-    if item is None:
-        raise ControlPlaneError("STATE_UNAVAILABLE", f"材料 V1 投影缺少条目: {item_id}", status_code=503)
-    authoritative = _authoritative_material_state(item)
-    if not persist:
-        return authoritative
-    return ControlStore(context).upsert_material_state(authoritative)
 
 
 def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
@@ -7271,13 +7477,9 @@ def _workspace_material_path(context: WorkspaceContext, raw_path: Any) -> Path:
 def _resume_goal_for_verified_material(context: WorkspaceContext, item_id: str, note: str) -> None:
     """Resume a blocked V2 Goal after material verification.
 
-    Material commands must not invoke the legacy Goal loader: it can import
-    ``goal_state.json`` and then mutate a second state machine.  SQLite is
-    updated first and the V1 file is refreshed only as a compatibility
-    projection, consistent with the explicit ``goal.resume`` command.
+    Material commands must not invoke or refresh the retired V1 Goal file.
+    SQLite is the only control-state write target.
     """
-    from agent.goal import write_goal_projection
-
     store = _ensure_v2_goal_import(context)
     goal = store.goal_state()
     if not isinstance(goal, dict) or str(goal.get("status") or "") != "blocked_human":
@@ -7301,8 +7503,7 @@ def _resume_goal_for_verified_material(context: WorkspaceContext, item_id: str, 
     constraints = dict(goal.get("constraints") or {})
     constraints["block_on_missing_materials"] = True
     goal["constraints"] = constraints
-    resumed = store.upsert_goal_state(goal, source="v2_material_verified")
-    write_goal_projection(context.root, resumed)
+    store.upsert_goal_state(goal, source="v2_material_verified")
 
 
 def _handle_materials_upload(
@@ -7310,7 +7511,7 @@ def _handle_materials_upload(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import mark_material_uploaded
+    from agent.material_verifier import verify_material
 
     # A successful automatic verification may resume a blocked Goal.  Validate
     # that goal's migration before recording any submission or changing the
@@ -7318,7 +7519,7 @@ def _handle_materials_upload(
     # material command.
     _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
-    _material_item(context, item_id)
+    material = _material_item(context, item_id)
     upload_token = str(envelope.payload.get("upload_token") or "").strip()
     if not upload_token:
         raise ControlPlaneError(
@@ -7341,18 +7542,17 @@ def _handle_materials_upload(
         source="materials.upload",
         consume_upload=True,
     )
-    result = mark_material_uploaded(
+    result = verify_material(
         context.root,
         item_id,
         uploaded_path=str(uploaded_path),
         note=str(envelope.payload.get("note") or envelope.payload.get("reason") or "").strip(),
-        rebuild=True,
-        auto_verify=True,
+        item=material,
     )
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "上传材料验证失败。"))
     lifecycle = str(result.get("lifecycle_status") or "uploaded")
-    projected = _sync_material_state_from_projection(context, item_id, persist=False)
+    projected = dict(material)
     projected["lifecycle_status"] = lifecycle
     verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
     if lifecycle == "verified":
@@ -7395,32 +7595,23 @@ def _handle_materials_verify(
     operation_id: str,
 ) -> dict[str, Any]:
     from agent.material_verifier import verify_material
-    from materials_checklist import update_item_response
 
     _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
-    _material_item(context, item_id)
+    material = _material_item(context, item_id)
     result = verify_material(
         context.root,
         item_id,
         uploaded_path="",
         note=str(envelope.payload.get("note") or "").strip(),
+        item=material,
     )
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "材料验证失败。"))
     lifecycle = str(result.get("lifecycle_status") or "uploaded").strip().lower()
     if lifecycle not in {"uploaded", "verified", "rejected"}:
         raise ControlPlaneError("STATE_UNAVAILABLE", "材料验证返回了未知生命周期，已拒绝更新。", status_code=503)
-    update = update_item_response(
-        context.root,
-        item_id,
-        response_status=lifecycle,
-        reason=str(result.get("message") or "材料自动验证"),
-        rebuild=True,
-    )
-    if not update.get("ok"):
-        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "验证状态保存失败。"))
-    projected = _sync_material_state_from_projection(context, item_id, persist=False)
+    projected = dict(material)
     projected["lifecycle_status"] = lifecycle
     projected["verification_confidence"] = result.get("confidence")
     if lifecycle == "verified":
@@ -7457,11 +7648,10 @@ def _handle_materials_confirm_verification(
     operation_id: str,
 ) -> dict[str, Any]:
     from agent.material_verifier import human_confirm_verification
-    from materials_checklist import update_item_response
 
     _ensure_v2_goal_import(context)
     item_id = str(envelope.payload.get("item_id") or "").strip()
-    _material_item(context, item_id)
+    material = _material_item(context, item_id)
     accept = envelope.payload.get("accept", True)
     if not isinstance(accept, bool):
         raise ControlPlaneError("COMMAND_INVALID", "accept 必须是布尔值。", status_code=400)
@@ -7480,16 +7670,7 @@ def _handle_materials_confirm_verification(
     if not result.get("ok"):
         raise ControlPlaneError("GATE_BLOCKED", str(result.get("message") or "材料核验记录不存在。"))
     lifecycle = "verified" if accept else "rejected"
-    update = update_item_response(
-        context.root,
-        item_id,
-        response_status=lifecycle,
-        reason=reason or f"人工确认验证通过 by {operator}",
-        rebuild=True,
-    )
-    if not update.get("ok"):
-        raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(update.get("message") or "核验结论保存失败。"))
-    projected = _sync_material_state_from_projection(context, item_id, persist=False)
+    projected = dict(material)
     projected["lifecycle_status"] = lifecycle
     projected["evidence_status"] = "verified" if accept else "rejected"
     if accept:
@@ -7519,11 +7700,6 @@ def _handle_materials_update(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import (
-        build_materials_checklist,
-        update_item_response,
-    )
-
     raw_updates = envelope.payload.get("updates")
     if isinstance(raw_updates, list):
         updates = [dict(item) for item in raw_updates if isinstance(item, dict)]
@@ -7575,25 +7751,23 @@ def _handle_materials_update(
             }
         )
 
-    result: dict[str, Any] = {"ok": True}
+    store = ControlStore(context)
     for item in normalized:
-        result = update_item_response(
-            context.root,
-            item["item_id"],
-            response_status=item["persist_status"],
-            reason=item["reason"],
-            suggested_attachment=item["suggested_attachment"],
-            rebuild=False,
-        )
-        if not result.get("ok"):
-            raise ControlPlaneError("COMMAND_DISPATCH_FAILED", str(result.get("message") or "材料状态更新失败。"))
-    build_materials_checklist(context.root)
-    for item in normalized:
-        _sync_material_state_from_projection(context, item["item_id"])
+        current = dict(by_id[item["item_id"]])
+        status = item["response_status"]
+        current["response_status"] = status
+        current["reason"] = item["reason"]
+        if item["suggested_attachment"]:
+            current["suggested_attachment"] = item["suggested_attachment"]
+        if status == "waived":
+            current["lifecycle_status"] = "waived"
+        elif status == "deferred" and not _material_fulfillment_verified(current):
+            current["lifecycle_status"] = "requested"
+        store.upsert_material_state(_authoritative_material_state(current), source="materials.update")
     return {
         "accepted": True,
         "operation_status": "succeeded",
-        "message": str(result.get("message") or f"已更新 {len(normalized)} 条材料。"),
+        "message": f"已更新 {len(normalized)} 条材料。",
     }
 
 
@@ -7602,41 +7776,26 @@ def _handle_materials_rebuild(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import build_materials_checklist, load_materials_checklist, update_item_response
+    from materials_checklist import derive_materials_checklist
 
-    authoritative = _material_items(context)
-    path = build_materials_checklist(context.root)
-    for item in authoritative:
-        lifecycle = str(item.get("lifecycle_status") or "").strip().lower()
-        response_status = str(item.get("response_status") or "deferred").strip().lower()
-        persisted = (
-            lifecycle
-            if lifecycle
-            in {"verified", "uploaded", "rejected", "waived", "requested", "missing", "not_applicable"}
-            else response_status
-        )
-        result = update_item_response(
-            context.root,
-            str(item.get("item_id") or ""),
-            response_status=persisted,
-            reason=str(item.get("reason") or ""),
-            suggested_attachment=str(item.get("suggested_attachment") or ""),
-            rebuild=False,
-        )
-        if not result.get("ok"):
-            raise ControlPlaneError("STATE_UNAVAILABLE", str(result.get("message") or "材料投影更新失败。"), status_code=503)
-    if authoritative:
-        path = build_materials_checklist(context.root)
-    checklist = load_materials_checklist(context.root)
-    if not path.exists() or not isinstance(checklist, dict):
-        raise ControlPlaneError("STATE_UNAVAILABLE", "材料清单重建后状态不可用。", status_code=503)
+    store = ControlStore(context)
+    existing = {str(item.get("item_id") or ""): item for item in _material_items(context)}
+    checklist = derive_materials_checklist(context.root)
+    generated = checklist.get("items") if isinstance(checklist.get("items"), list) else []
+    preserved_fields = {
+        "response_status", "lifecycle_status", "evidence_status", "reason",
+        "suggested_attachment", "suggested_placeholder_language", "uploaded_path",
+        "verification", "verification_history", "submission", "submission_history",
+    }
+    for item in generated:
+        if not isinstance(item, dict):
+            continue
+        item_id = str(item.get("item_id") or "")
+        prior = existing.get(item_id, {})
+        merged = dict(item)
+        merged.update({key: prior[key] for key in preserved_fields if key in prior})
+        store.upsert_material_state(_authoritative_material_state(merged), source="materials.rebuild")
     summary = checklist.get("summary") if isinstance(checklist.get("summary"), dict) else {}
-    for item in checklist.get("items") or []:
-        if isinstance(item, dict):
-            ControlStore(context).upsert_material_state(
-                _authoritative_material_state(item),
-                source="v1_projection",
-            )
     return {
         "accepted": True,
         "operation_status": "succeeded",
@@ -7652,68 +7811,87 @@ def _trigger_material_refill(
     chapter_ids: list[str] | None,
     replan_jobs: bool,
     max_chapters: int,
+    defer_start: bool = False,
 ) -> dict[str, Any]:
-    global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT, PAUSE_REQUESTED
-    if RUNNING or SUPERVISOR.is_running():
+    if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         return {"ok": False, "busy": True, "message": "当前已有任务在运行。"}
-    RUNNING = True
-    CURRENT_TASK = "materials-refill"
-    CURRENT_RUN_ID = context.workspace_id
-    CURRENT_RUN_ROOT = context.root
-    PAUSE_REQUESTED = False
 
     def worker() -> None:
-        global RUNNING, CURRENT_TASK, CURRENT_RUN_ID, CURRENT_RUN_ROOT
         status = "failed"
         message = "材料回填失败。"
         error: dict[str, Any] | None = None
-        try:
-            from materials_checklist import refill_material_gaps, revalidate_issues_after_materials
-
-            ControlStore(context).sync_operation(
-                operation_id,
-                "running",
-                message="正在按已验证材料回填章节。",
-                fencing_token=fencing_token,
-            )
-            result = refill_material_gaps(
-                context.root,
-                chapter_ids=chapter_ids,
-                replan_jobs=replan_jobs,
-                max_chapters=max_chapters,
-            )
-            from artifact_manifest import record_external_chapter_mutation
-
-            record_external_chapter_mutation(context, disposition="materials_refill")
+        with _legacy_execution_scope("materials-refill", context.workspace_id, context.root):
             try:
-                result["revalidate"] = revalidate_issues_after_materials(context.root)
-                _project_quality_issues(context)
-            except Exception as exc:
-                result["revalidate_error"] = str(exc)
-            failed = result.get("failed") if isinstance(result.get("failed"), list) else []
-            status = "succeeded" if result.get("ok") and not failed and not result.get("revalidate_error") else "blocked"
-            message = str(result.get("message") or "材料回填完成。")
-            error = {"failed": failed, "revalidate_error": result.get("revalidate_error")} if status == "blocked" else None
-        except Exception as exc:
-            error = {"message": str(exc)}
-            message = f"材料回填失败: {exc}"
-        finally:
-            try:
+                from materials_checklist import refill_material_gaps
+
                 ControlStore(context).sync_operation(
                     operation_id,
-                    status,
-                    message=message,
-                    error=error,
+                    "running",
+                    message="正在按已验证材料回填章节。",
                     fencing_token=fencing_token,
                 )
-            finally:
-                RUNNING = False
-                CURRENT_TASK = ""
-                CURRENT_RUN_ID = ""
-                CURRENT_RUN_ROOT = None
+                materials = _material_items(context)
+                result = refill_material_gaps(
+                    context.root,
+                    chapter_ids=chapter_ids,
+                    replan_jobs=replan_jobs,
+                    max_chapters=max_chapters,
+                    material_items=materials,
+                )
+                for item_id in result.get("resolved_item_ids") or []:
+                    item = next((row for row in materials if str(row.get("item_id") or "") == str(item_id)), None)
+                    if isinstance(item, dict):
+                        updated = dict(item)
+                        updated["lifecycle_status"] = "resolved"
+                        ControlStore(context).upsert_material_state(updated, source="materials.refill")
+                for item_id in result.get("injected_item_ids") or []:
+                    item = next((row for row in materials if str(row.get("item_id") or "") == str(item_id)), None)
+                    if isinstance(item, dict):
+                        updated = dict(item)
+                        updated["lifecycle_status"] = "injected"
+                        ControlStore(context).upsert_material_state(updated, source="materials.refill")
+                failed = result.get("failed") if isinstance(result.get("failed"), list) else []
+                status = "succeeded" if result.get("ok") and not failed else "blocked"
+                message = str(result.get("message") or "材料回填完成。")
+                error = {"failed": failed} if status == "blocked" else None
+                if status == "succeeded":
+                    from artifact_manifest import record_external_chapter_mutation
 
-    threading.Thread(target=worker, daemon=True, name=f"materials-refill-{context.workspace_id}").start()
-    return {"ok": True, "message": "材料回填已启动。"}
+                    refilled = record_external_chapter_mutation(context, disposition="materials_refill")
+                    if refilled:
+                        _record_v2_stage_lifecycle(
+                            context,
+                            operation_id,
+                            "write-all",
+                            "succeeded",
+                            "materials_refill",
+                            None,
+                        )
+            except Exception as exc:
+                error = {"message": str(exc)}
+                message = f"材料回填失败: {exc}"
+        try:
+            ControlStore(context).sync_operation(
+                operation_id,
+                status,
+                message=message,
+                error=error,
+                fencing_token=fencing_token,
+            )
+        except Exception as exc:
+            _append_log(f"[警告] 材料回填 Operation 状态回写失败: {exc}")
+
+    worker_thread = threading.Thread(target=worker, daemon=True, name=f"materials-refill-{context.workspace_id}")
+
+    def start_worker() -> None:
+        worker_thread.start()
+
+    result: dict[str, Any] = {"ok": True, "message": "材料回填已启动。", "_worker_thread": worker_thread}
+    if defer_start:
+        result["_after_commit"] = start_worker
+    else:
+        start_worker()
+    return result
 
 
 def _handle_materials_refill(
@@ -7721,18 +7899,10 @@ def _handle_materials_refill(
     envelope: CommandEnvelope,
     operation_id: str,
 ) -> dict[str, Any]:
-    from materials_checklist import load_materials_checklist
-
-    # The worker revalidates material-related issues, which still emits the
-    # one-version V1 projection before this explicit command projects it back
-    # to SQLite.  Refuse to start if the existing projection was not migrated.
-    _ensure_v2_issue_import(context)
     items = _material_items(context)
-    projection = load_materials_checklist(context.root)
-    projection_items = projection.get("items") if isinstance(projection.get("items"), list) else []
     unsafe_ready = [
         str(item.get("item_id") or "")
-        for item in [*items, *projection_items]
+        for item in items
         if isinstance(item, dict)
         and str(item.get("response_status") or "") == "ready"
         and not _material_fulfillment_verified(item)
@@ -7759,10 +7929,16 @@ def _handle_materials_refill(
         chapter_ids=chapter_ids,
         replan_jobs=bool(envelope.payload.get("replan_jobs", True)),
         max_chapters=max_chapters,
+        defer_start=True,
     )
     if not result.get("ok"):
         raise ControlPlaneError("LEASE_CONFLICT", str(result.get("message") or "材料回填未能启动。"))
-    return {"accepted": True, "operation_status": "running", "message": result["message"]}
+    return {
+        "accepted": True,
+        "operation_status": "running",
+        "message": result["message"],
+        "_after_commit": result.get("_after_commit"),
+    }
 
 
 def _handle_gate_revalidate(
@@ -7818,158 +7994,6 @@ def _handle_gate_revalidate(
     }
 
 
-def _handle_migration_reconcile(
-    context: WorkspaceContext,
-    envelope: CommandEnvelope,
-    operation_id: str,
-) -> dict[str, Any]:
-    actor = dict(envelope.actor or {})
-    if str(actor.get("role") or "").strip().lower() != "admin":
-        raise ControlPlaneError(
-            "AUTH_FORBIDDEN",
-            "只有管理员可以处理迁移冲突。",
-            status_code=403,
-        )
-    conflict_id = str(envelope.payload.get("conflict_id") or "").strip()
-    resolution = str(envelope.payload.get("resolution") or "").strip()
-    reason = str(envelope.payload.get("reason") or "").strip()
-    if not conflict_id:
-        raise ControlPlaneError("COMMAND_INVALID", "迁移协调缺少 conflict_id。", status_code=400)
-    store = ControlStore(context)
-    conflict = store.resolve_migration_conflict(
-        conflict_id,
-        resolution=resolution,
-        actor=actor,
-        reason=reason,
-    )
-    state = store.migration_state()
-    _refresh_migration_report(
-        context,
-        state,
-        action={
-            "kind": "migration.reconcile",
-            "conflict_id": conflict["conflict_id"],
-            "resolution": resolution,
-            "actor": actor,
-        },
-    )
-    return {
-        "accepted": True,
-        "operation_status": "succeeded",
-        "message": f"迁移冲突已处理: {conflict['conflict_id']}",
-        "migration": state,
-    }
-
-
-def _handle_migration_scan(
-    context: WorkspaceContext,
-    envelope: CommandEnvelope,
-    operation_id: str,
-) -> dict[str, Any]:
-    actor = dict(envelope.actor or {})
-    if str(actor.get("role") or "").strip().lower() != "admin":
-        raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以扫描旧工作区迁移状态。", status_code=403)
-    store = ControlStore(context)
-    dry_run = _v1_migration_dry_run(context)
-    inventory = dry_run.get("inventory") if isinstance(dry_run.get("inventory"), dict) else {}
-    imported = 0
-    for item in inventory.get("importable") or []:
-        if not isinstance(item, dict):
-            continue
-        domain = str(item.get("domain") or "")
-        legacy = item.get("legacy")
-        if domain == "goal":
-            imported += store.ensure_goal_state(legacy if isinstance(legacy, dict) else None)
-        elif domain == "materials":
-            imported += store.ensure_material_states(legacy if isinstance(legacy, list) else [])
-        elif domain == "issues":
-            imported += store.ensure_issue_states(legacy if isinstance(legacy, list) else [])
-        elif domain == "repair_job":
-            imported += store.ensure_repair_job_state(legacy if isinstance(legacy, dict) else None)
-        elif domain == "agent_activity":
-            imported += store.ensure_agent_activity_state(legacy if isinstance(legacy, dict) else None)
-    detected = 0
-    for item in inventory.get("conflicts") or []:
-        if not isinstance(item, dict):
-            continue
-        store.record_migration_conflict(
-            domain=str(item.get("domain") or "unknown"),
-            legacy=item.get("legacy"),
-            authoritative=item.get("authoritative"),
-            reason="管理员迁移扫描发现 V1 与 control.db 状态不一致。",
-            exclude_operation_id=operation_id,
-        )
-        detected += 1
-    for category, reason in (("orphans", "旧根目录控制状态未绑定到工作区。"), ("unrecognized", "旧状态文件无法识别。")):
-        for item in inventory.get(category) or []:
-            store.record_migration_conflict(
-                domain="orphan" if category == "orphans" else "unrecognized",
-                legacy=item,
-                authoritative={},
-                reason=reason,
-                exclude_operation_id=operation_id,
-            )
-            detected += 1
-    store.record_migration_scan(
-        fingerprint=str(dry_run.get("source_fingerprint") or ""),
-        manifest=[dict(item) for item in dry_run.get("source_manifest") or [] if isinstance(item, dict)],
-        actor=actor,
-    )
-    legacy_artifact_count = _register_legacy_artifact_inventory(context, store)
-    state = store.migration_state()
-    from utils import write_json
-
-    write_json(
-        context.root / "workspace" / "migration_report.json",
-        {
-            "version": 1,
-            "workspace_id": context.workspace_id,
-            "source_fingerprint": dry_run.get("source_fingerprint"),
-            "source_manifest": dry_run.get("source_manifest") or [],
-            "inventory": inventory,
-            "imported_count": imported,
-            "legacy_artifact_count": legacy_artifact_count,
-            "detected_count": detected,
-            "migration": state,
-        },
-    )
-    return {
-        "accepted": True,
-        "operation_status": "succeeded",
-        "message": (
-            f"迁移扫描完成：导入 {imported} 项，登记 {legacy_artifact_count} 个待重建旧 Artifact，"
-            f"发现 {detected} 项待协调状态。"
-        ),
-        "migration": state,
-    }
-
-
-def _handle_migration_cutover(
-    context: WorkspaceContext,
-    envelope: CommandEnvelope,
-    operation_id: str,
-) -> dict[str, Any]:
-    actor = dict(envelope.actor or {})
-    if str(actor.get("role") or "").strip().lower() != "admin":
-        raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以切换工作区至 V2 控制面。", status_code=403)
-    dry_run = _v1_migration_dry_run(context)
-    fingerprint = str(dry_run.get("source_fingerprint") or "")
-    store = ControlStore(context)
-    cutover = store.activate_migration_cutover(fingerprint=fingerprint, actor=actor)
-    state = store.migration_state()
-    _refresh_migration_report(
-        context,
-        state,
-        action={"kind": "migration.cutover", "fingerprint": fingerprint, "actor": actor},
-    )
-    return {
-        "accepted": True,
-        "operation_status": "succeeded",
-        "message": "工作区已完成 V2 控制面切换。",
-        "cutover": cutover,
-    }
-
-
 def _command_gateway(context: WorkspaceContext) -> CommandGateway:
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
     return CommandGateway(
@@ -8000,9 +8024,6 @@ def _command_gateway(context: WorkspaceContext) -> CommandGateway:
             "materials.rebuild": _handle_materials_rebuild,
             "materials.refill": _handle_materials_refill,
             "gate.revalidate": _handle_gate_revalidate,
-            "migration.scan": _handle_migration_scan,
-            "migration.cutover": _handle_migration_cutover,
-            "migration.reconcile": _handle_migration_reconcile,
         },
     )
 
@@ -8358,9 +8379,6 @@ async def api_v2_submit_command(workspace_id: str, request: Request) -> JSONResp
                 "workspace.run_utility": "确认执行工作区维护命令",
                 "workspace.archive": "确认归档工作区",
                 "workspace.clean": "确认清理工作区产物",
-                "migration.scan": "确认扫描并登记旧工作区迁移状态",
-                "migration.cutover": "确认切换工作区至 V2 控制面",
-                "migration.reconcile": "确认处理 V1/V2 迁移冲突",
             }
             label = labels.get(envelope.kind, f"确认执行 {envelope.kind}")
             action = gateway.propose(envelope, label=label, risk="high")
@@ -8439,46 +8457,29 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
     try:
         context = _workspace_context(workspace_id)
         store = ControlStore(context)
-        snapshot = _migration_snapshot_with_source_state(context, store.snapshot())
-        snapshot["compatibility_usage"] = store.compatibility_usage()
+        snapshot = store.snapshot()
+        snapshot.pop("migration", None)
+        snapshot.pop("compatibility_usage", None)
         snapshot["quality"] = {
             "latest_gate_evaluations": store.latest_gate_evaluations(),
             "source": "control.db",
         }
-        migration_preview = _v1_migration_dry_run(context)
-        legacy_import_pending = any(
-            bool(item.get("import_pending"))
-            for item in migration_preview.get("source_manifest") or []
-            if isinstance(item, dict)
-        )
-        # The V1 presentation aggregator initializes several legacy control
-        # files. Never invoke it while actual V1 state still awaits an
-        # administrator migration scan; the Snapshot endpoint must stay read-only.
-        compatibility = (
-            {
-                "goal": {}, "goal_full": {}, "agent_activity": {}, "repair_job": {},
-                "pipeline": {}, "workflow": [], "issues_summary": {}, "outputs": {},
-            }
-            if legacy_import_pending
-            else _status_payload(
-                context.root,
-                context.workspace_id,
-                persist_manual_review_summary=False,
-                v2_read_only=True,
-            )
+        compatibility = _status_payload(
+            context.root,
+            context.workspace_id,
+            persist_manual_review_summary=False,
+            v2_read_only=True,
         )
         goal_state = store.goal_state()
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
+        if repair_state and str(repair_state.get("status") or "") in RUNNING_REPAIR_STATUSES:
+            actual_resume_command = _v2_pipeline_resume_command(context)
+            if actual_resume_command:
+                # Snapshot-only projection: do not mutate the repair Job just
+                # to keep a UI label current.
+                repair_state = {**repair_state, "resume_command": actual_resume_command}
         issue_states = store.issue_states()
-        material_import_pending = (
-            store.v1_import_pending("materials")
-            and (context.root / "workspace" / "materials_checklist.json").exists()
-        )
-        issue_import_pending = (
-            store.v1_import_pending("issues")
-            and (context.root / "workspace" / "issues" / "open.json").exists()
-        )
         material_items = store.material_states()
         material_summary = {
             "exists": bool(material_items),
@@ -8486,19 +8487,90 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
             "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
             "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
-            "source": "migration_required" if material_import_pending else "control.db",
+            "source": "control.db",
         }
         artifact_states = snapshot.get("artifacts") or []
+        pipeline_operation = next(
+            (
+                item for item in (snapshot.get("operations") or [])
+                if str(item.get("kind") or "").startswith("pipeline.")
+            ),
+            None,
+        )
+        pipeline_operation_id = str((pipeline_operation or {}).get("operation_id") or "")
+        pipeline_operation_running = str((pipeline_operation or {}).get("status") or "") in {
+            "queued", "running", "pausing", "cancelling",
+        }
+        pipeline_stage_runs = [
+            item for item in (snapshot.get("stage_runs") or [])
+            if pipeline_operation_id and str(item.get("operation_id") or "") == pipeline_operation_id
+        ]
+        active_stage_run = next(
+            (
+                item for item in pipeline_stage_runs
+                if str(item.get("status") or "") in {"queued", "running"}
+            ),
+            None,
+        )
+        active_stage_command = str((active_stage_run or {}).get("stage_command") or "")
         pipeline_snapshot = _pipeline_snapshot_from_control(
             snapshot.get("operations") or [],
             compatibility.get("pipeline") or {},
+            snapshot.get("stage_runs") or [],
         )
+        if active_stage_command and pipeline_operation_running:
+            pipeline_snapshot["current_stage"] = active_stage_command
+        latest_pipeline_stage_by_command: dict[str, dict[str, Any]] = {}
+        for item in pipeline_stage_runs:
+            command = str(item.get("stage_command") or "")
+            if command and command not in latest_pipeline_stage_by_command:
+                latest_pipeline_stage_by_command[command] = item
+        using_registry_workflow = not bool(compatibility.get("workflow"))
+        raw_workflow = compatibility.get("workflow") or [
+            {
+                "id": spec.id,
+                "label": spec.label,
+                "command": spec.command,
+                "kind": spec.kind,
+                "done": False,
+                "ready": False,
+                "state": "blocked",
+                "message": "等待前置步骤",
+            }
+            for spec in workflow_stage_specs(include_utility=False)
+        ]
         workflow = []
-        for raw_step in compatibility.get("workflow") or []:
+        previous_done = True
+        for raw_step in raw_workflow:
             step = dict(raw_step) if isinstance(raw_step, dict) else {}
             command = str(step.get("command") or "")
+            is_utility = str(step.get("kind") or "") == "utility"
             manifests = [item for item in artifact_states if str(item.get("producer") or "") == command]
-            if manifests and not bool(compatibility.get("running") and compatibility.get("current_task") == command):
+            latest_stage = latest_pipeline_stage_by_command.get(command) or {}
+            latest_stage_status = str(latest_stage.get("status") or "")
+            if pipeline_operation_running and command == active_stage_command:
+                step["done"] = False
+                step["ready"] = True
+                step["state"] = "running"
+                step["message"] = "运行中"
+                step["artifact_source"] = "control.db"
+            elif latest_stage_status in {"failed", "paused", "cancelled"}:
+                error = latest_stage.get("error")
+                if isinstance(error, dict):
+                    detail = str(error.get("message") or error.get("detail") or error.get("code") or "")
+                else:
+                    detail = str(error or "")
+                state_labels = {
+                    "failed": "执行失败",
+                    "paused": "已暂停",
+                    "cancelled": "已取消",
+                }
+                step["done"] = False
+                step["ready"] = latest_stage_status != "cancelled"
+                step["state"] = "error" if latest_stage_status == "failed" else latest_stage_status
+                step["message"] = detail or state_labels[latest_stage_status]
+                step["artifact_source"] = "control.db"
+            elif manifests:
                 ready = all(str(item.get("status") or "") == "ready" for item in manifests)
                 step["done"] = ready
                 step["ready"] = True
@@ -8507,13 +8579,37 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                     stale_count = sum(1 for item in manifests if item.get("status") == "stale")
                     step["message"] = f"SQLite Artifact 已过期（{stale_count or len(manifests)} 项），需重新执行"
                 step["artifact_source"] = "control.db"
+            elif command:
+                spec = stage_spec_by_command(command)
+                virtual_only = bool(spec.produces) and all(artifact.kind == "virtual" for artifact in spec.produces)
+                if virtual_only and step.get("done"):
+                    # A virtual artifact has no filesystem existence signal.
+                    # In V2 it is complete only after its SQLite manifest is
+                    # recorded by a successful/reused StageRun.
+                    step["done"] = False
+                    step["state"] = "ready" if step.get("ready") else "blocked"
+                    step["message"] = "等待本轮执行"
+                    step["artifact_source"] = "control.db"
+            if not is_utility and step.get("done") and not previous_done:
+                step["done"] = False
+                step["ready"] = False
+                step["state"] = "blocked"
+                step["message"] = "等待前置步骤"
+            elif not is_utility and not step.get("done") and step.get("state") not in {"running", "recovering", "retrying", "error"}:
+                step["ready"] = previous_done
+                step["state"] = "ready" if previous_done else "blocked"
+                if using_registry_workflow or not step.get("message"):
+                    step["message"] = "可执行" if previous_done else "等待前置步骤"
             workflow.append(step)
+            if not is_utility:
+                previous_done = bool(step.get("done"))
+        goal_payload = {
+            **(compatibility.get("goal") or {}),
+            **(goal_state or compatibility.get("goal_full") or {}),
+        }
         snapshot.update(
             {
-                "goal": {
-                    **(compatibility.get("goal") or {}),
-                    **(goal_state or compatibility.get("goal_full") or {}),
-                },
+                "goal": goal_payload or None,
                 "activity": activity_state or compatibility.get("agent_activity"),
                 "repair_job": repair_state or compatibility.get("repair_job"),
                 "manual_review_summary": _v2_manual_review_summary(context),
@@ -8556,11 +8652,17 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                             if str(item.get("status") or "") in {"open", "in_progress"}
                             and str(item.get("severity") or "") == "block"
                         ][:8],
-                "source": "migration_required" if issue_import_pending else "control.db",
+                "source": "control.db",
                     },
                     "issues": issue_states,
                 },
                 "artifacts": snapshot.get("artifacts") or [],
+                "pipeline_stage_runs": pipeline_stage_runs,
+                "sources": {
+                    "tender": _list_source_files("tender", context.root),
+                    "company": _list_source_files("company", context.root),
+                    "template": _list_source_files("template", context.root),
+                },
                 "artifact_files": {
                     "inputs": compatibility.get("inputs") or {},
                     "workspace": compatibility.get("workspace") or {},
@@ -8570,8 +8672,12 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 # one-version adapter window; control fields above are SQLite-first.
                 "presentation": {
                     "workflow": workflow,
-                    "running": bool(compatibility.get("running")),
-                    "current_task": compatibility.get("current_task") or "",
+                    "running": pipeline_operation_running,
+                    "current_task": (
+                        active_stage_command
+                        or (pipeline_snapshot.get("current_stage") if pipeline_operation_running else "")
+                        or ""
+                    ),
                     "run_state": compatibility.get("run_state") or {},
                     "next_step": compatibility.get("next_step"),
                     "blocked_step": compatibility.get("blocked_step"),
@@ -8585,81 +8691,18 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 "compatibility_source": "v1_projection",
             }
         )
-        return JSONResponse({"ok": True, "snapshot": snapshot})
+        return JSONResponse(
+            {"ok": True, "snapshot": snapshot},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
     except ControlPlaneError as exc:
         return _command_error_response(exc)
     except Exception as exc:
         return _command_error_response(
             ControlPlaneError("STATE_UNAVAILABLE", f"快照读取失败: {exc}", status_code=503, retryable=True)
-        )
-
-
-@app.get("/api/v2/workspaces/{workspace_id}/migration/dry-run")
-def api_v2_migration_dry_run(workspace_id: str) -> JSONResponse:
-    try:
-        return JSONResponse({"ok": True, **_v1_migration_dry_run(_workspace_context(workspace_id))})
-    except ControlPlaneError as exc:
-        return _command_error_response(exc)
-    except Exception as exc:
-        return _command_error_response(
-            ControlPlaneError(
-                "STATE_UNAVAILABLE",
-                f"迁移预检失败: {exc}",
-                status_code=503,
-                retryable=True,
-            )
-        )
-
-
-@app.get("/api/v2/workspaces/{workspace_id}/migration/backups")
-def api_v2_migration_backups(workspace_id: str) -> JSONResponse:
-    try:
-        context = _workspace_context(workspace_id)
-        return JSONResponse({"ok": True, "backups": ControlStore(context).migration_backups()})
-    except ControlPlaneError as exc:
-        return _command_error_response(exc)
-    except Exception as exc:
-        return _command_error_response(
-            ControlPlaneError("STATE_UNAVAILABLE", f"迁移备份读取失败: {exc}", status_code=503, retryable=True)
-        )
-
-
-@app.get("/api/v2/workspaces/{workspace_id}/migration/report")
-def api_v2_migration_report(workspace_id: str) -> JSONResponse:
-    try:
-        context = _workspace_context(workspace_id)
-        path = context.root / "workspace" / "migration_report.json"
-        if not path.exists() or not path.is_file():
-            raise ControlPlaneError("MIGRATION_REPORT_NOT_FOUND", "尚未执行迁移扫描。", status_code=404)
-        report = _read_json_file(path)
-        if not isinstance(report, dict) or str(report.get("workspace_id") or "") != context.workspace_id:
-            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移审计报告无效。", status_code=503)
-        return JSONResponse({"ok": True, "report": report})
-    except ControlPlaneError as exc:
-        return _command_error_response(exc)
-    except Exception as exc:
-        return _command_error_response(
-            ControlPlaneError("STATE_UNAVAILABLE", f"迁移报告读取失败: {exc}", status_code=503, retryable=True)
-        )
-
-
-@app.post("/api/v2/workspaces/{workspace_id}/migration/backups/drill")
-async def api_v2_migration_backup_drill(workspace_id: str, request: Request) -> JSONResponse:
-    try:
-        body = await request.json()
-        if not isinstance(body, dict):
-            raise ControlPlaneError("COMMAND_INVALID", "请求体必须是 JSON 对象。", status_code=400)
-        context = _workspace_context(workspace_id)
-        principal = _request_principal(request)
-        if str(principal.get("role") or "").lower() != "admin":
-            raise ControlPlaneError("AUTH_FORBIDDEN", "只有管理员可以执行恢复演练。", status_code=403)
-        result = ControlStore(context).drill_migration_backup(str(body.get("path") or ""))
-        return JSONResponse({"ok": True, "backup": result})
-    except ControlPlaneError as exc:
-        return _command_error_response(exc)
-    except Exception as exc:
-        return _command_error_response(
-            ControlPlaneError("STATE_UNAVAILABLE", f"迁移恢复演练失败: {exc}", status_code=503, retryable=True)
         )
 
 
@@ -8953,7 +8996,9 @@ def api_logs(lines: int = Query(200, ge=1, le=2000), workspace_id: str = "") -> 
 @app.get("/api/v2/workspaces/{workspace_id}/logs/stream")
 @app.get("/api/logs/stream")
 async def api_logs_stream(request: Request, workspace_id: str = "") -> StreamingResponse:
-    root = _workspace_context(workspace_id).root if workspace_id else None
+    context = _workspace_context(workspace_id) if workspace_id else None
+    root = context.root if context is not None else None
+    control_store = ControlStore(context) if context is not None else None
 
     async def stream():
         last = 0
@@ -8965,12 +9010,21 @@ async def api_logs_stream(request: Request, workspace_id: str = "") -> Streaming
             while last < len(available_lines):
                 yield f"data: {json.dumps({'type': 'log', 'line': available_lines[last]}, ensure_ascii=False)}\n\n"
                 last += 1
-            events = load_run_events(root or _active_root())
-            while last_event < len(events):
-                event = events[last_event]
-                event_line = f"[{event.get('stage', '')}] {event.get('event_type', '')} {event.get('message', '')}".strip()
-                yield f"data: {json.dumps({'type': 'run_event', 'event': event, 'line': event_line}, ensure_ascii=False)}\n\n"
-                last_event += 1
+            if control_store is not None:
+                events = control_store.events(last_event, limit=200)
+                for event in events:
+                    last_event = int(event.get("seq") or last_event)
+                    payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+                    message = str(payload.get("message") or payload.get("status") or "")
+                    event_line = f"[ControlPlane] {event.get('kind', '')} {message}".strip()
+                    yield f"data: {json.dumps({'type': 'workspace_event', 'event': event, 'line': event_line}, ensure_ascii=False)}\n\n"
+            else:
+                events = load_run_events(_active_root())
+                while last_event < len(events):
+                    event = events[last_event]
+                    event_line = f"[{event.get('stage', '')}] {event.get('event_type', '')} {event.get('message', '')}".strip()
+                    yield f"data: {json.dumps({'type': 'run_event', 'event': event, 'line': event_line}, ensure_ascii=False)}\n\n"
+                    last_event += 1
             await asyncio.sleep(0.5)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
@@ -8981,7 +9035,28 @@ async def api_logs_stream(request: Request, workspace_id: str = "") -> Streaming
 # ---------------------------------------------------------------
 
 VALID_CATEGORIES = {"tender", "company", "template"}
-_SOURCE_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _source_upload_max_bytes() -> int:
+    """Read the source-upload limit from the same project .env as Web auth."""
+    from config import _parse_env_file
+
+    file_values = _parse_env_file(ROOT / ".env")
+    raw_value = os.environ.get(
+        "BID_AGENT_SOURCE_UPLOAD_MAX_MB",
+        file_values.get("BID_AGENT_SOURCE_UPLOAD_MAX_MB", "512"),
+    )
+    try:
+        limit_mb = int(str(raw_value).strip())
+    except (TypeError, ValueError):
+        limit_mb = 512
+    # Keep an accidental configuration from disabling the guard or accepting
+    # impractically large files in a local Web process.
+    limit_mb = max(1, min(limit_mb, 2048))
+    return limit_mb * 1024 * 1024
+
+
+_SOURCE_UPLOAD_MAX_BYTES = _source_upload_max_bytes()
 _SOURCE_UPLOAD_DENIED_EXTENSIONS = {
     ".bat",
     ".cmd",
@@ -9033,11 +9108,6 @@ async def api_upload(
 
     saved: list[str] = []
     for f in files:
-        content = await f.read()
-        if not content:
-            return JSONResponse({"ok": False, "message": "上传文件为空。"}, status_code=400)
-        if len(content) > _SOURCE_UPLOAD_MAX_BYTES:
-            return JSONResponse({"ok": False, "message": "单个源文件不能超过 100 MB。"}, status_code=413)
         try:
             filename = _safe_source_filename(f.filename or "")
         except ControlPlaneError as exc:
@@ -9047,7 +9117,28 @@ async def api_upload(
             return JSONResponse({"ok": False, "message": "上传路径越界。"}, status_code=400)
         if dest.exists():
             dest = dest.with_name(f"{dest.stem}_{uuid.uuid4().hex[:8]}{dest.suffix}")
-        dest.write_bytes(content)
+        size_bytes = 0
+        limit_exceeded = False
+        try:
+            with dest.open("xb") as output:
+                while chunk := await f.read(1024 * 1024):
+                    size_bytes += len(chunk)
+                    if size_bytes > _SOURCE_UPLOAD_MAX_BYTES:
+                        limit_exceeded = True
+                        break
+                    output.write(chunk)
+        except FileExistsError:
+            return JSONResponse({"ok": False, "message": "上传文件名冲突，请重试。"}, status_code=409)
+        if limit_exceeded:
+            dest.unlink(missing_ok=True)
+            limit_mb = _SOURCE_UPLOAD_MAX_BYTES // (1024 * 1024)
+            return JSONResponse(
+                {"ok": False, "message": f"单个源文件不能超过 {limit_mb} MB。"},
+                status_code=413,
+            )
+        if not size_bytes:
+            dest.unlink(missing_ok=True)
+            return JSONResponse({"ok": False, "message": "上传文件为空。"}, status_code=400)
         saved.append(dest.name)
         _append_log(f"[上传] {category} → {dest.name}")
 
@@ -9131,7 +9222,13 @@ def _propose_document_edit(request: Request, root: Path, payload: dict[str, Any]
     path = root / "outputs" / "final.md"
     if not path.exists() or not path.is_file():
         raise ControlPlaneError("ARTIFACT_NOT_FOUND", "final.md 不存在，请先执行 build-md。", status_code=404)
-    context = _workspace_context(ACTIVE_RUN_ID or root.name)
+    context = _workspace_context(root.name)
+    if not _same_path(context.root, root):
+        raise ControlPlaneError(
+            "WORKSPACE_MISMATCH",
+            "文档路径与 Command 工作区不一致，已拒绝创建确认操作。",
+            status_code=400,
+        )
     gateway = _command_gateway(context)
     command_payload = dict(payload)
     command_payload["base_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -9837,6 +9934,13 @@ def api_final_doc_undo_rewrite(request: Request, workspace_id: str = "") -> JSON
     root = _workspace_context(workspace_id).root if workspace_id else _active_root()
     key = root.resolve()
     backup_path = _LAST_BACKUP.get(key)
+    if not backup_path:
+        undo_state = ControlStore(_workspace_context(root.name)).document_undo()
+        relative = str((undo_state or {}).get("backup_path") or "").strip()
+        candidate = (root / relative).resolve() if relative else None
+        allowed = (root / "workspace" / "manual_line_edits").resolve()
+        if candidate and candidate.is_relative_to(allowed) and candidate.is_file():
+            backup_path = candidate
     if not backup_path or not backup_path.exists():
         return JSONResponse({"ok": False, "message": "没有可撤销的改写。"}, status_code=404)
     try:
@@ -10134,10 +10238,9 @@ def api_clean_workspace(request: Request) -> JSONResponse:
 
 
 def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
-    """Use control.db as restart authority and pipeline_control.json only as a worker checkpoint."""
+    """Fail closed after restart; explicit V2 resume owns all recovery."""
     store = ControlStore(context)
     operation = store.snapshot().get("operation")
-    checkpoint = SUPERVISOR.load(context.root)
     if not isinstance(operation, dict):
         return False
     status = str(operation.get("status") or "")
@@ -10162,44 +10265,14 @@ def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
     if status not in {"queued", "running"}:
         return False
 
-    checkpoint_operation = str(checkpoint.get("operation_id") or "")
-    checkpoint_fencing = int(checkpoint.get("fencing_token") or 0)
-    if not checkpoint or checkpoint_operation != operation_id or checkpoint_fencing != fencing_token:
-        store.sync_operation(
-            operation_id,
-            "blocked",
-            message="Pipeline checkpoint 与 control.db 不一致，已停止自动恢复。",
-            error={
-                "code": "STATE_CONFLICT",
-                "checkpoint_operation_id": checkpoint_operation,
-                "checkpoint_fencing_token": checkpoint_fencing,
-            },
-            fencing_token=fencing_token,
-        )
-        return False
-
-    if str(checkpoint.get("status") or "") not in {"running", "recovering", "retrying", "pausing"}:
-        SUPERVISOR._save(  # noqa: SLF001 - compatibility checkpoint is normalized from V2 authority here.
-            context.root,
-            {
-                "status": "recovering",
-                "operation_id": operation_id,
-                "fencing_token": fencing_token,
-                "message": "control.db 指示 Operation 仍在运行，准备断点恢复",
-            },
-        )
-    return SUPERVISOR.reconcile(
-        context.workspace_id,
-        context.root,
-        _run_sync,
-        gate_evaluator=lambda _root, command: _v2_gate_can_proceed(context, command),
-        artifact_recorder=lambda _root, command, disposition: _record_v2_stage_artifacts(
-            context,
-            command,
-            disposition,
-        ),
-        artifact_readiness_evaluator=lambda _root, command: _v2_stage_artifacts_reusable(context, command),
+    store.sync_operation(
+        operation_id,
+        "blocked",
+        message="服务重启后 Pipeline 未自动恢复；请通过 V2 Command 显式继续。",
+        error={"code": "ORPHANED_AFTER_RESTART", "previous_status": status},
+        fencing_token=fencing_token,
     )
+    return False
 
 
 def _reconcile_inactive_workspace(context: WorkspaceContext) -> dict[str, Any]:
@@ -10292,10 +10365,19 @@ def _startup_reconcile() -> None:
         try:
             reconcile_interrupted_repair(workspace_root)
             from agent.activity import reconcile_interrupted_activity
+            from context_selector import reconcile_interrupted_context_selection
 
             act = reconcile_interrupted_activity(workspace_root)
+            context_checkpoint = reconcile_interrupted_context_selection(workspace_root)
             if str(act.get("status") or "") == "interrupted":
                 _append_log(f"[系统] 已清理重启后残留工位: {workspace_root.name}")
+            if str(context_checkpoint.get("status") or "") == "interrupted":
+                completed = len(context_checkpoint.get("completed_chapter_ids") or [])
+                expected = len(context_checkpoint.get("expected_chapter_ids") or [])
+                _append_log(
+                    f"[系统] 上下文选择已中断: {workspace_root.name}，"
+                    f"已完成 {completed}/{expected}，请显式继续"
+                )
             if workspace_root != ROOT and not _same_path(workspace_root, ACTIVE_RUN_ROOT):
                 result = _reconcile_inactive_workspace(_workspace_context(workspace_root.name))
                 if result.get("changed"):

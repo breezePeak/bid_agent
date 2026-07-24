@@ -128,6 +128,7 @@ const companyInput = ref(null)
 const materialInput = ref(null)
 const selectedUploadItem = ref(null)
 const emptyMsg = ref('暂无材料清单。跑完「材料资格清单」阶段后会显示。')
+let refreshPromise = null
 
 const filters = [
   { key: 'deferred', label: '待补' },
@@ -200,17 +201,21 @@ function applyPayload(data) {
 }
 
 async function refresh() {
-  loading.value = true
-  msg.value = ''
-  try {
-    const { data } = await fetchMaterialsChecklist(props.runId)
-    if (data?.ok) applyPayload(data)
-    else emptyMsg.value = data?.message || '加载失败'
-  } catch (e) {
-    emptyMsg.value = e.message || '加载材料清单失败'
-  } finally {
-    loading.value = false
-  }
+  if (refreshPromise) return refreshPromise
+  refreshPromise = (async () => {
+    loading.value = true
+    msg.value = ''
+    try {
+      const { data } = await fetchMaterialsChecklist(props.runId)
+      if (data?.ok) applyPayload(data)
+      else emptyMsg.value = data?.message || '加载失败'
+    } catch (e) {
+      emptyMsg.value = e.message || '加载材料清单失败'
+    } finally {
+      loading.value = false
+    }
+  })().finally(() => { refreshPromise = null })
+  return refreshPromise
 }
 
 async function setStatus(item, status) {
@@ -297,7 +302,7 @@ async function onCompanyFiles(e) {
   try {
     for (const file of files) {
       const fd = new FormData()
-      fd.append('file', file)
+      fd.append('files', file)
       const workspace = encodeURIComponent(props.runId)
       const r = await fetch(`/api/v2/workspaces/${workspace}/sources?category=company`, { method: 'POST', body: fd }).then((x) => x.json())
       if (!r?.ok) throw new Error(r?.message || `上传失败: ${file.name}`)

@@ -1,12 +1,12 @@
 # 标书 Agent 控制面架构 V2
 
 > 版本：V2  
-> 状态：阶段 A/B 改造进行中，V2 尚未完成切换
+> 状态：V2-only 切换进行中，V1 API 已废弃
 > 确认日期：2026-07-21  
-> 现行实现：[current_logic_flow_v1.md](./current_logic_flow_v1.md)  
+> 现行实现：[current_logic_flow.md](./current_logic_flow.md)
 > 版本导航：[current_logic_flow.md](./current_logic_flow.md)
 
-V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构，并按两阶段完成收敛与迁移。阶段 A/B 已进入代码改造，但迁移、回归和切换验收尚未完成；V1 仍是当前实现真相源。
+V2 采用“Agent 控制面 + 确定性流水线唯一执行内核 + 每工作区 SQLite 控制状态”的目标架构。V1 API 已被明确废弃；V1 工作区和控制文件不再迁移，发现后直接删除。回归、旧代码物理清理和发布验收仍在进行。
 
 ## 1. 背景与问题
 
@@ -641,3 +641,58 @@ critical 风险仅在不是 fatal/废标、不是资格材料缺口、Policy 明
 | V2.0-B155 | 2026-07-22 | V2 Chat 的人工复核摘要改走 V2 摘要适配器，不再调用 V1 `manual_review_summary`；聊天状态读取保持在 V2 视图与兼容投影之间清晰分界。 |
 | V2.0-B156 | 2026-07-22 | V2 Workspace Snapshot 调用只读 V2 状态聚合器，并移除 Supervisor 兼容回退；Pipeline 快照仅由 `control.db` Operation 与 V2 状态视图构成。 |
 | V2.0-B157 | 2026-07-22 | V2 Workflow Step Detail 同样强制使用只读 V2 状态聚合，避免详情面板通过共享路由重新触发 V1 Runtime/状态投影读取。 |
+| V2.0-B158 | 2026-07-22 | 已确认的 V2 Repair Operation 启动时不再读取 `pipeline_control.json` 判断忙碌；并发授权由 `control.db` workspace lease 决定，进程内真实 Worker 状态仍用于防止同进程重复执行。 |
+| V2.0-B159 | 2026-07-22 | V2 Chat 最近事件改为按 `workspace_events.seq` 倒序限量读取后恢复升序，不再错误地用 workspace revision 充当 Event Stream 游标，避免遗漏首条或同 revision 的事件。 |
+| V2.0-B160 | 2026-07-22 | V2 暂停/取消通过 checkpoint PID 终止 Worker 前，必须校验 `operation_id` 与 fencing token 同 `control.db` 当前 Operation 一致；不匹配时 fail-closed，避免旧 checkpoint 误杀无关进程。 |
+| V2.0-B161 | 2026-07-22 | V2 Chat 日志流中的状态事件改读 `control.db.workspace_events`，按 seq 增量推送 `workspace_event`；V1 `run_events.jsonl` 仅保留给无 workspace 路径的兼容日志流。 |
+| V2.0-B162 | 2026-07-22 | V2 Materials Checklist 查询不再解析 `materials_checklist.json` 作为基础数据；条目、汇总与可回填判断来自 `control.db.material_states`，章节缺口只作为文件 Artifact 扫描。旧清单损坏不会覆盖或拖垮已迁移状态。 |
+| V2.0-B163 | 2026-07-22 | 文档编辑 ActionProposal 的 workspace 由目标文档根目录解析并校验，不再使用进程级 `ACTIVE_RUN_ID`；V2 撤销等路径在当前 UI 工作区变化时也不会把确认操作写入其他 workspace。 |
+| V2.0-B164 | 2026-07-22 | `document.apply_edit` 执行并发边界只由目标工作区的 CommandGateway Operation 与 SQLite lease 控制，不再被其他工作区的进程级 `RUNNING` 标志误阻断；终稿编辑保持 workspace 隔离。 |
+| V2.0-B165 | 2026-07-22 | 工作区归档与清理只检查目标 workspace 的 Worker/Supervisor 状态；其他工作区的进程级执行标志不再误阻断维护 Action，目标范围仍由 CommandGateway lease 和路径边界双重约束。 |
+| V2.0-B166 | 2026-07-22 | `document.apply_edit` 的单步撤销指针迁入目标 workspace 的 `control.db`；重启后 V2 撤销仍可从受路径边界校验的备份恢复，确认执行成功后清除指针，进程内 `_LAST_BACKUP` 仅保留兼容缓存。 |
+| V2.0-B167 | 2026-07-22 | 在完全拆除旧 Runner 进程级句柄前，所有 `_run_sync` 调用以执行锁串行化；V2 可按工作区提交并持有各自 lease，但旧 `RUNNING`、进程句柄与运行上下文不会被并发文档重建或阶段执行互相覆盖。 |
+| V2.0-B168 | 2026-07-22 | PipelineSupervisor 改为每 workspace 独立的运行槽、暂停/取消信号和恢复监控；不同工作区可同时拥有受各自 SQLite lease 授权的 Pipeline，而底层旧 Runner 仍由执行锁安全串行化。 |
+| V2.0-B169 | 2026-07-22 | V2 Repair Worker 不再在确认/claim 时预占进程级 `RUNNING`，而是在执行期进入共享旧执行锁；不同工作区的 Repair 可独立获得 CommandGateway 授权并排队执行，旧全局进程上下文不会相互覆盖。 |
+| V2.0-B170 | 2026-07-22 | V2 定向改稿同样在执行期进入旧执行锁，并将忙碌检查限定为目标 workspace；其他工作区正在运行时可安全排队，改稿 Operation、fencing 和 Artifact 更新仍保留在各自控制状态。 |
+| V2.0-B171 | 2026-07-22 | V2 材料回填改为执行期进入旧执行锁，启动检查仅看目标 workspace；不同工作区的回填 Command 可独立入队并各自回写 Operation，旧全局运行字段不再作为跨工作区互斥源。 |
+| V2.0-B172 | 2026-07-22 | V2 Repair、定向改稿与材料回填 Worker 均改为在 CommandGateway 成功提交 Operation 终态后才启动；不再出现后台线程先写运行状态、随后 Command 完成写回覆盖的竞态，CommandReceipt 与 Worker 生命周期保持一致。 |
+| V2.0-B173 | 2026-07-22 | CommandGateway 的 post-commit Worker 启动回调若抛出异常，会将尚在运行态的 Operation 与 CommandReceipt 归为失败并记录 `COMMAND_POST_COMMIT_FAILED`；不再把“已接受但 Worker 未启动”误报为成功。 |
+| V2.0-B174 | 2026-07-22 | `control.db.stage_runs` 开始记录 V2 Pipeline 已产出或复用阶段的 attempt、终态与 disposition，并与 Artifact manifest 记录处于同一失败边界；manifest 记录异常或缺少当前 Pipeline Operation 时 fail-closed。失败/取消阶段的完整 StageRun 生命周期仍在后续切片补齐。 |
+| V2.0-B175 | 2026-07-22 | V2 WorkspaceSnapshot 新增 `stage_runs`，控制台和 SSE 重新拉取后可读取 SQLite 阶段 attempt/终态，而不需要从 `pipeline_control.json` 推断已完成阶段。 |
+| V2.0-B176 | 2026-07-22 | Pipeline checkpoint 终态同步到 control.db 时，失败或取消的当前阶段同步写入 `stage_runs`；异常与取消原因进入该 StageRun 审计记录，补齐成功/复用之外的终态可观测性。 |
+| V2.0-B177 | 2026-07-22 | PipelineSupervisor 在每个阶段开始时写入 `StageRun.running`，并在复用、成功、门禁阻断、执行失败、产物不完整、取消或暂停时写入对应终态和原因；Artifact manifest 与 StageRun 分离记录但任一控制记录失败均 fail-closed。`control.db` schema 升级至 v18，以支持暂停阶段的审计终态。 |
+| V2.0-B178 | 2026-07-22 | StageRun 生命周期补齐计划中的 `queued → running → terminal`：Supervisor 在每个候选阶段先持久化 queued，进入执行前将同一 attempt 提升为 running；复用、失败、暂停和取消均终结该 attempt，不会把 queued/running 拆成两个 attempt。`control.db` schema 升级至 v19。 |
+| V2.0-B179 | 2026-07-22 | 阶段复用现在同时要求当前 Artifact manifest/hash/input fingerprint 有效，且该阶段最近一次跨 Operation 的 StageRun 为 `succeeded` 或 `reused`；只有尚未存在任何 manifest 的未切换 V1 工作区可进行一次兼容 bootstrap。已切换工作区或已有 manifest 却缺少成功 StageRun 时一律重跑，防止仅凭文件或孤立 manifest 误判完成。 |
+| V2.0-B180 | 2026-07-22 | `document.apply_edit` 重建 `build-docx` 后会把同一 Command Operation 写为 `StageRun.succeeded(document_edit_rebuild)`；手工终稿编辑产生的 DOCX manifest 因此拥有与执行记录一致的可复用证据，不再依赖更早 Pipeline 的 StageRun 或被误判为孤立 Artifact。 |
+| V2.0-B181 | 2026-07-22 | Issue 修复、定向改稿和材料回填产生章节 Artifact 时，仅在各自 Operation 真正成功后才写入 `write-all` 的成功 StageRun；partial/blocked/failed Worker 即使留下文件或 manifest 也没有成功执行证据，后续 Pipeline 不会复用该阶段。 |
+| V2.0-B182 | 2026-07-22 | StageRun 终态现在不可覆盖：相同终态重复投递按幂等处理且不提升 revision，不同终态一律返回 `STATE_CONFLICT`。只有新的 queued/running attempt 才能在后续重试中产生新记录，避免迟到 checkpoint 或 Worker 把既有成功审计改写成失败。 |
+| V2.0-B183 | 2026-07-22 | `Operation` 的 Worker 同步同样实施终态不可逆：成功、失败或取消后，同终态迟到心跳按幂等忽略，不同终态被 `STATE_CONFLICT` 拒绝。旧 Worker、checkpoint 或重启接管逻辑不能再把已完成 Operation 回退或反转。 |
+| V2.0-B184 | 2026-07-22 | Pipeline 在准备复用前已创建新的 queued StageRun；Artifact 复用判定现明确查询该命令最近的**终态** attempt，忽略当前 in-flight queued/running 重试。这样既保留“必须有成功历史 StageRun”的门槛，也不会让新 queued 记录错误遮蔽上一轮成功证据而强制无意义重跑。 |
+| V2.0-B185 | 2026-07-22 | pause/cancel 与 Pipeline 完成竞态时，若控制 Command 到达时目标 Operation 已是 succeeded/failed/cancelled，Gateway 持久化 `CommandNoOp` 并返回 `no_op`，不再报状态冲突或重新取得 lease。该结果可幂等重放并保留审计事件。 |
+| V2.0-B186 | 2026-07-22 | Pipeline 重启恢复发现 checkpoint Worker 已丢失时，会先将其当前 StageRun 以 `failed(worker_lost)` 终结，再创建新的 queued attempt 断点重试；StageRun 中断审计失败则 Pipeline fail-closed，不会留下未说明的 running 阶段或将半成品作为可复用输出。 |
+| V2.0-B187 | 2026-07-22 | WorkspaceSnapshot 保留 `stage_runs` 作为最近审计历史，并新增 `current_stage_runs` 精确绑定当前展示 Operation。控制台可同时展示当前流水线 attempt 与历史排障记录，避免不同 Operation 的同名阶段混入当前进度判断。 |
+| V2.0-B188 | 2026-07-23 | 按发布决策进入 V2-only：所有非 `/api/v2/`、认证和模型设置的 V1 API 在认证后统一返回 `410 V1_API_RETIRED` 与 V2 successor Link，不再记录兼容遥测、解析活动工作区或执行任何 V1 适配逻辑。 |
+| V2.0-B189 | 2026-07-23 | 主前端移除无工作区 Chat 的 `/api/chat/orchestrate` 回退，必须选择 workspace 后调用 V2 Chat；全局 Agent mode 读取迁至 `/api/v2/agent/flags`。V2-only 控制台不再主动请求任何 V1 路由。 |
+| V2.0-B190 | 2026-07-23 | V2 Artifact 复用与正式 GateReceipt 移除最后的 V1 bootstrap：每个正式输入必须有当前 SQLite manifest，复用还必须有成功的 V2 StageRun；检测到 `materials_checklist.json` 旧权威文件时正式门禁以 `V1_STATE_RETIRED` fail-closed，旧工作区应删除而非迁移。 |
+| V2.0-B191 | 2026-07-23 | V2 控制台移除“迁移”面板和迁移备份 API 调用，CommandGateway 不再注册 `migration.scan`、`migration.cutover` 或 `migration.reconcile`；V1 工作区不再提供导入/切换操作，应在工作区层直接删除。旧迁移代码仍待后续物理清理。 |
+| V2.0-B192 | 2026-07-23 | 所有仍会遇到 V1 Goal、RepairJob、Materials 或 Issue 文件的 V2 命令、聊天修复和门禁统一返回 `V1_STATE_RETIRED`，只读 Snapshot/列表以 `retired_v1_state` 标识空的 SQLite 视图；不再提示或暗示执行迁移扫描。 |
+| V2.0-B193 | 2026-07-23 | V2 `goal.resume` 与材料核验后的 Goal 恢复只写 `control.db.goal_state`，不再生成 `goal_state.json`；V2 风险接受不再刷新 `issues/open.json`，仅保留不可变风险日志与正式风险登记附件。 |
+| V2.0-B194 | 2026-07-23 | Goal、AgentActivity 和 RepairJob 基础模块移除对 `goal_state.json`、`activity.json`、`repair_job.json` 的读取和双写；这些领域状态只从 `control.db` 读取并写入，残留 V1 文件不会被导入或覆盖 SQLite。 |
+| V2.0-B195 | 2026-07-23 | 移除 V2 Web 和控制 CLI 的所有迁移 dry-run、备份、报告、恢复演练和扫描/切换/协调入口；路由契约回归确认 `/api/v2/**/migration/**` 不再暴露。迁移实现内部残留待后续物理删除，但没有 V2 入口可调用。 |
+| V2.0-B196 | 2026-07-23 | 正式出稿预检和 GateReceipt 输入 fingerprint 不再读取 MigrationConflict、cutover 或旧文件 checksum；预检只检查当前 V2 SQLite 领域状态、GateEvaluation 和 Artifact 证据。历史迁移 cutover 回归用例已标记为 retired。 |
+| V2.0-B197 | 2026-07-23 | V2 WorkspaceSnapshot 不再公开 migration 或 compatibility_usage 字段，也不再对旧文件作 cutover 健康探测；控制台只消费当前工作区的 V2 控制状态与事件。 |
+| V2.0-B198 | 2026-07-23 | V2 Pipeline Snapshot 不再从 `pipeline_control.json` 读取 run ID、阶段、PID、消息或一致性结论；展示只由当前 Pipeline Operation 的 `control.db` 记录构成，过期 checkpoint 不会影响控制台状态。 |
+| V2.0-B199 | 2026-07-23 | 服务重启时不再依据 `pipeline_control.json` 自动恢复或接管 Pipeline；仍处于 queued/running 的 V2 Operation 统一以 `ORPHANED_AFTER_RESTART` 置为 blocked，用户必须提交显式 `pipeline.resume`，恢复起点只从 control.db 前序 Operation 获取。 |
+| V2.0-B200 | 2026-07-23 | `src/main.py` 的公开旧阶段 CLI 完全下线：除 `control` 外，非内部 ExecutionWorker 的任何命令都返回拒绝；Chat、按钮和命令行控制统一只能通过 V2 CommandGateway。 |
+| V2.0-B201 | 2026-07-23 | V2 Snapshot 判定旧控制文件时改为固定的文件存在性检查，不再调用任何 V1 migration dry-run、解析或冲突逻辑；发现旧状态只展示空的 V2 兼容视图，不能触发导入。 |
+| V2.0-B202 | 2026-07-23 | V2 材料上传、自动核验和人工核验不再通过 `materials_checklist.json` 更新或回读当前材料状态；核验器接收 SQLite MaterialState 作为需求上下文，提交和核验审计在 control.db 中原子更新。 |
+| V2.0-B203 | 2026-07-23 | V2 `materials.update` 和 `materials.rebuild` 也移除 `materials_checklist.json` 双写/回读：前者直接更新 SQLite MaterialState；后者使用无副作用的需求推导器生成候选条目，并保留已有 SQLite 核验/提交生命周期后写回 control.db。旧文件写入包装器仅供待删除的 V1 Worker 使用。 |
+| V2.0-B204 | 2026-07-23 | V2 Pipeline 的 `build-materials-checklist` 阶段改为把无副作用的需求推导结果直接写入 `control.db.material_states`，其注册产物为虚拟控制状态而非 `materials_checklist.json`。断点复用还须确认 SQLite 中仍有材料状态，避免只凭旧运行事件把丢失的控制状态误判完成。 |
+| V2.0-B205 | 2026-07-23 | V2 材料回填将当前 SQLite MaterialState 显式传入重规划和章节改写，回填后把 injected/resolved 生命周期写回 control.db；不再重建材料 JSON、重验旧 Issue 投影或通过投影反写材料状态。 |
+| V2.0-B206 | 2026-07-23 | AgentActivity、Agent Snapshot 和 RuntimeStatus 的材料摘要统一读取 `control.db.material_states`；聊天/监控视图不再因旧 `materials_checklist.json` 缺失、滞后或损坏而显示错误的待补材料数量。 |
+| V2.0-B207 | 2026-07-23 | V2 Pipeline 的章节任务规划读取当前 SQLite MaterialState 并将其写入任务包，后续章节写作继续使用该任务包生成材料留白；因此移除材料 JSON 后不会丢失资格/必交材料约束。Agent Snapshot 也不再把该旧文件当作 Artifact。 |
+| V2.0-B208 | 2026-07-23 | V2 命令和 Snapshot 对任何遗留 Goal、Material、Issue 或 RepairJob 控制文件一律标记/拒绝为 `V1_STATE_RETIRED`，不再根据 SQLite 中的历史 import 标记放行混合工作区。测试夹具同步改为直接建立 V2 SQLite 状态。 |
+| V2.0-B209 | 2026-07-23 | 已物理移除 Web 层遗留的迁移扫描、切换和冲突协调 Command handler；即使未来错误注册路由，服务端也不再具备将 V1 控制状态导入、切换或协调回 V2 的执行实现。 |
+| V2.0-B210 | 2026-07-23 | CommandGateway 不再读取或阻断历史 `migration_conflicts`；旧工作区应删除，遗留迁移审计记录不能让新的 V2 Command 无法执行且又没有可用协调入口。 |
+| V2.0-B211 | 2026-07-23 | `ControlStore.snapshot()` 移除 migration、scan、cutover 和 conflict 输出；所有 Snapshot 消费者只获得 V2 Operation、StageRun、Confirmation、Lease 与 Artifact 控制状态。 |
+| V2.0-B212 | 2026-07-23 | Web 层最后的 V1 migration dry-run 实现已删除；服务不再枚举、哈希、解析或分类任何旧控制文件来形成导入清单。遗留文件仅按 `V1_STATE_RETIRED` 拒绝。 |

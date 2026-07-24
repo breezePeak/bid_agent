@@ -284,15 +284,34 @@ def rewrite_all(root: Path | None = None) -> list[Path]:
     return paths
 
 
-def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int | None = None) -> None:
+def review_fix_all(
+    root: Path | None = None,
+    max_rounds: int = 2,
+    workers: int | None = None,
+    chapter_ids: list[str] | None = None,
+) -> None:
+    """Review and repair chapters, optionally constrained to an explicit scope.
+
+    A repair revalidation must never turn a handful of Issue targets into a
+    whole-document rewrite.  An omitted scope preserves the normal pipeline
+    behaviour; a supplied scope is authoritative for every review, rewrite,
+    and Issue synchronization in this invocation.
+    """
     root = root or project_root()
     from subagent_runner import run_review_all, run_rewrite_all
     from stage_validation import chapter_ids as valid_chapter_ids, review_ids as valid_review_ids
 
     outlines = load_outline(root)
-    chapter_count = len(outlines.get("chapters", []))
+    scope = {stringify(item) for item in (chapter_ids or []) if stringify(item)}
+    existing_ids = valid_chapter_ids(root)
+    if scope:
+        unknown_ids = sorted(scope - existing_ids)
+        if unknown_ids:
+            raise RuntimeError(f"定向审核章节不存在: {unknown_ids}")
+    active_ids = scope or existing_ids
+    chapter_count = len(active_ids)
 
-    pending_review_ids = sorted(valid_chapter_ids(root) - valid_review_ids(root))
+    pending_review_ids = sorted(active_ids - valid_review_ids(root))
     if pending_review_ids:
         print(f"[1/{max_rounds + 1}] 补审 {len(pending_review_ids)} 个缺失章节（并发子 agent）...")
         review_result = run_review_all(root, workers=workers, chapter_ids=pending_review_ids)
@@ -310,6 +329,10 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int |
 
     for round_num in range(1, max_rounds + 1):
         need_rewrite_ids, need_evidence_ids, stuck_ids = _collect_auto_rewrite_ids(root)
+        if scope:
+            need_rewrite_ids = [item for item in need_rewrite_ids if item in scope]
+            need_evidence_ids = [item for item in need_evidence_ids if item in scope]
+            stuck_ids = [item for item in stuck_ids if item in scope]
         total_need_evidence.update(need_evidence_ids)
         total_stuck.update(stuck_ids)
 
@@ -359,6 +382,8 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int |
         if not isinstance(review, dict):
             continue
         chapter_id = stringify(review.get("chapter_id")) or rf.stem.replace("_review", "")
+        if scope and chapter_id not in scope:
+            continue
         status = stringify(review.get("rewrite_status"))
         if status == "stuck" or bool(review.get("stuck")):
             stuck_final.append(chapter_id)
@@ -406,6 +431,8 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int |
                 if not isinstance(data, dict):
                     continue
                 cid = str(data.get("chapter_id") or path.name.replace("_review.json", ""))
+                if scope and cid not in scope:
+                    continue
                 if cid in need_evidence_final or cid in stuck_final:
                     continue
                 if bool(data.get("need_rewrite")):
@@ -415,6 +442,7 @@ def review_fix_all(root: Path | None = None, max_rounds: int = 2, workers: int |
             need_rewrite_ids=need_rewrite_final,
             need_evidence_ids=need_evidence_final,
             stuck_ids=stuck_final,
+            chapter_ids=sorted(scope) or None,
         )
         if synced:
             print(f"[问题单] 已同步章节审核 Issue {len(synced)} 条")

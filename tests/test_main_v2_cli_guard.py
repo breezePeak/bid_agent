@@ -33,7 +33,7 @@ class MainV2CliGuardTests(unittest.TestCase):
                                 with mock.patch("sys.stdout", output):
                                     exit_code = main.main()
             self.assertEqual(exit_code, 2)
-            self.assertIn("受管 V2 工作区禁止", output.getvalue())
+            self.assertIn("V2 CommandGateway", output.getvalue())
             runner.assert_not_called()
 
     def test_pipeline_execution_worker_can_run_stage(self) -> None:
@@ -54,12 +54,11 @@ class MainV2CliGuardTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             runner.assert_called_once_with(workspace)
 
-    def test_validate_remains_read_only_compatible(self) -> None:
+    def test_validate_is_rejected_outside_execution_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             workspace = runs / "alpha"
             workspace.mkdir(parents=True)
-            report = {"results": [], "ok": 1, "warn": 0, "fail": 0}
             with mock.patch.object(main, "project_root", return_value=workspace):
                 with mock.patch.object(sys, "argv", ["main.py", "validate"]):
                     with mock.patch.dict(
@@ -68,11 +67,11 @@ class MainV2CliGuardTests(unittest.TestCase):
                         clear=False,
                     ):
                         with mock.patch.object(main, "_configure_console_encoding"):
-                            with mock.patch.object(main, "validate_project", return_value=report) as validate:
+                            with mock.patch.object(main, "validate_project") as validate:
                                 with mock.patch("sys.stdout", io.StringIO()):
                                     exit_code = main.main()
-            self.assertEqual(exit_code, 0)
-            validate.assert_called_once_with(workspace)
+            self.assertEqual(exit_code, 2)
+            validate.assert_not_called()
 
 
 if __name__ == "__main__":

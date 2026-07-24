@@ -107,11 +107,33 @@ class ArtifactManifestTests(unittest.TestCase):
             (root / "workspace" / "chunks" / "company_chunks.json").write_text("[]", encoding="utf-8")
             context = WorkspaceContext.resolve(runs, "alpha")
 
-            self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
+            self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
             record_stage_artifacts(context, "split-docs")
+            store = ControlStore(context)
+            store.record_stage_run("pipeline-1", "split-docs", "succeeded", disposition="produced")
             self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
             (root / "inputs" / "tender.md").write_text("changed", encoding="utf-8")
             self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+
+    def test_reuse_rejects_manifest_without_successful_stage_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "inputs").mkdir(parents=True)
+            (root / "workspace" / "chunks").mkdir(parents=True)
+            (root / "inputs" / "tender.md").write_text("tender", encoding="utf-8")
+            (root / "inputs" / "company.md").write_text("company", encoding="utf-8")
+            (root / "workspace" / "chunks" / "tender_chunks.json").write_text("[]", encoding="utf-8")
+            (root / "workspace" / "chunks" / "company_chunks.json").write_text("[]", encoding="utf-8")
+            context = WorkspaceContext.resolve(runs, "alpha")
+
+            record_stage_artifacts(context, "split-docs")
+            self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+            ControlStore(context).record_stage_run("pipeline-1", "split-docs", "failed", disposition="runner_failed")
+            self.assertFalse(stage_artifacts_reusable(context, "split-docs"))
+            ControlStore(context).record_stage_run("pipeline-2", "split-docs", "succeeded", disposition="produced")
+            ControlStore(context).record_stage_run("pipeline-3", "split-docs", "queued", disposition="queued")
+            self.assertTrue(stage_artifacts_reusable(context, "split-docs"))
 
     def test_document_edit_refreshes_final_manifests_and_stales_quality_reports(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -141,12 +163,15 @@ class ArtifactManifestTests(unittest.TestCase):
                     }
                 )
 
-            record_document_edit_artifacts(context)
+            record_document_edit_artifacts(context, operation_id="document-edit-1")
 
             self.assertEqual(store.artifact_state("outputs/final.md")["disposition"], "manual_override")
             self.assertEqual(store.artifact_state("outputs/final.docx")["status"], "ready")
             self.assertEqual(store.artifact_state("workspace/compliance_report.json")["status"], "stale")
             self.assertEqual(store.artifact_state("workspace/format_check_report.json")["status"], "stale")
+            run = store.latest_stage_run("document-edit-1", "build-docx") or {}
+            self.assertEqual(run.get("status"), "succeeded")
+            self.assertEqual(run.get("disposition"), "document_edit_rebuild")
 
     def test_external_chapter_mutation_refreshes_chapters_and_stales_downstream(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

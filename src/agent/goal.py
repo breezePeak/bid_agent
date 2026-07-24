@@ -40,37 +40,18 @@ def _goal_control_store(root: Path):
 
 def load_goal(root: Path | None = None) -> dict[str, Any] | None:
     root = (root or project_root()).resolve()
-    path = goal_path(root)
-    imported: dict[str, Any] | None = None
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            data = None
-        imported = data if isinstance(data, dict) else None
     store = _goal_control_store(root)
-    store.ensure_goal_state(imported)
     return store.goal_state()
 
 
 def save_goal(root: Path | None, goal: dict[str, Any]) -> Path:
     root = (root or project_root()).resolve()
-    path = goal_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
     goal = dict(goal)
     goal["updated_at"] = _now()
     _goal_control_store(root).upsert_goal_state(goal)
-    path.write_text(json.dumps(goal, ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
+    return goal_path(root)
 
 
-def write_goal_projection(root: Path | None, goal: dict[str, Any]) -> Path:
-    """Refresh only the one-version V1 file projection after a V2 state write."""
-    root = (root or project_root()).resolve()
-    path = goal_path(root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(dict(goal), ensure_ascii=False, indent=2), encoding="utf-8")
-    return path
 
 
 def _criterion_artifact_exists(root: Path, path: str) -> dict[str, Any]:
@@ -1529,25 +1510,20 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
             except Exception:
                 pass
         if not resolved_ids:
-            # Fall back to re-running write-all stage via full-ish plan
-            objectives.append({"type": "full_generate"})
-            criteria.extend(
-                [
-                    {"check": "no_open_blocks"},
-                    {"check": "artifact_exists", "path": "workspace/chapters"},
-                ]
-            )
+            # A repair request without explicit chapter targets must never
+            # silently degrade into a full-document generation run.
+            objectives.append({"type": "target_scope_required"})
             plan = [
                 {
-                    "step_id": "write_chapters",
-                    "tool": "write_chapters",
-                    "args": {},
+                    "step_id": "inspect_repair_scope",
+                    "tool": "diagnose_failure",
+                    "args": {"command": ""},
                     "depends_on": [],
                     "run_if": {},
                     "status": "pending",
                     "attempts": 0,
-                    "max_attempts": 2,
-                    "label": "重试章节写作",
+                    "max_attempts": 1,
+                    "label": "缺少目标章节，等待人工确认范围",
                 }
             ]
             return {
@@ -1556,7 +1532,7 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
                 "constraints": constraints,
                 "chapter_ids": [],
                 "plan": plan,
-                "completion_mode": "criteria",
+                "completion_mode": "manual",
             }
         objectives.append({"type": "fix_chapter", "chapter_ids": resolved_ids})
         constraints["chapter_ids"] = resolved_ids

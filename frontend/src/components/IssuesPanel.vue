@@ -12,7 +12,6 @@
         <span v-if="deferredCount > 0" class="ip-badge-alert" :title="`待补 ${deferredCount} 条材料`">{{ deferredCount }}</span>
       </button>
       <button class="ip-tab" :class="{ on: tab === 'logs' }" @click="tab = 'logs'">日志</button>
-      <button class="ip-tab" :class="{ on: tab === 'migration' }" @click="tab = 'migration'">迁移</button>
       <button class="ip-tab" :class="{ on: tab === 'files' }" @click="tab = 'files'">文件</button>
     </div>
 
@@ -51,10 +50,6 @@
       <div v-else class="ip-empty-soft" style="padding:12px">暂无日志。启动流水线后会实时汇入。</div>
     </div>
 
-    <div v-else-if="tab === 'migration'" class="ip-issues">
-      <MigrationPanel :run-id="runId" />
-    </div>
-
     <div v-else-if="tab === 'issues'" class="ip-issues">
       <div class="ip-header">
         <div class="ip-title-row">
@@ -63,11 +58,13 @@
         </div>
         <div v-if="report.exists" class="ip-banner" :class="{ blocking: report.blocking, warn: !report.blocking && report.need_manual_review }">
           <div class="ip-banner-kicker">
-            {{ report.blocking ? '合规阻断 · 暂不可出正式稿' : (report.need_manual_review ? '合规待人工复核' : '合规状态正常') }}
+            {{ report.source === 'issues'
+              ? '最小修复失败 · 问题仍未关闭'
+              : (report.blocking ? '合规阻断 · 暂不可出正式稿' : (report.need_manual_review ? '合规待人工复核' : '合规状态正常')) }}
           </div>
           <div class="ip-banner-stats">
-            失败 {{ counts.fail || 0 }} · 警告 {{ counts.warn || 0 }} · 通过 {{ counts.pass || 0 }}
-            · 最高 {{ severityLabel(report.max_severity) }}
+            <template v-if="report.source === 'issues'">失败 {{ counts.fail || 0 }} · 警告 {{ counts.warn || 0 }}</template>
+            <template v-else>失败 {{ counts.fail || 0 }} · 警告 {{ counts.warn || 0 }} · 通过 {{ counts.pass || 0 }} · 最高 {{ severityLabel(report.max_severity) }}</template>
           </div>
         </div>
         <div v-else class="ip-empty-soft">{{ emptyMsg }}</div>
@@ -102,13 +99,18 @@
             <span class="ip-sev">{{ severityLabel(item.severity) }}</span>
             <span class="ip-st">{{ item.status === 'fail' ? '失败' : (item.status === 'warn' ? '警告' : item.status) }}</span>
           </div>
-          <div class="ip-name">{{ item.check_name || item.check_type || '检查项' }}</div>
-          <div class="ip-req" v-if="item.requirement">{{ item.requirement }}</div>
-          <div class="ip-detail" v-if="selected === item.check_id">
-            <div v-if="item.suggestion"><b>建议：</b>{{ item.suggestion }}</div>
-            <div v-if="item.check_type"><b>类型：</b>{{ item.check_type }}</div>
-            <div><b>处理：</b>{{ item.auto_fixable ? '可尝试系统定向改稿' : '需人工补充材料/正文响应' }}</div>
-            <div v-if="item.need_manual_review" class="ip-man">需人工复核</div>
+            <div class="ip-name">{{ item.check_name || item.check_type || '检查项' }}</div>
+            <div class="ip-req" v-if="item.requirement">{{ item.requirement }}</div>
+            <div class="ip-detail-summary" v-if="item.failure_reason"><b>最近修复失败：</b>{{ item.failure_reason }}</div>
+            <div class="ip-detail" v-if="selected === item.check_id">
+              <div v-if="item.failure_reason"><b>失败原因：</b>{{ item.failure_reason }}</div>
+              <div v-if="item.suggestion"><b>建议：</b>{{ item.suggestion }}</div>
+              <div v-if="item.check_type"><b>类型：</b>{{ item.check_type }}</div>
+              <div><b>处理：</b>{{ item.auto_fixable ? '可尝试系统定向改稿' : '需人工补充材料/正文响应' }}</div>
+              <button v-if="item.failure_reason && item.issue_id" class="btn btn-sm" :disabled="acceptingIssue === item.issue_id" @click.stop="acceptRisk(item)">
+                {{ acceptingIssue === item.issue_id ? '提交中...' : '接受风险并解除该项阻断' }}
+              </button>
+              <div v-if="item.need_manual_review" class="ip-man">需人工复核</div>
           </div>
         </div>
       </div>
@@ -118,12 +120,11 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import FileExplorer from './FileExplorer.vue'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
-import MigrationPanel from './MigrationPanel.vue'
-import { fetchComplianceReport, fetchMaterialsChecklist } from '../api'
+import { acceptIssueRisk, confirmWorkspaceAction, fetchComplianceReport, fetchIssues, fetchMaterialsChecklist } from '../api'
 import { useWorkspaceRuntime } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
@@ -144,16 +145,17 @@ const deferredCountLocal = ref(0)
 const materialsExists = ref(false)
 
 // Single status bus: materials deferred badge follows the V2 Snapshot.
-const { materialsDeferred, quality } = useWorkspaceRuntime({
+const { status: runtimeStatus, materialsDeferred, quality } = useWorkspaceRuntime({
   runId: computed(() => props.runId),
 })
 const deferredCount = computed(() => {
   const fromBus = Number(materialsDeferred.value || 0) || 0
-  return fromBus || deferredCountLocal.value || 0
+  return runtimeStatus.value ? fromBus : (deferredCountLocal.value || 0)
 })
 const report = ref({ exists: false, blocking: false, items: [], counts: {}, max_severity: '' })
 const emptyMsg = ref('暂无合规报告。跑完 compliance-check 后会显示失败/警告明细。')
-let materialsTimer = null
+const acceptingIssue = ref('')
+let materialsBadgeRefresh = null
 
 const counts = computed(() => report.value.counts || {})
 const qualityEvaluations = computed(() => Array.isArray(quality.value?.latest_gate_evaluations)
@@ -225,35 +227,69 @@ function onMaterialsPanelStatus(payload) {
 }
 
 async function refreshMaterialsBadge() {
-  try {
-    const { data } = await fetchMaterialsChecklist(props.runId)
-    if (!data?.ok) return
-    const summary = data.summary || data.checklist?.summary || {}
-    publishMaterialsStatus({
-      exists: !!data.exists,
-      deferred: Number(summary.deferred || 0) || 0,
-      total: Number(summary.total || 0) || 0,
-      ready: Number(summary.ready || 0) || 0,
-      waived: Number(summary.waived || 0) || 0,
-      items: Array.isArray(data.items) ? data.items : [],
-    })
-  } catch (e) { /* ignore */ }
+  if (materialsBadgeRefresh) return materialsBadgeRefresh
+  materialsBadgeRefresh = (async () => {
+    try {
+      const { data } = await fetchMaterialsChecklist(props.runId)
+      if (!data?.ok) return
+      const summary = data.summary || data.checklist?.summary || {}
+      publishMaterialsStatus({
+        exists: !!data.exists,
+        deferred: Number(summary.deferred || 0) || 0,
+        total: Number(summary.total || 0) || 0,
+        ready: Number(summary.ready || 0) || 0,
+        waived: Number(summary.waived || 0) || 0,
+        items: Array.isArray(data.items) ? data.items : [],
+      })
+    } catch (e) { /* status refresh is best-effort */ }
+  })().finally(() => { materialsBadgeRefresh = null })
+  return materialsBadgeRefresh
 }
 
 async function refresh() {
   loading.value = true
   try {
-    const { data } = await fetchComplianceReport(props.runId)
+    const [{ data }, { data: issuesData }] = await Promise.all([
+      fetchComplianceReport(props.runId),
+      fetchIssues(props.runId, 'open'),
+    ])
+    const issueRows = (Array.isArray(issuesData?.issues) ? issuesData.issues : []).map((issue) => {
+      const evidence = issue?.evidence && typeof issue.evidence === 'object' ? issue.evidence : {}
+      const lastFailure = evidence.last_repair_failure && typeof evidence.last_repair_failure === 'object'
+        ? evidence.last_repair_failure : {}
+      const failureReason = String(issue?.failure_reason || lastFailure.reason || '').trim()
+      return {
+        check_id: String(issue?.id || ''),
+        issue_id: String(issue?.id || ''),
+        check_name: issue?.title || issue?.code || '质量问题',
+        check_type: issue?.stage_id || issue?.code || '',
+        requirement: issue?.detail || '',
+        suggestion: issue?.suggestion || issue?.recommended_action || '',
+        failure_reason: failureReason,
+        severity: issue?.severity === 'block' ? 'critical' : (issue?.severity || 'major'),
+        status: failureReason || issue?.severity === 'block' ? 'fail' : 'warn',
+        auto_fixable: issue?.auto_fixable !== false,
+        need_manual_review: !!issue?.need_manual_review,
+      }
+    })
     if (data && data.ok) {
       report.value = {
-        exists: !!data.exists,
-        blocking: !!data.blocking,
+        exists: !!data.exists || issueRows.length > 0,
+        source: data.exists ? 'compliance' : (issueRows.length ? 'issues' : ''),
+        blocking: !!data.blocking || issueRows.some(item => item.status === 'fail'),
         need_manual_review: !!data.need_manual_review,
         max_severity: data.max_severity || '',
-        counts: data.counts || {},
-        items: data.items || [],
+        counts: data.exists
+          ? (data.counts || {})
+          : {
+              fail: issueRows.filter(item => item.status === 'fail').length,
+              warn: issueRows.filter(item => item.status === 'warn').length,
+            },
+        items: data.exists ? (data.items || []) : issueRows,
       }
-      if (!data.exists) emptyMsg.value = data.message || emptyMsg.value
+      if (!data.exists) emptyMsg.value = issueRows.length
+        ? '以下为 V2 问题单中的未关闭问题；展开可查看最近一次修复失败原因。'
+        : (data.message || emptyMsg.value)
       if (data.blocking) {
         tab.value = 'issues'
         filter.value = 'fail'
@@ -264,7 +300,27 @@ async function refresh() {
   } finally {
     loading.value = false
   }
-  await refreshMaterialsBadge()
+}
+
+async function acceptRisk(item) {
+  const reason = window.prompt('接受风险会解除该问题的流程阻断，但失败原因、原始证据和你的理由会永久保留在风险登记中。\n\n请填写接受原因（至少 8 个字符）：', '')
+  if (reason === null) return
+  if (reason.trim().replace(/\s/g, '').length < 8) {
+    emptyMsg.value = '接受风险原因至少需要 8 个有效字符。'
+    return
+  }
+  if (!window.confirm('确认接受此风险并允许流程继续？该决定会被审计保留。')) return
+  acceptingIssue.value = item.issue_id
+  try {
+    let { data } = await acceptIssueRisk(props.runId, item.issue_id, reason.trim())
+    const actionId = data?.action?.action_id || data?.action?.confirmation_id
+    if (actionId) ({ data } = await confirmWorkspaceAction(props.runId, actionId))
+    if (!data?.ok && !data?.accepted) throw new Error(data?.message || '接受风险失败')
+    emptyMsg.value = '风险已接受并记录：失败原因、原始证据和接受理由均已保留。现在可继续下一步流程。'
+    await refresh()
+  } catch (e) {
+    emptyMsg.value = e.response?.data?.message || e.message || '接受风险失败'
+  } finally { acceptingIssue.value = '' }
 }
 
 watch(() => props.runId, () => {
@@ -295,10 +351,6 @@ watch(() => props.focus, (v) => {
 
 onMounted(() => {
   refresh()
-  materialsTimer = setInterval(refreshMaterialsBadge, 4000)
-})
-onBeforeUnmount(() => {
-  if (materialsTimer) clearInterval(materialsTimer)
 })
 
 defineExpose({

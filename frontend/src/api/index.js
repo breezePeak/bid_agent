@@ -106,6 +106,14 @@ export function fetchLlmSettings() {
   return api.get('/llm-settings')
 }
 
+export function fetchFlowSettings() {
+  return api.get('/flow-settings')
+}
+
+export function saveFlowSettings(settings) {
+  return api.post('/flow-settings', { settings })
+}
+
 export function saveLlmModel(model, setActive = false) {
   return api.post('/llm-settings', { model, set_active: setActive })
 }
@@ -135,12 +143,10 @@ export function clearChatMessages(runId) {
 }
 
 export function orchestrateChat(message, { runId = '', selectedCommand = '', action = null } = {}) {
+  if (!runId) throw new Error('请先选择工作空间，再使用 V2 Chat')
   const payload = { message, run_id: runId, selected_command: selectedCommand }
   if (action && typeof action === 'object') payload.action = action
-  const path = runId
-    ? `/v2/workspaces/${encodeURIComponent(runId)}/chat/turn`
-    : '/chat/orchestrate'
-  return api.post(path, payload, { timeout: 120000 })
+  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/chat/turn`, payload, { timeout: 120000 })
 }
 
 function newCommandId() {
@@ -151,15 +157,9 @@ function newCommandId() {
 }
 
 export function fetchWorkspaceSnapshot(runId) {
-  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/snapshot`)
-}
-
-export function fetchMigrationBackups(runId) {
-  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/migration/backups`)
-}
-
-export function drillMigrationBackup(runId, path) {
-  return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/migration/backups/drill`, { path })
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/snapshot`, {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
 }
 
 export async function submitWorkspaceCommand(runId, kind, payload = {}, options = {}) {
@@ -178,10 +178,23 @@ export async function submitWorkspaceCommand(runId, kind, payload = {}, options 
 export async function startOrResumePipeline(runId, startCommand = '') {
   const snapshotResponse = await fetchWorkspaceSnapshot(runId)
   const snapshot = snapshotResponse?.data?.snapshot || {}
-  const operation = snapshot.operation && typeof snapshot.operation === 'object' ? snapshot.operation : null
-  const resume = operation && ['paused', 'blocked'].includes(String(operation.status || ''))
+  const operation = snapshot.pipeline && typeof snapshot.pipeline === 'object' ? snapshot.pipeline : null
+  const resume = operation && ['paused', 'blocked', 'interrupted'].includes(String(operation.status || ''))
   const kind = resume ? 'pipeline.resume' : 'pipeline.start'
-  const payload = { start_command: startCommand || '' }
+  const workflow = Array.isArray(snapshot.presentation?.workflow)
+    ? snapshot.presentation.workflow
+    : []
+  const nextStep = workflow.find(step => (
+    step
+    && step.done !== true
+    && ['running', 'ready', 'error', 'paused', 'interrupted'].includes(String(step.state || ''))
+  ))
+  const derivedCommand = String(
+    operation?.current_stage
+    || nextStep?.command
+    || ''
+  ).trim()
+  const payload = { start_command: startCommand || derivedCommand }
   if (resume) payload.operation_id = operation.operation_id
   const commandId = newCommandId()
   return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/commands`, {
@@ -212,7 +225,7 @@ export function fetchAgentDecisions(runId, tail = 20) {
 }
 
 export function fetchAgentFlags() {
-  return api.get('/agent/flags')
+  return api.get('/v2/agent/flags')
 }
 
 

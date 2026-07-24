@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v16_adds_control_migration_gate_and_material_history_tables(self) -> None:
+    def test_schema_v19_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -111,7 +111,7 @@ class ControlPlaneTests(unittest.TestCase):
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "16")
+            self.assertEqual(schema_version, "19")
             self.assertIsNotNone(migration_table)
             self.assertIsNotNone(gate_evaluations)
             self.assertIsNotNone(material_verifications)
@@ -341,7 +341,7 @@ class ControlPlaneTests(unittest.TestCase):
                 )
             self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
 
-    def test_migration_conflict_is_idempotent_blocks_mutations_and_is_audited(self) -> None:
+    def test_retired_migration_conflict_does_not_block_v2_mutations(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             store = ControlStore(context)
@@ -359,15 +359,14 @@ class ControlPlaneTests(unittest.TestCase):
             )
             self.assertEqual(conflict["conflict_id"], duplicate["conflict_id"])
             self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
-            self.assertEqual(store.snapshot()["migration"]["open_count"], 1)
+            self.assertNotIn("migration", store.snapshot())
 
             gateway = CommandGateway(
                 context,
                 {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
             )
-            with self.assertRaises(ControlPlaneError) as blocked:
-                gateway.submit(_envelope(context, store, "pipeline.start"))
-            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
+            receipt = gateway.submit(_envelope(context, store, "pipeline.start"))
+            self.assertEqual(receipt.status, "accepted")
 
             resolved = store.resolve_migration_conflict(
                 conflict["conflict_id"],
@@ -465,7 +464,6 @@ class ControlPlaneTests(unittest.TestCase):
             store.record_migration_scan(fingerprint="scan-1", manifest=[], actor={"id": "admin"})
             cutover = store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
             self.assertEqual(cutover["status"], "active")
-            self.assertEqual(store.snapshot()["migration"]["cutover"]["fingerprint"], "scan-1")
             store.record_migration_conflict(
                 domain="orphan", legacy={"path": "legacy.json"}, authoritative={}, reason="orphan"
             )
@@ -642,6 +640,173 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(snapshot["operation"]["status"], "running")
             self.assertEqual(len(snapshot["operations"]), 1)
             self.assertEqual(len(gateway.store.events()), 2)
+            self.assertEqual(gateway.store.recent_events(limit=10), gateway.store.events())
+            self.assertEqual(
+                gateway.store.recent_events(limit=1)[0]["seq"],
+                gateway.store.events()[-1]["seq"],
+            )
+
+    def test_post_commit_start_failure_marks_running_operation_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+
+            def start(ctx, envelope, operation_id):
+                def fail_start() -> None:
+                    raise RuntimeError("worker thread unavailable")
+
+                return {
+                    "accepted": True,
+                    "operation_status": "running",
+                    "message": "worker queued",
+                    "_after_commit": fail_start,
+                }
+
+            gateway = CommandGateway(context, {"pipeline.start": start})
+            receipt = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+
+            self.assertEqual(receipt.status, "rejected")
+            self.assertEqual(operation["status"], "failed")
+            self.assertEqual(receipt.error["code"], "COMMAND_POST_COMMIT_FAILED")
+
+    def test_stage_run_records_attempt_and_terminal_disposition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            running = store.record_stage_run("operation-1", "build-md", "running")
+            completed = store.record_stage_run(
+                "operation-1", "build-md", "succeeded", disposition="produced"
+            )
+            runs = store.stage_runs("operation-1")
+
+            self.assertEqual(running["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(runs[0]["attempt"], 1)
+            self.assertEqual(runs[0]["status"], "succeeded")
+            self.assertEqual(runs[0]["disposition"], "produced")
+            self.assertEqual(store.snapshot()["stage_runs"][0]["stage_run_id"], running["stage_run_id"])
+            self.assertEqual(store.snapshot()["current_stage_runs"], [])
+            self.assertEqual(store.latest_stage_run("operation-1", "build-md")["status"], "succeeded")
+            self.assertIsNone(store.latest_stage_run("operation-1", "missing-stage"))
+
+    def test_stage_run_promotes_queued_attempt_without_creating_a_second_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+
+            queued = store.record_stage_run("operation-1", "build-md", "queued", disposition="queued")
+            running = store.record_stage_run("operation-1", "build-md", "running", disposition="started")
+            completed = store.record_stage_run("operation-1", "build-md", "succeeded", disposition="produced")
+
+            self.assertEqual(queued["stage_run_id"], running["stage_run_id"])
+            self.assertEqual(running["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(completed["attempt"], 1)
+
+    def test_stage_run_terminal_state_is_immutable_and_duplicate_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.record_stage_run("operation-1", "build-md", "running", disposition="started")
+            completed = store.record_stage_run("operation-1", "build-md", "succeeded", disposition="produced")
+            revision = store.revision()
+
+            duplicate = store.record_stage_run("operation-1", "build-md", "succeeded", disposition="ignored")
+            self.assertEqual(duplicate["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(store.revision(), revision)
+            with self.assertRaises(ControlPlaneError) as raised:
+                store.record_stage_run("operation-1", "build-md", "failed", disposition="late_failure")
+            self.assertEqual(raised.exception.code, "STATE_CONFLICT")
+
+    def test_latest_terminal_stage_run_ignores_inflight_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            store = ControlStore(context)
+            store.record_stage_run("operation-1", "build-md", "succeeded", disposition="produced")
+            store.record_stage_run("operation-2", "build-md", "queued", disposition="queued")
+
+            self.assertEqual(store.latest_stage_run_for_command("build-md")["status"], "queued")
+            terminal = store.latest_terminal_stage_run_for_command("build-md") or {}
+            self.assertEqual(terminal.get("status"), "succeeded")
+
+    def test_operation_terminal_state_rejects_late_worker_transition(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation = gateway.store.operation(receipt.operation_id or "") or {}
+            gateway.store.sync_operation(
+                receipt.operation_id or "",
+                "succeeded",
+                message="completed",
+                fencing_token=operation["fencing_token"],
+            )
+            revision = gateway.store.revision()
+
+            self.assertEqual(
+                gateway.store.sync_operation(
+                    receipt.operation_id or "",
+                    "succeeded",
+                    message="late duplicate",
+                    fencing_token=operation["fencing_token"],
+                ),
+                revision,
+            )
+            with self.assertRaises(ControlPlaneError) as raised:
+                gateway.store.sync_operation(
+                    receipt.operation_id or "",
+                    "failed",
+                    message="late worker failure",
+                    fencing_token=operation["fencing_token"],
+                )
+            self.assertEqual(raised.exception.code, "STATE_CONFLICT")
+            self.assertEqual((gateway.store.operation(receipt.operation_id or "") or {})["status"], "succeeded")
+
+    def test_late_pause_or_cancel_on_terminal_pipeline_is_durable_no_op(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"},
+                    "pipeline.pause": lambda ctx, envelope, operation_id: self.fail("late pause must not dispatch"),
+                    "pipeline.cancel": lambda ctx, envelope, operation_id: self.fail("late cancel must not dispatch"),
+                },
+            )
+            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation = gateway.store.operation(started.operation_id or "") or {}
+            gateway.store.sync_operation(
+                started.operation_id or "",
+                "succeeded",
+                fencing_token=operation["fencing_token"],
+            )
+            pause = gateway.submit(
+                _envelope(
+                    context,
+                    gateway.store,
+                    "pipeline.pause",
+                    payload={"operation_id": started.operation_id},
+                    key="late-pause",
+                )
+            )
+            self.assertEqual(pause.status, "no_op")
+            self.assertEqual(pause.operation_id, started.operation_id)
+
+            cancel_action = gateway.propose(
+                _envelope(
+                    context,
+                    gateway.store,
+                    "pipeline.cancel",
+                    payload={"operation_id": started.operation_id},
+                    key="late-cancel",
+                ),
+                label="确认取消",
+                risk="high",
+            )
+            cancel = gateway.confirm(cancel_action["confirmation_id"])
+            self.assertEqual(cancel.status, "no_op")
+            self.assertEqual(cancel.operation_id, started.operation_id)
 
     def test_revision_conflict_fails_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

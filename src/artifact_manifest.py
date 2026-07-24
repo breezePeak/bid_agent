@@ -129,25 +129,32 @@ def stage_artifacts_reusable(context: WorkspaceContext, command: str) -> bool:
     spec = stage_spec_by_command(command)
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
+    # The Supervisor creates the new queued attempt before asking whether an
+    # existing artifact may be reused. That in-flight record must not hide the
+    # preceding completed evidence that this decision is evaluating.
+    latest_run = store.latest_terminal_stage_run_for_command(command)
     fingerprint = stage_input_fingerprint(context.root, command)
     for artifact in spec.produces:
         current = describe_artifact(context.root, artifact)
         if current["status"] != "ready":
             return False
         state = states.get(current["artifact_key"])
-        # One compatibility release may bootstrap manifests for existing V1 output.
         if state is None:
-            continue
+            return False
         if state.get("status") != "ready":
             return False
         if state.get("sha256") != current.get("sha256"):
             return False
         if state.get("input_fingerprint") != fingerprint:
             return False
-    return True
+    if latest_run is not None:
+        return str(latest_run.get("status") or "") in {"succeeded", "reused"}
+    # V2 requires both manifest evidence and a successful V2 StageRun.  Files
+    # left by the retired V1 workflow are never reusable authority.
+    return False
 
 
-def record_document_edit_artifacts(context: WorkspaceContext) -> None:
+def record_document_edit_artifacts(context: WorkspaceContext, *, operation_id: str = "") -> None:
     """Keep manual final.md edits authoritative while invalidating quality outputs."""
     store = ControlStore(context)
     store.mark_artifact_states_stale(
@@ -173,6 +180,16 @@ def record_document_edit_artifacts(context: WorkspaceContext) -> None:
     )
     store.upsert_artifact_state(final_md)
     record_stage_artifacts(context, "build-docx", disposition="produced")
+    if operation_id:
+        # The document Command rebuilt DOCX through the deterministic stage
+        # runner. Preserve that execution evidence so a later Pipeline can
+        # safely reuse the manifest instead of treating it as an orphan file.
+        store.record_stage_run(
+            operation_id,
+            "build-docx",
+            "succeeded",
+            disposition="document_edit_rebuild",
+        )
 
 
 def record_external_chapter_mutation(

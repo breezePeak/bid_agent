@@ -155,8 +155,10 @@ def _execute_stage(
     stage_id: str,
     *,
     force: bool = False,
+    resume: bool = True,
     workers: int | None = None,
     max_retries: int = 0,
+    chapter_ids: list[str] | None = None,
     dry_run: bool = False,
     actor: str = "pipeline",
 ) -> ToolResult:
@@ -167,10 +169,24 @@ def _execute_stage(
         "command": stage.command,
         "stage_id": stage.id,
         "force": force,
+        "resume": resume,
         "workers": workers,
         "max_retries": max_retries,
+        "chapter_ids": list(chapter_ids or []),
         "dry_run": dry_run,
     }
+
+    # A repair is always target-driven.  Never let a missing scope silently
+    # turn a chapter repair/revalidation into a full-document LLM run.
+    if actor == "repair" and stage.id in {"write_chapters", "review_fix_chapters"} and not chapter_ids:
+        return _fail(
+            tool_name,
+            args,
+            started,
+            code="repair_scope_required",
+            message=f"最小修复执行 {stage.command} 必须提供 chapter_ids，已拒绝全量执行",
+            retryable=False,
+        )
 
     # A repair operation may execute only known root-cause/revalidation stages.
     # Downstream delivery stages remain protected by the normal quality gate.
@@ -219,7 +235,18 @@ def _execute_stage(
 
     # Virtual-only produces (e.g. init) always report ready; do not treat as skip targets.
     concrete_produces = [a for a in stage.produces if a.kind != "virtual"]
-    if not force and concrete_produces and stage_outputs_ready(root, stage.id):
+    outputs_ready = stage_outputs_ready(root, stage.id)
+    if stage.id == "select_contexts":
+        from context_selector import load_context_selection_checkpoint
+
+        # Legacy context files have no input fingerprints. Running this stage
+        # once upgrades them into durable, resumable checkpoints.
+        context_checkpoint = load_context_selection_checkpoint(root)
+        outputs_ready = (
+            outputs_ready
+            and str(context_checkpoint.get("status") or "") == "completed"
+        )
+    if not force and concrete_produces and outputs_ready:
         return ToolResult(
             ok=True,
             tool=tool_name,
@@ -274,12 +301,23 @@ def _execute_stage(
             run_write_all(
                 root,
                 workers=effective_workers,
+                chapter_ids=chapter_ids,
                 max_retries=int(max_retries or 0),
             )
         elif stage.id == "review_fix_chapters":
             from chapter_rewriter import review_fix_all
 
-            review_fix_all(root, workers=effective_workers)
+            review_fix_all(root, workers=effective_workers, chapter_ids=chapter_ids)
+        elif stage.id == "select_contexts":
+            from agents.context_agent import run as run_context_agents
+
+            run_context_agents(
+                root,
+                workers=effective_workers,
+                max_retries=int(max_retries or 0),
+                resume=bool(resume) and not force,
+                force=force,
+            )
         else:
             _call_with_supported_kwargs(func, root, extra)
     except Exception as exc:  # noqa: BLE001 - surface to ToolResult
@@ -1741,8 +1779,10 @@ def invoke(
             root,
             stage.id,
             force=bool(args.get("force", False)),
+            resume=bool(args.get("resume", True)),
             workers=clamp_workers(args.get("workers")),
             max_retries=int(args.get("max_retries", 0) or 0),
+            chapter_ids=args.get("chapter_ids"),
             dry_run=dry_run,
             actor=actor,
         )
@@ -1850,7 +1890,7 @@ def invoke(
     if spec.stage_id:
         # allow only known stage params
         stage_args = {
-            k: v for k, v in args.items() if k in {"force", "workers", "max_retries"}
+            k: v for k, v in args.items() if k in {"force", "resume", "workers", "max_retries", "chapter_ids"}
         }
         err = _validate_args(spec, stage_args)
         if err:
@@ -1859,8 +1899,10 @@ def invoke(
             root,
             spec.stage_id,
             force=bool(stage_args.get("force", False)),
+            resume=bool(stage_args.get("resume", True)),
             workers=clamp_workers(stage_args.get("workers")),
             max_retries=int(stage_args.get("max_retries", 0) or 0),
+            chapter_ids=stage_args.get("chapter_ids"),
             dry_run=dry_run,
             actor=actor,
         )

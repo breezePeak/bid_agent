@@ -8,6 +8,11 @@
         <span class="aw-pool">工位池 {{ poolSize }} 并发</span>
       </div>
       <div class="aw-summary">
+        <span class="aw-chip queue" v-if="contextSelection.expected">
+          上下文 {{ contextSelection.completed }}/{{ contextSelection.expected }}
+          · 剩余 {{ contextSelection.remaining }}
+        </span>
+        <span class="aw-chip fail" v-if="contextSelection.status === 'interrupted'">已中断，等待继续</span>
         <span class="aw-chip run">在岗 {{ stats.running }}</span>
         <span class="aw-chip queue">待领 {{ stats.queued }}</span>
         <span class="aw-chip done">已交 {{ stats.done }}</span>
@@ -90,6 +95,7 @@
                 <span v-if="team.queued" class="mini queue">待 {{ team.queued }}</span>
                 <span v-if="team.done" class="mini done">完 {{ team.done }}</span>
                 <span v-if="team.failed" class="mini fail">败 {{ team.failed }}</span>
+                <span v-if="team.interrupted" class="mini fail">断 {{ team.interrupted }}</span>
               </div>
             </div>
             <div class="seat-row">
@@ -185,6 +191,7 @@ const POOL_SIZE = 10
 const PREVIEW_N = 24
 
 const ROLE_TEAMS = [
+  { role: 'chapter_context_selector', label: '上下文组', emoji: '🧩', color: 'teal' },
   { role: 'chapter_writer', label: '写作组', emoji: '✍️', color: 'blue' },
   { role: 'chapter_reviewer', label: '审核组', emoji: '🔍', color: 'purple' },
   { role: 'chapter_rewriter', label: '改稿组', emoji: '📝', color: 'orange' },
@@ -207,6 +214,7 @@ const data = computed(() => {
 })
 const agents = computed(() => (Array.isArray(data.value.agents) ? data.value.agents : []))
 const summary = computed(() => data.value.summary || {})
+const contextSelection = computed(() => data.value.context_selection || {})
 const phaseLabel = computed(() => data.value.phase_label || data.value.phase || '')
 const isLive = computed(() => props.active || String(data.value.status || '') === 'running' || (summary.value.running || 0) > 0)
 
@@ -256,7 +264,7 @@ const roleTeams = computed(() => {
   // Only show teams that currently have work. Fully idle pools stay hidden.
   const rolesToShow = new Set()
   for (const r of Object.keys(byRole)) {
-    if (byRole[r].some((a) => a.status === 'running' || a.status === 'queued' || a.status === 'failed')) {
+    if (byRole[r].some((a) => a.status === 'running' || a.status === 'queued' || a.status === 'failed' || a.status === 'interrupted')) {
       rolesToShow.add(r)
     }
   }
@@ -273,6 +281,7 @@ const roleTeams = computed(() => {
       const queued = list.filter((a) => a.status === 'queued').length
       const done = list.filter((a) => a.status === 'done').length
       const failed = list.filter((a) => a.status === 'failed').length
+      const interrupted = list.filter((a) => a.status === 'interrupted').length
       // Only render busy seats; empty idle desks are omitted
       const seats = running.map((job, i) => ({
         id: `${t.role}-seat-${i}`,
@@ -288,6 +297,7 @@ const roleTeams = computed(() => {
         queued,
         done,
         failed,
+        interrupted,
         seats,
         currentChapters: running.map((a) => a.chapter_id).filter(Boolean).slice(0, 8),
       }

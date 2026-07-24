@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from subagent_registry import (
+    CHAPTER_CONTEXT_SELECTOR,
     CHAPTER_WRITER,
     pipeline_manifest,
     subagent_manifest,
@@ -38,6 +39,7 @@ _ORCHESTRATOR_SYSTEM_PROMPT = """你是标书 Agent 的主 Agent（全局会话�
 ## 5. 动作空间（action 字段，只能取其一）
 - query: 只读查询，不执行命令。给 query_type（status/manual_review/score_coverage/quality_risk/inputs/outputs）。
 - run_command: 执行某流水线阶段，给 command（从 pipeline 里选）。
+- dispatch_contexts: 派发多个章节上下文选择子 agent 并发执行或显式续跑。对应 select-context-all。
 - dispatch_chapters: 派发多个章节写作子 agent 并发初写。对应 write-all。
 - dispatch_review: 派发审核子 agent 并发审核 + 需要时由写作子 agent 改稿（自动循环）。对应 review-fix-all。
 - dispatch_rewrite: 你已读了各章 review 结果，定向派发写作子 agent 对指定章节改稿。给 rewrite_targets。
@@ -49,7 +51,7 @@ _ORCHESTRATOR_SYSTEM_PROMPT = """你是标书 Agent 的主 Agent（全局会话�
 ## 6. 输出规则
 1. 只输出一个 JSON 对象，不要任何额外文字、不要 markdown 代码块。
 2. 字段：intent, action, query_type(仅 query), command(仅 run_command), rewrite_targets(仅 dispatch_rewrite，数组 [{chapter_id, focus_problems, priority}]), reply(基于状态快照真实数字，不编造), actions(按钮数组), auto_execute(布尔，仅用户明确要"执行/继续/开始/跑"时 true)。
-3. actions 元素：{"type":"run_command","command":"<cmd>","label":"<lbl>"}；{"type":"dispatch_chapters","label":"派发章节写作"}；{"type":"dispatch_review","label":"派发审核改稿"}；{"type":"dispatch_rewrite","label":"定向改稿"}；{"type":"global_review","label":"全文审核"}；{"type":"auto_run","label":"一键跑完剩余"}；{"type":"show_step","command":"<cmd>","label":"<lbl>"}。
+3. actions 元素：{"type":"run_command","command":"<cmd>","label":"<lbl>"}；{"type":"dispatch_contexts","label":"派发上下文选择","params":{"resume":true}}；{"type":"dispatch_chapters","label":"派发章节写作"}；{"type":"dispatch_review","label":"派发审核改稿"}；{"type":"dispatch_rewrite","label":"定向改稿"}；{"type":"global_review","label":"全文审核"}；{"type":"auto_run","label":"一键跑完剩余"}；{"type":"show_step","command":"<cmd>","label":"<lbl>"}。
 4. 用户说"继续/下一步/开始/执行/跑/重试/派发"→action=run_command, command=next_step.command, auto_execute=true。
 5. 用户说"全部跑完/一键生成"→action=auto_run, auto_execute=true。
 6. 用户说"审核/检查质量"但没有明确要求执行时，先 action=query, query_type=quality_risk；只有明确说"执行审核/开始审核/派发审核"才 action=dispatch_review 或 global_review；用户说"合规检查/废标检查/专项合规"→action=run_command, command=compliance-check。
@@ -249,7 +251,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 
 _VALID_ACTIONS = {
-    "query", "run_command", "dispatch_chapters", "dispatch_review",
+    "query", "run_command", "dispatch_contexts", "dispatch_chapters", "dispatch_review",
     "dispatch_rewrite", "global_review", "auto_run", "chat",
 }
 
@@ -548,6 +550,20 @@ def resolve_execution(plan_result: dict[str, Any], status: dict[str, Any]) -> di
             result["actions"] = [{"type": "run_command", "command": command, "label": f"执行 {command}"}] if command else []
         if not result["reply"] and command:
             result["reply"] = f"准备执行 `{command}`。"
+        return result
+
+    if action == "dispatch_contexts":
+        result["trigger_command"] = CHAPTER_CONTEXT_SELECTOR.command if auto_execute else ""
+        if not result["reply"]:
+            result["reply"] = "把待处理章节派发给多个上下文选择子 Agent 并发执行；有效检查点会直接复用。"
+        if not result["actions"]:
+            result["actions"] = [
+                {
+                    "type": "dispatch_contexts",
+                    "label": "继续上下文选择" if "继续" in str(plan_result.get("intent") or "") else "派发上下文选择",
+                    "params": {"resume": True},
+                }
+            ]
         return result
 
     if action == "dispatch_chapters":

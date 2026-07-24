@@ -179,7 +179,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 16
+    SCHEMA_VERSION = 19
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -198,9 +198,6 @@ class ControlStore:
         "workspace.run_utility",
         "workspace.archive",
         "workspace.clean",
-        "migration.scan",
-        "migration.cutover",
-        "migration.reconcile",
     }
     BLOCKED_REMEDIATION_KINDS = {
         "repair.start",
@@ -285,6 +282,20 @@ class ControlStore:
                         message TEXT NOT NULL DEFAULT '',
                         error_json TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS stage_runs (
+                        stage_run_id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL,
+                        stage_command TEXT NOT NULL,
+                        attempt INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        disposition TEXT NOT NULL DEFAULT '',
+                        error_json TEXT,
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        UNIQUE(operation_id, stage_command, attempt)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_stage_runs_operation
+                        ON stage_runs(operation_id, stage_command, attempt DESC);
                     CREATE TABLE IF NOT EXISTS workspace_lease (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         lease_id TEXT NOT NULL,
@@ -2903,6 +2914,198 @@ class ControlStore:
         with self._connection() as connection:
             return self._revision(connection)
 
+    def record_stage_run(
+        self,
+        operation_id: str,
+        stage_command: str,
+        status: str,
+        *,
+        disposition: str = "",
+        error: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        operation = str(operation_id or "").strip()
+        command = str(stage_command or "").strip()
+        state = str(status or "").strip().lower()
+        if not operation or not command or state not in {"queued", "running", "succeeded", "failed", "reused", "cancelled", "paused"}:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "StageRun 状态无效。", status_code=503)
+        now = _now()
+        terminal = state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                latest = connection.execute(
+                    "SELECT * FROM stage_runs WHERE operation_id = ? AND stage_command = ? "
+                    "ORDER BY attempt DESC LIMIT 1",
+                    (operation, command),
+                ).fetchone()
+                latest_state = str(latest["status"]) if latest else ""
+                latest_terminal = latest_state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+                if latest is not None and terminal and latest_terminal:
+                    if latest_state == state:
+                        connection.commit()
+                        return {
+                            "stage_run_id": str(latest["stage_run_id"]),
+                            "operation_id": operation,
+                            "stage_command": command,
+                            "attempt": int(latest["attempt"]),
+                            "status": latest_state,
+                            "disposition": str(latest["disposition"] or ""),
+                        }
+                    raise ControlPlaneError(
+                        "STATE_CONFLICT",
+                        "StageRun 已处于终态，拒绝覆盖审计记录。",
+                        status_code=409,
+                        details={
+                            "operation_id": operation,
+                            "stage_command": command,
+                            "current_status": latest_state,
+                            "requested_status": state,
+                        },
+                    )
+                if latest is None or state == "queued" or (state == "running" and str(latest["status"]) != "queued"):
+                    attempt = int(latest["attempt"] if latest else 0) + 1
+                    run_id = str(uuid.uuid4())
+                    connection.execute(
+                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, error_json, started_at, completed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (run_id, operation, command, attempt, state, disposition, _json(error) if error else None, now, now if terminal else None),
+                    )
+                else:
+                    run_id = str(latest["stage_run_id"])
+                    attempt = int(latest["attempt"])
+                    connection.execute(
+                        "UPDATE stage_runs SET status = ?, disposition = ?, error_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                        (state, disposition, _json(error) if error else None, now if terminal else None, run_id),
+                    )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection, revision, "StageRunRecorded", "StageRun", run_id,
+                    {"operation_id": operation, "command": command, "attempt": attempt, "status": state, "disposition": disposition},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {"stage_run_id": run_id, "operation_id": operation, "stage_command": command, "attempt": attempt, "status": state, "disposition": disposition}
+
+    def stage_runs(self, operation_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM stage_runs WHERE operation_id = ? ORDER BY stage_command, attempt",
+                (str(operation_id or ""),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["error"] = _decode(item.pop("error_json", None), None)
+            result.append(item)
+        return result
+
+    def latest_stage_run(self, operation_id: str, stage_command: str) -> dict[str, Any] | None:
+        """Return the latest attempt for one stage without inferring its state."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM stage_runs WHERE operation_id = ? AND stage_command = ? "
+                "ORDER BY attempt DESC LIMIT 1",
+                (str(operation_id or ""), str(stage_command or "")),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def latest_stage_run_for_command(self, stage_command: str) -> dict[str, Any] | None:
+        """Return the most recent persisted attempt for a stage across Operations."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM stage_runs WHERE stage_command = ? ORDER BY rowid DESC LIMIT 1",
+                (str(stage_command or ""),),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def latest_terminal_stage_run_for_command(self, stage_command: str) -> dict[str, Any] | None:
+        """Return the latest completed attempt, ignoring an in-flight retry."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM stage_runs WHERE stage_command = ? "
+                "AND status IN ('succeeded', 'failed', 'reused', 'cancelled', 'paused') "
+                "ORDER BY rowid DESC LIMIT 1",
+                (str(stage_command or ""),),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def document_undo(self) -> dict[str, Any] | None:
+        """Return the durable one-step document undo pointer for this workspace."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT value FROM control_meta WHERE key = 'document_undo_state'"
+            ).fetchone()
+        value = _decode(str(row[0]), None) if row else None
+        return dict(value) if isinstance(value, dict) else None
+
+    def set_document_undo(self, backup_path: str, *, operation_id: str = "") -> dict[str, Any]:
+        relative_path = str(backup_path or "").strip()
+        if not relative_path:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "文档撤销备份路径不能为空。", status_code=503)
+        state = {
+            "backup_path": relative_path,
+            "operation_id": str(operation_id or "").strip(),
+            "updated_at": _now(),
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO control_meta(key, value) VALUES ('document_undo_state', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_json(state),),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "DocumentUndoAvailable",
+                    "Document",
+                    "final.md",
+                    {"backup_path": relative_path, "operation_id": state["operation_id"]},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return state
+
+    def clear_document_undo(self) -> None:
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                deleted = connection.execute(
+                    "DELETE FROM control_meta WHERE key = 'document_undo_state'"
+                ).rowcount
+                if deleted:
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection,
+                        revision,
+                        "DocumentUndoCleared",
+                        "Document",
+                        "final.md",
+                        {},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     @staticmethod
     def _receipt_from_row(row: sqlite3.Row, *, duplicate: bool = False) -> CommandReceipt:
         return CommandReceipt(
@@ -2934,18 +3137,6 @@ class ControlStore:
                 if duplicate:
                     connection.commit()
                     return self._receipt_from_row(duplicate, duplicate=True), False
-
-                if envelope.kind not in {"migration.scan", "migration.reconcile"}:
-                    open_conflicts = int(connection.execute(
-                        "SELECT COUNT(*) FROM migration_conflicts WHERE status = 'open'"
-                    ).fetchone()[0])
-                    if open_conflicts:
-                        raise ControlPlaneError(
-                            "MIGRATION_RECONCILIATION_REQUIRED",
-                            "工作区存在未解决的 V1/V2 状态冲突，已拒绝变更操作。",
-                            status_code=409,
-                            details={"open_count": open_conflicts},
-                        )
 
                 if envelope.kind in self.CONFIRMATION_REQUIRED_KINDS:
                     if not envelope.confirmation_id:
@@ -3025,6 +3216,51 @@ class ControlStore:
                         "materials.refill": {"blocked"},
                     }
                     allowed_statuses = {"blocked"} if blocked_mutation_retry else allowed[envelope.kind]
+                    if (
+                        envelope.kind in {"pipeline.pause", "pipeline.cancel"}
+                        and previous_status in {"succeeded", "failed", "cancelled"}
+                    ):
+                        revision = self._bump_revision(connection)
+                        message = f"Operation 已处于终态 {previous_status}，无需执行 {envelope.kind}。"
+                        connection.execute(
+                            """
+                            INSERT INTO commands(
+                                command_id, kind, payload_json, goal_id, actor_json,
+                                expected_revision, idempotency_key, status, operation_id,
+                                confirmation_id, message, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'no_op', ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                envelope.command_id,
+                                envelope.kind,
+                                _json(envelope.payload),
+                                envelope.goal_id,
+                                _json(envelope.actor),
+                                envelope.expected_revision,
+                                envelope.idempotency_key,
+                                operation_id,
+                                envelope.confirmation_id,
+                                message,
+                                now,
+                                now,
+                            ),
+                        )
+                        self._event(
+                            connection,
+                            revision,
+                            "CommandNoOp",
+                            "Command",
+                            envelope.command_id,
+                            {"kind": envelope.kind, "operation_id": operation_id, "operation_status": previous_status},
+                        )
+                        connection.commit()
+                        return CommandReceipt(
+                            command_id=envelope.command_id,
+                            operation_id=operation_id,
+                            status="no_op",
+                            workspace_revision=revision,
+                            message=message,
+                        ), False
                     if previous_status not in allowed_statuses:
                         raise ControlPlaneError(
                             "OPERATION_STATE_CONFLICT",
@@ -3244,6 +3480,22 @@ class ControlStore:
                             "actual_fencing_token": int(fencing_token),
                         },
                     )
+                current_status = str(row["status"])
+                terminal_states = {"succeeded", "failed", "cancelled"}
+                if current_status in terminal_states:
+                    if current_status != status:
+                        raise ControlPlaneError(
+                            "STATE_CONFLICT",
+                            "Operation 已处于终态，拒绝覆盖控制状态。",
+                            status_code=409,
+                            details={
+                                "operation_id": operation_id,
+                                "current_status": current_status,
+                                "requested_status": status,
+                            },
+                        )
+                    connection.commit()
+                    return self._revision(connection)
                 error_json = _json(error) if error else None
                 if str(row["status"]) == status and str(row["message"] or "") == message and row["error_json"] == error_json:
                     if status not in {"succeeded", "failed", "cancelled"}:
@@ -3435,6 +3687,9 @@ class ControlStore:
                 "SELECT command_id, kind, status, operation_id, confirmation_id, message, created_at, updated_at "
                 "FROM commands ORDER BY created_at DESC LIMIT 50"
             ).fetchall()]
+            stage_runs = [dict(row) for row in connection.execute(
+                "SELECT * FROM stage_runs ORDER BY started_at DESC LIMIT 100"
+            ).fetchall()]
             confirmations = [dict(row) for row in connection.execute(
                 "SELECT confirmation_id, risk, label, status, expected_revision, expires_at, created_at "
                 "FROM confirmations WHERE status = 'pending' ORDER BY created_at"
@@ -3443,40 +3698,28 @@ class ControlStore:
             artifact_rows = connection.execute(
                 "SELECT * FROM artifact_states ORDER BY artifact_key"
             ).fetchall()
-            migration_rows = connection.execute(
-                "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
-            ).fetchall()
-            migration_scan = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
-            ).fetchone()
-            migration_cutover = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
-            ).fetchone()
         for operation in operations:
             operation["error"] = _decode(operation.pop("error_json", None), None)
+        for stage_run in stage_runs:
+            stage_run["error"] = _decode(stage_run.pop("error_json", None), None)
+        current_operation = next(
+            (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
+            operations[0] if operations else None,
+        )
+        current_operation_id = str((current_operation or {}).get("operation_id") or "")
         return {
             "workspace_id": self.context.workspace_id,
             "revision": revision,
-            "operation": next(
-                (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
-                operations[0] if operations else None,
-            ),
+            "operation": current_operation,
             "operations": operations,
             "commands": commands,
+            "stage_runs": stage_runs,
+            "current_stage_runs": [
+                item for item in stage_runs if current_operation_id and str(item.get("operation_id") or "") == current_operation_id
+            ],
             "confirmations": confirmations,
             "lease": dict(lease_row) if lease_row else None,
             "artifacts": [self._artifact_row(row) for row in artifact_rows],
-            "migration": {
-                "status": (
-                    "needs_reconciliation"
-                    if any(str(row["status"]) == "open" for row in migration_rows)
-                    else "ready"
-                ),
-                "open_count": sum(1 for row in migration_rows if str(row["status"]) == "open"),
-                "conflicts": [self._migration_conflict_row(row) for row in migration_rows],
-                "last_scan": _decode(str(migration_scan["value"]), None) if migration_scan else None,
-                "cutover": _decode(str(migration_cutover["value"]), None) if migration_cutover else None,
-            },
         }
 
     def operation(self, operation_id: str) -> dict[str, Any] | None:
@@ -3499,6 +3742,22 @@ class ControlStore:
             ).fetchall()
         events: list[dict[str, Any]] = []
         for row in rows:
+            item = dict(row)
+            item["workspace_id"] = self.context.workspace_id
+            item["payload"] = _decode(item.pop("payload_json", None), {})
+            events.append(item)
+        return events
+
+    def recent_events(self, *, limit: int = 20) -> list[dict[str, Any]]:
+        """Return the newest events in ascending sequence order."""
+        capped_limit = max(1, min(int(limit), 2000))
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM workspace_events ORDER BY seq DESC LIMIT ?",
+                (capped_limit,),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in reversed(rows):
             item = dict(row)
             item["workspace_id"] = self.context.workspace_id
             item["payload"] = _decode(item.pop("payload_json", None), {})
@@ -3563,7 +3822,22 @@ class CommandGateway:
                 error=error.as_dict(),
             )
         if callable(after_commit):
-            after_commit()
+            try:
+                after_commit()
+            except Exception as exc:
+                error = ControlPlaneError(
+                    "COMMAND_POST_COMMIT_FAILED",
+                    f"Command 已提交但后续执行未能启动: {exc}",
+                    status_code=500,
+                )
+                return self.store.finish_dispatch(
+                    envelope,
+                    operation_id,
+                    success=False,
+                    operation_status="failed",
+                    message=error.message,
+                    error=error.as_dict(),
+                )
         return receipt
 
     def propose(self, envelope: CommandEnvelope, *, label: str, risk: str) -> dict[str, Any]:
