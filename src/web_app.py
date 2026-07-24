@@ -95,6 +95,7 @@ def _is_v1_compat_api(path: str) -> bool:
         path.startswith("/api/v2/")
         or path.startswith("/api/auth/")
         or path.startswith("/api/llm-settings")
+        or path.startswith("/api/flow-settings")
     )
 
 
@@ -488,7 +489,10 @@ def _parse_timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.strip())
+        parsed = datetime.fromisoformat(value.strip())
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
     except ValueError:
         return None
 
@@ -1543,7 +1547,7 @@ def _workflow_timings(
             if started_at is not None:
                 timing["started_at"] = started_at.isoformat(timespec="seconds")
         if started_at is not None:
-            duration_seconds = max(0, (datetime.now() - started_at).total_seconds())
+            duration_seconds = max(0, (datetime.now(timezone.utc) - started_at).total_seconds())
             timing["duration_seconds"] = int(round(duration_seconds))
             timing["duration_label"] = _format_duration(duration_seconds)
         timing["status"] = "running"
@@ -1888,19 +1892,52 @@ def _status_payload(
 ) -> dict[str, Any]:
     v2_store = ControlStore(WorkspaceContext.resolve(root.parent, root.name)) if v2_read_only else None
     v2_snapshot = v2_store.snapshot() if v2_store is not None else {}
-    v2_operation = v2_snapshot.get("operation") if isinstance(v2_snapshot.get("operation"), dict) else {}
     if v2_read_only:
         # Control status must come from SQLite in V2.  V1 run_state.json and
         # pipeline_control.json are compatibility projections, not a fallback
         # authority for the Chat control surface.
-        pipeline_control = {
-            "operation_id": str(v2_operation.get("operation_id") or ""),
-            "kind": str(v2_operation.get("kind") or ""),
-            "status": str(v2_operation.get("status") or "idle"),
-            "current_stage": str(v2_operation.get("start_command") or ""),
-            "message": str(v2_operation.get("message") or ""),
-            "updated_at": str(v2_operation.get("updated_at") or ""),
-        }
+        pipeline_operation = next(
+            (
+                item for item in (v2_snapshot.get("operations") or [])
+                if str(item.get("kind") or "").startswith("pipeline.")
+            ),
+            None,
+        )
+        if pipeline_operation:
+            pipeline_operation_id = str(pipeline_operation.get("operation_id") or "")
+            latest_stage_run = next(
+                (
+                    item for item in (v2_snapshot.get("stage_runs") or [])
+                    if str(item.get("operation_id") or "") == pipeline_operation_id
+                ),
+                None,
+            )
+            pipeline_control = {
+                "operation_id": pipeline_operation_id,
+                "kind": str(pipeline_operation.get("kind") or ""),
+                "status": str(pipeline_operation.get("status") or "idle"),
+                "current_stage": str(
+                    (latest_stage_run or {}).get("stage_command")
+                    or pipeline_operation.get("start_command")
+                    or ""
+                ),
+                "message": str(pipeline_operation.get("message") or ""),
+                "error": pipeline_operation.get("error"),
+                "updated_at": str(pipeline_operation.get("updated_at") or ""),
+                "source": "control.db",
+                "consistent": True,
+            }
+        else:
+            pipeline_control = {
+                "operation_id": "",
+                "kind": "",
+                "status": "idle",
+                "current_stage": "",
+                "message": "",
+                "updated_at": "",
+                "source": "control.db",
+                "consistent": True,
+            }
         run_state = {
             "stage": pipeline_control["current_stage"],
             "status": pipeline_control["status"],
@@ -1920,6 +1957,12 @@ def _status_payload(
         else (manual_review_summary(root) if persist_manual_review_summary else {})
     )
     repair_job = load_v2_repair_job(root) if v2_read_only else load_repair_job(root)
+    if v2_read_only and repair_job and str(repair_job.get("status") or "") in RUNNING_REPAIR_STATUSES:
+        actual_resume_command = _v2_pipeline_resume_command(WorkspaceContext.resolve(root.parent, root.name))
+        if actual_resume_command:
+            # Keep the chat card aligned with control.db stage runs.  The Job's
+            # original resume command is historical and may be stale.
+            repair_job = {**repair_job, "resume_command": actual_resume_command}
     pending_confirmation = None
     if str(repair_job.get("status") or "") == "awaiting_confirmation":
         pending_confirmation = {
@@ -2332,13 +2375,32 @@ def _minimal_repair_resume_command(root: Path) -> str:
 
 
 def _v2_pipeline_resume_command(context: WorkspaceContext) -> str:
-    """Choose a resume stage from authoritative Pipeline Operations only."""
-    allowed = set(auto_run_commands())
+    """Choose the interrupted/incomplete stage from authoritative V2 records."""
+    commands = auto_run_commands()
+    allowed = set(commands)
     try:
-        operations = ControlStore(context).snapshot().get("operations") or []
+        store = ControlStore(context)
+        operations = store.snapshot().get("operations") or []
         for item in operations:
             if not isinstance(item, dict) or not str(item.get("kind") or "").startswith("pipeline."):
                 continue
+            operation_id = str(item.get("operation_id") or "").strip()
+            latest_by_command: dict[str, dict[str, Any]] = {}
+            for stage_run in (store.stage_runs(operation_id) if operation_id else []):
+                stage_command = str(stage_run.get("stage_command") or "").strip()
+                if stage_command not in allowed:
+                    continue
+                attempt = int(stage_run.get("attempt") or 0)
+                current = latest_by_command.get(stage_command)
+                if current is None or attempt >= int(current.get("attempt") or 0):
+                    latest_by_command[stage_command] = stage_run
+            # The operation's start command is only a historical boundary.
+            # Prefer the first unfinished recorded stage: a pipeline started
+            # at context selection may already have reached chapter writing.
+            for stage_command in commands:
+                stage_run = latest_by_command.get(stage_command)
+                if stage_run and str(stage_run.get("status") or "") not in {"succeeded", "reused"}:
+                    return stage_command
             command = str(item.get("start_command") or "").strip()
             if command in allowed:
                 return command
@@ -2474,6 +2536,62 @@ def _repair_result_count(result: dict[str, Any], key: str, count_key: str) -> in
         return 0
 
 
+def _sync_v2_repair_failure_details(context: WorkspaceContext, result: dict[str, Any]) -> int:
+    """Project per-issue repair failures into the V2 Issue authority.
+
+    The repair engine also writes a legacy compatibility issue log.  V2 panels
+    deliberately read control.db, so copying only that log made a failure
+    visible in the chat card but invisible on the Issues tab.
+    """
+    failed_rows = [
+        item for item in (result.get("results") or [])
+        if isinstance(item, dict)
+        and str(item.get("classification") or "") == "failed"
+        and str(item.get("issue_id") or "").strip()
+    ]
+    if not failed_rows:
+        return 0
+    store = ControlStore(context)
+    issues = store.issue_states()
+    by_id = {str(item.get("issue_id") or item.get("id") or ""): item for item in failed_rows}
+    changed = 0
+    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    for issue in issues:
+        row = by_id.get(str(issue.get("id") or ""))
+        if row is None:
+            continue
+        reason = str(row.get("failure_reason") or row.get("message") or "修复动作执行失败").strip()[:1200]
+        evidence = dict(issue.get("evidence") or {})
+        evidence["last_repair_failure"] = {
+            "at": now,
+            "reason": reason,
+            "action_errors": [
+                str(item.get("message") or item.get("error") or "")[:600]
+                for item in (row.get("step_results") or [])
+                if isinstance(item, dict) and not item.get("ok")
+            ][:5],
+            "revalidation_errors": [
+                str(item.get("message") or item.get("error") or "")[:600]
+                for item in (row.get("revalidate_results") or [])
+                if isinstance(item, dict) and not item.get("ok")
+            ][:5],
+        }
+        detail = str(issue.get("detail") or "").split("\n\n最近一次最小修复失败：", 1)[0]
+        issue.update(
+            {
+                "status": "open",
+                "detail": f"{detail}\n\n最近一次最小修复失败：{reason}".strip(),
+                "failure_reason": reason,
+                "evidence": evidence,
+                "updated_at": now,
+            }
+        )
+        changed += 1
+    if changed:
+        store.replace_issue_states(issues, source="repair.failure")
+    return changed
+
+
 def _trigger_repair_job(
     root: Path,
     confirmation_id: str,
@@ -2606,6 +2724,8 @@ def _trigger_repair_job(
                     issue_snapshot=(repair_context and ControlStore(repair_context).issue_states()),
                     progress_callback=_progress,
                 )
+                if repair_context:
+                    _sync_v2_repair_failure_details(repair_context, result)
             except Exception as exc:
                 failure = exc
                 result = {"ok": False, "failed": [str(exc)], "message": f"最小修复失败：{exc}"}
@@ -3134,6 +3254,26 @@ async def api_chat_orchestrate(request: Request) -> JSONResponse:
                     },
                     workspace_id=run_id,
                 )
+                if is_v2_workspace_chat:
+                    # The user's explicit chat command is the authorization.
+                    # Retain a confirmed Command record for audit, but do not
+                    # ask the user to click a second confirmation button.
+                    proposal = gateway.propose(envelope, label="聊天指令：执行最小修复", risk="high")
+                    receipt = gateway.confirm(
+                        str(proposal.get("confirmation_id") or proposal.get("action_id") or ""),
+                        actor=_request_actor(request, source="chat"),
+                    )
+                    repair_job = load_v2_repair_job(root)
+                    return _chat_response(
+                        root,
+                        run_id,
+                        receipt.message or f"已开始处理 {len(candidates)} 个阻断问题。",
+                        actions=[],
+                        intent="minimal_repair",
+                        triggered_repair=True,
+                        repair_job=repair_job or None,
+                        command_receipts=[receipt.as_dict()],
+                    )
                 proposal = gateway.propose(envelope, label="确认执行最小修复", risk="high")
                 return _chat_response(
                     root,
@@ -3625,6 +3765,15 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
                 store.issue_v1_import_pending()
                 and (context.root / "workspace" / "issues" / "open.json").exists()
             )
+            # One-time-safe projection for repair jobs completed before the
+            # failure-detail synchronization was introduced.  The job itself
+            # is already V2 state, so this does not consult retired V1 files.
+            repair_result = store.repair_job_state().get("result")
+            if isinstance(repair_result, dict):
+                try:
+                    _sync_v2_repair_failure_details(context, repair_result)
+                except Exception:
+                    pass
             all_issues = store.issue_states()
             open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
             blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
@@ -5620,6 +5769,26 @@ def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
         _append_log(f"[暂停] {command} 已暂停，可从断点继续。")
     elif exit_code != 0:
         _append_log(f"[错误] 流程已停止: {command} 执行失败，请查看上方报错。")
+    context_resume_summary: tuple[int, int] | None = None
+    if exit_code != 0 and command == "select-context-all":
+        # A stopped child process cannot update its final batch/activity state.
+        # Reconcile disk artifacts before any recovery attempt so the next
+        # explicit/automatic invocation dispatches only unfinished chapters.
+        try:
+            from agent.activity import reconcile_interrupted_activity
+            from context_selector import reconcile_interrupted_context_selection
+
+            checkpoint = reconcile_interrupted_context_selection(run_root)
+            reconcile_interrupted_activity(run_root)
+            completed = len(checkpoint.get("completed_chapter_ids") or [])
+            expected = len(checkpoint.get("expected_chapter_ids") or [])
+            context_resume_summary = (completed, expected)
+            _append_log(
+                f"[断点] 上下文选择已校正：已完成 {completed}/{expected}，"
+                f"剩余 {max(0, expected - completed)} 章。"
+            )
+        except Exception as exc:
+            _append_log(f"[警告] 上下文断点校正失败: {exc}")
     if record_state:
         state_status = "paused" if exit_code != 0 and was_paused else ("ok" if exit_code == 0 else "error")
         state_message = (
@@ -5635,14 +5804,22 @@ def _run_sync_impl(command: str, run_id: str, run_root: Path) -> int:
                 _write_json_file(error_path, {"command": command, "exit_code": exit_code, "lines": error_lines})
             except Exception:
                 pass
-            recovered_exit = _attempt_auto_recovery(command, run_root, error_lines)
-            if recovered_exit == 0:
-                exit_code = 0
-                state_status = "ok"
-                state_message = f"{command} 自动恢复后执行完成"
-            elif recovered_exit is None and not was_paused:
-                state_status = "recovery_failed"
-                state_message = f"{command} 自动恢复未成功，exit_code={exit_code}"
+            if command == "select-context-all":
+                completed, expected = context_resume_summary or (0, 0)
+                state_status = "paused"
+                state_message = (
+                    f"上下文选择已中断：已完成 {completed}/{expected}，"
+                    "请点击“继续上下文选择”显式续跑"
+                )
+            else:
+                recovered_exit = _attempt_auto_recovery(command, run_root, error_lines)
+                if recovered_exit == 0:
+                    exit_code = 0
+                    state_status = "ok"
+                    state_message = f"{command} 自动恢复后执行完成"
+                elif recovered_exit is None and not was_paused:
+                    state_status = "recovery_failed"
+                    state_message = f"{command} 自动恢复未成功，exit_code={exit_code}"
         save_run_state(
             run_root,
             {"root_dir": str(run_root), "current_command": command},
@@ -5665,10 +5842,15 @@ def _workspace_context(workspace_id: str) -> WorkspaceContext:
 
 
 def _ensure_v2_issue_import(context: WorkspaceContext) -> ControlStore:
-    """Reject retired V1 Issue state before a V2 command can consume it."""
+    """Reject unscanned V1 Issue state without blocking a V2 compatibility projection."""
     store = ControlStore(context)
     legacy_path = context.root / "workspace" / "issues" / "open.json"
-    if legacy_path.exists():
+    # ``open.json`` remains a one-version compatibility projection for older
+    # pages.  It is not an authority in V2: once control.db has established
+    # issue state, its presence must not make the V2 workspace unusable.
+    # A file in a workspace with no recorded V2/migration state is still
+    # rejected fail-closed instead of being imported implicitly.
+    if legacy_path.exists() and store.issue_v1_import_pending():
         raise ControlPlaneError(
             "V1_STATE_RETIRED",
             "检测到已废弃的 V1 Issue 状态文件；请删除旧工作区并在 V2 工作区重新执行。",
@@ -5912,6 +6094,89 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
             ),
         }
     )
+
+
+# Flow settings are intentionally limited to parameters consumed at runtime.
+# Keep the allow-list here so this endpoint can never become an arbitrary .env
+# editor from the browser.
+FLOW_SETTING_SPECS: dict[str, tuple[str, Any, int, int]] = {
+    "workers": ("BID_AGENT_WORKERS_DEFAULT", 4, 1, 10),
+    "llm_concurrency": ("BID_AGENT_LLM_CONCURRENCY", 8, 1, 32),
+    "write_batch_retries": ("BID_AGENT_WRITE_BATCH_RETRIES", 5, 0, 20),
+    "max_repair_rounds": ("AGENT_MAX_REPAIR_ROUNDS", 2, 0, 10),
+}
+FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
+    "chapter_review_gate": ("CHAPTER_REVIEW_GATE", True),
+    "global_review_gate": ("GLOBAL_REVIEW_GATE", True),
+    "allow_accept_risk": ("ISSUE_ACCEPT_RISK_ENABLED", False),
+}
+
+
+def _flow_settings() -> dict[str, Any]:
+    from config import _parse_env_file
+
+    values = _parse_env_file(_llm_env_path())
+    result: dict[str, Any] = {}
+    for alias, (key, default, low, high) in FLOW_SETTING_SPECS.items():
+        try:
+            result[alias] = max(low, min(high, int(values.get(key, os.environ.get(key, default)))))
+        except (TypeError, ValueError):
+            result[alias] = default
+    for alias, (key, default) in FLOW_REVIEW_SPECS.items():
+        raw = str(values.get(key, os.environ.get(key, "1" if default else "0"))).strip().lower()
+        result[alias] = raw not in {"0", "false", "no", "off"}
+    return result
+
+
+def _write_flow_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    current = _flow_settings()
+    for alias, (_key, _default, low, high) in FLOW_SETTING_SPECS.items():
+        if alias in settings:
+            try:
+                current[alias] = max(low, min(high, int(settings[alias])))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"{alias} 必须是 {low}-{high} 的整数") from exc
+    for alias in FLOW_REVIEW_SPECS:
+        if alias in settings:
+            current[alias] = bool(settings[alias])
+    env_updates = {
+        key: str(current[alias]) for alias, (key, *_rest) in FLOW_SETTING_SPECS.items()
+    }
+    env_updates.update({key: "1" if current[alias] else "0" for alias, (key, _default) in FLOW_REVIEW_SPECS.items()})
+    path = _llm_env_path()
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    rendered: list[str] = []
+    for line in lines:
+        key = line.strip().split("=", 1)[0].strip() if "=" in line else ""
+        if key in env_updates:
+            rendered.append(f"{key}={env_updates[key]}")
+            seen.add(key)
+        else:
+            rendered.append(line)
+    rendered.extend(f"{key}={value}" for key, value in env_updates.items() if key not in seen)
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text("\n".join(rendered) + "\n", encoding="utf-8")
+    temp.replace(path)
+    os.environ.update(env_updates)
+    return current
+
+
+@app.get("/api/flow-settings")
+def api_get_flow_settings() -> JSONResponse:
+    return JSONResponse({"ok": True, "settings": _flow_settings()})
+
+
+@app.post("/api/flow-settings")
+async def api_set_flow_settings(request: Request) -> JSONResponse:
+    try:
+        body = await request.json()
+        settings = body.get("settings") if isinstance(body, dict) else None
+        if not isinstance(settings, dict):
+            raise ValueError("缺少 settings 对象。")
+        return JSONResponse({"ok": True, "settings": _write_flow_settings(settings), "applied_live": True})
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
 
     compliance_path = context.root / "workspace" / "compliance_report.json"
     compliance = _read_json_file(compliance_path) if compliance_path.exists() else {}
@@ -6216,6 +6481,7 @@ def _pipeline_status_to_operation(status: str) -> str:
 def _pipeline_snapshot_from_control(
     operations: list[dict[str, Any]],
     _checkpoint: dict[str, Any],
+    stage_runs: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     operation = next(
         (
@@ -6240,13 +6506,33 @@ def _pipeline_snapshot_from_control(
     }.get(str(operation.get("status") or ""), "failed")
     operation_id = str(operation.get("operation_id") or "")
     fencing_token = int(operation.get("fencing_token") or 0)
+    operation_stage_runs = [
+        item
+        for item in (stage_runs or [])
+        if str(item.get("operation_id") or "") == operation_id
+    ]
+    active_stage_run = next(
+        (
+            item
+            for item in operation_stage_runs
+            if str(item.get("status") or "") in {"queued", "running"}
+        ),
+        None,
+    )
+    latest_stage_run = active_stage_run or (operation_stage_runs[0] if operation_stage_runs else None)
     return {
         "operation_id": operation_id,
+        "kind": str(operation.get("kind") or ""),
         "fencing_token": fencing_token,
         "status": status,
-        "current_stage": str(operation.get("start_command") or ""),
+        "current_stage": str(
+            (latest_stage_run or {}).get("stage_command")
+            or operation.get("start_command")
+            or ""
+        ),
         "message": str(operation.get("message") or ""),
         "error": operation.get("error"),
+        "updated_at": str(operation.get("updated_at") or ""),
         "source": "control.db",
         "consistent": True,
     }
@@ -6369,7 +6655,11 @@ def _handle_pipeline_resume(
     if not str(payload.get("start_command") or "").strip():
         previous_operation_id = str(payload.get("operation_id") or "").strip()
         previous = ControlStore(context).operation(previous_operation_id) if previous_operation_id else None
-        payload["start_command"] = str((previous or {}).get("start_command") or "")
+        payload["start_command"] = str(
+            (previous or {}).get("start_command")
+            or _v2_pipeline_resume_command(context)
+            or ""
+        )
         if not payload["start_command"]:
             raise ControlPlaneError(
                 "STATE_UNAVAILABLE",
@@ -8173,38 +8463,22 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "latest_gate_evaluations": store.latest_gate_evaluations(),
             "source": "control.db",
         }
-        legacy_import_pending = any(
-            (context.root / relative).exists()
-            for relative in (
-                "workspace/agent/goal_state.json",
-                "workspace/agent/activity.json",
-                "workspace/materials_checklist.json",
-                "workspace/issues/open.json",
-                "workspace/repair_job.json",
-            )
-        )
-        # The V1 presentation aggregator initializes several legacy control
-        # files. Never invoke it when retired V1 state exists; the Snapshot
-        # endpoint must stay read-only and must not revive the old model.
-        compatibility = (
-            {
-                "goal": {}, "goal_full": {}, "agent_activity": {}, "repair_job": {},
-                "pipeline": {}, "workflow": [], "issues_summary": {}, "outputs": {},
-            }
-            if legacy_import_pending
-            else _status_payload(
-                context.root,
-                context.workspace_id,
-                persist_manual_review_summary=False,
-                v2_read_only=True,
-            )
+        compatibility = _status_payload(
+            context.root,
+            context.workspace_id,
+            persist_manual_review_summary=False,
+            v2_read_only=True,
         )
         goal_state = store.goal_state()
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
+        if repair_state and str(repair_state.get("status") or "") in RUNNING_REPAIR_STATUSES:
+            actual_resume_command = _v2_pipeline_resume_command(context)
+            if actual_resume_command:
+                # Snapshot-only projection: do not mutate the repair Job just
+                # to keep a UI label current.
+                repair_state = {**repair_state, "resume_command": actual_resume_command}
         issue_states = store.issue_states()
-        material_import_pending = (context.root / "workspace" / "materials_checklist.json").exists()
-        issue_import_pending = (context.root / "workspace" / "issues" / "open.json").exists()
         material_items = store.material_states()
         material_summary = {
             "exists": bool(material_items),
@@ -8212,19 +8486,90 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             "ready": sum(1 for item in material_items if item.get("response_status") == "ready"),
             "deferred": sum(1 for item in material_items if item.get("response_status") == "deferred"),
             "waived": sum(1 for item in material_items if item.get("response_status") == "waived"),
-            "source": "retired_v1_state" if material_import_pending else "control.db",
+            "source": "control.db",
         }
         artifact_states = snapshot.get("artifacts") or []
+        pipeline_operation = next(
+            (
+                item for item in (snapshot.get("operations") or [])
+                if str(item.get("kind") or "").startswith("pipeline.")
+            ),
+            None,
+        )
+        pipeline_operation_id = str((pipeline_operation or {}).get("operation_id") or "")
+        pipeline_operation_running = str((pipeline_operation or {}).get("status") or "") in {
+            "queued", "running", "pausing", "cancelling",
+        }
+        pipeline_stage_runs = [
+            item for item in (snapshot.get("stage_runs") or [])
+            if pipeline_operation_id and str(item.get("operation_id") or "") == pipeline_operation_id
+        ]
+        active_stage_run = next(
+            (
+                item for item in pipeline_stage_runs
+                if str(item.get("status") or "") in {"queued", "running"}
+            ),
+            None,
+        )
+        active_stage_command = str((active_stage_run or {}).get("stage_command") or "")
         pipeline_snapshot = _pipeline_snapshot_from_control(
             snapshot.get("operations") or [],
             compatibility.get("pipeline") or {},
+            snapshot.get("stage_runs") or [],
         )
+        if active_stage_command and pipeline_operation_running:
+            pipeline_snapshot["current_stage"] = active_stage_command
+        latest_pipeline_stage_by_command: dict[str, dict[str, Any]] = {}
+        for item in pipeline_stage_runs:
+            command = str(item.get("stage_command") or "")
+            if command and command not in latest_pipeline_stage_by_command:
+                latest_pipeline_stage_by_command[command] = item
+        using_registry_workflow = not bool(compatibility.get("workflow"))
+        raw_workflow = compatibility.get("workflow") or [
+            {
+                "id": spec.id,
+                "label": spec.label,
+                "command": spec.command,
+                "kind": spec.kind,
+                "done": False,
+                "ready": False,
+                "state": "blocked",
+                "message": "等待前置步骤",
+            }
+            for spec in workflow_stage_specs(include_utility=False)
+        ]
         workflow = []
-        for raw_step in compatibility.get("workflow") or []:
+        previous_done = True
+        for raw_step in raw_workflow:
             step = dict(raw_step) if isinstance(raw_step, dict) else {}
             command = str(step.get("command") or "")
+            is_utility = str(step.get("kind") or "") == "utility"
             manifests = [item for item in artifact_states if str(item.get("producer") or "") == command]
-            if manifests and not bool(compatibility.get("running") and compatibility.get("current_task") == command):
+            latest_stage = latest_pipeline_stage_by_command.get(command) or {}
+            latest_stage_status = str(latest_stage.get("status") or "")
+            if pipeline_operation_running and command == active_stage_command:
+                step["done"] = False
+                step["ready"] = True
+                step["state"] = "running"
+                step["message"] = "运行中"
+                step["artifact_source"] = "control.db"
+            elif latest_stage_status in {"failed", "paused", "cancelled"}:
+                error = latest_stage.get("error")
+                if isinstance(error, dict):
+                    detail = str(error.get("message") or error.get("detail") or error.get("code") or "")
+                else:
+                    detail = str(error or "")
+                state_labels = {
+                    "failed": "执行失败",
+                    "paused": "已暂停",
+                    "cancelled": "已取消",
+                }
+                step["done"] = False
+                step["ready"] = latest_stage_status != "cancelled"
+                step["state"] = "error" if latest_stage_status == "failed" else latest_stage_status
+                step["message"] = detail or state_labels[latest_stage_status]
+                step["artifact_source"] = "control.db"
+            elif manifests:
                 ready = all(str(item.get("status") or "") == "ready" for item in manifests)
                 step["done"] = ready
                 step["ready"] = True
@@ -8233,13 +8578,37 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                     stale_count = sum(1 for item in manifests if item.get("status") == "stale")
                     step["message"] = f"SQLite Artifact 已过期（{stale_count or len(manifests)} 项），需重新执行"
                 step["artifact_source"] = "control.db"
+            elif command:
+                spec = stage_spec_by_command(command)
+                virtual_only = bool(spec.produces) and all(artifact.kind == "virtual" for artifact in spec.produces)
+                if virtual_only and step.get("done"):
+                    # A virtual artifact has no filesystem existence signal.
+                    # In V2 it is complete only after its SQLite manifest is
+                    # recorded by a successful/reused StageRun.
+                    step["done"] = False
+                    step["state"] = "ready" if step.get("ready") else "blocked"
+                    step["message"] = "等待本轮执行"
+                    step["artifact_source"] = "control.db"
+            if not is_utility and step.get("done") and not previous_done:
+                step["done"] = False
+                step["ready"] = False
+                step["state"] = "blocked"
+                step["message"] = "等待前置步骤"
+            elif not is_utility and not step.get("done") and step.get("state") not in {"running", "recovering", "retrying", "error"}:
+                step["ready"] = previous_done
+                step["state"] = "ready" if previous_done else "blocked"
+                if using_registry_workflow or not step.get("message"):
+                    step["message"] = "可执行" if previous_done else "等待前置步骤"
             workflow.append(step)
+            if not is_utility:
+                previous_done = bool(step.get("done"))
+        goal_payload = {
+            **(compatibility.get("goal") or {}),
+            **(goal_state or compatibility.get("goal_full") or {}),
+        }
         snapshot.update(
             {
-                "goal": {
-                    **(compatibility.get("goal") or {}),
-                    **(goal_state or compatibility.get("goal_full") or {}),
-                },
+                "goal": goal_payload or None,
                 "activity": activity_state or compatibility.get("agent_activity"),
                 "repair_job": repair_state or compatibility.get("repair_job"),
                 "manual_review_summary": _v2_manual_review_summary(context),
@@ -8282,11 +8651,17 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                             if str(item.get("status") or "") in {"open", "in_progress"}
                             and str(item.get("severity") or "") == "block"
                         ][:8],
-                "source": "retired_v1_state" if issue_import_pending else "control.db",
+                "source": "control.db",
                     },
                     "issues": issue_states,
                 },
                 "artifacts": snapshot.get("artifacts") or [],
+                "pipeline_stage_runs": pipeline_stage_runs,
+                "sources": {
+                    "tender": _list_source_files("tender", context.root),
+                    "company": _list_source_files("company", context.root),
+                    "template": _list_source_files("template", context.root),
+                },
                 "artifact_files": {
                     "inputs": compatibility.get("inputs") or {},
                     "workspace": compatibility.get("workspace") or {},
@@ -8296,8 +8671,12 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 # one-version adapter window; control fields above are SQLite-first.
                 "presentation": {
                     "workflow": workflow,
-                    "running": bool(compatibility.get("running")),
-                    "current_task": compatibility.get("current_task") or "",
+                    "running": pipeline_operation_running,
+                    "current_task": (
+                        active_stage_command
+                        or (pipeline_snapshot.get("current_stage") if pipeline_operation_running else "")
+                        or ""
+                    ),
                     "run_state": compatibility.get("run_state") or {},
                     "next_step": compatibility.get("next_step"),
                     "blocked_step": compatibility.get("blocked_step"),
@@ -8311,7 +8690,13 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 "compatibility_source": "v1_projection",
             }
         )
-        return JSONResponse({"ok": True, "snapshot": snapshot})
+        return JSONResponse(
+            {"ok": True, "snapshot": snapshot},
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+            },
+        )
     except ControlPlaneError as exc:
         return _command_error_response(exc)
     except Exception as exc:
@@ -9979,10 +10364,19 @@ def _startup_reconcile() -> None:
         try:
             reconcile_interrupted_repair(workspace_root)
             from agent.activity import reconcile_interrupted_activity
+            from context_selector import reconcile_interrupted_context_selection
 
             act = reconcile_interrupted_activity(workspace_root)
+            context_checkpoint = reconcile_interrupted_context_selection(workspace_root)
             if str(act.get("status") or "") == "interrupted":
                 _append_log(f"[系统] 已清理重启后残留工位: {workspace_root.name}")
+            if str(context_checkpoint.get("status") or "") == "interrupted":
+                completed = len(context_checkpoint.get("completed_chapter_ids") or [])
+                expected = len(context_checkpoint.get("expected_chapter_ids") or [])
+                _append_log(
+                    f"[系统] 上下文选择已中断: {workspace_root.name}，"
+                    f"已完成 {completed}/{expected}，请显式继续"
+                )
             if workspace_root != ROOT and not _same_path(workspace_root, ACTIVE_RUN_ROOT):
                 result = _reconcile_inactive_workspace(_workspace_context(workspace_root.name))
                 if result.get("changed"):

@@ -33,7 +33,7 @@ let pollMs = 2000
 function applyStatusPayload(data) {
   if (!data || typeof data !== 'object') return
   state.status = data
-  state.runtime = data.runtime && typeof data.runtime === 'object' ? data.runtime : state.runtime
+  state.runtime = data.runtime && typeof data.runtime === 'object' ? data.runtime : null
   state.updatedAt = Date.now()
   state.error = ''
 }

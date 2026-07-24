@@ -40,7 +40,7 @@
         v-for="(step, idx) in steps"
         :key="step.command"
         class="plan-row"
-        :class="{ done: step.status === 'done', running: step.status === 'running', recovering: step.status === 'recovering' || step.status === 'retrying', error: step.status === 'error', clickable: true }"
+        :class="{ done: step.status === 'done', running: step.status === 'running', recovering: step.status === 'recovering' || step.status === 'retrying', error: step.status === 'error', paused: step.status === 'paused', cancelled: step.status === 'cancelled', clickable: true }"
         @click="$emit('preview', step.command)"
         :title="'查看「' + step.label + '」成果'"
       >
@@ -52,6 +52,8 @@
               <path d="M12 2a10 10 0 0 1 10 10" stroke="currentColor" stroke-linecap="round" />
             </svg>
           </span>
+          <span v-else-if="step.status === 'paused'">Ⅱ</span>
+          <span v-else-if="step.status === 'cancelled'">×</span>
           <span v-else class="plan-row-num">{{ idx + 1 }}</span>
         </span>
         <span class="plan-row-label" :class="{ strike: step.status === 'done' }">{{ step.label }}</span>
@@ -61,6 +63,8 @@
           <span v-else-if="step.status === 'recovering'" class="plan-row-running">修复中</span>
           <span v-else-if="step.status === 'retrying'" class="plan-row-running">重试中</span>
           <span v-else-if="step.status === 'error'" class="plan-row-err">失败</span>
+          <span v-else-if="step.status === 'paused'" class="plan-row-err">已暂停</span>
+          <span v-else-if="step.status === 'cancelled'" class="plan-row-err">已取消</span>
         </span>
       </div>
     </div>
@@ -124,7 +128,7 @@ watch(() => props.running || props.executing, (v) => {
 const bodyRef = ref(null)
 const doneCount = computed(() => props.steps.filter(s => s.status === 'done').length)
 const percent = computed(() => props.steps.length ? Math.round((doneCount.value / props.steps.length) * 100) : 0)
-const activeStep = computed(() => props.steps.find(s => ['running', 'recovering', 'retrying', 'error'].includes(s.status)) || props.steps.find(s => s.status !== 'done') || props.steps[props.steps.length - 1])
+const activeStep = computed(() => props.steps.find(s => ['running', 'recovering', 'retrying', 'error', 'paused', 'cancelled'].includes(s.status)) || props.steps.find(s => s.status !== 'done') || props.steps[props.steps.length - 1])
 const activeStatusLabel = computed(() => {
   if (!activeStep.value) return ''
   if (activeStep.value.status === 'error') return '失败'
@@ -132,6 +136,8 @@ const activeStatusLabel = computed(() => {
   if (activeStep.value.status === 'retrying') return '重试中'
   if (activeStep.value.status === 'done') return '已完成'
   if (activeStep.value.status === 'running') return '执行中'
+  if (activeStep.value.status === 'paused') return '已暂停'
+  if (activeStep.value.status === 'cancelled') return '已取消'
   return '待执行'
 })
 

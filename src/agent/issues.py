@@ -147,9 +147,11 @@ def upsert_issues(
     new_issues: list[dict[str, Any]],
     *,
     replace_stage_id: str | None = None,
+    replace_stage_target_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Merge issues into open snapshot. Optionally drop previous open issues from same stage."""
+    """Merge issues into open snapshot, optionally replacing one stage or its targets."""
     root = root or project_root()
+    target_ids = {stringify(item).strip() for item in (replace_stage_target_ids or []) if stringify(item).strip()}
     with _lock:
         current = load_open_issues(root)
         if replace_stage_id:
@@ -159,6 +161,10 @@ def upsert_issues(
                 if not (
                     str(i.get("stage_id")) == replace_stage_id
                     and str(i.get("status")) in {"open", "in_progress"}
+                    and (
+                        not target_ids
+                        or bool(target_ids.intersection({stringify(x).strip() for x in ((i.get("target") or {}).get("ids") or [])}))
+                    )
                 )
             ]
         # de-dupe by stage+code+target ids
@@ -279,6 +285,48 @@ def mark_issue_status(root: Path | None, issue_id: str, status: str) -> dict[str
         if found is None:
             return None
         # keep fixed issues out of open snapshot optional: keep but filtered by open_block
+        save_open_issues(root, issues)
+        return found
+
+
+def record_issue_repair_failure(
+    root: Path | None,
+    issue_id: str,
+    reason: str,
+    *,
+    action_errors: list[str] | None = None,
+    revalidation_errors: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Persist the latest automated-repair failure on the actionable Issue."""
+    root = root or project_root()
+    reason = str(reason or "修复动作未返回具体原因").strip()[:1200]
+    with _lock:
+        issues = load_open_issues(root)
+        found = None
+        for issue in issues:
+            if str(issue.get("id") or "") != str(issue_id or ""):
+                continue
+            evidence = dict(issue.get("evidence") or {})
+            evidence["last_repair_failure"] = {
+                "at": _now(),
+                "reason": reason,
+                "action_errors": [str(item)[:600] for item in (action_errors or []) if str(item).strip()][:5],
+                "revalidation_errors": [str(item)[:600] for item in (revalidation_errors or []) if str(item).strip()][:5],
+            }
+            detail = str(issue.get("detail") or "").split("\n\n最近一次最小修复失败：", 1)[0]
+            issue.update(
+                {
+                    "status": "open",
+                    "detail": f"{detail}\n\n最近一次最小修复失败：{reason}",
+                    "evidence": evidence,
+                    "updated_at": _now(),
+                }
+            )
+            append_issue_log(root, issue)
+            found = issue
+            break
+        if found is None:
+            return None
         save_open_issues(root, issues)
         return found
 

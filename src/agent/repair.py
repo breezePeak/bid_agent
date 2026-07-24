@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from typing import Any, Callable
 
-from agent.issues import load_open_issues, mark_issue_status, record_issue_metric
+from agent.issues import load_open_issues, mark_issue_status, record_issue_metric, record_issue_repair_failure
 from agent.root_cause import ROOT_CAUSE_TABLE
 from utils import project_root, stringify
 
@@ -463,6 +463,11 @@ def _execute_action(root: Path, action: dict[str, Any]) -> dict[str, Any]:
         if not command:
             return {**base, "ok": False, "message": "缺少 command"}
         args = {"command": command, "force": True}
+        chapter_ids = _ordered_unique(
+            [str(x) for x in (action.get("target_ids") or params.get("chapter_ids") or [])]
+        )
+        if chapter_ids:
+            args["chapter_ids"] = chapter_ids
     else:
         return {**base, "ok": False, "message": f"未知动作: {action_type}"}
 
@@ -484,6 +489,7 @@ def _run_revalidations(
     root: Path,
     commands: list[str],
     *,
+    chapter_ids_by_command: dict[str, list[str]] | None = None,
     progress_callback: ProgressCallback | None = None,
 ) -> list[dict[str, Any]]:
     from agent.tool_runtime import invoke
@@ -497,13 +503,41 @@ def _run_revalidations(
     )
     for index, command in enumerate(unique_commands, start=1):
         try:
+            args: dict[str, Any] = {"command": command, "force": True}
+            scoped_ids = list((chapter_ids_by_command or {}).get(command) or [])
+            if command in {"write-all", "review-fix-all"} and not scoped_ids:
+                row = {
+                    "command": command,
+                    "chapter_ids": [],
+                    "ok": False,
+                    "summary": "",
+                    "error": {
+                        "type": "RepairScopeRequired",
+                        "message": f"最小修复重验 {command} 缺少 chapter_ids，已拒绝全量执行",
+                    },
+                }
+                results.append(row)
+                _emit_progress(
+                    progress_callback,
+                    "revalidate",
+                    {
+                        "completed": index,
+                        "total": len(unique_commands),
+                        "command": command,
+                        "ok": False,
+                        "commands": unique_commands,
+                    },
+                )
+                continue
+            if scoped_ids:
+                args["chapter_ids"] = scoped_ids
             result = invoke(
                 "run_stage",
-                {"command": command, "force": True},
+                args,
                 root=root,
                 actor="repair",
             )
-            row = {"command": command, **_invoke_result_row(result)}
+            row = {"command": command, "chapter_ids": scoped_ids, **_invoke_result_row(result)}
             results.append(row)
         except Exception as exc:  # noqa: BLE001
             row = {
@@ -554,6 +588,23 @@ def _classification_message(classification: str) -> str:
     }.get(classification, classification)
 
 
+def _failure_reason(rows: list[dict[str, Any]]) -> str:
+    messages: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get("ok"):
+            continue
+        error = row.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or error.get("detail") or error.get("code") or "")
+        else:
+            message = str(error or "")
+        message = message or str(row.get("message") or row.get("summary") or "")
+        message = message.strip()
+        if message and message not in messages:
+            messages.append(message)
+    return "；".join(messages[:3]) or "修复动作或重验失败，但未返回具体错误"
+
+
 def execute_repair_plan(
     root: Path | None,
     issue_id: str,
@@ -597,9 +648,19 @@ def execute_repair_plan(
     return {**results[0], "batch": batch}
 
 
-def revalidate_gate(root: Path | None, command: str) -> dict[str, Any]:
+def revalidate_gate(
+    root: Path | None,
+    command: str,
+    *,
+    chapter_ids: list[str] | None = None,
+) -> dict[str, Any]:
     root = root or project_root()
-    rows = _run_revalidations(root, [command])
+    scoped = _ordered_unique([str(item) for item in (chapter_ids or [])])
+    rows = _run_revalidations(
+        root,
+        [command],
+        chapter_ids_by_command={command: scoped} if scoped else None,
+    )
     sync_errors = _sync_gate_issues(root)
     row = rows[0] if rows else {"ok": False, "command": command, "summary": "", "error": None}
     if sync_errors:
@@ -705,10 +766,33 @@ def execute_repair_batch(
             },
         )
 
+    # Chapter-writing and chapter-review gates can mutate prose. Preserve the
+    # Issue targets here; otherwise generic stage commands silently expand a
+    # small repair into a full-document write/review.
+    revalidation_chapter_ids: dict[str, list[str]] = {}
+    unscoped_revalidations: set[str] = set()
+    for plan in batch_plan.get("plans") or []:
+        if not isinstance(plan, dict):
+            continue
+        for command in plan.get("revalidate") or []:
+            command = str(command or "")
+            if command not in {"review-fix-all", "write-all"}:
+                continue
+            ids = _ordered_unique([str(item) for item in (plan.get("chapter_ids") or [])])
+            if ids:
+                revalidation_chapter_ids[command] = _ordered_unique(
+                    revalidation_chapter_ids.get(command, []) + ids
+                )
+            else:
+                unscoped_revalidations.add(command)
+    for command in unscoped_revalidations:
+        revalidation_chapter_ids.pop(command, None)
+
     # Every discovering gate is forced exactly once, after all edit attempts.
     revalidate_results = _run_revalidations(
         root,
         list(batch_plan.get("revalidate") or []),
+        chapter_ids_by_command=revalidation_chapter_ids,
         progress_callback=progress_callback,
     )
     sync_errors = _sync_gate_issues(root)
@@ -798,6 +882,18 @@ def execute_repair_batch(
             "revalidate_results": issue_revalidate_results,
             "message": _classification_message(classification),
         }
+        if classification == "failed":
+            action_errors = [_failure_reason(issue_action_results)]
+            revalidation_errors = [_failure_reason(issue_revalidate_results)]
+            failure_reason = _failure_reason(issue_action_results + issue_revalidate_results)
+            result["failure_reason"] = failure_reason
+            record_issue_repair_failure(
+                root,
+                issue_id,
+                failure_reason,
+                action_errors=action_errors if action_errors[0] else [],
+                revalidation_errors=revalidation_errors if revalidation_errors[0] else [],
+            )
         results.append(result)
 
         # Restore still-open issues from in_progress and keep recreated ids open.

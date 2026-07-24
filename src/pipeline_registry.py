@@ -191,7 +191,7 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
             _artifact("workspace/contexts/*_context.json", kind="glob"),
             _artifact("workspace/contexts/*_ranked_chunks.json", kind="glob", required_nonempty=False),
         ),
-        runner="context_selector.select_contexts_for_jobs",
+        runner="agents.context_agent.run",
         max_context_chars=18000,
         max_chunks=30,
         prompt_agents=("chapter_context_selector",),

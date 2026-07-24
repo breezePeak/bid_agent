@@ -19,7 +19,7 @@
         v-for="(msg, idx) in messages"
         :key="idx"
         class="chat-msg"
-        :class="{ user: msg.role === 'user', assistant: msg.role === 'assistant', system: msg.role === 'system', thinking: idx === streamingIdx, 'stage-log-msg': msg.role === 'system' && msg.kind === 'stage_log' }"
+        :class="{ user: msg.role === 'user', assistant: msg.role === 'assistant', system: msg.role === 'system', thinking: idx === streamingIdx, 'stage-log-msg': msg.role === 'system' && msg.kind === 'stage_log', 'resolved-status-msg': msg.runtimeResolved }"
       >
         <div class="chat-msg-content">
           <template v-if="msg.role === 'system'">
@@ -253,6 +253,13 @@ import {
   submitWorkspaceCommand,
 } from '../api'
 import { forceRuntimeRefresh } from '../composables/useWorkspaceRuntime'
+import {
+  hasPipelineExecutionHistory,
+  isStalePipelineControlMessage,
+  normalizeSequentialPlanSteps,
+  sourceFilesFromSections,
+  statusDetailText,
+} from '../composables/workspaceSnapshot'
 
 const props = defineProps({
   runId: { type: String, required: true },
@@ -295,15 +302,15 @@ function syncPlanStepsFromWorkflow(workflow, timings = {}) {
   const core = coreWorkflowSteps(workflow)
   if (!core.length) return
   const prevByCommand = Object.fromEntries(planSteps.value.map(s => [s.command, s]))
-  planSteps.value = core.map(step => {
+  planSteps.value = normalizeSequentialPlanSteps(core.map(step => {
     const command = step.command
     const prev = prevByCommand[command] || {}
-    let status = prev.status || 'pending'
+    let status = 'pending'
     if (step.done) status = 'done'
     else if (step.state === 'running') status = 'running'
     else if (step.state === 'recovering' || step.state === 'retrying') status = step.state
     else if (step.state === 'error') status = 'error'
-    else if (!prev.status) status = 'pending'
+    else if (step.state === 'paused' || step.state === 'cancelled') status = step.state
     const timing = timings[command]
     const durationLabel = (timing && typeof timing === 'object' && timing.duration_label)
       ? timing.duration_label
@@ -315,7 +322,7 @@ function syncPlanStepsFromWorkflow(workflow, timings = {}) {
       message: step.message || prev.message || '',
       durationLabel,
     }
-  })
+  }))
 }
 
 const messages = ref([])
@@ -331,6 +338,7 @@ const pendingChatFiles = ref([])
 
 const prevStatusMap = reactive({})
 let messagesLoaded = false
+let lastRuntimeReconcileKey = ''
 
 const running = ref(false)
 const autoExecuting = ref(false)
@@ -457,7 +465,7 @@ function repairCount(field) {
 function repairResultItemText(item, index) {
   if (!item || typeof item !== 'object') return String(item || `第 ${index + 1} 项`)
   const id = item.issue_id || item.id || item.plan?.issue_id || `第 ${index + 1} 项`
-  const detail = item.message || item.summary || item.final_status || (item.ok === false ? '修复失败' : '已处理')
+  const detail = item.failure_reason || item.message || item.summary || item.final_status || (item.ok === false ? '修复失败' : '已处理')
   return `${id}：${detail}`
 }
 
@@ -503,7 +511,9 @@ const quickBtns = computed(() => {
   ]
   const nextPending = planSteps.value.find(s => s.status !== 'done')
   if (nextPending) {
-    if (nextPending.command === 'review-fix-all') {
+    if (nextPending.command === 'select-context-all') {
+      btns.push({ label: '派发上下文选择', type: 'dispatch_contexts', params: { resume: true } })
+    } else if (nextPending.command === 'review-fix-all') {
       btns.push({ label: '派发审核改稿', type: 'dispatch_review' })
     } else if (nextPending.command === 'global-review') {
       btns.push({ label: '定向改稿', type: 'dispatch_rewrite' })
@@ -552,7 +562,7 @@ async function uploadFiles(category, fileList) {
     const workspace = encodeURIComponent(props.runId)
     const r = await fetch(`/api/v2/workspaces/${workspace}/sources?category=${encodeURIComponent(category)}`, { method: 'POST', body: fd }).then(r => r.json())
     if (r.ok) {
-      files[category] = r.saved || []
+      await loadSourceFiles()
       addMessage('system', `已上传: ${files[category].join(', ')}`)
       if (uploadedAll.value) { showPlan.value = true; loadStatus().then(maybeAutoStart) }
     }
@@ -574,6 +584,18 @@ function onChatFileSelected(e) {
 // ---- status ----
 function isRepairTaskName(value) {
   return /(minimal[-_ ]?repair|repair[-_ ]?issues?|最小修复|修复问题)/i.test(String(value || ''))
+}
+
+async function loadSourceFiles() {
+  try {
+    const workspace = encodeURIComponent(props.runId)
+    const data = await fetch(`/api/v2/workspaces/${workspace}/files`).then(r => r.json())
+    if (!data?.ok) return
+    const sourceFiles = sourceFilesFromSections(data.sections)
+    files.tender = sourceFiles.tender
+    files.company = sourceFiles.company
+    files.template = sourceFiles.template
+  } catch (e) { /* 文件树恢复为兜底逻辑，不阻断聊天状态加载 */ }
 }
 
 function stopRepairPolling() {
@@ -661,6 +683,10 @@ function applyRepairJob(job) {
   return true
 }
 
+function ensureStatusPolling() {
+  if (!statusTimer) statusTimer = setInterval(loadStatus, 2000)
+}
+
 async function refreshCurrentRepairJob(expectedJobId = '') {
   if (repairPollInFlight) return
   repairPollInFlight = true
@@ -709,8 +735,6 @@ async function beginRepairTracking(jobId = '', initialJob = null) {
   repairExecuting.value = true
   autoExecuting.value = false
   autoStarted.value = true
-  if (statusTimer) clearInterval(statusTimer)
-  statusTimer = null
   closeSSE()
 
   if (repairPollStarting) return repairPollStarting
@@ -738,14 +762,13 @@ function updateFromStatus(data) {
   if (repairTaskRunning) {
     repairExecuting.value = true
     autoExecuting.value = false
-    if (statusTimer) clearInterval(statusTimer)
-    statusTimer = null
     closeSSE()
     if (!repairTimer && !repairPollStarting) {
       void beginRepairTracking(data.repair_job?.job_id || repairJob.value?.job_id || '', data.repair_job || null)
     }
   }
   running.value = !!data.running && !repairTaskRunning
+  if (hasPipelineExecutionHistory(data)) autoStarted.value = true
   if (!data.workflow) return
   const wf = data.workflow || []
   const timings = (data.timings && typeof data.timings === 'object') ? data.timings : {}
@@ -764,15 +787,16 @@ function updateFromStatus(data) {
     }
     prevStatusMap[s.command] = s.status
   })
+  reconcilePipelineChatStatus(data)
   if (data.agent_activity) agentActivity.value = data.agent_activity
   productMode.value = data.product_mode || data.runtime?.product_mode || ''
   productModeLabel.value = data.product_mode_label || data.runtime?.product_mode_label || ''
   statusConsistent.value = data.consistent !== false && data.runtime?.consistent !== false
   goalLiveStatus.value = String(data.goal?.status || data.goal_full?.status || data.runtime?.stores?.goal?.status || '')
   if (data.sources) {
-    if (data.sources.tender?.length) files.tender = data.sources.tender.map(f => f.name || f)
-    if (data.sources.company?.length) files.company = data.sources.company.map(f => f.name || f)
-    if (data.sources.template?.length) files.template = data.sources.template.map(f => f.name || f)
+    files.tender = (data.sources.tender || []).map(f => f.name || f)
+    files.company = (data.sources.company || []).map(f => f.name || f)
+    files.template = (data.sources.template || []).map(f => f.name || f)
     if (uploadedAll.value) { showPlan.value = true; maybeAutoStart() }
   }
   const outputs = data.outputs || {}
@@ -797,16 +821,58 @@ function updateFromStatus(data) {
   const pipelineStatus = data.pipeline?.status || ''
   if (pipelineStatus === 'complete' && autoExecuting.value) {
     autoExecuting.value = false
-    clearInterval(statusTimer); closeSSE()
+    closeSSE()
     addMessage('assistant', '全部流程已完成！可以编辑文档或下载。', [{ type: 'show_doc_editor', label: '文档编辑' }])
-  } else if (['failed', 'paused'].includes(pipelineStatus) && autoExecuting.value) {
+  } else if (['failed', 'paused', 'interrupted', 'cancelled'].includes(pipelineStatus) && autoExecuting.value) {
     autoExecuting.value = false
-    clearInterval(statusTimer); closeSSE()
-    const detail = data.pipeline?.error || data.pipeline?.message || ''
-    addMessage('assistant', `后端流水线已${pipelineStatus === 'paused' ? '暂停' : '停止'}${detail ? '：' + detail : ''}`)
+    closeSSE()
+    const detail = statusDetailText(data.pipeline?.error) || statusDetailText(data.pipeline?.message)
+    const terminalLabel = {
+      paused: '暂停',
+      interrupted: '阻断',
+      cancelled: '取消',
+      failed: '停止',
+    }[pipelineStatus] || '停止'
+    addMessage('assistant', `后端流水线已${terminalLabel}${detail ? '：' + detail : ''}`)
+  }
+  if (running.value && !repairTaskRunning) {
+    autoExecuting.value = true
+    autoStarted.value = true
+    if (!sseSource) connectSSE()
   }
   // 状态轮询时同步材料待补提醒（去重）
   void maybeNotifyMaterialsGap()
+}
+
+function reconcilePipelineChatStatus(data) {
+  if (!messagesLoaded || !data?.running) return
+  const command = String(data.current_task || data.pipeline?.current_stage || '').trim()
+  if (!command) return
+
+  let reconciled = false
+  messages.value.forEach((message) => {
+    if (
+      message?.kind !== 'stage_log'
+      && !message?.runtimeResolved
+      && isStalePipelineControlMessage(message?.content)
+    ) {
+      message.runtimeResolved = true
+      message.runtimeOriginalContent = message.content
+      message.content = `历史状态（已恢复）：${message.content}`
+      message.actions = []
+      reconciled = true
+    }
+  })
+
+  const operationId = String(data.operation?.operation_id || data.pipeline?.operation_id || props.runId)
+  const reconcileKey = `${operationId}:${command}`
+  if (reconciled && reconcileKey !== lastRuntimeReconcileKey) {
+    lastRuntimeReconcileKey = reconcileKey
+    addMessage('system', `✓ 流水线已恢复，当前正在执行「${stepLabel(command)}」。`, [], {
+      kind: 'runtime_status',
+      persist: false,
+    })
+  }
 }
 
 function applyMaterialsStatus(payload = {}) {
@@ -871,23 +937,22 @@ async function startAutoRun(fromCommand = null) {
   autoStarted.value = true
   addMessage('system', fromCommand ? `从 ${stepLabel(fromCommand)} 继续后端流水线...` : '启动后端自动流水线...')
   connectSSE()
-  if (statusTimer) clearInterval(statusTimer)
-  statusTimer = setInterval(loadStatus, 2000)
+  ensureStatusPolling()
   try {
     const resp = await startOrResumePipeline(props.runId, fromCommand || '')
     const body = resp?.data || {}
     if (!body.ok) {
-      autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+      autoExecuting.value = false; closeSSE(); ensureStatusPolling()
       addMessage('system', `流水线启动失败: ${body.message || ''}`)
     }
   } catch (e) {
-    autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+    autoExecuting.value = false; closeSSE(); ensureStatusPolling()
     const message = e?.response?.data?.message || e?.message || ''
     addMessage('system', `流水线启动请求失败: ${message}`)
   }
 }
 async function pauseAutoRun() {
-  autoExecuting.value = false; clearInterval(statusTimer); closeSSE()
+  autoExecuting.value = false; closeSSE(); ensureStatusPolling()
   try {
     const response = await submitWorkspaceCommand(props.runId, 'pipeline.pause')
     addMessage('system', response?.data?.message || '流程已暂停')
@@ -1241,8 +1306,7 @@ async function doChat(text, { action = null } = {}) {
 
 function watchLiveRun() {
   connectSSE()
-  if (statusTimer) clearInterval(statusTimer)
-  statusTimer = setInterval(loadStatus, 2000)
+  ensureStatusPolling()
 }
 
 async function doRewriteBlock(lineNumber, instruction) {
@@ -1485,6 +1549,7 @@ function handleAction(act, sourceMessage = null) {
     triggerAndAutoAdvance(cmd, '重试')
   }
   else if (act.type === 'skip_stage') { skipFailedStage(act.command) }
+  else if (act.type === 'dispatch_contexts') triggerAndAutoAdvance('select-context-all', act.label || '派发上下文选择子 Agent')
   else if (act.type === 'dispatch_chapters') triggerAndAutoAdvance('write-all', '派发章节写作子 Agent')
   else if (act.type === 'dispatch_review') triggerAndAutoAdvance('review-fix-all', '派发审核改稿子 Agent')
   else if (act.type === 'dispatch_rewrite' || act.type === 'rewrite_chapters') {
@@ -1658,16 +1723,17 @@ onMounted(async () => {
     addMessage('assistant', '你好！请上传招标文件、公司资料和标书模板，我会自动生成执行计划并帮你生成投标文件。')
   }
   await loadStatus()
+  await loadSourceFiles()
   if (repairExecuting.value) {
     await beginRepairTracking(repairJob.value?.job_id || '', repairJob.value)
   } else if (running.value) {
     autoExecuting.value = true
     autoStarted.value = true
     connectSSE()
-    statusTimer = setInterval(loadStatus, 2000)
   } else {
     maybeAutoStart()
   }
+  ensureStatusPolling()
 })
 onBeforeUnmount(() => {
   clearInterval(statusTimer)

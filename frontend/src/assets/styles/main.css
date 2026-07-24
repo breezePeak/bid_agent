@@ -832,6 +832,14 @@ body {
   background: #fef2f2;
   color: #b91c1c;
 }
+.plan-list-current.status-paused {
+  background: #fff7ed;
+  color: #c2410c;
+}
+.plan-list-current.status-cancelled {
+  background: #f1f5f9;
+  color: #64748b;
+}
 .plan-list-current.status-recovering,
 .plan-list-current.status-retrying {
   background: var(--color-warning-light);
@@ -968,6 +976,16 @@ body {
   border-left: 3px solid var(--color-warning);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
+.plan-row.paused {
+  background: #fff7ed;
+  color: #c2410c;
+  border-left: 3px solid #f59e0b;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+.plan-row.cancelled {
+  background: #f8fafc;
+  color: #64748b;
+}
 .plan-row.done { 
   color: var(--color-text-secondary); 
 }
@@ -1000,6 +1018,14 @@ body {
   background: var(--color-warning); 
   border-color: var(--color-warning); 
   color: #fff; 
+}
+.plan-row.paused .plan-row-check {
+  border-color: #f59e0b;
+  color: #c2410c;
+}
+.plan-row.cancelled .plan-row-check {
+  border-color: #94a3b8;
+  color: #64748b;
 }
 .plan-row .spin { 
   animation: spin 1s linear infinite; 
@@ -1420,6 +1446,19 @@ body {
   padding: 4px 8px; 
   background: rgba(15, 23, 42, 0.03);
   border-radius: 12px;
+}
+.chat-msg.resolved-status-msg .chat-msg-content {
+  opacity: 0.68;
+}
+.chat-msg.resolved-status-msg .chat-msg-text {
+  color: var(--color-text-secondary);
+  background: #f8fafc;
+  border-color: #dbe3ee;
+  box-shadow: none;
+}
+.chat-msg.resolved-status-msg .system-text {
+  color: var(--color-text-muted);
+  background: #f1f5f9;
 }
 .chat-msg-actions { 
   display: flex; 

@@ -52,6 +52,10 @@ def load_chapter_context(state: ChapterState) -> ChapterState:
     root = Path(state.get("root_dir") or project_root())
     job = state.get("job") or {}
     chapter_id = stringify(state.get("chapter_id") or job.get("chapter_id"))
+    from context_selector import valid_context_ids
+
+    if chapter_id not in valid_context_ids(root, [job]):
+        raise ValueError(f"章节 {chapter_id} 上下文缺失、无效或输入已变化，请先续跑上下文选择")
     context_path = Path(stringify(job.get("context_path")) or root / "workspace" / "contexts" / f"{chapter_id}_context.json")
     if not context_path.is_absolute():
         context_path = root / context_path

@@ -129,6 +129,151 @@ class V2WebControlTests(unittest.TestCase):
                 "awaiting_confirmation",
             )
 
+    def test_v2_chat_minimal_repair_command_confirms_once_and_starts_immediately(self) -> None:
+        """An explicit V2 chat command is authorization, not a proposal prompt."""
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+
+            class _Gateway:
+                def __init__(self) -> None:
+                    self.store = SimpleNamespace(revision=lambda: 7)
+                    self.proposed = None
+                    self.confirmed = None
+
+                def propose(self, envelope, **_kwargs):
+                    self.proposed = envelope
+                    return {"confirmation_id": "chat-repair-confirmation", "type": "confirm_v2_command"}
+
+                def confirm(self, confirmation_id, *, actor):
+                    self.confirmed = (confirmation_id, actor)
+                    return SimpleNamespace(
+                        message="已开始最小修复。",
+                        as_dict=lambda: {"status": "accepted", "operation_id": "repair-op"},
+                    )
+
+            gateway = _Gateway()
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "load_messages", return_value=[]):
+                    with mock.patch.object(web_app, "save_message", return_value={}):
+                        with mock.patch.object(web_app, "_minimal_repair_candidates", return_value=[{"id": "issue-1"}]):
+                            with mock.patch.object(web_app, "_command_gateway", return_value=gateway):
+                                response = _body(
+                                    asyncio.run(
+                                        web_app.api_v2_chat_turn(
+                                            "alpha",
+                                            _Request({"message": "最小修复"}),
+                                        )
+                                    )
+                                )
+
+            self.assertTrue(response["ok"])
+            self.assertEqual(response["intent"], "minimal_repair")
+            self.assertTrue(response["triggered_repair"])
+            self.assertEqual(response["actions"], [])
+            self.assertEqual(gateway.proposed.kind, "repair.start")
+            self.assertEqual(gateway.confirmed[0], "chat-repair-confirmation")
+
+    def test_status_payload_uses_actual_failed_stage_for_active_v2_repair(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            root.mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda *_args: {"accepted": True, "operation_status": "blocked"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "select-context-all"},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "active-repair-stage-label",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(receipt.operation_id or "", "select-context-all", "succeeded")
+            gateway.store.record_stage_run(receipt.operation_id or "", "write-all", "failed")
+            gateway.store.upsert_repair_job_state(
+                {
+                    "job_id": "repair-1",
+                    "status": "revalidating",
+                    "phase": "revalidating",
+                    "resume_command": "select-context-all",
+                }
+            )
+
+            payload = web_app._status_payload(root, "alpha", v2_read_only=True)
+
+            self.assertEqual(payload["repair_job"]["resume_command"], "write-all")
+
+    def test_v2_repair_failure_reason_is_projected_to_issue_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.replace_issue_states(
+                [{"id": "issue-1", "status": "open", "severity": "block", "title": "章节事实声明"}],
+                source="test",
+            )
+
+            changed = web_app._sync_v2_repair_failure_details(
+                context,
+                {
+                    "results": [
+                        {
+                            "issue_id": "issue-1",
+                            "classification": "failed",
+                            "failure_reason": "RuntimeError: 章节写作失败（已自动重试）",
+                            "step_results": [{"ok": False, "message": "write-all failed"}],
+                        }
+                    ]
+                },
+            )
+
+            issue = ControlStore(context).issue_states()[0]
+            self.assertEqual(changed, 1)
+            self.assertEqual(issue["failure_reason"], "RuntimeError: 章节写作失败（已自动重试）")
+            self.assertIn("最近一次最小修复失败", issue["detail"])
+            self.assertEqual(issue["evidence"]["last_repair_failure"]["reason"], issue["failure_reason"])
+
+    def test_v2_issues_api_backfills_failure_from_completed_repair_job(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.replace_issue_states(
+                [{"id": "issue-1", "status": "open", "severity": "block", "title": "章节事实声明"}],
+                source="test",
+            )
+            store.upsert_repair_job_state(
+                {
+                    "job_id": "repair-1",
+                    "status": "partial",
+                    "phase": "partial",
+                    "result": {
+                        "results": [
+                            {
+                                "issue_id": "issue-1",
+                                "classification": "failed",
+                                "failure_reason": "RuntimeError: 章节写作失败",
+                            }
+                        ]
+                    },
+                }
+            )
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                payload = _body(web_app.api_list_issues(workspace_id="alpha"))
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(payload["issues"][0]["failure_reason"], "RuntimeError: 章节写作失败")
+
     def test_v2_chat_query_does_not_write_legacy_manual_review_summary(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -435,6 +580,30 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(ControlStore(context).issue_v1_import_pending())
             self.assertEqual(ControlStore(context).revision(), 0)
 
+    def test_v2_gate_allows_legacy_issue_projection_after_v2_state_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            issue_dir = root / "workspace" / "issues"
+            issue_dir.mkdir(parents=True)
+            (issue_dir / "open.json").write_text(
+                json.dumps({"issues": [{"id": "compat-copy", "status": "open", "severity": "block"}]}),
+                encoding="utf-8",
+            )
+            context = WorkspaceContext.resolve(runs, "alpha")
+            store = ControlStore(context)
+            store.replace_issue_states(
+                [{"id": "v2-block", "status": "open", "severity": "block"}],
+                source="quality.revalidate",
+            )
+
+            with mock.patch("agent.issues.quality_gate_mode", return_value="hard"):
+                gate = web_app._v2_gate_can_proceed(context, "build-md")
+
+            self.assertFalse(gate["can_proceed"])
+            self.assertEqual(gate["source"], "control.db")
+            self.assertEqual(gate["blocks"][0]["id"], "v2-block")
+
     def test_v2_gate_fails_closed_for_unmigrated_invalid_legacy_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -684,6 +853,115 @@ class V2WebControlTests(unittest.TestCase):
                 web_app._handle_pipeline_resume(context, envelope, "resume-operation")
 
             self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
+
+    def test_v2_pipeline_resume_derives_stage_when_prior_start_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {
+                    "accepted": True,
+                    "operation_status": "paused",
+                }},
+            )
+            previous = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": ""},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "prior-empty-stage",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            envelope = CommandEnvelope.from_mapping(
+                {
+                    "kind": "pipeline.resume",
+                    "payload": {"operation_id": previous.operation_id},
+                    "expected_revision": gateway.store.revision(),
+                    "idempotency_key": "resume-derived-stage",
+                },
+                workspace_id="alpha",
+            )
+
+            with mock.patch.object(web_app, "_v2_pipeline_resume_command", return_value="parse-score"):
+                with mock.patch.object(web_app, "_handle_pipeline_start", return_value={"accepted": True}) as start:
+                    result = web_app._handle_pipeline_resume(context, envelope, "resume-operation")
+
+            self.assertTrue(result["accepted"])
+            self.assertEqual(start.call_args.args[1].payload["start_command"], "parse-score")
+
+    def test_v2_resume_command_uses_incomplete_stage_run_when_start_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {
+                    "accepted": True,
+                    "operation_status": "paused",
+                }},
+            )
+            previous = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": ""},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "prior-empty-stage-runs",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(
+                previous.operation_id,
+                "prepare-inputs",
+                "reused",
+                disposition="reused",
+            )
+            gateway.store.record_stage_run(
+                previous.operation_id,
+                "select-context-all",
+                "running",
+                disposition="started",
+            )
+
+            self.assertEqual(
+                web_app._v2_pipeline_resume_command(context),
+                "select-context-all",
+            )
+
+    def test_v2_resume_command_prefers_actual_failed_stage_over_start_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {
+                    "accepted": True,
+                    "operation_status": "blocked",
+                }},
+            )
+            operation = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "select-context-all"},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "resume-prefers-real-stage",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(operation.operation_id, "select-context-all", "succeeded")
+            gateway.store.record_stage_run(operation.operation_id, "write-all", "failed")
+
+            self.assertEqual(web_app._v2_pipeline_resume_command(context), "write-all")
 
     def test_v2_repair_requires_confirmation_and_uses_same_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2709,6 +2987,9 @@ class V2WebControlTests(unittest.TestCase):
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
+            tender_dir = context.root / "sources" / "tender"
+            tender_dir.mkdir(parents=True)
+            (tender_dir / "招标文件.docx").write_bytes(b"docx")
             store = ControlStore(context)
             store.upsert_goal_state({"goal_id": "goal-v2", "status": "running", "plan": [{"id": "p1"}]})
             store.upsert_agent_activity_state({"status": "running", "phase": "writing", "agents": [{"id": "a1"}]})
@@ -2763,6 +3044,9 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(snapshot["findings"]["issues_summary"]["can_proceed"])
             self.assertEqual(snapshot["findings"]["issues_summary"]["source"], "control.db")
             self.assertEqual(snapshot["artifacts"][0]["artifact_key"], "outputs/final.docx")
+            self.assertEqual([item["name"] for item in snapshot["sources"]["tender"]], ["招标文件.docx"])
+            self.assertEqual(snapshot["sources"]["company"], [])
+            self.assertEqual(snapshot["sources"]["template"], [])
             self.assertEqual(snapshot["artifact_files"]["outputs"]["final_docx"], True)
             self.assertTrue(snapshot["presentation"]["workflow"][0]["done"])
             self.assertEqual(snapshot["presentation"]["workflow"][0]["artifact_source"], "control.db")
@@ -2785,6 +3069,214 @@ class V2WebControlTests(unittest.TestCase):
             self.assertFalse(stale_step["done"])
             self.assertEqual(stale_step["state"], "ready")
             self.assertIn("已过期", stale_step["message"])
+
+    def test_v2_snapshot_does_not_treat_unrecorded_virtual_artifact_as_done(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            WorkspaceContext.resolve(runs, "alpha")
+            compatibility = {
+                "pipeline": {},
+                "workflow": [
+                    {
+                        "command": "build-materials-checklist",
+                        "done": True,
+                        "ready": True,
+                        "state": "done",
+                        "message": "用时 --",
+                    }
+                ],
+                "outputs": {},
+            }
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            step = payload["snapshot"]["presentation"]["workflow"][0]
+            self.assertFalse(step["done"])
+            self.assertEqual(step["state"], "ready")
+            self.assertEqual(step["message"], "等待本轮执行")
+            self.assertEqual(step["artifact_source"], "control.db")
+
+    def test_v2_snapshot_projects_active_stage_run_into_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {
+                    "accepted": True,
+                    "operation_status": "running",
+                }},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "snapshot-active-stage",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(
+                receipt.operation_id or "",
+                "parse-score",
+                "running",
+                disposition="started",
+            )
+            compatibility = {
+                "pipeline": {},
+                "workflow": [
+                    {
+                        "command": "parse-score",
+                        "done": False,
+                        "ready": True,
+                        "state": "ready",
+                    }
+                ],
+                "outputs": {},
+            }
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            snapshot = payload["snapshot"]
+            self.assertTrue(snapshot["presentation"]["running"])
+            self.assertEqual(snapshot["presentation"]["current_task"], "parse-score")
+            self.assertEqual(snapshot["pipeline"]["current_stage"], "parse-score")
+            self.assertEqual(snapshot["presentation"]["workflow"][0]["state"], "running")
+
+    def test_v2_snapshot_does_not_treat_non_pipeline_operation_as_running_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda *_: {
+                        "accepted": True,
+                        "operation_status": "succeeded",
+                    },
+                    "materials.rebuild": lambda *_: {
+                        "accepted": True,
+                        "operation_status": "running",
+                    },
+                },
+            )
+            pipeline = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "build-docx"},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "pipeline-complete-before-materials",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(
+                pipeline.operation_id or "",
+                "build-docx",
+                "succeeded",
+                disposition="completed",
+            )
+            material = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "materials.rebuild",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "materials-running",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            self.assertEqual(gateway.store.operation(material.operation_id or "")["status"], "running")
+            compatibility = {
+                "pipeline": {},
+                "workflow": [{"command": "build-docx", "done": True, "state": "done"}],
+                "outputs": {},
+            }
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            snapshot = payload["snapshot"]
+            self.assertEqual(snapshot["operation"]["kind"], "materials.rebuild")
+            self.assertFalse(snapshot["presentation"]["running"])
+            self.assertEqual(snapshot["presentation"]["current_task"], "")
+            self.assertEqual(snapshot["pipeline"]["operation_id"], pipeline.operation_id)
+            self.assertEqual(snapshot["pipeline"]["status"], "complete")
+            self.assertEqual(snapshot["pipeline"]["current_stage"], "build-docx")
+            self.assertEqual(len(snapshot["pipeline_stage_runs"]), 1)
+
+    def test_v2_snapshot_projects_terminal_failed_stage_not_pipeline_start_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "pipeline.start": lambda *_: {
+                        "accepted": True,
+                        "operation_status": "running",
+                    },
+                },
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "prepare-inputs"},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "pipeline-fails-later",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            operation_id = receipt.operation_id or ""
+            gateway.store.record_stage_run(operation_id, "prepare-inputs", "succeeded", disposition="completed")
+            gateway.store.record_stage_run(
+                operation_id,
+                "parse-score",
+                "failed",
+                disposition="runner_failed",
+                error={"message": "评分解析失败"},
+            )
+            gateway.store.sync_operation(
+                operation_id,
+                "failed",
+                message="parse-score failed",
+                error={"message": "评分解析失败"},
+            )
+            compatibility = {
+                "pipeline": {},
+                "workflow": [
+                    {"command": "prepare-inputs", "done": True, "state": "done"},
+                    {"command": "parse-score", "done": False, "ready": True, "state": "ready"},
+                ],
+                "outputs": {},
+            }
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            snapshot = payload["snapshot"]
+            self.assertFalse(snapshot["presentation"]["running"])
+            self.assertEqual(snapshot["presentation"]["current_task"], "")
+            self.assertEqual(snapshot["pipeline"]["status"], "failed")
+            self.assertEqual(snapshot["pipeline"]["current_stage"], "parse-score")
+            self.assertEqual(snapshot["presentation"]["workflow"][1]["state"], "error")
+            self.assertEqual(snapshot["presentation"]["workflow"][1]["message"], "评分解析失败")
 
     def test_v2_snapshot_does_not_write_manual_review_summary_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2824,8 +3316,13 @@ class V2WebControlTests(unittest.TestCase):
             self.assertTrue(store.issue_v1_import_pending())
             self.assertTrue(store.v1_import_pending("materials"))
             self.assertEqual(store.revision(), 0)
-            self.assertEqual(payload["snapshot"]["materials"]["source"], "retired_v1_state")
-            self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "retired_v1_state")
+            self.assertEqual(payload["snapshot"]["materials"]["source"], "control.db")
+            self.assertEqual(payload["snapshot"]["findings"]["issues_summary"]["source"], "control.db")
+            workflow = payload["snapshot"]["presentation"]["workflow"]
+            core_workflow = [step for step in workflow if step.get("kind") != "utility"]
+            self.assertEqual(len(core_workflow), len(web_app.auto_run_commands()))
+            self.assertEqual(core_workflow[0]["command"], "prepare-inputs")
+            self.assertTrue(core_workflow[0]["ready"])
 
     def test_v2_materials_read_does_not_import_legacy_material_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -10,13 +10,15 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from agent.issues import make_issue, upsert_issues  # noqa: E402
+from agent.issues import load_open_issues, make_issue, upsert_issues  # noqa: E402
 from agent.repair import (  # noqa: E402
     build_repair_batch_plan,
     execute_repair_batch,
     issue_fingerprint,
+    revalidate_gate,
 )
-from agent.root_cause import sync_issues_from_compliance  # noqa: E402
+from agent.root_cause import sync_issues_from_compliance, sync_issues_from_review_fix  # noqa: E402
+from agent.tool_runtime import invoke  # noqa: E402
 
 
 class FakeResult:
@@ -144,6 +146,126 @@ class RepairBatchTests(unittest.TestCase):
             # One merged rewrite plus one de-duplicated global-review gate.
             self.assertEqual(invoke.call_count, 2)
 
+    def test_chapter_review_revalidation_keeps_issue_chapter_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            issues = [
+                make_issue(
+                    stage_id="review_fix_chapters",
+                    command="review-fix-all",
+                    severity="block",
+                    code="CHAPTER_REVIEW_BLOCKER",
+                    title=f"rewrite {chapter_id}",
+                    target_type="chapter",
+                    target_ids=[chapter_id],
+                    suggested_actions=[{"type": "rewrite_chapters", "params": {}}],
+                )
+                for chapter_id in ("2", "2.2", "4.3.2.3")
+            ]
+            upsert_issues(root, issues)
+
+            with mock.patch("agent.tool_runtime.invoke", return_value=FakeResult(True)) as invoke:
+                with mock.patch("agent.repair._sync_gate_issues", return_value=[]):
+                    with mock.patch("agent.repair._open_issue_map", return_value={}):
+                        result = execute_repair_batch(
+                            root, [str(issue["id"]) for issue in issues], confirm=True
+                        )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(invoke.call_count, 2)
+            self.assertEqual(
+                invoke.call_args_list[-1].args[1],
+                {
+                    "command": "review-fix-all",
+                    "force": True,
+                    "chapter_ids": ["2", "2.2", "4.3.2.3"],
+                },
+            )
+
+    def test_chapter_write_revalidation_keeps_issue_chapter_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            issues = [
+                make_issue(
+                    stage_id="write_chapters",
+                    command="write-all",
+                    severity="block",
+                    code="WRITE_CHAPTER_FAILED",
+                    title=f"write {chapter_id}",
+                    target_type="chapter",
+                    target_ids=[chapter_id],
+                    suggested_actions=[{"type": "rewrite_chapters", "params": {}}],
+                )
+                for chapter_id in ("2", "2.2", "4.3.2.2")
+            ]
+            upsert_issues(root, issues)
+
+            with mock.patch("agent.tool_runtime.invoke", return_value=FakeResult(True)) as invoke:
+                with mock.patch("agent.repair._sync_gate_issues", return_value=[]):
+                    with mock.patch("agent.repair._open_issue_map", return_value={}):
+                        result = execute_repair_batch(
+                            root, [str(issue["id"]) for issue in issues], confirm=True
+                        )
+
+            self.assertTrue(result["ok"], result)
+            self.assertEqual(
+                invoke.call_args_list[-1].args[1],
+                {
+                    "command": "write-all",
+                    "force": True,
+                    "chapter_ids": ["2", "2.2", "4.3.2.2"],
+                },
+            )
+
+    def test_repair_cannot_run_unscoped_chapter_write_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+
+            result = invoke(
+                "run_stage",
+                {"command": "write-all", "force": True},
+                root=root,
+                actor="repair",
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error.code, "repair_scope_required")
+
+    def test_repair_revalidation_cannot_run_unscoped_chapter_write_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+
+            with mock.patch("agent.tool_runtime.invoke") as invoke:
+                result = revalidate_gate(root, "write-all")
+
+            self.assertFalse(result["ok"])
+            self.assertIn("缺少 chapter_ids", result["error"]["message"])
+            invoke.assert_not_called()
+
+    def test_scoped_review_sync_does_not_close_other_chapter_issues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = self._root(tmp)
+            issues = [
+                make_issue(
+                    stage_id="review_fix_chapters",
+                    command="review-fix-all",
+                    severity="block",
+                    code="CHAPTER_REVIEW_BLOCKER",
+                    title=f"chapter {chapter_id}",
+                    target_type="chapter",
+                    target_ids=[chapter_id],
+                )
+                for chapter_id in ("2", "9")
+            ]
+            upsert_issues(root, issues)
+
+            sync_issues_from_review_fix(root, chapter_ids=["2"])
+
+            self.assertEqual(
+                [item["target"]["ids"] for item in load_open_issues(root)],
+                [["9"]],
+            )
+
     def test_real_compliance_report_with_42_items_runs_one_grouped_fix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = self._root(tmp)
@@ -270,6 +392,11 @@ class RepairBatchTests(unittest.TestCase):
             self.assertEqual(result["failed"], [failed["id"]])
             self.assertEqual(result["success_count"], 0)
             self.assertFalse(result["ok"])
+            failed_result = next(item for item in result["results"] if item["issue_id"] == failed["id"])
+            self.assertIn("failed", failed_result["failure_reason"])
+            persisted = next(item for item in load_open_issues(root) if item["id"] == failed["id"])
+            self.assertIn("最近一次最小修复失败", persisted["detail"])
+            self.assertIn("last_repair_failure", persisted["evidence"])
 
     def test_manual_issue_stays_manual_when_its_gate_cannot_revalidate(self) -> None:
         """A missing human-upload must not be mislabeled as a tool failure."""

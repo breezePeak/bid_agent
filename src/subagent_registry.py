@@ -33,6 +33,22 @@ def _chapter_concurrency() -> int:
         return 4
 
 
+CHAPTER_CONTEXT_SELECTOR = SubagentSpec(
+    name="chapter_context_selector",
+    label="章节上下文选择子 Agent",
+    description=(
+        "章节上下文选择子 agent 蓝图。主 Agent 将每个待处理章节投入固定 worker 池，"
+        "并发选择招标文件与公司资料片段；受 BID_AGENT_WORKERS_MAX 和全局 LLM 并发限制。"
+        "产出 workspace/contexts/*_context.json，并支持按有效检查点显式续跑。"
+    ),
+    command="select-context-all",
+    instantiation="per-chapter",
+    concurrency=_chapter_concurrency(),
+    modes=("select_context", "resume"),
+    worker_module="agents.context_agent",
+)
+
+
 CHAPTER_WRITER = SubagentSpec(
     name="chapter_writer",
     label="章节写作子 Agent",
@@ -40,7 +56,7 @@ CHAPTER_WRITER = SubagentSpec(
         "章节写作子 agent 蓝图（注册表只存 1 种类型）。运行时由 subagent_runner.run_write_all / "
         "run_rewrite_all 将章节任务投入 worker 池，经 ThreadPoolExecutor 并发执行"
         "（上限 BID_AGENT_WORKERS_MAX，默认 BID_AGENT_WORKERS_DEFAULT），"
-        "每个 worker 依次领取章节并 invoke chapter_subgraph（选上下文→写作→自检）。"
+        "每个 worker 依次领取章节并 invoke chapter_subgraph（加载已选上下文→写作→自检）。"
         "write 模式对应初写（write-all），rewrite 模式带审核反馈改稿（复用同一蓝图的文件上下文，"
         "即 continue 模式）。"
     ),
@@ -83,7 +99,12 @@ GLOBAL_REVIEWER = SubagentSpec(
     worker_module="agents.global_review_agent",
 )
 
-_SUBAGENTS: tuple[SubagentSpec, ...] = (CHAPTER_WRITER, CHAPTER_REVIEWER, GLOBAL_REVIEWER)
+_SUBAGENTS: tuple[SubagentSpec, ...] = (
+    CHAPTER_CONTEXT_SELECTOR,
+    CHAPTER_WRITER,
+    CHAPTER_REVIEWER,
+    GLOBAL_REVIEWER,
+)
 _SUBAGENT_BY_NAME: dict[str, SubagentSpec] = {s.name: s for s in _SUBAGENTS}
 
 
@@ -127,7 +148,7 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
     "build_template_evidence": "生成模板依据映射和质量报告。",
     "generate_outline": "基于评分点和事实生成标书大纲。",
     "plan_chapter_jobs": "将大纲拆解为章节任务包。",
-    "select_contexts": "为每个章节任务选择上下文。",
+    "select_contexts": "主 Agent 派发章节上下文选择子 agent，并发生成上下文且支持断点续跑。",
     "write_chapters": "派发给多个章节写作子 agent 并发生成章节。",
     "review_fix_chapters": "派发给多个章节审核子 agent 并发审核，需要时由写作子 agent 改稿。",
     "build_source_trace_index": "生成来源追溯索引。",
@@ -167,6 +188,7 @@ def pipeline_manifest() -> list[dict[str, Any]]:
 ActionKind = Literal[
     "query",
     "run_command",
+    "dispatch_contexts",
     "dispatch_chapters",
     "dispatch_review",
     "dispatch_rewrite",

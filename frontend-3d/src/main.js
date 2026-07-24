@@ -448,15 +448,19 @@ function openUploadGate({ demo: isDemo }) {
     demo: isDemo,
     async onComplete(payload) {
       app.audio?.playChime?.({ bright: true })
+      // 遮罩已关：立刻播开炉仪式（开盖→三宝飞入→合盖→八卦）
+      const ritualP =
+        app.playFeedRitual?.({
+          labels: ['招标文件', '公司资料', 'Word 模板'],
+        }) || Promise.resolve()
+
       if (payload.demo) {
-        // 演法：模拟投料后开跑演示
-        await new Promise((r) => setTimeout(r, 350))
+        await ritualP
         startDemo()
-        app.focusFurnace?.()
         showCalligraphy('三宝已备', '演法开炉 · 周天运转', { pin: false })
         return
       }
-      // 观火：建丹房 → 上传 → 启流水线
+      // 观火：建丹房 → 上传 → 启流水线（与仪式并行）
       const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '')
       const created = await startRun({
         name: `炼丹阁-${stamp}`,
@@ -479,7 +483,7 @@ function openUploadGate({ demo: isDemo }) {
       await loadRuns()
       startLive()
       ensureRunsTimer()
-      app.focusHall?.()
+      await ritualP
       showCalligraphy('开炉炼制', '三宝入炉 · 流水线已启', { pin: false })
     },
     onSkip() {

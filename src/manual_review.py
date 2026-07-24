@@ -167,61 +167,87 @@ def apply_manual_review_update(root: Path | None, category: str, payload: dict[s
     return {"item_id": item_id, "recommended_stage": stage, "status": status}
 
 
-def manual_review_context_for_chapter(root: Path | None, chapter_id: str) -> dict[str, Any]:
+def manual_review_contexts_for_chapters(
+    root: Path | None,
+    chapter_ids: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Build chapter review context in one snapshot.
+
+    Context validation may inspect hundreds of chapters at once. Loading the
+    evidence map and control decisions once avoids repeating the same large JSON
+    and SQLite reads for every chapter.
+    """
     root = root or project_root()
-    chapter_key = stringify(chapter_id)
     chapter_actions = _load_indexed_overrides(root, "chapter_review")["items"]
     template_overrides = _load_indexed_overrides(root, "template_evidence")["items"]
     evidence_map = load_template_evidence_map(root)
     items = evidence_map.get("items") if isinstance(evidence_map.get("items"), list) else []
+    results: dict[str, dict[str, Any]] = {}
 
-    operator_instructions: list[str] = []
-    preferred_tender_chunk_ids: list[str] = []
-    preferred_company_chunk_ids: list[str] = []
+    for chapter_id in chapter_ids:
+        chapter_key = stringify(chapter_id)
+        if not chapter_key or chapter_key in results:
+            continue
+        operator_instructions: list[str] = []
+        preferred_tender_chunk_ids: list[str] = []
+        preferred_company_chunk_ids: list[str] = []
 
-    for action in chapter_actions.values():
-        if not isinstance(action, dict):
-            continue
-        if stringify(action.get("chapter_id")) != chapter_key:
-            continue
-        text = stringify(action.get("operator_instruction"))
-        if text and text not in operator_instructions:
-            operator_instructions.append(text)
-        for chunk_id in action.get("preferred_tender_chunk_ids", []):
-            chunk_id = stringify(chunk_id)
-            if chunk_id and chunk_id not in preferred_tender_chunk_ids:
-                preferred_tender_chunk_ids.append(chunk_id)
-        for chunk_id in action.get("preferred_company_chunk_ids", []):
-            chunk_id = stringify(chunk_id)
-            if chunk_id and chunk_id not in preferred_company_chunk_ids:
-                preferred_company_chunk_ids.append(chunk_id)
+        for action in chapter_actions.values():
+            if not isinstance(action, dict):
+                continue
+            if stringify(action.get("chapter_id")) != chapter_key:
+                continue
+            text = stringify(action.get("operator_instruction"))
+            if text and text not in operator_instructions:
+                operator_instructions.append(text)
+            for chunk_id in action.get("preferred_tender_chunk_ids", []):
+                chunk_id = stringify(chunk_id)
+                if chunk_id and chunk_id not in preferred_tender_chunk_ids:
+                    preferred_tender_chunk_ids.append(chunk_id)
+            for chunk_id in action.get("preferred_company_chunk_ids", []):
+                chunk_id = stringify(chunk_id)
+                if chunk_id and chunk_id not in preferred_company_chunk_ids:
+                    preferred_company_chunk_ids.append(chunk_id)
 
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        heading_id = stringify(item.get("heading_id"))
-        if not heading_id or not (heading_id == chapter_key or heading_id.startswith(chapter_key + ".")):
-            continue
-        override = template_overrides.get(stringify(item.get("id")))
-        if not isinstance(override, dict):
-            continue
-        for chunk_id in override.get("preferred_tender_chunk_ids", []):
-            chunk_id = stringify(chunk_id)
-            if chunk_id and chunk_id not in preferred_tender_chunk_ids:
-                preferred_tender_chunk_ids.append(chunk_id)
-        for chunk_id in override.get("preferred_company_chunk_ids", []):
-            chunk_id = stringify(chunk_id)
-            if chunk_id and chunk_id not in preferred_company_chunk_ids:
-                preferred_company_chunk_ids.append(chunk_id)
-        replacement = stringify(override.get("replacement_notes"))
-        if replacement and replacement not in operator_instructions:
-            operator_instructions.append(f"模板任务人工说明：{replacement}")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            heading_id = stringify(item.get("heading_id"))
+            if not heading_id or not (heading_id == chapter_key or heading_id.startswith(chapter_key + ".")):
+                continue
+            override = template_overrides.get(stringify(item.get("id")))
+            if not isinstance(override, dict):
+                continue
+            for chunk_id in override.get("preferred_tender_chunk_ids", []):
+                chunk_id = stringify(chunk_id)
+                if chunk_id and chunk_id not in preferred_tender_chunk_ids:
+                    preferred_tender_chunk_ids.append(chunk_id)
+            for chunk_id in override.get("preferred_company_chunk_ids", []):
+                chunk_id = stringify(chunk_id)
+                if chunk_id and chunk_id not in preferred_company_chunk_ids:
+                    preferred_company_chunk_ids.append(chunk_id)
+            replacement = stringify(override.get("replacement_notes"))
+            if replacement and replacement not in operator_instructions:
+                operator_instructions.append(f"模板任务人工说明：{replacement}")
 
-    return {
-        "operator_instructions": operator_instructions,
-        "preferred_tender_chunk_ids": preferred_tender_chunk_ids,
-        "preferred_company_chunk_ids": preferred_company_chunk_ids,
-    }
+        results[chapter_key] = {
+            "operator_instructions": operator_instructions,
+            "preferred_tender_chunk_ids": preferred_tender_chunk_ids,
+            "preferred_company_chunk_ids": preferred_company_chunk_ids,
+        }
+    return results
+
+
+def manual_review_context_for_chapter(root: Path | None, chapter_id: str) -> dict[str, Any]:
+    chapter_key = stringify(chapter_id)
+    return manual_review_contexts_for_chapters(root, [chapter_key]).get(
+        chapter_key,
+        {
+            "operator_instructions": [],
+            "preferred_tender_chunk_ids": [],
+            "preferred_company_chunk_ids": [],
+        },
+    )
 
 
 def score_coverage_assignment_overrides(root: Path | None) -> dict[str, dict[str, Any]]:

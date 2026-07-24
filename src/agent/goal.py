@@ -1510,25 +1510,20 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
             except Exception:
                 pass
         if not resolved_ids:
-            # Fall back to re-running write-all stage via full-ish plan
-            objectives.append({"type": "full_generate"})
-            criteria.extend(
-                [
-                    {"check": "no_open_blocks"},
-                    {"check": "artifact_exists", "path": "workspace/chapters"},
-                ]
-            )
+            # A repair request without explicit chapter targets must never
+            # silently degrade into a full-document generation run.
+            objectives.append({"type": "target_scope_required"})
             plan = [
                 {
-                    "step_id": "write_chapters",
-                    "tool": "write_chapters",
-                    "args": {},
+                    "step_id": "inspect_repair_scope",
+                    "tool": "diagnose_failure",
+                    "args": {"command": ""},
                     "depends_on": [],
                     "run_if": {},
                     "status": "pending",
                     "attempts": 0,
-                    "max_attempts": 2,
-                    "label": "重试章节写作",
+                    "max_attempts": 1,
+                    "label": "缺少目标章节，等待人工确认范围",
                 }
             ]
             return {
@@ -1537,7 +1532,7 @@ def infer_goal_from_message(message: str) -> dict[str, Any]:
                 "constraints": constraints,
                 "chapter_ids": [],
                 "plan": plan,
-                "completion_mode": "criteria",
+                "completion_mode": "manual",
             }
         objectives.append({"type": "fix_chapter", "chapter_ids": resolved_ids})
         constraints["chapter_ids"] = resolved_ids

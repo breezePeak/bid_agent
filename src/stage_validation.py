@@ -92,10 +92,25 @@ def summary_ids(root: Path) -> set[str]:
 
 
 def stage_collection_status(root: Path, stage_id: str) -> dict[str, Any]:
+    checkpoint_status = ""
     if stage_id == "plan_chapter_jobs":
         expected, actual = outline_chapter_ids(root), job_ids(root)
     elif stage_id == "select_contexts":
-        expected, actual = job_ids(root), context_ids(root)
+        expected = job_ids(root)
+        try:
+            from context_selector import (
+                load_context_selection_checkpoint,
+                valid_context_ids,
+            )
+
+            actual = valid_context_ids(root)
+            checkpoint_status = str(
+                load_context_selection_checkpoint(root).get("status") or ""
+            )
+        except Exception:
+            # Invalid or unavailable inputs must fail closed: a stale context
+            # must never unlock chapter writing.
+            actual = set()
     elif stage_id == "write_chapters":
         expected, actual = job_ids(root), chapter_ids(root)
     elif stage_id == "review_fix_chapters":
@@ -107,9 +122,12 @@ def stage_collection_status(root: Path, stage_id: str) -> dict[str, Any]:
 
     missing = sorted(expected - actual)
     unexpected = sorted(actual - expected)
+    complete = bool(expected) and not missing
+    if stage_id == "select_contexts" and checkpoint_status:
+        complete = complete and checkpoint_status == "completed"
     return {
         "stage": stage_id,
-        "complete": bool(expected) and not missing,
+        "complete": complete,
         "expected_count": len(expected),
         "completed_count": len(expected & actual),
         "missing_ids": missing,

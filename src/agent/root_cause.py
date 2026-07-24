@@ -476,14 +476,25 @@ def sync_issues_from_review_fix(
     need_rewrite_ids: list[str] | None = None,
     need_evidence_ids: list[str] | None = None,
     stuck_ids: list[str] | None = None,
+    chapter_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     root = root or project_root()
+    scope = {stringify(item) for item in (chapter_ids or []) if stringify(item)}
+    if scope:
+        need_rewrite_ids = [item for item in (need_rewrite_ids or []) if stringify(item) in scope]
+        need_evidence_ids = [item for item in (need_evidence_ids or []) if stringify(item) in scope]
+        stuck_ids = [item for item in (stuck_ids or []) if stringify(item) in scope]
     issues = issues_from_review_fix(
         need_rewrite_ids=need_rewrite_ids,
         need_evidence_ids=need_evidence_ids,
         stuck_ids=stuck_ids,
     )
-    return upsert_issues(root, issues, replace_stage_id="review_fix_chapters")
+    return upsert_issues(
+        root,
+        issues,
+        replace_stage_id="review_fix_chapters",
+        replace_stage_target_ids=list(scope) or None,
+    )
 
 
 def sync_issues_from_write_failures(

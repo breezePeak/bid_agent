@@ -87,6 +87,8 @@ export class App3D {
       () => {
         // 环游刚启动的保护窗内，忽略误触打断
         if (this._tourLockUntil && performance.now() < this._tourLockUntil) return
+        // 投料仪式中不打断
+        if (this._feedRitual && !this._feedRitual.finished) return
         this.controls.enabled = true
         this.autoOrbit = false
         this._userDriving = true
@@ -120,6 +122,8 @@ export class App3D {
     this._completedIds = new Set()
     this._allDoneFired = false
     this._lastFailSig = ''
+    this._feedRitual = null
+    this._feedScrolls = []
 
     this._rebuildPickables()
 
@@ -292,37 +296,335 @@ export class App3D {
   /** 视角预设 — 机位差异大，切换时可见 */
   focusOverview() {
     this.focusMode = 'overview'
-    this._animateCamera(new THREE.Vector3(0, 14, 52), new THREE.Vector3(0, 5, -4))
+    this._animateCamera(new THREE.Vector3(0, 18, 62), new THREE.Vector3(0, 8, -6))
   }
 
   focusFront() {
     this.focusMode = 'front'
-    this._animateCamera(new THREE.Vector3(0, 4, 36), new THREE.Vector3(0, 4, -2))
+    this._animateCamera(new THREE.Vector3(0, 5, 42), new THREE.Vector3(0, 6, -4))
   }
 
   focusHall() {
     this.focusMode = 'hall'
-    this._animateCamera(new THREE.Vector3(0, 4.5, 12), new THREE.Vector3(0, 3.2, -8))
+    this._animateCamera(new THREE.Vector3(0, 5.5, 14), new THREE.Vector3(0, 4, -10))
   }
 
   focusFurnace() {
     this.focusMode = 'furnace'
-    this._animateCamera(new THREE.Vector3(5, 4.2, 2), new THREE.Vector3(0, 3, -8))
+    const mouth = this._furnaceMouthWorld()
+    this._animateCamera(
+      mouth.clone().add(new THREE.Vector3(5.5, 2.8, 6.5)),
+      mouth.clone().add(new THREE.Vector3(0, -0.3, 0)),
+    )
+  }
+
+  _furnaceMouthWorld() {
+    if (this.env.pedestal) {
+      // 九龙炉口约 y≈2.42（本地）
+      const p = new THREE.Vector3(0, 2.42, 0)
+      this.env.pedestal.localToWorld(p)
+      return p
+    }
+    const h = this.env.pavilion?.hallCenter
+    return h ? h.clone().add(new THREE.Vector3(0, 2.4, 0)) : new THREE.Vector3(0, 4, -10)
+  }
+
+  _furnaceRoot() {
+    return this.env.pedestal
+  }
+
+  /**
+   * 开炉投料仪式：镜头飞向丹炉 → 开盖 → 三宝飞入 → 合盖 → 八卦符文显现
+   * @returns {Promise<void>}
+   */
+  playFeedRitual(opts = {}) {
+    const labels = opts.labels || ['招标文件', '公司资料', 'Word 模板']
+    return new Promise((resolve) => {
+      if (this._feedRitual) {
+        this._clearFeedRitual(true)
+      }
+      this.stopCameraTour?.()
+      this.autoOrbit = false
+      this._userDriving = true
+      this.focusMode = 'feed'
+
+      const ped = this._furnaceRoot()
+      const mouth = this._furnaceMouthWorld()
+      const camFrom = this.camera.position.clone()
+      const tgtFrom = this.controls.target.clone()
+      const camTo = mouth.clone().add(new THREE.Vector3(4.8, 2.6, 5.8))
+      const tgtTo = mouth.clone().add(new THREE.Vector3(0, -0.2, 0))
+
+      // 三份卷轴（屏幕前方生成，飞入炉口）
+      this._clearFeedScrolls()
+      const scrolls = []
+      const colors = [0xe8c050, 0x6aefc0, 0xff8060]
+      for (let i = 0; i < 3; i++) {
+        const g = this._makeFeedScroll(labels[i] || `宝匣${i + 1}`, colors[i])
+        const start = mouth.clone().add(new THREE.Vector3((i - 1) * 2.2, 3.2 + i * 0.15, 8 + i * 0.3))
+        g.position.copy(start)
+        g.scale.setScalar(0.001)
+        g.visible = false
+        this.scene.add(g)
+        scrolls.push({
+          group: g,
+          start: start.clone(),
+          end: mouth.clone().add(new THREE.Vector3((i - 1) * 0.15, 0.1, (i - 1) * 0.08)),
+          delay: 1.55 + i * 0.55,
+          dur: 1.15,
+          done: false,
+        })
+      }
+      this._feedScrolls = scrolls
+
+      if (ped?.userData?.ritualRunes) {
+        ped.userData.ritualRunes.visible = false
+        ped.userData.ritualBoost = 0
+        for (const m of ped.userData.runeMeshes || []) {
+          if (m.material) m.material.opacity = 0
+          m.scale.set(0.001, 0.001, 0.001)
+        }
+        for (const r of ped.userData.ritualRings || []) {
+          if (r.material) r.material.opacity = 0
+        }
+        for (const ray of ped.userData.ritualRays || []) {
+          if (ray.material) ray.material.opacity = 0
+        }
+      }
+      ped?.userData?.setLidOpen?.(0)
+
+      this._feedRitual = {
+        t: 0,
+        phase: 'approach',
+        camFrom,
+        camTo,
+        tgtFrom,
+        tgtTo,
+        lidOpen: 0,
+        lidTarget: 0,
+        runeReveal: 0,
+        resolve,
+        finished: false,
+      }
+      this.audio?.playChime?.({ bright: true })
+    })
+  }
+
+  _makeFeedScroll(label, color) {
+    const g = new THREE.Group()
+    const body = new THREE.Mesh(
+      new THREE.BoxGeometry(0.55, 0.75, 0.08),
+      new THREE.MeshStandardMaterial({
+        color: 0xf5e6c8,
+        roughness: 0.65,
+        metalness: 0.08,
+        emissive: color,
+        emissiveIntensity: 0.22,
+      }),
+    )
+    g.add(body)
+    for (const y of [0.42, -0.42]) {
+      const rod = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.05, 0.05, 0.62, 8),
+        new THREE.MeshStandardMaterial({
+          color,
+          metalness: 0.65,
+          roughness: 0.3,
+          emissive: color,
+          emissiveIntensity: 0.35,
+        }),
+      )
+      rod.rotation.z = Math.PI / 2
+      rod.position.y = y
+      g.add(rod)
+    }
+    const glow = new THREE.Mesh(
+      new THREE.SphereGeometry(0.55, 10, 10),
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
+        opacity: 0.18,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    )
+    g.add(glow)
+    // 简易标签
+    const canvas = document.createElement('canvas')
+    canvas.width = 256
+    canvas.height = 64
+    const ctx = canvas.getContext('2d')
+    ctx.clearRect(0, 0, 256, 64)
+    ctx.font = 'bold 32px "Noto Serif SC", "Songti SC", serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#3a2010'
+    ctx.fillText(String(label).slice(0, 6), 128, 34)
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.colorSpace = THREE.SRGBColorSpace
+    const tag = new THREE.Mesh(
+      new THREE.PlaneGeometry(0.48, 0.12),
+      new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false }),
+    )
+    tag.position.z = 0.05
+    g.add(tag)
+    return g
+  }
+
+  _clearFeedScrolls() {
+    for (const s of this._feedScrolls || []) {
+      this.scene.remove(s.group)
+      s.group.traverse((o) => {
+        o.geometry?.dispose?.()
+        if (o.material) {
+          o.material.map?.dispose?.()
+          o.material.dispose?.()
+        }
+      })
+    }
+    this._feedScrolls = []
+  }
+
+  _clearFeedRitual(resolveEarly = false) {
+    const r = this._feedRitual
+    this._feedRitual = null
+    this._clearFeedScrolls()
+    if (resolveEarly && r && !r.finished) {
+      r.finished = true
+      r.resolve?.()
+    }
+  }
+
+  _tickFeedRitual(dt) {
+    const r = this._feedRitual
+    if (!r || r.finished) return false
+    r.t += dt
+    const ped = this._furnaceRoot()
+    const setLid = ped?.userData?.setLidOpen
+    const ease = (k) => k * k * (3 - 2 * k)
+    const clamp01 = (v) => Math.max(0, Math.min(1, v))
+    this.controls.enabled = false
+    this._userDriving = false
+    this._camAnim = null
+
+    // 镜头：飞向 → 旁观投料 → 抬高看阵
+    const highCam = r.camTo.clone().add(new THREE.Vector3(-1.5, 2.2, 1.2))
+    const highTgt = r.tgtTo.clone().add(new THREE.Vector3(0, -0.8, 0))
+    if (r.t < 1.4) {
+      const k = ease(clamp01(r.t / 1.4))
+      this.camera.position.lerpVectors(r.camFrom, r.camTo, k)
+      this.controls.target.lerpVectors(r.tgtFrom, r.tgtTo, k)
+    } else if (r.t < 4.6) {
+      this.camera.position.copy(r.camTo)
+      this.controls.target.copy(r.tgtTo)
+    } else {
+      const k = ease(clamp01((r.t - 4.6) / 1.6))
+      this.camera.position.lerpVectors(r.camTo, highCam, k)
+      this.controls.target.lerpVectors(r.tgtTo, highTgt, k)
+    }
+    this.camera.lookAt(this.controls.target)
+
+    // 0.9–2.0s 开盖
+    if (r.t >= 0.9 && r.t < 2.0) {
+      r.lidTarget = ease(clamp01((r.t - 0.9) / 1.0))
+      setLid?.(r.lidTarget)
+      if (ped?.userData) ped.userData.ritualBoost = Math.max(ped.userData.ritualBoost || 0, 0.25)
+    } else if (r.t >= 2.0 && r.t < 3.9) {
+      setLid?.(1)
+    }
+
+    // 1.55–4.0s 三宝依次飞入
+    for (const s of this._feedScrolls) {
+      const local = r.t - s.delay
+      if (local < 0) continue
+      if (!s.group.visible) {
+        s.group.visible = true
+        s.group.scale.setScalar(1)
+        this.audio?.playUiTap?.()
+      }
+      if (local >= s.dur) {
+        if (!s.done) {
+          s.done = true
+          s.group.visible = false
+          this.audio?.playChime?.({ bright: false })
+          if (ped?.userData) {
+            ped.userData.ritualBoost = Math.min(1, (ped.userData.ritualBoost || 0) + 0.2)
+          }
+        }
+        continue
+      }
+      const k = ease(clamp01(local / s.dur))
+      s.group.position.lerpVectors(s.start, s.end, k)
+      s.group.position.y += Math.sin(k * Math.PI) * 1.6
+      const sc = Math.max(0.12, 1 - k * 0.88)
+      s.group.scale.setScalar(sc)
+      s.group.rotation.y = k * Math.PI * 2.2
+      s.group.rotation.x = k * 0.6
+    }
+
+    // 3.9–5.0s 合盖
+    if (r.t >= 3.9 && r.t < 5.1) {
+      const k = ease(clamp01((r.t - 3.9) / 1.0))
+      r.lidTarget = 1 - k
+      setLid?.(r.lidTarget)
+    } else if (r.t >= 5.1) {
+      setLid?.(0)
+    }
+
+    // 4.6s 起八卦符文显现
+    if (r.t >= 4.6) {
+      const runes = ped?.userData?.ritualRunes
+      if (runes) {
+        runes.visible = true
+        r.runeReveal = ease(clamp01((r.t - 4.6) / 1.4))
+        if (ped.userData) {
+          ped.userData.ritualBoost = Math.max(ped.userData.ritualBoost || 0, 0.55 + r.runeReveal * 0.45)
+        }
+        const meshes = ped.userData.runeMeshes || []
+        for (let i = 0; i < meshes.length; i++) {
+          const m = meshes[i]
+          const rk = clamp01(r.runeReveal * 1.3 - i * 0.08)
+          const s = 0.15 + rk * 0.8
+          m.scale.set(s, s, 1)
+          if (m.material) m.material.opacity = rk * 0.9
+        }
+        for (const ring of ped.userData.ritualRings || []) {
+          if (ring.material) ring.material.opacity = r.runeReveal * 0.45
+        }
+        for (const ray of ped.userData.ritualRays || []) {
+          if (ray.material) ray.material.opacity = r.runeReveal * 0.35
+        }
+      }
+    }
+
+    // 结束
+    if (r.t >= 6.6) {
+      setLid?.(0)
+      if (ped?.userData) ped.userData.ritualBoost = Math.max(0.35, ped.userData.ritualBoost || 0)
+      this._clearFeedScrolls()
+      r.finished = true
+      this._feedRitual = null
+      this.controls.enabled = true
+      this.audio?.playSpiritWave?.()
+      r.resolve?.()
+      return false
+    }
+    return true
   }
 
   focusSide() {
     this.focusMode = 'side'
-    this._animateCamera(new THREE.Vector3(32, 12, 8), new THREE.Vector3(0, 4, -4))
+    this._animateCamera(new THREE.Vector3(38, 16, 10), new THREE.Vector3(0, 8, -6))
   }
 
   focusTop() {
     this.focusMode = 'top'
-    this._animateCamera(new THREE.Vector3(0, 48, 10), new THREE.Vector3(0, 0, 4))
+    this._animateCamera(new THREE.Vector3(0, 58, 12), new THREE.Vector3(0, 0, 2))
   }
 
   focusBack() {
     this.focusMode = 'back'
-    this._animateCamera(new THREE.Vector3(0, 14, -40), new THREE.Vector3(0, 5, -6))
+    this._animateCamera(new THREE.Vector3(0, 16, -48), new THREE.Vector3(0, 8, -8))
   }
 
   focusActive() {
@@ -574,7 +876,6 @@ export class App3D {
 
   _pick() {
     this.raycaster.setFromCamera(this.pointer, this.camera)
-    // Prefer stage hits; agent hits optional sparse traverse
     let intersects = this.raycaster.intersectObjects(this._pickables, false)
     if (!intersects.length) {
       const agentHits = []
@@ -623,7 +924,10 @@ export class App3D {
       this.onFinaleBook?.(c)
     }
 
-    if (this._camTour && this.autoOrbit) {
+    // 投料仪式优先驱动相机
+    if (this._feedRitual && !this._feedRitual.finished) {
+      this._tickFeedRitual(dt)
+    } else if (this._camTour && this.autoOrbit) {
       // 环游优先：不让 OrbitControls / 其它动画覆盖相机
       this._userDriving = false
       this.controls.enabled = false

@@ -106,6 +106,14 @@ export function fetchLlmSettings() {
   return api.get('/llm-settings')
 }
 
+export function fetchFlowSettings() {
+  return api.get('/flow-settings')
+}
+
+export function saveFlowSettings(settings) {
+  return api.post('/flow-settings', { settings })
+}
+
 export function saveLlmModel(model, setActive = false) {
   return api.post('/llm-settings', { model, set_active: setActive })
 }
@@ -149,7 +157,9 @@ function newCommandId() {
 }
 
 export function fetchWorkspaceSnapshot(runId) {
-  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/snapshot`)
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/snapshot`, {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
 }
 
 export async function submitWorkspaceCommand(runId, kind, payload = {}, options = {}) {
@@ -168,10 +178,23 @@ export async function submitWorkspaceCommand(runId, kind, payload = {}, options 
 export async function startOrResumePipeline(runId, startCommand = '') {
   const snapshotResponse = await fetchWorkspaceSnapshot(runId)
   const snapshot = snapshotResponse?.data?.snapshot || {}
-  const operation = snapshot.operation && typeof snapshot.operation === 'object' ? snapshot.operation : null
-  const resume = operation && ['paused', 'blocked'].includes(String(operation.status || ''))
+  const operation = snapshot.pipeline && typeof snapshot.pipeline === 'object' ? snapshot.pipeline : null
+  const resume = operation && ['paused', 'blocked', 'interrupted'].includes(String(operation.status || ''))
   const kind = resume ? 'pipeline.resume' : 'pipeline.start'
-  const payload = { start_command: startCommand || '' }
+  const workflow = Array.isArray(snapshot.presentation?.workflow)
+    ? snapshot.presentation.workflow
+    : []
+  const nextStep = workflow.find(step => (
+    step
+    && step.done !== true
+    && ['running', 'ready', 'error', 'paused', 'interrupted'].includes(String(step.state || ''))
+  ))
+  const derivedCommand = String(
+    operation?.current_stage
+    || nextStep?.command
+    || ''
+  ).trim()
+  const payload = { start_command: startCommand || derivedCommand }
   if (resume) payload.operation_id = operation.operation_id
   const commandId = newCommandId()
   return api.post(`/v2/workspaces/${encodeURIComponent(runId)}/commands`, {
