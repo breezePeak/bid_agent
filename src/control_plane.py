@@ -652,6 +652,11 @@ class ControlStore:
             row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (item["unit_id"],)).fetchone()
         return dict(row) if row else {}
 
+    def content_locks(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM content_locks ORDER BY created_at, block_id").fetchall()
+        return [dict(row) for row in rows]
+
     def migration_state(self) -> dict[str, Any]:
         conflicts = self.migration_conflicts()
         open_conflicts = [item for item in conflicts if item.get("status") == "open"]

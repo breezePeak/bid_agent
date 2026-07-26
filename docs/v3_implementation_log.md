@@ -61,3 +61,9 @@
 - 内容：新增 ContentUnit 初始化和调度器；控制库记录单元状态、尝试次数、证据快照与输出 Artifact。
 - Writer：新增受契约约束的 ContentWriter，只能向 DocumentPlan 既有节点写 `ContentBlock`；严格模板模式要求目标节点已声明 slot，禁止新标题和共享状态写入。
 - 验证：`python -m unittest tests.test_v3_content_units tests.test_v3_research_service tests.test_v3_document_planner`（5 tests passed）。
+
+## PR-8：三级全文整合
+
+- 状态：已完成
+- 内容：新增 `DocumentIntegrator`，读取 ContentBlock Artifact、保留人工锁定内容，并以主责 Requirement 和规范化正文为键实际删除重复块；输出 `IntegratedDocument` 与不可变 rewrite trace。
+- 验证：`python -m unittest tests.test_v3_integrator tests.test_v3_content_units tests.test_v3_contracts`（9 tests passed）。
