@@ -23,3 +23,11 @@
 - 规范化：新增 `SourceNormalizer`，生成带稳定 ID、输入角色与段落锚点的 `workspace/v3/source_index.json`，企业资料与外部参考资料按角色隔离。
 - 失效：招标、评分或模板替换将结构和内容单元标记为全量受影响；企业资料保留局部影响入口，待 PR-3 的事实依赖边建立后精确定位。
 - 验证：`python -m unittest tests.test_v3_input_manifest tests.test_v3_contracts`（10 tests passed）。
+
+## PR-3：要求台账与项目整体模型
+
+- 状态：已完成
+- 内容：新增 `RequirementLedgerBuilder`，从招标和评分来源切片原子化抽取强制、评分、资格、交付、验收和合同要求，每项保留原文和稳定来源锚点。
+- 项目模型：新增 `ProjectModelBuilder` 与理解门，独立生成目标、范围、工作包、交付物、验收、工期、角色、约束、已确认企业事实、未知项和 EvidenceNeed；外部参考资料不会被写成企业事实。
+- 迁移边界：现有 `project_understanding.py` 仅保留为未自动接入的实验实现，待 V3 StageRunner 替代链通过后物理删除。
+- 验证：`python -m unittest tests.test_v3_requirement_project_model tests.test_v3_input_manifest tests.test_v3_contracts`（13 tests passed）。
