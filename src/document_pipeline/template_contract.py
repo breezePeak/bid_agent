@@ -50,7 +50,19 @@ class TemplateContractCompiler:
 
     @staticmethod
     def _fingerprint(path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        document = Document(str(path))
+        shape = {
+            "paragraphs": [
+                {"style": paragraph.style.style_id if paragraph.style else ""}
+                for paragraph in document.paragraphs
+            ],
+            "tables": [
+                {"rows": len(table.rows), "columns": len(table.columns)}
+                for table in document.tables
+            ],
+            "sections": len(document.sections),
+        }
+        return hashlib.sha256(repr(shape).encode("utf-8")).hexdigest()
 
     def _nodes(self, document: Document) -> tuple[list[ContractNode], dict[int, str]]:
         nodes: list[ContractNode] = []

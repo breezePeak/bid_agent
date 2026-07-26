@@ -73,3 +73,9 @@
 - 状态：已完成
 - 内容：新增只读 `QualityGate`，输出终稿覆盖与内容质量报告；任何未响应强制要求或无来源关键 Claim 会阻断 `verify_document` GateEvaluation。
 - 验证：`python -m unittest tests.test_v3_quality tests.test_v3_integrator tests.test_v3_contracts`（9 tests passed）。
+
+## PR-10：严格模板 Renderer
+
+- 状态：已完成
+- 内容：新增 StrictTemplateRenderer，复制 V3 原模板并只按声明 text/cell slot 写入已通过整合的 ContentBlock；模板模式不允许重建 Word、清空正文或异常时生成空白文档。
+- 验证：`python -m unittest tests.test_v3_template_renderer`（1 test passed）。
