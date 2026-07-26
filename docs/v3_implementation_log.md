@@ -85,3 +85,9 @@
 - 状态：已完成（编辑闭环将在 PR-12 API Command 中接入）
 - 内容：新增 StandardRenderer，仅从 OutlineContract 与 IntegratedDocument 输出 Markdown/DOCX，禁止临时标题和章节文件拼接。
 - 验证：`python -m unittest tests.test_v3_standard_renderer tests.test_v3_template_renderer`（2 tests passed）。
+
+## PR-12：唯一 V3 StageRunner（后端）
+
+- 状态：进行中
+- 内容：新增 `V3StageRunner`，串联来源规范化、台账、模型、契约、规划、写作、整合、质量与渲染；未知阶段显式失败。
+- 验证：`python -m unittest tests.test_v3_stage_runner`（1 test passed）。
