@@ -580,6 +580,49 @@ class ControlStore:
                 ).fetchall()
         return [self._migration_conflict_row(row) for row in rows]
 
+    def upsert_evidence_need(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Persist scheduling state only; immutable evidence lives in V3 artifacts."""
+        required = ("need_id", "question", "topic_id", "priority", "blocking_scope", "deadline_stage", "query_budget", "status")
+        missing = [
+            key
+            for key in required
+            if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())
+        ]
+        if missing:
+            raise ControlPlaneError("INVALID_EVIDENCE_NEED", f"EvidenceNeed 缺少字段: {', '.join(missing)}", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO evidence_needs(
+                        need_id, question, topic_id, priority, blocking_scope, deadline_stage,
+                        query_budget, status, active_batch_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(need_id) DO UPDATE SET
+                        question=excluded.question, topic_id=excluded.topic_id, priority=excluded.priority,
+                        blocking_scope=excluded.blocking_scope, deadline_stage=excluded.deadline_stage,
+                        query_budget=excluded.query_budget, status=excluded.status,
+                        active_batch_id=excluded.active_batch_id, updated_at=excluded.updated_at
+                    """,
+                    (
+                        item["need_id"], item["question"], item["topic_id"], item["priority"],
+                        item["blocking_scope"], item["deadline_stage"], int(item["query_budget"]),
+                        item["status"], item.get("active_batch_id"), now, now,
+                    ),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return self.evidence_need(str(item["need_id"])) or {}
+
+    def evidence_need(self, need_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM evidence_needs WHERE need_id = ?", (need_id,)).fetchone()
+        return dict(row) if row else None
+
     def migration_state(self) -> dict[str, Any]:
         conflicts = self.migration_conflicts()
         open_conflicts = [item for item in conflicts if item.get("status") == "open"]

@@ -141,6 +141,44 @@ class EvidenceNeed(BaseModel):
     status: Literal["open", "researching", "satisfied", "gap", "cancelled"] = "open"
 
 
+class EvidenceSourceType(str, Enum):
+    TENDER = "tender"
+    COMPANY = "company"
+    OFFICIAL = "official"
+    STANDARD = "standard"
+    ACADEMIC = "academic"
+    WEB = "web"
+    MANUAL = "manual"
+
+
+class EvidenceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    evidence_id: str = Field(min_length=1)
+    batch_id: str = Field(min_length=1)
+    source_type: EvidenceSourceType
+    title: str = Field(min_length=1)
+    source_url: str | None = None
+    publisher: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    claim_types: list[Literal["project_context", "standard", "method", "enterprise_capability"]] = Field(default_factory=list)
+    retrieved_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def enterprise_claims_require_company_evidence(self) -> "EvidenceItem":
+        if "enterprise_capability" in self.claim_types and self.source_type is not EvidenceSourceType.COMPANY:
+            raise ValueError("外部资料不能证明企业能力")
+        return self
+
+
+class EvidenceBatch(ContractModel):
+    batch_id: str = Field(min_length=1)
+    need_id: str = Field(min_length=1)
+    query_count: int = Field(ge=0)
+    items: list[EvidenceItem] = Field(default_factory=list)
+    status: Literal["published", "gap", "failed"]
+
+
 class ProjectModel(ContractModel):
     project_id: str = Field(min_length=1)
     identity: dict[str, str] = Field(default_factory=dict)

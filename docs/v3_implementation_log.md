@@ -46,3 +46,11 @@
 - 内容：新增 `DocumentPlanner`，在正文生成前为每项要求和评分项分配唯一 primary owner，并写入 V3 `DocumentPlan` 与规划覆盖报告；未覆盖或重复主责会阻断。
 - ContentUnit：自动将有父子关系的完整父章节归为写作单元；无模板扁平目录先合并为一个语义文档单元，避免“一标题一 Writer”。
 - 验证：`python -m unittest tests.test_v3_document_planner tests.test_v3_document_contract tests.test_v3_requirement_project_model`（6 tests passed）。
+
+## PR-6：按需研究服务
+
+- 状态：已完成
+- 内容：新增 `ResearchService` 与 Provider 接口；研究仅由 `EvidenceNeed` 触发，发布到不可变的 `workspace/v3/evidence/batches` 快照，不会修改 `inputs/reference.md` 或触发全量切分。
+- 控制状态：`control.db.evidence_needs` 记录预算、状态与活动证据批次；预算为零或检索失败会显式形成 gap。
+- 安全边界：外部 Provider 不能发布企业能力 Claim；企业事实仍必须来自 `company` 输入角色。
+- 验证：`python -m unittest tests.test_v3_research_service tests.test_v3_contracts tests.test_v3_document_planner`（11 tests passed）。
