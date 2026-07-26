@@ -221,6 +221,8 @@ class TemplateContract(_DocumentContractBase):
     template_hash: str = Field(min_length=1)
     structural_fingerprint: str = Field(min_length=1)
     slots: list[TemplateSlot] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    blocking_gaps: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def slots_must_target_known_nodes(self) -> "TemplateContract":

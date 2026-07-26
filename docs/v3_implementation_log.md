@@ -31,3 +31,11 @@
 - 项目模型：新增 `ProjectModelBuilder` 与理解门，独立生成目标、范围、工作包、交付物、验收、工期、角色、约束、已确认企业事实、未知项和 EvidenceNeed；外部参考资料不会被写成企业事实。
 - 迁移边界：现有 `project_understanding.py` 仅保留为未自动接入的实验实现，待 V3 StageRunner 替代链通过后物理删除。
 - 验证：`python -m unittest tests.test_v3_requirement_project_model tests.test_v3_input_manifest tests.test_v3_contracts`（13 tests passed）。
+
+## PR-4：双模式文档契约
+
+- 状态：已完成
+- 严格模板：新增 OOXML 模板契约编译器，读取原始模板并识别标题层级、父子关系、文本/表格占位 slot 与结构指纹；未能映射的要求输出 `TEMPLATE_COVERAGE_GAP`，不创建新标题。
+- 无模板：新增目录契约编译器，按要求台账分组生成带 `requirement_ids` 来源的节点；台账为空时直接阻断，禁止万能目录。
+- 模式：`DocumentContractCompiler` 只由活动 `template` 输入决定 `template_strict`；其他 DOCX 角色不会触发严格模板模式。
+- 验证：`python -m unittest tests.test_v3_document_contract tests.test_v3_requirement_project_model tests.test_v3_contracts`（12 tests passed）。
