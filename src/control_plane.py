@@ -179,7 +179,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 19
+    SCHEMA_VERSION = 20
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -471,6 +471,63 @@ class ControlStore:
                         created_at TEXT NOT NULL,
                         resolved_at TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS document_state (
+                        workspace_id TEXT PRIMARY KEY,
+                        document_mode TEXT NOT NULL DEFAULT '',
+                        project_model_revision INTEGER,
+                        document_contract_revision INTEGER,
+                        document_plan_revision INTEGER,
+                        integration_revision INTEGER,
+                        delivery_status TEXT NOT NULL DEFAULT 'draft_with_gaps',
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS evidence_needs (
+                        need_id TEXT PRIMARY KEY,
+                        question TEXT NOT NULL,
+                        topic_id TEXT NOT NULL,
+                        priority TEXT NOT NULL,
+                        blocking_scope TEXT NOT NULL,
+                        deadline_stage TEXT NOT NULL,
+                        query_budget INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        active_batch_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS content_unit_states (
+                        unit_id TEXT PRIMARY KEY,
+                        contract_revision INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        attempt INTEGER NOT NULL DEFAULT 0,
+                        evidence_snapshot_hash TEXT NOT NULL DEFAULT '',
+                        output_artifact_id TEXT,
+                        invalidation_reason TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS dependency_edges (
+                        upstream_type TEXT NOT NULL,
+                        upstream_id TEXT NOT NULL,
+                        downstream_type TEXT NOT NULL,
+                        downstream_id TEXT NOT NULL,
+                        edge_kind TEXT NOT NULL,
+                        PRIMARY KEY (upstream_type, upstream_id, downstream_type, downstream_id, edge_kind)
+                    );
+                    CREATE TABLE IF NOT EXISTS change_sets (
+                        change_id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        impact_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        applied_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS content_locks (
+                        block_id TEXT PRIMARY KEY,
+                        lock_owner TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
                     CREATE INDEX IF NOT EXISTS idx_events_revision ON workspace_events(workspace_revision);
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
@@ -478,6 +535,12 @@ class ControlStore:
                     CREATE INDEX IF NOT EXISTS idx_artifact_states_status ON artifact_states(status, producer);
                     CREATE INDEX IF NOT EXISTS idx_migration_conflicts_status
                         ON migration_conflicts(status, domain, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_evidence_needs_status
+                        ON evidence_needs(status, deadline_stage, priority);
+                    CREATE INDEX IF NOT EXISTS idx_content_unit_states_state
+                        ON content_unit_states(state, contract_revision);
+                    CREATE INDEX IF NOT EXISTS idx_dependency_edges_downstream
+                        ON dependency_edges(downstream_type, downstream_id);
                     """
                 )
                 operation_columns = {
