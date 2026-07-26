@@ -91,3 +91,4 @@
 - 状态：进行中
 - 内容：新增 `V3StageRunner`，串联来源规范化、台账、模型、契约、规划、写作、整合、质量与渲染；未知阶段显式失败。
 - 验证：`python -m unittest tests.test_v3_stage_runner`（1 test passed）。
+- 汇总验证：`python -m unittest discover -s tests -p "test_v3_*.py"`（28 tests passed）。
