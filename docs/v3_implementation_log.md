@@ -67,3 +67,9 @@
 - 状态：已完成
 - 内容：新增 `DocumentIntegrator`，读取 ContentBlock Artifact、保留人工锁定内容，并以主责 Requirement 和规范化正文为键实际删除重复块；输出 `IntegratedDocument` 与不可变 rewrite trace。
 - 验证：`python -m unittest tests.test_v3_integrator tests.test_v3_content_units tests.test_v3_contracts`（9 tests passed）。
+
+## PR-9：追溯与质量门禁
+
+- 状态：已完成
+- 内容：新增只读 `QualityGate`，输出终稿覆盖与内容质量报告；任何未响应强制要求或无来源关键 Claim 会阻断 `verify_document` GateEvaluation。
+- 验证：`python -m unittest tests.test_v3_quality tests.test_v3_integrator tests.test_v3_contracts`（9 tests passed）。
