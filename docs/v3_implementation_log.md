@@ -39,3 +39,10 @@
 - 无模板：新增目录契约编译器，按要求台账分组生成带 `requirement_ids` 来源的节点；台账为空时直接阻断，禁止万能目录。
 - 模式：`DocumentContractCompiler` 只由活动 `template` 输入决定 `template_strict`；其他 DOCX 角色不会触发严格模板模式。
 - 验证：`python -m unittest tests.test_v3_document_contract tests.test_v3_requirement_project_model tests.test_v3_contracts`（12 tests passed）。
+
+## PR-5：全文责任计划与规划覆盖
+
+- 状态：已完成
+- 内容：新增 `DocumentPlanner`，在正文生成前为每项要求和评分项分配唯一 primary owner，并写入 V3 `DocumentPlan` 与规划覆盖报告；未覆盖或重复主责会阻断。
+- ContentUnit：自动将有父子关系的完整父章节归为写作单元；无模板扁平目录先合并为一个语义文档单元，避免“一标题一 Writer”。
+- 验证：`python -m unittest tests.test_v3_document_planner tests.test_v3_document_contract tests.test_v3_requirement_project_model`（6 tests passed）。
