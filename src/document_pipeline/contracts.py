@@ -72,6 +72,19 @@ class SourceAnchor(BaseModel):
     location: str = Field(min_length=1)
 
 
+class NormalizedChunk(BaseModel):
+    """A stable, role-aware source fragment used by every V3 content stage."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chunk_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    role: InputRole
+    ordinal: int = Field(ge=0)
+    content: str = Field(min_length=1)
+    source_anchor: SourceAnchor
+
+
 class RequirementKind(str, Enum):
     MANDATORY = "mandatory"
     SCORE = "score"
