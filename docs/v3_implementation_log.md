@@ -54,3 +54,10 @@
 - 控制状态：`control.db.evidence_needs` 记录预算、状态与活动证据批次；预算为零或检索失败会显式形成 gap。
 - 安全边界：外部 Provider 不能发布企业能力 Claim；企业事实仍必须来自 `company` 输入角色。
 - 验证：`python -m unittest tests.test_v3_research_service tests.test_v3_contracts tests.test_v3_document_planner`（11 tests passed）。
+
+## PR-7：ContentUnit Scheduler 与 Writer
+
+- 状态：已完成
+- 内容：新增 ContentUnit 初始化和调度器；控制库记录单元状态、尝试次数、证据快照与输出 Artifact。
+- Writer：新增受契约约束的 ContentWriter，只能向 DocumentPlan 既有节点写 `ContentBlock`；严格模板模式要求目标节点已声明 slot，禁止新标题和共享状态写入。
+- 验证：`python -m unittest tests.test_v3_content_units tests.test_v3_research_service tests.test_v3_document_planner`（5 tests passed）。

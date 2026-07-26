@@ -623,6 +623,35 @@ class ControlStore:
             row = connection.execute("SELECT * FROM evidence_needs WHERE need_id = ?", (need_id,)).fetchone()
         return dict(row) if row else None
 
+    def upsert_content_unit_state(self, item: dict[str, Any]) -> dict[str, Any]:
+        required = ("unit_id", "contract_revision", "state")
+        missing = [key for key in required if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())]
+        if missing:
+            raise ControlPlaneError("INVALID_CONTENT_UNIT", f"ContentUnit 缺少字段: {', '.join(missing)}", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO content_unit_states(
+                    unit_id, contract_revision, state, attempt, evidence_snapshot_hash,
+                    output_artifact_id, invalidation_reason, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(unit_id) DO UPDATE SET
+                    contract_revision=excluded.contract_revision, state=excluded.state,
+                    attempt=excluded.attempt, evidence_snapshot_hash=excluded.evidence_snapshot_hash,
+                    output_artifact_id=excluded.output_artifact_id,
+                    invalidation_reason=excluded.invalidation_reason, updated_at=excluded.updated_at
+                """,
+                (
+                    item["unit_id"], int(item["contract_revision"]), item["state"], int(item.get("attempt", 0)),
+                    str(item.get("evidence_snapshot_hash") or ""), item.get("output_artifact_id"),
+                    str(item.get("invalidation_reason") or ""), now,
+                ),
+            )
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (item["unit_id"],)).fetchone()
+        return dict(row) if row else {}
+
     def migration_state(self) -> dict[str, Any]:
         conflicts = self.migration_conflicts()
         open_conflicts = [item for item in conflicts if item.get("status") == "open"]
