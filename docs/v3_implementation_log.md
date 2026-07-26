@@ -79,3 +79,9 @@
 - 状态：已完成
 - 内容：新增 StrictTemplateRenderer，复制 V3 原模板并只按声明 text/cell slot 写入已通过整合的 ContentBlock；模板模式不允许重建 Word、清空正文或异常时生成空白文档。
 - 验证：`python -m unittest tests.test_v3_template_renderer`（1 test passed）。
+
+## PR-11：无模板 Renderer
+
+- 状态：已完成（编辑闭环将在 PR-12 API Command 中接入）
+- 内容：新增 StandardRenderer，仅从 OutlineContract 与 IntegratedDocument 输出 Markdown/DOCX，禁止临时标题和章节文件拼接。
+- 验证：`python -m unittest tests.test_v3_standard_renderer tests.test_v3_template_renderer`（2 tests passed）。
