@@ -9,13 +9,29 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from graph.chapter_subgraph import route_after_self_check, self_check_chapter
+from graph.chapter_subgraph import route_after_self_check, route_after_write, self_check_chapter
 
 
 class ChapterSubgraphLoopTests(unittest.TestCase):
     def test_route_pass_saves(self) -> None:
         state = {"chapter_status": "passed", "rewrite_round": 0, "max_rewrite_rounds": 2}
         self.assertEqual(route_after_self_check(state), "save_chapter")
+
+    def test_review_switch_controls_inline_self_check(self) -> None:
+        with mock.patch.dict("os.environ", {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "1"}):
+            self.assertEqual(route_after_write({}), "self_check_chapter")
+        with mock.patch.dict("os.environ", {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "0"}):
+            self.assertEqual(route_after_write({}), "save_chapter")
+
+    def test_disabling_review_skips_even_an_already_entered_self_check(self) -> None:
+        with (
+            mock.patch.dict("os.environ", {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "0"}),
+            mock.patch("graph.chapter_subgraph.review_chapter_markdown") as review,
+        ):
+            result = self_check_chapter({"chapter_status": "pending"})
+        review.assert_not_called()
+        self.assertEqual(result["chapter_status"], "passed")
+        self.assertTrue(result["self_check"]["skipped"])
 
     def test_route_need_evidence_saves(self) -> None:
         state = {

@@ -66,6 +66,7 @@ from graph.state_recorder import load_run_events, load_stage_metrics, save_run_s
 from manual_review import apply_manual_review_update, manual_review_items, manual_review_summary
 from pipeline_registry import (
     RunArtifact,
+    STAGE_SPECS,
     auto_run_commands,
     artifact_exists,
     stage_command_map,
@@ -366,7 +367,83 @@ def _workflow_step_payload() -> list[dict[str, Any]]:
 
 
 WORKFLOW_STEPS: list[dict[str, Any]] = _workflow_step_payload()
-WORKFLOW_COMMAND_LABELS = {step["command"]: step["label"] for step in WORKFLOW_STEPS}
+WORKFLOW_COMMAND_LABELS = {stage.command: stage.label for stage in STAGE_SPECS}
+
+
+def _refresh_workflow_cache() -> None:
+    global WORKFLOW_STEPS, WORKFLOW_COMMAND_LABELS
+    WORKFLOW_STEPS = _workflow_step_payload()
+    # 日志还要识别被当前策略跳过的历史阶段，因此标签始终来自完整注册表。
+    WORKFLOW_COMMAND_LABELS = {stage.command: stage.label for stage in STAGE_SPECS}
+
+
+def _progress_from_log_line(line: str) -> dict[str, int] | None:
+    patterns = (
+        r"\[(\d+)\s*/\s*(\d+)\]",
+        r"(?:已完成|已解决|完成)\s*(\d+)\s*/\s*(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, line)
+        if not match:
+            continue
+        completed, total = int(match.group(1)), int(match.group(2))
+        if total > 0 and 0 <= completed <= total:
+            return {"completed": completed, "total": total}
+    return None
+
+
+def _complete_single_step_from_line(line: str, progress: dict[str, int] | None) -> dict[str, int] | None:
+    if (
+        progress is not None
+        and int(progress.get("total") or 0) == 1
+        and re.search(r"(?:\[完成\]|执行完成|成功)", line)
+    ):
+        return {"completed": 1, "total": 1}
+    return progress
+
+
+def _should_attach_stage_progress(line: str) -> bool:
+    """Only put stage progress on user-facing milestones, never on traceback frames."""
+    return bool(
+        _progress_from_log_line(line)
+        or re.search(
+            r"^(?:---.*(?:开始|完成)|\[(?:执行|完成|进度|开始|跳过|重试|自动重试|错误|警告)\])",
+            line.strip(),
+        )
+    )
+
+
+def _stage_progress(root: Path, command: str) -> dict[str, int] | None:
+    if not command:
+        return None
+    try:
+        spec = stage_spec_by_command(command)
+    except KeyError:
+        return None
+    try:
+        if spec.id in COLLECTION_STAGE_IDS:
+            status = stage_collection_status(root, spec.id)
+            total = int(status.get("expected_count") or 0)
+            completed = int(status.get("completed_count") or 0)
+        elif command == "build-source-trace":
+            from stage_validation import chapter_ids
+
+            expected = chapter_ids(root)
+            actual = {
+                path.name.removesuffix("_sources.json")
+                for path in (root / "workspace" / "source_traces").glob("*_sources.json")
+                if path.is_file() and path.stat().st_size > 0
+            }
+            total = len(expected)
+            completed = len(expected & actual)
+        else:
+            total = 1
+            completed = 1 if stage_outputs_ready(root, spec.id) else 0
+    except Exception:
+        return None
+    if total <= 0:
+        return None
+    return {"completed": min(completed, total), "total": total}
 
 
 def _append_log(line: str) -> None:
@@ -379,29 +456,95 @@ def _append_log(line: str) -> None:
         try:
             path = run_root / "workspace" / "runtime_logs.jsonl"
             path.parent.mkdir(parents=True, exist_ok=True)
-            record = json.dumps({"ts": datetime.now().isoformat(timespec="seconds"), "line": line}, ensure_ascii=False)
+            command = str(CURRENT_TASK or "").strip()
+            progress = _progress_from_log_line(line)
+            if progress is None and _should_attach_stage_progress(line):
+                progress = _stage_progress(run_root, command)
+            progress = _complete_single_step_from_line(line, progress)
+            progress_text = (
+                f"({progress['completed']}/{progress['total']})"
+                if progress is not None
+                else ""
+            )
+            record = json.dumps(
+                {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "line": line,
+                    "command": command,
+                    "stage": WORKFLOW_COMMAND_LABELS.get(command, command),
+                    "progress": progress,
+                    "progress_text": progress_text,
+                },
+                ensure_ascii=False,
+            )
             with _WORKSPACE_LOG_LOCK, path.open("a", encoding="utf-8") as handle:
                 handle.write(record + "\n")
         except Exception:
             pass
 
 
-def _workspace_log_lines(root: Path, limit: int = LOG_MAX) -> list[str]:
+def _workspace_log_records(root: Path, limit: int = LOG_MAX) -> list[dict[str, Any]]:
     path = root / "workspace" / "runtime_logs.jsonl"
     if not path.exists():
         return []
-    rows: list[str] = []
+    rows: list[dict[str, Any]] = []
+    active_command = ""
+    in_traceback = False
     try:
         raw_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-max(1, limit):]
         for raw in raw_lines:
             try:
                 record = json.loads(raw)
-                rows.append(str(record.get("line") or "") if isinstance(record, dict) else str(record))
+                if not isinstance(record, dict):
+                    record = {"line": str(record)}
             except json.JSONDecodeError:
-                rows.append(raw)
+                record = {"line": raw}
+            line = str(record.get("line") or "")
+            stripped_line = line.strip()
+            if stripped_line.startswith("Traceback (most recent call last):"):
+                in_traceback = True
+            display = not in_traceback
+            if in_traceback and (
+                stripped_line.startswith("[")
+                or stripped_line.startswith("---")
+            ) and not stripped_line.startswith("Traceback"):
+                in_traceback = False
+                display = True
+            command = str(record.get("command") or "").strip()
+            start_match = re.search(r"开始:\s+python\s+src/main\.py\s+([a-z0-9-]+)", line, re.I)
+            if start_match:
+                active_command = start_match.group(1)
+            if not command:
+                command = active_command
+            stage = str(record.get("stage") or "").strip() or WORKFLOW_COMMAND_LABELS.get(command, command)
+            progress = _progress_from_log_line(line)
+            if progress is None and _should_attach_stage_progress(line):
+                stored_progress = record.get("progress") if isinstance(record.get("progress"), dict) else None
+                progress = stored_progress
+            progress = _complete_single_step_from_line(line, progress)
+            progress_text = str(record.get("progress_text") or "").strip()
+            if not progress_text and progress is not None:
+                progress_text = f"({int(progress['completed'])}/{int(progress['total'])})"
+            rows.append(
+                {
+                    "ts": str(record.get("ts") or ""),
+                    "line": line,
+                    "command": command,
+                    "stage": stage,
+                    "progress": progress,
+                    "progress_text": progress_text,
+                    "display": display,
+                }
+            )
+            if "完成: exit_code=" in line:
+                active_command = ""
     except OSError:
         return []
     return rows
+
+
+def _workspace_log_lines(root: Path, limit: int = LOG_MAX) -> list[str]:
+    return [record["line"] for record in _workspace_log_records(root, limit)]
 
 
 def _decode_log_bytes(data: bytes) -> str:
@@ -1379,8 +1522,8 @@ def _step_extra_details(root: Path, command: str) -> dict[str, Any]:
         items = [i for i in (data.get("items") or []) if isinstance(i, dict)]
         return {
             "compliance_report": {
-                "blocking": data.get("blocking"),
-                "need_manual_review": data.get("need_manual_review"),
+                "blocking": False,
+                "need_manual_review": bool(data.get("need_manual_review") or data.get("blocking")),
                 "max_severity": data.get("max_severity"),
                 "summary": data.get("summary") if isinstance(data.get("summary"), dict) else {},
                 "failed_items": [
@@ -1559,6 +1702,8 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
     key_map = {
         "inputs/tender.md": status["inputs"]["tender_md"],
         "inputs/company.md": status["inputs"]["company_md"],
+        "inputs/reference.md": _path_status(root, "inputs/reference.md"),
+        "inputs/writing_brief.md": _path_status(root, "inputs/writing_brief.md"),
         "inputs/score.md": status["inputs"]["score_md"],
         "inputs/template.docx": status["inputs"]["template_docx"],
         "workspace/imported/*": all(status["imported"].values()),
@@ -1569,11 +1714,23 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         "workspace/imported/tender_other.md": status["imported"]["tender_other"],
         "workspace/chunks/tender_chunks.json": status["chunks"]["tender_chunks"],
         "workspace/chunks/company_chunks.json": status["chunks"]["company_chunks"],
+        "workspace/chunks/reference_chunks.json": _path_status(
+            root, "workspace/chunks/reference_chunks.json"
+        ),
         "workspace/tender_requirements.json": status["workspace"]["tender_requirements"],
         "workspace/company_facts.json": status["workspace"]["company_facts"],
         "workspace/score_requirements.json": status["workspace"]["score_requirements"],
         "workspace/score_points.json": status["workspace"]["score_points"],
         "workspace/global_facts.json": status["workspace"]["global_facts"],
+        "workspace/project_understanding.json": _path_status(
+            root, "workspace/project_understanding.json"
+        ),
+        "workspace/research_raw_results.json": _path_status(
+            root, "workspace/research_raw_results.json"
+        ),
+        "workspace/research_report.json": _path_status(
+            root, "workspace/research_report.json"
+        ),
         "workspace/materials_checklist.json": status["workspace"]["materials_checklist"],
         "workspace/template_evidence_map.json": status["workspace"]["template_evidence_map"],
         "workspace/template_quality_report.json": status["workspace"]["template_quality_report"],
@@ -1599,6 +1756,8 @@ def _step_status(root: Path, step: dict[str, Any], status: dict[str, Any]) -> di
         "sources/tender": _path_status(root, "sources/tender/*"),
         "sources/company": _path_status(root, "sources/company/*"),
         "sources/template": _path_status(root, "sources/template/*"),
+        "sources/reference": _path_status(root, "sources/reference/*"),
+        "sources/guidance": _path_status(root, "sources/guidance/*"),
     }
 
     requirement_paths = [_artifact_path(req) for req in step.get("requires", [])]
@@ -1905,6 +2064,21 @@ def _status_payload(
         )
         if pipeline_operation:
             pipeline_operation_id = str(pipeline_operation.get("operation_id") or "")
+            pipeline_operation_status = str(pipeline_operation.get("status") or "idle")
+            if (
+                pipeline_operation_status in {"running", "pausing", "cancelling"}
+                and not SUPERVISOR.is_running(root)
+                and not _operation_has_live_lease(v2_snapshot, pipeline_operation_id)
+            ):
+                pipeline_operation_status = "interrupted"
+                pipeline_operation = {
+                    **pipeline_operation,
+                    "message": "后台执行已中断，等待用户指令。",
+                    "error": {
+                        "code": "STALE_OPERATION_LEASE",
+                        "message": "Operation 没有有效 Worker 租约。",
+                    },
+                }
             latest_stage_run = next(
                 (
                     item for item in (v2_snapshot.get("stage_runs") or [])
@@ -1915,7 +2089,7 @@ def _status_payload(
             pipeline_control = {
                 "operation_id": pipeline_operation_id,
                 "kind": str(pipeline_operation.get("kind") or ""),
-                "status": str(pipeline_operation.get("status") or "idle"),
+                "status": pipeline_operation_status,
                 "current_stage": str(
                     (latest_stage_run or {}).get("stage_command")
                     or pipeline_operation.get("start_command")
@@ -1927,6 +2101,11 @@ def _status_payload(
                 "source": "control.db",
                 "consistent": True,
             }
+            pipeline_control = _project_current_pipeline_policy(
+                WorkspaceContext.resolve(root.parent, root.name),
+                pipeline_control,
+                worker_live=SUPERVISOR.is_running(root),
+            )
         else:
             pipeline_control = {
                 "operation_id": "",
@@ -1957,12 +2136,13 @@ def _status_payload(
         else (manual_review_summary(root) if persist_manual_review_summary else {})
     )
     repair_job = load_v2_repair_job(root) if v2_read_only else load_repair_job(root)
-    if v2_read_only and repair_job and str(repair_job.get("status") or "") in RUNNING_REPAIR_STATUSES:
+    if v2_read_only and repair_job:
         actual_resume_command = _v2_pipeline_resume_command(WorkspaceContext.resolve(root.parent, root.name))
-        if actual_resume_command:
-            # Keep the chat card aligned with control.db stage runs.  The Job's
-            # original resume command is historical and may be stale.
-            repair_job = {**repair_job, "resume_command": actual_resume_command}
+        repair_job = {
+            **repair_job,
+            "historical_resume_command": str(repair_job.get("resume_command") or ""),
+            "resume_command": actual_resume_command,
+        }
     pending_confirmation = None
     if str(repair_job.get("status") or "") == "awaiting_confirmation":
         pending_confirmation = {
@@ -2375,38 +2555,103 @@ def _minimal_repair_resume_command(root: Path) -> str:
 
 
 def _v2_pipeline_resume_command(context: WorkspaceContext) -> str:
-    """Choose the interrupted/incomplete stage from authoritative V2 records."""
+    """Choose the first incomplete stage from authoritative artifact evidence."""
     commands = auto_run_commands()
-    allowed = set(commands)
-    try:
-        store = ControlStore(context)
-        operations = store.snapshot().get("operations") or []
-        for item in operations:
-            if not isinstance(item, dict) or not str(item.get("kind") or "").startswith("pipeline."):
-                continue
-            operation_id = str(item.get("operation_id") or "").strip()
+    store = ControlStore(context)
+    if not store.artifact_states():
+        # Compatibility for workspaces created before the artifact manifest:
+        # use the latest unfinished StageRun until authoritative artifacts exist.
+        for operation in store.snapshot().get("operations") or []:
+            operation_id = str(operation.get("operation_id") or "")
             latest_by_command: dict[str, dict[str, Any]] = {}
-            for stage_run in (store.stage_runs(operation_id) if operation_id else []):
-                stage_command = str(stage_run.get("stage_command") or "").strip()
-                if stage_command not in allowed:
+            for stage_run in store.stage_runs(operation_id) if operation_id else []:
+                command = str(stage_run.get("stage_command") or "")
+                if command not in commands:
                     continue
-                attempt = int(stage_run.get("attempt") or 0)
-                current = latest_by_command.get(stage_command)
-                if current is None or attempt >= int(current.get("attempt") or 0):
-                    latest_by_command[stage_command] = stage_run
-            # The operation's start command is only a historical boundary.
-            # Prefer the first unfinished recorded stage: a pipeline started
-            # at context selection may already have reached chapter writing.
-            for stage_command in commands:
-                stage_run = latest_by_command.get(stage_command)
+                current = latest_by_command.get(command)
+                if current is None or int(stage_run.get("attempt") or 0) >= int(current.get("attempt") or 0):
+                    latest_by_command[command] = stage_run
+            for command in commands:
+                stage_run = latest_by_command.get(command)
                 if stage_run and str(stage_run.get("status") or "") not in {"succeeded", "reused"}:
-                    return stage_command
-            command = str(item.get("start_command") or "").strip()
-            if command in allowed:
-                return command
-    except Exception:
+                    return command
+            completed_indexes = [
+                commands.index(command)
+                for command, stage_run in latest_by_command.items()
+                if str(stage_run.get("status") or "") in {"succeeded", "reused"}
+            ]
+            if completed_indexes:
+                next_index = max(completed_indexes) + 1
+                return commands[next_index] if next_index < len(commands) else ""
         return ""
+    for command in commands:
+        try:
+            if _v2_stage_artifacts_reusable(context, command):
+                continue
+        except Exception:
+            pass
+        return command
     return ""
+
+
+def _normalize_pipeline_start_command(context: WorkspaceContext, requested: str) -> tuple[str, bool]:
+    """Migrate a stale/disabled start stage to the current workflow."""
+    requested = str(requested or "").strip()
+    commands = auto_run_commands()
+    if requested in commands:
+        return requested, False
+    resolved = _v2_pipeline_resume_command(context)
+    if resolved in commands:
+        return resolved, bool(requested)
+    return "", bool(requested)
+
+
+def _project_current_pipeline_policy(
+    context: WorkspaceContext,
+    pipeline: dict[str, Any],
+    *,
+    worker_live: bool = False,
+) -> dict[str, Any]:
+    """Keep historical stages from overriding the current workflow policy."""
+    if not isinstance(pipeline, dict) or not pipeline:
+        return pipeline
+    current = str(pipeline.get("current_stage") or "").strip()
+    if not current or current in set(auto_run_commands()) or worker_live:
+        return pipeline
+    resume = _v2_pipeline_resume_command(context)
+    projected = {
+        **pipeline,
+        "historical_stage": current,
+        "current_stage": resume,
+        "policy_migrated": True,
+    }
+    status = str(projected.get("status") or "")
+    terminal_or_waiting = {
+        "failed",
+        "interrupted",
+        "paused",
+        "cancelled",
+        "blocked",
+        "succeeded",
+        "complete",
+    }
+    if resume and status in terminal_or_waiting:
+        projected.update(
+            {
+                "status": "paused",
+                "message": f"历史阶段 {current} 已失效；可从 {resume} 继续。",
+                "error": None,
+            }
+        )
+    elif not resume and status in terminal_or_waiting:
+        projected.update(
+            {
+                "status": "complete",
+                "message": f"历史阶段 {current} 已失效；当前流程无需继续。",
+                "error": None,
+            }
+        )
+    return projected
 
 
 def _issue_repair_fingerprint(issue: dict[str, Any]) -> str:
@@ -2760,7 +3005,13 @@ def _trigger_repair_job(
                     None,
                 )
 
-        resume_command = str(job.get("resume_command") or "")
+        stored_resume_command = str(job.get("resume_command") or "")
+        resume_command, resume_migrated = _normalize_pipeline_start_command(
+            WorkspaceContext.resolve(root.parent, root.name),
+            stored_resume_command,
+        )
+        if resume_migrated:
+            result["historical_resume_command"] = stored_resume_command
         resume_started = False
         # Only auto-resume when fully clear — partial/failed jobs would hit the same gate again
         should_resume = (
@@ -3758,7 +4009,7 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
     root = context.root if context else _active_root()
     try:
         if context:
-            from agent.issues import quality_gate_mode
+            from agent.issues import effective_block_issues, quality_gate_mode
 
             store = ControlStore(context)
             issue_import_pending = (
@@ -3774,7 +4025,26 @@ def api_list_issues(status: str = "open", workspace_id: str = "") -> JSONRespons
                     _sync_v2_repair_failure_details(context, repair_result)
                 except Exception:
                     pass
-            all_issues = store.issue_states()
+            stored_issues = store.issue_states()
+            raw_blocks = [
+                issue for issue in stored_issues
+                if str(issue.get("status") or "") in {"open", "in_progress"}
+                and str(issue.get("severity") or "") in {"block", "fatal"}
+            ]
+            effective_block_ids = {
+                str(issue.get("id") or issue.get("issue_id") or "")
+                for issue in effective_block_issues(context.root, raw_blocks)
+            }
+            all_issues = []
+            for issue in stored_issues:
+                normalized_issue = dict(issue)
+                issue_id = str(normalized_issue.get("id") or normalized_issue.get("issue_id") or "")
+                if (
+                    str(normalized_issue.get("severity") or "") in {"block", "fatal"}
+                    and issue_id not in effective_block_ids
+                ):
+                    normalized_issue["severity"] = "warn"
+                all_issues.append(normalized_issue)
             open_issues = [i for i in all_issues if str(i.get("status")) in {"open", "in_progress"}]
             blocks = [i for i in open_issues if str(i.get("severity")) == "block"]
             warns = [i for i in open_issues if str(i.get("severity")) == "warn"]
@@ -4100,8 +4370,13 @@ def api_compliance_report(workspace_id: str = "") -> JSONResponse:
         {
             "ok": True,
             "exists": True,
-            "blocking": bool(data.get("blocking") or summary.get("blocking")),
-            "need_manual_review": bool(data.get("need_manual_review") or summary.get("need_manual_review")),
+            "blocking": False,
+            "need_manual_review": bool(
+                data.get("need_manual_review")
+                or summary.get("need_manual_review")
+                or data.get("blocking")
+                or summary.get("blocking")
+            ),
             "max_severity": data.get("max_severity") or summary.get("max_severity"),
             "summary": summary,
             "counts": summary.get("counts") if isinstance(summary.get("counts"), dict) else {},
@@ -4885,14 +5160,17 @@ def _safe_issues_summary(root: Path | None = None) -> dict:
 def _v2_issues_summary(root: Path) -> dict[str, Any]:
     """Read Issue authority for V2 presentation without invoking the V1 loader."""
     try:
-        from agent.issues import quality_gate_mode
+        from agent.issues import effective_block_issues, quality_gate_mode
 
         issues = ControlStore(WorkspaceContext.resolve(root.parent, root.name)).issue_states()
         open_issues = [
             item for item in issues
             if str(item.get("status") or "") in {"open", "in_progress"}
         ]
-        blocks = [item for item in open_issues if str(item.get("severity") or "") == "block"]
+        blocks = effective_block_issues(
+            root,
+            [item for item in open_issues if str(item.get("severity") or "") == "block"],
+        )
         warns = [item for item in open_issues if str(item.get("severity") or "") == "warn"]
         mode = quality_gate_mode()
         return {
@@ -5430,6 +5708,22 @@ COMMANDS: dict[str, list[str]] = {
     "graph-run": [],
 }
 
+# Maintenance commands are an explicit allow-list.  Do not derive this set as
+# "all commands not in the current workflow": stages disabled by a policy
+# change (for example summarize/global review/compliance) are still core stages,
+# not utilities, and stale clients must not be able to execute them through the
+# utility endpoint.
+WORKSPACE_UTILITY_COMMANDS = frozenset(
+    {
+        "init",
+        "analyze-template",
+        "check-price-tables",
+        "check-deviation-tables",
+        "validate-claims",
+        "validate",
+    }
+)
+
 AUTO_RECOVERY_MAX_ATTEMPTS = 2
 
 _NON_RECOVERABLE_ERROR_PATTERNS = (
@@ -5925,7 +6219,7 @@ def _request_principal(request: Request) -> dict[str, Any]:
 def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[str, Any]:
     """Fail-closed gate evaluation for V2 mutations using the explicit workspace."""
     try:
-        from agent.issues import quality_gate_mode
+        from agent.issues import effective_block_issues, quality_gate_mode
 
         store = _ensure_v2_issue_import(context)
         issues = store.issue_states()
@@ -5933,10 +6227,11 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
             item for item in issues
             if str(item.get("status") or "") in {"open", "in_progress"}
         ]
-        blocks = [
+        raw_blocks = [
             item for item in open_issues
             if str(item.get("severity") or "") in {"block", "fatal"}
         ]
+        blocks = effective_block_issues(context.root, raw_blocks)
         mode = quality_gate_mode()
         block_commands = {str(item.get("command") or "") for item in blocks}
         revalidate_allowed = bool(next_command and next_command in block_commands)
@@ -5985,7 +6280,8 @@ def _v2_gate_can_proceed(context: WorkspaceContext, next_command: str) -> dict[s
 
 def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
     """Read-only formal-export checks backed by authoritative SQLite Issues."""
-    from agent.issues import classify_issue_risk
+    from agent.issues import classify_issue_risk, effective_block_issues
+    from pipeline_registry import chapter_review_enabled
 
     store = ControlStore(context)
     _ensure_v2_goal_import(context)
@@ -5993,10 +6289,16 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
     _ensure_v2_material_import(context)
     _ensure_v2_issue_import(context)
     cutover = None
-    failed_evaluations = [
-        evaluation for evaluation in store.latest_gate_evaluations()
-        if str(evaluation.get("verdict") or "") in {"block", "error"}
-    ]
+    review_enabled = chapter_review_enabled()
+    failed_evaluations = (
+        [
+            evaluation for evaluation in store.latest_gate_evaluations()
+            if str(evaluation.get("verdict") or "") in {"block", "error"}
+            and str(evaluation.get("command") or "") != "compliance-check"
+        ]
+        if review_enabled
+        else []
+    )
     if failed_evaluations:
         error_evaluations = [item for item in failed_evaluations if item.get("verdict") == "error"]
         raise ControlPlaneError(
@@ -6021,7 +6323,7 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
         }
         missing_evaluations = [
             command
-            for command in ("global-review", "compliance-check")
+            for command in ("global-review",)
             if str((latest_by_command.get(command) or {}).get("verdict") or "") != "pass"
         ]
         if missing_evaluations:
@@ -6033,7 +6335,6 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
             )
         evaluation_inputs = {
             "global-review": context.root / "workspace" / "global_review.json",
-            "compliance-check": context.root / "workspace" / "compliance_report.json",
         }
         stale_evaluations: list[str] = []
         for command, source_path in evaluation_inputs.items():
@@ -6060,12 +6361,32 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
         item for item in issues
         if str(item.get("status") or "") in {"open", "in_progress"}
     ]
-    blocks = [
+    raw_blocks = [
         item for item in open_issues
         if str(item.get("severity") or "") in {"block", "fatal"}
     ]
+    blocks = effective_block_issues(context.root, raw_blocks)
     accepted = [item for item in issues if str(item.get("status") or "") == "accepted"]
     checks: list[dict[str, Any]] = []
+
+    if not review_enabled:
+        checks.append(
+            {
+                "id": "review_disabled",
+                "label": "审核",
+                "ok": True,
+                "detail": "已关闭；历史审核问题仅保留记录，不阻断第一版",
+            }
+        )
+        return _finish_v2_export_preflight(
+            context,
+            open_issues,
+            blocks,
+            accepted,
+            checks,
+            classify_issue_risk,
+            review_enabled=False,
+        )
 
     global_path = context.root / "workspace" / "global_review.json"
     global_review = _read_json_file(global_path) if global_path.exists() else {}
@@ -6094,6 +6415,15 @@ def _v2_export_preflight(context: WorkspaceContext) -> dict[str, Any]:
             ),
         }
     )
+    return _finish_v2_export_preflight(
+        context,
+        open_issues,
+        blocks,
+        accepted,
+        checks,
+        classify_issue_risk,
+        review_enabled=True,
+    )
 
 
 # Flow settings are intentionally limited to parameters consumed at runtime.
@@ -6106,10 +6436,12 @@ FLOW_SETTING_SPECS: dict[str, tuple[str, Any, int, int]] = {
     "max_repair_rounds": ("AGENT_MAX_REPAIR_ROUNDS", 2, 0, 10),
 }
 FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
+    "chapter_review_enabled": ("BID_AGENT_CHAPTER_REVIEW_ENABLED", True),
     "chapter_review_gate": ("CHAPTER_REVIEW_GATE", True),
     "global_review_gate": ("GLOBAL_REVIEW_GATE", True),
     "allow_accept_risk": ("ISSUE_ACCEPT_RISK_ENABLED", False),
     "anti_fabrication_gate": ("BID_AGENT_ANTI_FABRICATION_GATE", True),
+    "write_failure_fallback": ("BID_AGENT_WRITE_FAILURE_FALLBACK", True),
 }
 
 
@@ -6126,7 +6458,22 @@ def _flow_settings() -> dict[str, Any]:
     for alias, (key, default) in FLOW_REVIEW_SPECS.items():
         raw = str(values.get(key, os.environ.get(key, "1" if default else "0"))).strip().lower()
         result[alias] = raw not in {"0", "false", "no", "off"}
+    if not result["chapter_review_enabled"]:
+        result["chapter_review_gate"] = False
+        result["global_review_gate"] = False
+        result["anti_fabrication_gate"] = False
     return result
+
+
+def _apply_flow_settings_to_env(settings: dict[str, Any]) -> None:
+    env_updates = {
+        key: str(settings[alias]) for alias, (key, *_rest) in FLOW_SETTING_SPECS.items()
+    }
+    env_updates.update({
+        key: "1" if settings[alias] else "0"
+        for alias, (key, _default) in FLOW_REVIEW_SPECS.items()
+    })
+    os.environ.update(env_updates)
 
 
 def _write_flow_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -6140,6 +6487,10 @@ def _write_flow_settings(settings: dict[str, Any]) -> dict[str, Any]:
     for alias in FLOW_REVIEW_SPECS:
         if alias in settings:
             current[alias] = bool(settings[alias])
+    if not current["chapter_review_enabled"]:
+        current["chapter_review_gate"] = False
+        current["global_review_gate"] = False
+        current["anti_fabrication_gate"] = False
     env_updates = {
         key: str(current[alias]) for alias, (key, *_rest) in FLOW_SETTING_SPECS.items()
     }
@@ -6159,7 +6510,8 @@ def _write_flow_settings(settings: dict[str, Any]) -> dict[str, Any]:
     temp = path.with_name(path.name + ".tmp")
     temp.write_text("\n".join(rendered) + "\n", encoding="utf-8")
     temp.replace(path)
-    os.environ.update(env_updates)
+    _apply_flow_settings_to_env(current)
+    _refresh_workflow_cache()
     return current
 
 
@@ -6179,47 +6531,59 @@ async def api_set_flow_settings(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
 
-    compliance_path = context.root / "workspace" / "compliance_report.json"
-    compliance = _read_json_file(compliance_path) if compliance_path.exists() else {}
-    compliance_summary = (
-        compliance.get("summary")
-        if isinstance(compliance, dict) and isinstance(compliance.get("summary"), dict)
-        else {}
-    )
-    if compliance_path.exists() and (
-        not isinstance(compliance, dict)
-        or not (
-            isinstance(compliance.get("blocking"), bool)
-            or isinstance(compliance_summary.get("blocking"), bool)
+
+def _finish_v2_export_preflight(
+    context: WorkspaceContext,
+    open_issues: list[dict[str, Any]],
+    blocks: list[dict[str, Any]],
+    accepted: list[dict[str, Any]],
+    checks: list[dict[str, Any]],
+    classify_issue_risk: Any,
+    *,
+    review_enabled: bool,
+) -> dict[str, Any]:
+    if review_enabled:
+        compliance_path = context.root / "workspace" / "compliance_report.json"
+        compliance = _read_json_file(compliance_path) if compliance_path.exists() else {}
+        compliance_summary = (
+            compliance.get("summary")
+            if isinstance(compliance, dict) and isinstance(compliance.get("summary"), dict)
+            else {}
         )
-    ):
-        raise ControlPlaneError(
-            "STATE_UNAVAILABLE",
-            "compliance_report.json 无效或缺少 blocking 布尔值，已拒绝正式出稿。",
-            status_code=503,
+        if compliance_path.exists() and (
+            not isinstance(compliance, dict)
+            or not (
+                isinstance(compliance.get("blocking"), bool)
+                or isinstance(compliance_summary.get("blocking"), bool)
+            )
+        ):
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "compliance_report.json 无效或缺少 blocking 布尔值，已拒绝正式出稿。",
+                status_code=503,
+            )
+        compliance_blocking = bool(
+            isinstance(compliance, dict)
+            and (compliance.get("blocking") or compliance_summary.get("blocking"))
         )
-    compliance_blocking = bool(
-        isinstance(compliance, dict)
-        and (compliance.get("blocking") or compliance_summary.get("blocking"))
-    )
-    compliance_blocks = [
-        item for item in blocks
-        if str(item.get("stage_id") or "") == "compliance_check"
-    ]
-    checks.append(
-        {
-            "id": "compliance_check",
-            "label": "专项合规门禁",
-            "ok": compliance_path.exists() and not compliance_blocking and not compliance_blocks,
-            "detail": (
-                "缺少 compliance_report.json"
-                if not compliance_path.exists()
-                else "通过"
-                if not compliance_blocking and not compliance_blocks
-                else f"阻断 blocking={compliance_blocking}, issues={len(compliance_blocks)}"
-            ),
-        }
-    )
+        compliance_blocks = [
+            item for item in blocks
+            if str(item.get("stage_id") or "") == "compliance_check"
+        ]
+        checks.append(
+            {
+                "id": "compliance_check",
+                "label": "专项合规门禁",
+                "ok": compliance_path.exists() and not compliance_blocking and not compliance_blocks,
+                "detail": (
+                    "缺少 compliance_report.json"
+                    if not compliance_path.exists()
+                    else "通过"
+                    if not compliance_blocking and not compliance_blocks
+                    else f"阻断 blocking={compliance_blocking}, issues={len(compliance_blocks)}"
+                ),
+            }
+        )
 
     checks.append(
         {
@@ -6326,13 +6690,20 @@ def _v2_stage_artifacts_reusable(context: WorkspaceContext, command: str) -> boo
 
 
 _FORMAL_GATE_RULES_VERSION = "v2-formal-control-2026-07-21"
-_FORMAL_GATE_INPUTS = (
-    "outputs/final.md",
-    "outputs/final.docx",
-    "workspace/global_review.json",
-    "workspace/compliance_report.json",
-    "workspace/format_check_report.json",
-)
+def _formal_gate_inputs() -> tuple[str, ...]:
+    """Return artifacts that may actually block delivery under current policy."""
+    from pipeline_registry import chapter_review_enabled
+
+    inputs = [
+        "outputs/final.md",
+        "outputs/final.docx",
+        "workspace/format_check_report.json",
+    ]
+    if chapter_review_enabled():
+        inputs.append("workspace/global_review.json")
+    # Compliance is advisory in every mode.  Its report remains available in
+    # the UI, but a missing/stale historical report must never block download.
+    return tuple(inputs)
 _FORMAL_GATE_TREES = (
     "inputs/tender",
     "inputs/company",
@@ -6356,7 +6727,7 @@ def _formal_gate_fingerprint(context: WorkspaceContext) -> tuple[str, str]:
         digest.update(
             json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         )
-    for relative in _FORMAL_GATE_INPUTS:
+    for relative in _formal_gate_inputs():
         path = context.root / relative
         digest.update(relative.encode("utf-8"))
         digest.update(b"\0")
@@ -6418,7 +6789,7 @@ def _assert_formal_artifacts_ready(context: WorkspaceContext) -> None:
     store = ControlStore(context)
     states = {item["artifact_key"]: item for item in store.artifact_states()}
     blocked: list[dict[str, str]] = []
-    for relative in _FORMAL_GATE_INPUTS:
+    for relative in _formal_gate_inputs():
         state = states.get(relative)
         if state is None:
             blocked.append({"path": relative, "reason": "manifest_missing"})
@@ -6436,6 +6807,75 @@ def _assert_formal_artifacts_ready(context: WorkspaceContext) -> None:
             "正式稿依赖的 Artifact 已 stale、缺失或与 SQLite manifest 不一致。",
             details={"artifacts": blocked},
         )
+
+
+def _synchronize_formal_delivery_artifacts(
+    context: WorkspaceContext,
+    operation_id: str,
+) -> list[str]:
+    """Bring Word/format outputs in sync with the current final.md before download."""
+    from artifact_manifest import describe_artifact, record_stage_artifacts, stage_artifacts_reusable
+
+    store = ControlStore(context)
+    refreshed: list[str] = []
+    final_md = describe_artifact(context.root, RunArtifact("outputs/final.md"))
+    if final_md.get("status") != "ready":
+        raise ControlPlaneError("GATE_BLOCKED", "final.md 不存在或为空，不能生成 Word。", status_code=409)
+
+    stored_md = store.artifact_state("outputs/final.md")
+    if (
+        not stored_md
+        or stored_md.get("status") != "ready"
+        or stored_md.get("sha256") != final_md.get("sha256")
+    ):
+        # final.md is the document currently shown in the editor.  Adopt that
+        # exact revision as the delivery source, then invalidate/rebuild its
+        # downstream Word and format artifacts.
+        record_stage_artifacts(context, "build-md", disposition="adopt_current_draft")
+        _record_v2_stage_lifecycle(
+            context,
+            operation_id,
+            "build-md",
+            "succeeded",
+            "adopt_current_draft",
+            None,
+        )
+        refreshed.append("build-md")
+
+    for command in ("build-docx", "check-format"):
+        try:
+            reusable = stage_artifacts_reusable(context, command)
+        except Exception:
+            reusable = False
+        if reusable:
+            continue
+        _record_v2_stage_lifecycle(context, operation_id, command, "running", "delivery_refresh", None)
+        exit_code = _run_sync(command, context.workspace_id, context.root)
+        if exit_code != 0:
+            _record_v2_stage_lifecycle(
+                context,
+                operation_id,
+                command,
+                "failed",
+                "delivery_refresh",
+                {"message": f"{command} 执行失败，exit_code={exit_code}"},
+            )
+            raise ControlPlaneError(
+                "COMMAND_DISPATCH_FAILED",
+                f"下载前同步最新文档失败：{command} exit_code={exit_code}",
+                status_code=409,
+            )
+        record_stage_artifacts(context, command, disposition="delivery_refresh")
+        _record_v2_stage_lifecycle(
+            context,
+            operation_id,
+            command,
+            "succeeded",
+            "delivery_refresh",
+            None,
+        )
+        refreshed.append(command)
+    return refreshed
 
 
 def _validate_formal_gate_receipt(
@@ -6483,6 +6923,9 @@ def _pipeline_snapshot_from_control(
     operations: list[dict[str, Any]],
     _checkpoint: dict[str, Any],
     stage_runs: list[dict[str, Any]] | None = None,
+    *,
+    lease: dict[str, Any] | None = None,
+    enforce_live_lease: bool = False,
 ) -> dict[str, Any]:
     operation = next(
         (
@@ -6506,6 +6949,14 @@ def _pipeline_snapshot_from_control(
         "blocked": "interrupted",
     }.get(str(operation.get("status") or ""), "failed")
     operation_id = str(operation.get("operation_id") or "")
+    operation_is_active = str(operation.get("status") or "") in {
+        "running", "pausing", "cancelling",
+    }
+    if enforce_live_lease and operation_is_active and not _operation_has_live_lease(
+        {"lease": lease},
+        operation_id,
+    ):
+        status = "interrupted"
     fencing_token = int(operation.get("fencing_token") or 0)
     operation_stage_runs = [
         item
@@ -6531,12 +6982,38 @@ def _pipeline_snapshot_from_control(
             or operation.get("start_command")
             or ""
         ),
-        "message": str(operation.get("message") or ""),
-        "error": operation.get("error"),
+        "message": (
+            "后台执行已中断，等待用户指令。"
+            if status == "interrupted"
+            else str(operation.get("message") or "")
+        ),
+        "error": (
+            {
+                "code": "STALE_OPERATION_LEASE",
+                "message": "Operation 没有有效 Worker 租约。",
+            }
+            if status == "interrupted"
+            else operation.get("error")
+        ),
         "updated_at": str(operation.get("updated_at") or ""),
         "source": "control.db",
         "consistent": True,
     }
+
+
+def _operation_has_live_lease(snapshot: dict[str, Any], operation_id: str) -> bool:
+    lease = snapshot.get("lease") if isinstance(snapshot, dict) else None
+    if not isinstance(lease, dict):
+        return False
+    if str(lease.get("operation_id") or "") != str(operation_id or ""):
+        return False
+    try:
+        expires_at = datetime.fromisoformat(str(lease.get("expires_at") or ""))
+    except (TypeError, ValueError):
+        return False
+    if expires_at.tzinfo is None:
+        return False
+    return expires_at > datetime.now(timezone.utc)
 
 
 def _sync_pipeline_control_state(root: Path, payload: dict[str, Any]) -> None:
@@ -6608,8 +7085,23 @@ def _handle_pipeline_start(
     start_command = str(envelope.payload.get("start_command") or "").strip()
     if envelope.kind == "pipeline.run_stage" and not start_command:
         raise ControlPlaneError("COMMAND_INVALID", "run_stage 缺少 start_command。", status_code=400)
+    requested_start = start_command
     if start_command and start_command not in auto_run_commands():
-        raise ControlPlaneError("COMMAND_INVALID", f"无效起始阶段: {start_command}", status_code=400)
+        if envelope.kind == "pipeline.run_stage":
+            raise ControlPlaneError(
+                "COMMAND_INVALID",
+                f"阶段已被当前流程设置关闭: {start_command}",
+                status_code=409,
+            )
+        start_command, migrated = _normalize_pipeline_start_command(context, start_command)
+        if not start_command:
+            return {
+                "accepted": True,
+                "operation_status": "succeeded",
+                "message": "当前流程已完成；历史起始阶段已失效，无需再次执行。",
+            }
+        if migrated:
+            _append_log(f"[流程迁移] 已跳过失效阶段 {requested_start}，从 {start_command} 继续。")
     gate = _v2_gate_can_proceed(context, start_command or "auto_run")
     if not gate.get("can_proceed", False):
         raise ControlPlaneError(
@@ -6656,11 +7148,18 @@ def _handle_pipeline_resume(
     if not str(payload.get("start_command") or "").strip():
         previous_operation_id = str(payload.get("operation_id") or "").strip()
         previous = ControlStore(context).operation(previous_operation_id) if previous_operation_id else None
-        payload["start_command"] = str(
+        if previous_operation_id and previous is None:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "恢复流水线引用的 Operation 不存在，无法确定安全续跑位置。",
+                status_code=503,
+            )
+        candidate = str(
             (previous or {}).get("start_command")
             or _v2_pipeline_resume_command(context)
             or ""
         )
+        payload["start_command"], _migrated = _normalize_pipeline_start_command(context, candidate)
         if not payload["start_command"]:
             raise ControlPlaneError(
                 "STATE_UNAVAILABLE",
@@ -6851,8 +7350,8 @@ def _handle_accept_issue_risk(
     reason = str(envelope.payload.get("reason") or "").strip()
     if not issue_id:
         raise ControlPlaneError("COMMAND_INVALID", "缺少 issue_id。", status_code=400)
-    if len("".join(reason.split())) < 8:
-        raise ControlPlaneError("COMMAND_INVALID", "接受风险原因至少需要 8 个有效字符。", status_code=400)
+    if not reason:
+        reason = "用户在问题面板确认接受风险并继续流程"
     if not accept_risk_enabled():
         raise ControlPlaneError("POLICY_DENIED", "未开启接受风险功能。")
     actor = envelope.actor if isinstance(envelope.actor, dict) else {}
@@ -6970,7 +7469,10 @@ def _record_quality_gate_evaluation(
         item for item in findings
         if item["status"] in {"open", "in_progress"} and item["risk_class"] in {"block", "fatal", "critical"}
     ]
-    resolved_verdict = verdict or ("block" if blocks else "pass")
+    # 专项合规是提示性检查；发现项继续入库，但 GateEvaluation 不得阻断流程。
+    resolved_verdict = "pass" if command == "compliance-check" and verdict != "error" else (
+        verdict or ("block" if blocks else "pass")
+    )
     if resolved_verdict == "error":
         findings.append(
             {
@@ -7260,8 +7762,7 @@ def _handle_workspace_run_utility(
     operation_id: str,
 ) -> dict[str, Any]:
     command = str(envelope.payload.get("command") or "").strip()
-    allowed = set(COMMANDS) - set(auto_run_commands())
-    if command not in allowed:
+    if command not in WORKSPACE_UTILITY_COMMANDS:
         raise ControlPlaneError("COMMAND_INVALID", f"不支持的工作区 utility command: {command}", status_code=400)
     if (RUNNING and _same_path(CURRENT_RUN_ROOT, context.root)) or SUPERVISOR.is_running(context.root):
         raise ControlPlaneError("LEASE_CONFLICT", "当前已有任务或流水线正在运行。", status_code=409)
@@ -7947,8 +8448,6 @@ def _handle_gate_revalidate(
     operation_id: str,
 ) -> dict[str, Any]:
     artifact = context.root / "outputs" / "final.docx"
-    if not artifact.exists() or not artifact.is_file() or artifact.stat().st_size <= 0:
-        raise ControlPlaneError("GATE_BLOCKED", "final.docx 不存在或为空，不能签发正式稿凭据。")
     gate = _v2_gate_can_proceed(context, "build-docx")
     if not gate.get("can_proceed") or gate.get("block_count"):
         raise ControlPlaneError(
@@ -7959,6 +8458,9 @@ def _handle_gate_revalidate(
     try:
         preflight = _v2_export_preflight(context)
         _assert_formal_materials_verified(context)
+        refreshed = _synchronize_formal_delivery_artifacts(context, operation_id)
+        if not artifact.exists() or not artifact.is_file() or artifact.stat().st_size <= 0:
+            raise ControlPlaneError("GATE_BLOCKED", "final.docx 不存在或为空，不能签发正式稿凭据。")
         _assert_formal_artifacts_ready(context)
     except ControlPlaneError:
         raise
@@ -7990,7 +8492,12 @@ def _handle_gate_revalidate(
     return {
         "accepted": True,
         "operation_status": "succeeded",
-        "message": f"正式稿门禁已通过，GateReceipt={receipt.get('receipt_id', '')}",
+        "message": (
+            f"最新文档已同步并通过出稿检查，GateReceipt={receipt.get('receipt_id', '')}"
+            if refreshed
+            else f"正式稿门禁已通过，GateReceipt={receipt.get('receipt_id', '')}"
+        ),
+        "refreshed_stages": refreshed,
     }
 
 
@@ -8473,13 +8980,27 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
         goal_state = store.goal_state()
         activity_state = store.agent_activity_state()
         repair_state = store.repair_job_state()
-        if repair_state and str(repair_state.get("status") or "") in RUNNING_REPAIR_STATUSES:
+        if repair_state:
             actual_resume_command = _v2_pipeline_resume_command(context)
-            if actual_resume_command:
-                # Snapshot-only projection: do not mutate the repair Job just
-                # to keep a UI label current.
-                repair_state = {**repair_state, "resume_command": actual_resume_command}
+            repair_state = {
+                **repair_state,
+                "historical_resume_command": str(repair_state.get("resume_command") or ""),
+                "resume_command": actual_resume_command,
+            }
         issue_states = store.issue_states()
+        from agent.issues import effective_block_issues
+
+        open_issue_states = [
+            item for item in issue_states
+            if str(item.get("status") or "") in {"open", "in_progress"}
+        ]
+        effective_block_states = effective_block_issues(
+            context.root,
+            [
+                item for item in open_issue_states
+                if str(item.get("severity") or "") == "block"
+            ],
+        )
         material_items = store.material_states()
         material_summary = {
             "exists": bool(material_items),
@@ -8498,9 +9019,15 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             None,
         )
         pipeline_operation_id = str((pipeline_operation or {}).get("operation_id") or "")
-        pipeline_operation_running = str((pipeline_operation or {}).get("status") or "") in {
-            "queued", "running", "pausing", "cancelling",
-        }
+        pipeline_operation_state = str((pipeline_operation or {}).get("status") or "")
+        pipeline_operation_running = (
+            SUPERVISOR.is_running(context.root)
+            or pipeline_operation_state == "queued"
+            or (
+                pipeline_operation_state in {"running", "pausing", "cancelling"}
+                and _operation_has_live_lease(snapshot, pipeline_operation_id)
+            )
+        )
         pipeline_stage_runs = [
             item for item in (snapshot.get("stage_runs") or [])
             if pipeline_operation_id and str(item.get("operation_id") or "") == pipeline_operation_id
@@ -8517,8 +9044,22 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             snapshot.get("operations") or [],
             compatibility.get("pipeline") or {},
             snapshot.get("stage_runs") or [],
+            lease=snapshot.get("lease"),
+            enforce_live_lease=True,
         )
-        if active_stage_command and pipeline_operation_running:
+        pipeline_snapshot = _project_current_pipeline_policy(
+            context,
+            pipeline_snapshot,
+            worker_live=SUPERVISOR.is_running(context.root),
+        )
+        if (
+            active_stage_command
+            and pipeline_operation_running
+            and (
+                active_stage_command in set(auto_run_commands())
+                or SUPERVISOR.is_running(context.root)
+            )
+        ):
             pipeline_snapshot["current_stage"] = active_stage_command
         latest_pipeline_stage_by_command: dict[str, dict[str, Any]] = {}
         for item in pipeline_stage_runs:
@@ -8545,6 +9086,8 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
             step = dict(raw_step) if isinstance(raw_step, dict) else {}
             command = str(step.get("command") or "")
             is_utility = str(step.get("kind") or "") == "utility"
+            if not is_utility and command not in set(auto_run_commands()):
+                continue
             manifests = [item for item in artifact_states if str(item.get("producer") or "") == command]
             latest_stage = latest_pipeline_stage_by_command.get(command) or {}
             latest_stage_status = str(latest_stage.get("status") or "")
@@ -8553,6 +9096,19 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 step["ready"] = True
                 step["state"] = "running"
                 step["message"] = "运行中"
+                step["artifact_source"] = "control.db"
+            elif pipeline_operation_running and active_stage_command and step.get("state") in {
+                "running",
+                "recovering",
+                "retrying",
+            }:
+                # A V1 compatibility workflow can retain a stale running flag
+                # after the authoritative StageRun has advanced.  The plan must
+                # project exactly one active node: the current control.db run.
+                step["done"] = False
+                step["ready"] = previous_done
+                step["state"] = "ready" if previous_done else "blocked"
+                step["message"] = "等待当前阶段完成" if previous_done else "等待前置步骤"
                 step["artifact_source"] = "control.db"
             elif latest_stage_status in {"failed", "paused", "cancelled"}:
                 error = latest_stage.get("error")
@@ -8569,6 +9125,12 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                 step["ready"] = latest_stage_status != "cancelled"
                 step["state"] = "error" if latest_stage_status == "failed" else latest_stage_status
                 step["message"] = detail or state_labels[latest_stage_status]
+                step["artifact_source"] = "control.db"
+            elif latest_stage_status in {"queued", "running"} and not pipeline_operation_running:
+                step["done"] = False
+                step["ready"] = True
+                step["state"] = "interrupted"
+                step["message"] = "后台执行已中断，等待用户指令"
                 step["artifact_source"] = "control.db"
             elif manifests:
                 ready = all(str(item.get("status") or "") == "ready" for item in manifests)
@@ -8622,11 +9184,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                             1 for item in issue_states
                             if str(item.get("status") or "") in {"open", "in_progress"}
                         ),
-                        "block_count": sum(
-                            1 for item in issue_states
-                            if str(item.get("status") or "") in {"open", "in_progress"}
-                            and str(item.get("severity") or "") == "block"
-                        ),
+                        "block_count": len(effective_block_states),
                         "warn_count": sum(
                             1 for item in issue_states
                             if str(item.get("status") or "") in {"open", "in_progress"}
@@ -8634,11 +9192,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                         ),
                         "can_proceed": (
                             str((compatibility.get("issues_summary") or {}).get("mode") or "hard") == "soft"
-                            or not any(
-                                str(item.get("status") or "") in {"open", "in_progress"}
-                                and str(item.get("severity") or "") == "block"
-                                for item in issue_states
-                            )
+                            or not effective_block_states
                         ),
                         "mode": str((compatibility.get("issues_summary") or {}).get("mode") or "hard"),
                         "top_blocks": [
@@ -8648,9 +9202,7 @@ def api_v2_workspace_snapshot(workspace_id: str) -> JSONResponse:
                                 "title": item.get("title"),
                                 "stage_id": item.get("stage_id"),
                             }
-                            for item in issue_states
-                            if str(item.get("status") or "") in {"open", "in_progress"}
-                            and str(item.get("severity") or "") == "block"
+                            for item in effective_block_states
                         ][:8],
                 "source": "control.db",
                     },
@@ -8842,6 +9394,18 @@ async def api_run_command(request: Request) -> JSONResponse:
             {"ok": False, "message": f"未知命令: {command}，可用: {', '.join(sorted(COMMANDS))}"},
             status_code=400,
         )
+    registered_core_commands = {
+        stage.command for stage in STAGE_SPECS if stage.kind != "utility"
+    }
+    if command in registered_core_commands and command not in set(auto_run_commands()):
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"阶段已被当前流程策略关闭，禁止从旧入口执行: {command}",
+                "code": "STAGE_DISABLED_BY_POLICY",
+            },
+            status_code=409,
+        )
     if command not in {"validate", "init-demo"} and ACTIVE_RUN_ROOT is None:
         return JSONResponse(
             {"ok": False, "message": "请先点击“开始生成”，创建本次运行工作空间后再执行流程命令。"},
@@ -8930,10 +9494,10 @@ async def api_start_pipeline(request: Request) -> JSONResponse:
     if sent_run_id and sent_run_id != ACTIVE_RUN_ID:
         return JSONResponse({"ok": False, "message": "工作空间已变化，请刷新后重试。"}, status_code=409)
     start_command = str(body.get("start_command", "")).strip()
-    if start_command and start_command not in auto_run_commands():
-        return JSONResponse({"ok": False, "message": f"无效起始阶段: {start_command}"}, status_code=400)
     try:
         context = _workspace_context(sent_run_id or ACTIVE_RUN_ID)
+        if start_command and start_command not in auto_run_commands():
+            start_command, _migrated = _normalize_pipeline_start_command(context, start_command)
         store = ControlStore(context)
         envelope = CommandEnvelope.from_mapping(
             {
@@ -8988,8 +9552,15 @@ def api_pause_run(request: Request) -> JSONResponse:
 @app.get("/api/logs")
 def api_logs(lines: int = Query(200, ge=1, le=2000), workspace_id: str = "") -> JSONResponse:
     if workspace_id:
-        workspace_lines = _workspace_log_lines(_workspace_context(workspace_id).root, LOG_MAX)
-        return JSONResponse({"lines": workspace_lines[-lines:], "total": len(workspace_lines)})
+        workspace_records = _workspace_log_records(_workspace_context(workspace_id).root, LOG_MAX)
+        selected = workspace_records[-lines:]
+        return JSONResponse(
+            {
+                "lines": [record["line"] for record in selected],
+                "records": selected,
+                "total": len(workspace_records),
+            }
+        )
     return JSONResponse({"lines": LOG_LINES[-lines:], "total": len(LOG_LINES)})
 
 
@@ -9006,9 +9577,25 @@ async def api_logs_stream(request: Request, workspace_id: str = "") -> Streaming
         while True:
             if await request.is_disconnected():
                 break
-            available_lines = _workspace_log_lines(root, LOG_MAX) if root else LOG_LINES
-            while last < len(available_lines):
-                yield f"data: {json.dumps({'type': 'log', 'line': available_lines[last]}, ensure_ascii=False)}\n\n"
+            available_records = (
+                _workspace_log_records(root, LOG_MAX)
+                if root
+                else [
+                    {
+                        "line": line,
+                        "ts": "",
+                        "command": "",
+                        "stage": "",
+                        "progress": None,
+                        "progress_text": "",
+                        "display": True,
+                    }
+                    for line in LOG_LINES
+                ]
+            )
+            while last < len(available_records):
+                record = available_records[last]
+                yield f"data: {json.dumps({'type': 'log', **record}, ensure_ascii=False)}\n\n"
                 last += 1
             if control_store is not None:
                 events = control_store.events(last_event, limit=200)
@@ -10240,38 +10827,52 @@ def api_clean_workspace(request: Request) -> JSONResponse:
 def _reconcile_pipeline_from_control(context: WorkspaceContext) -> bool:
     """Fail closed after restart; explicit V2 resume owns all recovery."""
     store = ControlStore(context)
-    operation = store.snapshot().get("operation")
-    if not isinstance(operation, dict):
-        return False
-    status = str(operation.get("status") or "")
-    operation_id = str(operation.get("operation_id") or "")
-    fencing_token = int(operation.get("fencing_token") or 0)
-    if status == "pausing":
+    snapshot = store.snapshot()
+    all_operations = list(snapshot.get("operations") or [])
+    for operation in all_operations:
+        store.cancel_active_stage_runs(
+            str(operation.get("operation_id") or ""),
+            disposition="orphaned_after_restart",
+            error={"code": "ORPHANED_AFTER_RESTART"},
+        )
+    operations = [
+        item
+        for item in all_operations
+        if str(item.get("status") or "")
+        in {"queued", "running", "pausing", "cancelling", "blocked"}
+    ]
+    for operation in operations:
+        operation_id = str(operation.get("operation_id") or "")
+        status = str(operation.get("status") or "")
+        fencing_token = int(operation.get("fencing_token") or 0)
+        if status == "blocked":
+            store.sync_operation(
+                operation_id,
+                "blocked",
+                message=str(operation.get("message") or "后台执行已中断，等待用户指令。"),
+                error=operation.get("error"),
+                fencing_token=fencing_token,
+            )
+            continue
+        if status == "pausing":
+            new_status = "paused"
+            message = "服务重启时完成暂停"
+            error = None
+        elif status == "cancelling":
+            new_status = "cancelled"
+            message = "服务重启时完成取消"
+            error = None
+        else:
+            new_status = "blocked"
+            message = "服务重启后后台执行已中断，等待用户指令。"
+            error = {"code": "ORPHANED_AFTER_RESTART", "previous_status": status}
         store.sync_operation(
             operation_id,
-            "paused",
-            message="服务重启时完成暂停",
+            new_status,
+            message=message,
+            error=error,
             fencing_token=fencing_token,
         )
-        return False
-    if status == "cancelling":
-        store.sync_operation(
-            operation_id,
-            "cancelled",
-            message="服务重启时完成取消",
-            fencing_token=fencing_token,
-        )
-        return False
-    if status not in {"queued", "running"}:
-        return False
-
-    store.sync_operation(
-        operation_id,
-        "blocked",
-        message="服务重启后 Pipeline 未自动恢复；请通过 V2 Command 显式继续。",
-        error={"code": "ORPHANED_AFTER_RESTART", "previous_status": status},
-        fencing_token=fencing_token,
-    )
     return False
 
 
@@ -10334,6 +10935,13 @@ def _startup_reconcile() -> None:
     # reconciled so subsequent status transitions carry the same operation
     # identity and fencing token into control.db.
     SUPERVISOR.set_status_listener(_sync_pipeline_control_state)
+    # .env 是流程开关的持久化真相。重启后必须重新注入进程环境，
+    # 否则界面显示“审核已关闭”，后端仍会使用默认开启值。
+    try:
+        _apply_flow_settings_to_env(_flow_settings())
+        _refresh_workflow_cache()
+    except Exception as exc:
+        _append_log(f"[警告] 加载流程设置失败: {exc}")
     # 启动时把“使用中”的大模型刷进进程环境，避免仅写了 models.json/.env 但进程仍用旧环境变量
     try:
         store = _read_models_store()

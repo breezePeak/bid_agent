@@ -277,9 +277,9 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
                     add(
                         _check(
                             "compliance blocking",
-                            "fail",
-                            "专项合规检查存在 fatal/critical 阻断项",
-                            "请查看 workspace/compliance_report.json 并修复后重新执行 compliance-check",
+                            "warn",
+                            "专项合规检查存在 fatal/critical 提示项",
+                            "请查看 workspace/compliance_report.json 并人工复核",
                         )
                     )
                 elif compliance.get("need_manual_review") or summary.get("need_manual_review"):

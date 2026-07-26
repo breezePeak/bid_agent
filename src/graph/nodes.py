@@ -737,7 +737,7 @@ def compliance_check_node(state) -> dict:
     _start_stage(state, "compliance_check", "专项合规检查")
     try:
         report_path = root / "workspace" / "compliance_report.json"
-        # resume 也要重新校验 blocking，避免半成品/旧报告被静默跳过
+        # resume 时复用报告；历史 blocking 状态按提示处理。
         if _is_resume(state) and stage_resume_ready(root, "compliance_check") and report_path.exists():
             report_data = read_json(report_path)
             status = compliance_review_status(report_data if isinstance(report_data, dict) else {})
@@ -755,7 +755,7 @@ def compliance_check_node(state) -> dict:
             message = "need_manual_review"
         update = {"compliance_report_path": str(report_path)}
         _persist_state(state, update, stage="compliance_check", status=status, message=message)
-        # pre_build 阶段：blocking 标记 error 但仍允许继续出稿，由 check_format 终稿硬门禁拦截
+        # 专项合规仅提示，任何检查结果都不阻断后续出稿。
         return update
     except Exception as exc:
         _persist_error_state(state, "compliance_check", exc)

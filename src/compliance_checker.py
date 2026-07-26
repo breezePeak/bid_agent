@@ -1117,16 +1117,21 @@ def summarize_compliance_items(items: list[dict[str, Any]]) -> dict[str, Any]:
         if item.get("need_manual_review"):
             counts["need_manual_review"] += 1
 
-    blocking = any(
+    hard_findings = any(
         stringify(item.get("status")) == STATUS_FAIL
         and stringify(item.get("severity")) in {"fatal", "critical"}
         for item in items
     )
-    need_manual = any(bool(item.get("need_manual_review")) for item in items) or blocking
-    ok = not blocking and counts["fail"] == 0
+    # 专项合规检查是提示性检查：保留 fatal/critical 原始等级供人工判断，
+    # 但不得阻断流水线或正式出稿。
+    blocking = False
+    need_manual = any(bool(item.get("need_manual_review")) for item in items) or hard_findings
+    ok = counts["fail"] == 0
     return {
         "ok": ok,
         "blocking": blocking,
+        "advisory_only": True,
+        "hard_findings": hard_findings,
         "need_manual_review": need_manual,
         "max_severity": _max_severity([i for i in items if stringify(i.get("status")) in {STATUS_FAIL, STATUS_WARN}] or items),
         "counts": counts,
@@ -1187,6 +1192,8 @@ def normalize_compliance_report(data: Any) -> dict[str, Any]:
         "items": normalized_items,
         "ok": bool(summary["ok"]),
         "blocking": bool(summary["blocking"]),
+        "advisory_only": True,
+        "hard_findings": bool(summary.get("hard_findings")),
         "need_manual_review": bool(summary["need_manual_review"]),
         "max_severity": summary["max_severity"],
     }
@@ -1230,8 +1237,8 @@ def run_compliance_check(
         report["phase"] = phase
         output_path = root / "workspace" / "compliance_report.json"
         write_json(output_path, report)
-        if raise_on_blocking and report.get("blocking"):
-            raise RuntimeError(f"终稿合规检查失败（缺少 final.md），请查看 {output_path}")
+        if report.get("blocking"):
+            print(f"[提示] 终稿合规检查发现高风险项（不阻断流程），请查看 {output_path}")
         return output_path
 
     try:
@@ -1359,7 +1366,7 @@ def run_compliance_check(
     except Exception as exc:
         print(f"[警告] 同步合规 Issue 失败: {exc}")
 
-    if raise_on_blocking and report.get("blocking"):
+    if report.get("blocking"):
         fatal_or_critical = [
             f"{item.get('check_id')}:{item.get('check_name')}"
             for item in report.get("items", [])
@@ -1368,7 +1375,7 @@ def run_compliance_check(
             and item.get("severity") in {"fatal", "critical"}
         ][:8]
         detail = "；".join(fatal_or_critical) if fatal_or_critical else "存在阻断项"
-        raise RuntimeError(f"专项合规检查阻断出稿：{detail}。详见 {output_path}")
+        print(f"[提示] 专项合规检查发现高风险项（不阻断流程）：{detail}。详见 {output_path}")
     return output_path
 
 
@@ -1378,7 +1385,7 @@ def compliance_gate_status(report: dict[str, Any]) -> str:
     if report.get("blocking") or (
         isinstance(report.get("summary"), dict) and report["summary"].get("blocking")
     ):
-        return "error"
+        return "warn"
     if report.get("need_manual_review") or (
         isinstance(report.get("summary"), dict) and report["summary"].get("need_manual_review")
     ):
@@ -1389,18 +1396,17 @@ def compliance_gate_status(report: dict[str, Any]) -> str:
 def validate_compliance_report(root: Path, *, raise_on_blocking: bool = True) -> dict[str, Any]:
     report_path = root / "workspace" / "compliance_report.json"
     if not report_path.exists():
-        raise ValueError(f"合规检查报告不存在: {report_path}")
-    report = read_json(report_path)
+        return {}
+    try:
+        report = read_json(report_path)
+    except Exception:
+        return {}
     if not isinstance(report, dict):
-        raise ValueError("compliance_report.json 必须是 JSON 对象")
+        return {}
     normalized = normalize_compliance_report(report)
-    if raise_on_blocking and normalized.get("blocking"):
-        raise RuntimeError(
-            f"专项合规检查存在 fatal/critical 失败项，请查看 {report_path}"
-        )
     return normalized
 
 
 def enforce_final_compliance_gate(root: Path | None = None) -> Path:
-    """终稿硬门禁：基于 final.md 复检，blocking 则抛错阻止成功完成。"""
-    return run_compliance_check(root, raise_on_blocking=True, phase="final")
+    """终稿提示性复检：记录合规风险，但不阻止流程成功完成。"""
+    return run_compliance_check(root, raise_on_blocking=False, phase="final")

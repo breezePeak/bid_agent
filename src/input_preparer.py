@@ -4,6 +4,7 @@ import shutil
 from pathlib import Path
 
 from company_extractor import run_company_import
+from reference_extractor import run_reference_import
 from template_analyzer import analyze_template
 from tender_extractor import run_tender_import
 from utils import ensure_dirs, project_root
@@ -26,6 +27,7 @@ def prepare_inputs(root: Path | None = None) -> None:
     analyze_template(root)
     run_tender_import(root)
     run_company_import(root)
+    run_reference_import(root)
 
     print("[完成] 资料导入完毕。")
 

@@ -27,8 +27,15 @@
       <div class="wl-doc-header">
         <h3>文档编辑 <span v-if="docPageCount > 0" class="wl-doc-pagecount">— 约 {{ docPageCount }} 页 (A4)</span></h3>
         <div class="wl-doc-actions">
+          <span
+            v-if="docxDownloadMessage"
+            class="wl-doc-download-status"
+            :class="{ error: docxDownloadError }"
+          >{{ docxDownloadMessage }}</span>
           <button class="btn btn-sm" @click="mode = 'chat'">&larr; 返回聊天</button>
-          <button class="btn btn-sm" @click="downloadDocx">下载 Word</button>
+          <button class="btn btn-sm" :disabled="docxDownloading" @click="downloadDocx">
+            {{ docxDownloading ? '正在同步并生成…' : '下载 Word' }}
+          </button>
           <button class="btn btn-sm" @click="downloadMd">下载 MD</button>
         </div>
       </div>
@@ -92,6 +99,9 @@ const chatWidth = ref(Math.round((window.innerWidth - 260) * 0.4))
 const docPageCount = ref(0)
 const railFocus = ref('')
 const pipelineLogs = ref([])
+const docxDownloading = ref(false)
+const docxDownloadMessage = ref('')
+const docxDownloadError = ref(false)
 
 function openDoc() {
   mode.value = 'doc'
@@ -145,10 +155,16 @@ function onFocusRail(key) {
 function onPipelineLog(payload) {
   const line = typeof payload === 'string' ? payload : (payload?.line || '')
   const stage = typeof payload === 'object' ? (payload.stage || '') : ''
+  const at = typeof payload === 'object' ? (payload.at || '') : ''
+  const kind = typeof payload === 'object' ? (payload.kind || 'log') : 'log'
+  const progress = typeof payload === 'object' ? (payload.progress || null) : null
+  const progressText = typeof payload === 'object' ? (payload.progressText || '') : ''
   if (!line) return
+  const signature = `${at}|${stage}|${line}`
+  if (pipelineLogs.value.some(row => `${row.at || ''}|${row.stage || ''}|${row.line || ''}` === signature)) return
   pipelineLogs.value = [
     ...pipelineLogs.value.slice(-400),
-    { line, stage, at: new Date().toISOString() },
+    { line, stage, kind, progress, progressText, at: at || new Date().toISOString() },
   ]
 }
 
@@ -188,10 +204,18 @@ function previewFile(path) {
   previewFileName.value = path
 }
 async function downloadDocx() {
+  if (docxDownloading.value) return
+  docxDownloading.value = true
+  docxDownloadError.value = false
+  docxDownloadMessage.value = '正在同步当前编辑稿、Word 和格式报告，请稍候…'
   try {
     await downloadFinalDocx(props.runId)
+    docxDownloadMessage.value = '文档已同步，下载已开始。'
   } catch (error) {
-    window.alert(error?.response?.data?.message || error?.message || '正式稿门禁未通过，无法下载 Word。')
+    docxDownloadError.value = true
+    docxDownloadMessage.value = error?.response?.data?.message || error?.message || '文档同步失败，暂时无法下载 Word。'
+  } finally {
+    docxDownloading.value = false
   }
 }
 function downloadMd() { downloadFinalMd(props.runId) }

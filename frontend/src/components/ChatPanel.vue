@@ -16,7 +16,7 @@
 
       <!-- messages -->
       <div
-        v-for="(msg, idx) in messages"
+        v-for="(msg, idx) in visibleMessages"
         :key="idx"
         class="chat-msg"
         :class="{ user: msg.role === 'user', assistant: msg.role === 'assistant', system: msg.role === 'system', thinking: idx === streamingIdx, 'stage-log-msg': msg.role === 'system' && msg.kind === 'stage_log', 'resolved-status-msg': msg.runtimeResolved }"
@@ -365,6 +365,18 @@ const activeStageLog = ref(null)
 let activeLogBodyEl = null
 
 const uploadedAll = computed(() => files.tender.length > 0 && files.company.length > 0 && files.template.length > 0)
+const visibleMessages = computed(() => {
+  const seenRuntime = new Set()
+  return messages.value.filter(message => {
+    if (message?.kind === 'stage_log') return false
+    const content = String(message?.content || '').trim()
+    const runtimeNoise = /(?:流水线启动请求失败|后端流水线已停止|无效起始阶段)/.test(content)
+    if (!runtimeNoise) return true
+    if (seenRuntime.has(content)) return false
+    seenRuntime.add(content)
+    return true
+  })
+})
 const planDone = computed(() => planSteps.value.length > 0 && planSteps.value.every(s => s.status === 'done'))
 const docxReady = ref(false)
 const recoveryState = ref(null)
@@ -490,7 +502,7 @@ const quickBtns = computed(() => {
       { label: '查看全文审核', type: 'show_step', command: 'global-review' },
     ]
     if (complianceSummary.value) {
-      btns.splice(2, 0, { label: complianceSummary.value.blocking ? '合规阻断详情' : '查看专项合规', type: 'show_step', command: 'compliance-check' })
+      btns.splice(2, 0, { label: complianceSummary.value.blocking ? '查看合规风险提示' : '查看专项合规', type: 'show_step', command: 'compliance-check' })
     }
     btns.push({ label: '材料清单', type: 'show_step', command: 'build-materials-checklist' })
     btns.push({ label: '流水线日志', type: 'show_step', command: 'logs' })
@@ -564,7 +576,11 @@ async function uploadFiles(category, fileList) {
     if (r.ok) {
       await loadSourceFiles()
       addMessage('system', `已上传: ${files[category].join(', ')}`)
-      if (uploadedAll.value) { showPlan.value = true; loadStatus().then(maybeAutoStart) }
+      if (uploadedAll.value) {
+        showPlan.value = true
+        await loadStatus()
+        addMessage('assistant', '资料已齐全，执行计划已准备好。等待你的指令后再开始。')
+      }
     }
   } catch (e) { addMessage('system', `上传失败: ${e.message}`) }
 }
@@ -584,6 +600,12 @@ function onChatFileSelected(e) {
 // ---- status ----
 function isRepairTaskName(value) {
   return /(minimal[-_ ]?repair|repair[-_ ]?issues?|最小修复|修复问题)/i.test(String(value || ''))
+}
+
+function addRuntimeMessageOnce(role, content, actions = []) {
+  const text = String(content || '').trim()
+  if (!text || messages.value.some(message => String(message?.content || '').trim() === text)) return
+  addMessage(role, text, actions, { kind: 'runtime_status', persist: false })
 }
 
 async function loadSourceFiles() {
@@ -797,7 +819,7 @@ function updateFromStatus(data) {
     files.tender = (data.sources.tender || []).map(f => f.name || f)
     files.company = (data.sources.company || []).map(f => f.name || f)
     files.template = (data.sources.template || []).map(f => f.name || f)
-    if (uploadedAll.value) { showPlan.value = true; maybeAutoStart() }
+    if (uploadedAll.value) showPlan.value = true
   }
   const outputs = data.outputs || {}
   docxReady.value = !!(outputs.final_docx || outputs.final_md)
@@ -822,7 +844,12 @@ function updateFromStatus(data) {
   if (pipelineStatus === 'complete' && autoExecuting.value) {
     autoExecuting.value = false
     closeSSE()
-    addMessage('assistant', '全部流程已完成！可以编辑文档或下载。', [{ type: 'show_doc_editor', label: '文档编辑' }])
+    if (planDone.value) {
+      addMessage('assistant', '全部流程已完成！可以编辑文档或下载。', [{ type: 'show_doc_editor', label: '文档编辑' }])
+    } else {
+      const next = planSteps.value.find(s => s.status !== 'done')
+      addMessage('assistant', `本次后台操作已完成，整体流程尚未结束${next ? '；下一步是「' + next.label + '」' : ''}。`)
+    }
   } else if (['failed', 'paused', 'interrupted', 'cancelled'].includes(pipelineStatus) && autoExecuting.value) {
     autoExecuting.value = false
     closeSSE()
@@ -833,7 +860,7 @@ function updateFromStatus(data) {
       cancelled: '取消',
       failed: '停止',
     }[pipelineStatus] || '停止'
-    addMessage('assistant', `后端流水线已${terminalLabel}${detail ? '：' + detail : ''}`)
+    addRuntimeMessageOnce('assistant', `后端流水线已${terminalLabel}${detail ? '：' + detail : ''}`)
   }
   if (running.value && !repairTaskRunning) {
     autoExecuting.value = true
@@ -921,16 +948,7 @@ function notifyMaterialsStatus(payload) {
   if (deferred <= 0) lastMaterialsNotifyKey = ''
 }
 
-// ---- auto run ----
-function maybeAutoStart() {
-  if (!uploadedAll.value) return
-  if (autoStarted.value || autoExecuting.value || running.value || repairExecuting.value) return
-  if (planDone.value) return
-  autoStarted.value = true
-  showPlan.value = true
-  addMessage('assistant', '资料已齐全，自动开始执行流程。每完成一个阶段会自动推进到下一个，无需手动点击。可随时输入「暂停」或提问。')
-  nextTick(() => startAutoRun())
-}
+// ---- pipeline run (only after an explicit user action) ----
 async function startAutoRun(fromCommand = null) {
   if (autoExecuting.value || sending.value || repairExecuting.value) return
   autoExecuting.value = true
@@ -943,12 +961,12 @@ async function startAutoRun(fromCommand = null) {
     const body = resp?.data || {}
     if (!body.ok) {
       autoExecuting.value = false; closeSSE(); ensureStatusPolling()
-      addMessage('system', `流水线启动失败: ${body.message || ''}`)
+      addRuntimeMessageOnce('system', `流水线启动失败: ${body.message || ''}`)
     }
   } catch (e) {
     autoExecuting.value = false; closeSSE(); ensureStatusPolling()
     const message = e?.response?.data?.message || e?.message || ''
-    addMessage('system', `流水线启动请求失败: ${message}`)
+    addRuntimeMessageOnce('system', `流水线启动请求失败: ${message}`)
   }
 }
 async function pauseAutoRun() {
@@ -997,8 +1015,6 @@ async function runCommand(cmd) {
 
 // ---- SSE ----
 // 详细日志分流到右侧「日志」；聊天仅保留失败/门禁等强信号。
-const CHAT_LOG_RE = /(失败|错误|质量门禁|阻断|✗|Exception|Traceback|启动失败)/i
-const VALUABLE_LOG_RE = /(失败|错误|重试|质量门禁|SubAgent|warn|启动|完成|执行|章节|并发|生成|写作|审核|改稿|进度|LLM|开始|成功|跳过|警告|✗)/i
 let lastLogLine = ''
 
 function currentStageLabel() {
@@ -1015,27 +1031,12 @@ function collapseActiveStageLog() {
   activeLogBodyEl = null
 }
 
-function pushValuableLog(line, kind = 'log') {
+function pushValuableLog(line, kind = 'log', stage = '', at = '', progress = null, progressText = '', toPipelineLog = true) {
   const text = String(line || '').trim()
   if (!text || text === lastLogLine) return
   lastLogLine = text
-  const label = currentStageLabel()
-  emit('pipeline-log', { line: text, stage: label, kind })
-  if (!CHAT_LOG_RE.test(text)) return
-  let m = activeStageLog.value
-  if (!m || m.stageLabel !== label) {
-    if (m) collapseActiveStageLog()
-    m = { role: 'system', kind: 'stage_log', content: text, stageLabel: label, collapsed: true, logCount: 1, thinking: '', thinkingExpanded: false, created_at: '', actions: [] }
-    messages.value.push(m)
-    activeStageLog.value = m
-  } else {
-    m.content = m.content ? m.content + '\n' + text : text
-    m.logCount = (m.logCount || 0) + 1
-  }
-  nextTick(() => {
-    scrollBottom()
-    if (activeLogBodyEl) activeLogBodyEl.scrollTop = activeLogBodyEl.scrollHeight
-  })
+  const label = String(stage || '').trim() || currentStageLabel()
+  if (toPipelineLog) emit('pipeline-log', { line: text, stage: label, kind, at, progress, progressText })
 }
 
 function connectSSE() {
@@ -1047,14 +1048,23 @@ function connectSSE() {
     try {
       const d = JSON.parse(e.data)
       if (!d || !d.line) return
+      if (d.display === false) return
       const line = String(d.line)
-      if (d.type === 'run_event' || d.type === 'workspace_event') {
+      if (d.type === 'log') {
+        // 阶段 stdout/stderr 全量进入右侧日志；聊天区仍只保留错误等强信号。
+        pushValuableLog(
+          line,
+          'log',
+          d.stage || d.command || '',
+          d.ts || '',
+          d.progress || null,
+          d.progress_text || '',
+        )
+      } else if (d.type === 'run_event' || d.type === 'workspace_event') {
         const et = (d.event && (d.event.event_type || d.event.kind)) || ''
         // success 由 status 轮询给出带用时的更漂亮消息，这里避免重复
         if (et === 'success') return
-        pushValuableLog(line, d.type)
-      } else {
-        if (VALUABLE_LOG_RE.test(line)) pushValuableLog(line, 'log')
+        // 控制面事件既不进入聊天，也不进入右侧阶段执行日志。
       }
     } catch (_) { /* */ }
   }
@@ -1685,22 +1695,8 @@ async function loadChatHistory() {
     const resp = await fetchChatMessages(props.runId)
     const body = resp && resp.data
     if (body && body.ok && Array.isArray(body.messages) && body.messages.length) {
-      messages.value = body.messages.map(m => {
+      messages.value = body.messages.filter(m => m?.kind !== 'stage_log').map(m => {
         const kind = m.kind || (m.role === 'system' ? 'system' : 'message')
-        if (kind === 'stage_log') {
-          const content = m.content || ''
-          const firstLine = content.split('\n')[0] || ''
-          const mm = firstLine.match(/^\[([^\]]+)\]/)
-          return {
-            role: 'system',
-            kind: 'stage_log',
-            content,
-            stageLabel: mm ? mm[1] : '阶段日志',
-            collapsed: true,
-            logCount: content ? content.split('\n').length : 0,
-            thinking: '', thinkingExpanded: false, created_at: m.created_at || '', actions: [],
-          }
-        }
         return {
           role: m.role,
           content: m.content,
@@ -1730,8 +1726,6 @@ onMounted(async () => {
     autoExecuting.value = true
     autoStarted.value = true
     connectSSE()
-  } else {
-    maybeAutoStart()
   }
   ensureStatusPolling()
 })

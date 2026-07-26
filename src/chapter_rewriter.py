@@ -130,7 +130,7 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
     score_points = load_score_points(root)
     global_facts = load_global_facts(root)
     related_sps = select_score_points(score_points, job.get("score_point_ids", []))
-    selected_tender, selected_company = _load_selected_chunks(root, context)
+    selected_tender, selected_company, selected_reference = _load_selected_chunks(root, context)
 
     chapter_info = {
         "id": stringify(job.get("chapter_id")),
@@ -140,8 +140,27 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
         "sections": job.get("sections", []),
     }
     prompt = load_agent_prompt(root, "chapter_rewriter")
-    tender_context = summarize_chunk_payload(selected_tender, total_max_chars=REWRITE_CONTEXT_MAX_CHARS // 2, per_chunk_chars=1200)
-    company_context = summarize_chunk_payload(selected_company, total_max_chars=REWRITE_CONTEXT_MAX_CHARS // 2, per_chunk_chars=1000)
+    tender_context = summarize_chunk_payload(
+        selected_tender,
+        total_max_chars=REWRITE_CONTEXT_MAX_CHARS * 2 // 5,
+        per_chunk_chars=1200,
+    )
+    company_context = summarize_chunk_payload(
+        selected_company,
+        total_max_chars=REWRITE_CONTEXT_MAX_CHARS * 3 // 10,
+        per_chunk_chars=1000,
+    )
+    reference_context = summarize_chunk_payload(
+        selected_reference,
+        total_max_chars=REWRITE_CONTEXT_MAX_CHARS * 3 // 10,
+        per_chunk_chars=1000,
+    )
+    writing_brief_path = root / "inputs" / "writing_brief.md"
+    writing_brief = (
+        writing_brief_path.read_text(encoding="utf-8").strip()
+        if writing_brief_path.exists()
+        else ""
+    )
 
     problems_count = len(review.get("problems", []))
     priority_fixes = review.get("priority_fixes") if isinstance(review.get("priority_fixes"), list) else []
@@ -195,6 +214,7 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
             "max_severity": stringify(review.get("max_severity")),
             "tender_chunk_count": len(tender_context),
             "company_chunk_count": len(company_context),
+            "reference_chunk_count": len(reference_context),
         },
         chapter_id=chapter_id,
         temperature=0.35,
@@ -212,6 +232,8 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
                         f"{compact_json(related_sps)}\n\n"
                         "## 全局事实\n\n"
                         f"{compact_json(global_facts)}\n\n"
+                        "## 项目写作要求（用户经验与编写偏好）\n\n"
+                        f"{writing_brief or '未提供'}\n\n"
                         "## 本轮优先修复项（必须逐项处理）\n\n"
                         f"{compact_json(rewrite_fixes)}\n\n"
                         "## 完整审核结果\n\n"
@@ -222,6 +244,8 @@ def rewrite_chapter(chapter_id: str, root: Path | None = None) -> Path:
                         f"{compact_json(tender_context)}\n\n"
                         "## 选中的公司资料片段\n\n"
                         f"{compact_json(company_context)}\n\n"
+                        "## 选中的外部参考资料片段\n\n"
+                        f"{compact_json(reference_context)}\n\n"
                         "## 原章节正文\n\n"
                         f"{trim_text(old_md, REWRITE_CONTEXT_MAX_CHARS // 2)}"
                     ),
@@ -297,6 +321,11 @@ def review_fix_all(
     behaviour; a supplied scope is authoritative for every review, rewrite,
     and Issue synchronization in this invocation.
     """
+    from pipeline_registry import chapter_review_enabled
+
+    if not chapter_review_enabled():
+        print("[跳过] 设置已关闭章节审核，不执行审核改稿。")
+        return
     root = root or project_root()
     from subagent_runner import run_review_all, run_rewrite_all
     from stage_validation import chapter_ids as valid_chapter_ids, review_ids as valid_review_ids

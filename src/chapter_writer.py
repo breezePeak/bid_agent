@@ -69,11 +69,17 @@ def _build_chunk_payload(
     return payload
 
 
-def _load_selected_chunks(root: Path, context: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _load_selected_chunks(
+    root: Path,
+    context: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     tender_chunks = read_json(root / "workspace" / "chunks" / "tender_chunks.json")
     company_chunks = read_json(root / "workspace" / "chunks" / "company_chunks.json")
+    reference_path = root / "workspace" / "chunks" / "reference_chunks.json"
+    reference_chunks = read_json(reference_path) if reference_path.exists() else []
     tender_index = _chunks_by_id(tender_chunks if isinstance(tender_chunks, list) else [])
     company_index = _chunks_by_id(company_chunks if isinstance(company_chunks, list) else [])
+    reference_index = _chunks_by_id(reference_chunks if isinstance(reference_chunks, list) else [])
 
     selected_tender = []
     for item in context.get("selected_tender_chunks", []):
@@ -91,7 +97,15 @@ def _load_selected_chunks(root: Path, context: dict[str, Any]) -> tuple[list[dic
         else:
             print(f"[警告] 公司资料 chunk id 未找到: {chunk_id}")
 
-    return selected_tender, selected_company
+    selected_reference = []
+    for item in context.get("selected_reference_chunks", []):
+        chunk_id = stringify(item.get("id")) if isinstance(item, dict) else stringify(item)
+        if chunk_id in reference_index:
+            selected_reference.append(reference_index[chunk_id])
+        else:
+            print(f"[警告] 外部参考资料 chunk id 未找到: {chunk_id}")
+
+    return selected_tender, selected_company, selected_reference
 
 
 def write_chapter_from_job_context(
@@ -105,9 +119,19 @@ def write_chapter_from_job_context(
     global_facts = load_global_facts(root)
     tender_requirements = load_tender_requirements(root)
     related_score_points = select_score_points(score_points, job.get("score_point_ids", []))
-    selected_tender_chunks, selected_company_chunks = _load_selected_chunks(root, context)
+    selected_tender_chunks, selected_company_chunks, selected_reference_chunks = _load_selected_chunks(root, context)
     tender_payload = _build_chunk_payload(selected_tender_chunks, context.get("selected_tender_chunks", []))
     company_payload = _build_chunk_payload(selected_company_chunks, context.get("selected_company_chunks", []))
+    reference_payload = _build_chunk_payload(
+        selected_reference_chunks,
+        context.get("selected_reference_chunks", []),
+    )
+    writing_brief_path = root / "inputs" / "writing_brief.md"
+    writing_brief = (
+        writing_brief_path.read_text(encoding="utf-8").strip()
+        if writing_brief_path.exists()
+        else ""
+    )
     manual_review = manual_review_context_for_chapter(root, stringify(job.get("chapter_id")))
     materials_items = job.get("materials_checklist_items")
     if not isinstance(materials_items, list) or not materials_items:
@@ -123,12 +147,17 @@ def write_chapter_from_job_context(
     }
     tender_context = summarize_chunk_payload(
         tender_payload,
-        total_max_chars=WRITER_CONTEXT_MAX_CHARS // 2,
+        total_max_chars=WRITER_CONTEXT_MAX_CHARS * 2 // 5,
         per_chunk_chars=1200,
     )
     company_context = summarize_chunk_payload(
         company_payload,
-        total_max_chars=WRITER_CONTEXT_MAX_CHARS // 2,
+        total_max_chars=WRITER_CONTEXT_MAX_CHARS * 3 // 10,
+        per_chunk_chars=1000,
+    )
+    reference_context = summarize_chunk_payload(
+        reference_payload,
+        total_max_chars=WRITER_CONTEXT_MAX_CHARS * 3 // 10,
         per_chunk_chars=1000,
     )
     profile = load_project_profile(root)
@@ -151,6 +180,7 @@ def write_chapter_from_job_context(
             "score_point_count": len(related_score_points),
             "tender_chunk_count": len(tender_context),
             "company_chunk_count": len(company_context),
+            "reference_chunk_count": len(reference_context),
             "manual_review_instructions": len(manual_review.get("operator_instructions", [])),
             "expected_pages": expected_pages,
         },
@@ -176,16 +206,20 @@ def write_chapter_from_job_context(
                         f"{compact_json(tender_requirements)}\n\n"
                         "## 当前章节相关模板任务\n\n"
                         f"{compact_json(job.get('template_tasks', []))}\n\n"
+                        "## 项目写作要求（用户经验与编写偏好）\n\n"
+                        f"{writing_brief or '未提供'}\n\n"
                         "## 人工复核补充要求\n\n"
                         f"{compact_json(manual_review)}\n\n"
                         "## 材料/资格待响应清单\n\n"
                         f"{compact_json(materials_items)}\n\n"
                         "## 上下文摘要\n\n"
-                        f"{summarize_for_prompt({'max_context_chars': WRITER_CONTEXT_MAX_CHARS, 'tender_chunks': len(tender_context), 'company_chunks': len(company_context)}, 1200)}\n\n"
+                        f"{summarize_for_prompt({'max_context_chars': WRITER_CONTEXT_MAX_CHARS, 'tender_chunks': len(tender_context), 'company_chunks': len(company_context), 'reference_chunks': len(reference_context)}, 1200)}\n\n"
                         "## 选中的招标文件片段\n\n"
                         f"{compact_json(tender_context)}\n\n"
                         "## 选中的公司资料片段\n\n"
                         f"{compact_json(company_context)}\n\n"
+                        "## 选中的外部参考资料片段\n\n"
+                        f"{compact_json(reference_context)}\n\n"
                         "写作提醒：先覆盖当前章节 writing_requirements，再覆盖每个 section 的 writing_requirements；"
                         "如果 sections 为空，不要额外创造小节标题；"
                         "章节标题必须使用当前章节任务包中的 heading_level 对应的 Markdown 标题层级；"
@@ -229,6 +263,55 @@ def write_chapter(chapter_id: str, root: Path | None = None) -> Path:
     output_path = root / "workspace" / "chapters" / f"{chapter_id}.md"
     write_text(output_path, content)
     print(f"[完成] 已生成章节 {chapter_id}: {output_path}")
+    return output_path
+
+
+def write_fallback_chapter(
+    chapter_id: str,
+    root: Path | None = None,
+    *,
+    failure_reason: str = "",
+) -> Path:
+    """Create a deterministic first-draft chapter when model writing cannot finish."""
+    root = root or project_root()
+    job_path = root / "workspace" / "jobs" / f"{chapter_id}.json"
+    if not job_path.exists():
+        raise FileNotFoundError(f"缺少章节任务，无法生成保底草稿: {job_path}")
+    job = read_json(job_path)
+    title = stringify(job.get("chapter_title")) or stringify(job.get("title")) or "章节内容"
+    level = max(1, min(int(job.get("heading_level") or 1), 6))
+    lines = [
+        f"{'#' * level} {chapter_id} {title}",
+        "",
+        "> 草稿说明：本章已生成第一版结构，事实性内容以招标文件和随附材料为准。",
+        "",
+    ]
+    description = stringify(job.get("description"))
+    if description:
+        lines.extend([description, ""])
+    requirements = [stringify(item) for item in (job.get("writing_requirements") or []) if stringify(item)]
+    if requirements:
+        lines.extend(["本章拟按以下要求组织响应：", *[f"- {item}" for item in requirements], ""])
+    sections = [item for item in (job.get("sections") or []) if isinstance(item, dict)]
+    for section in sections:
+        section_title = stringify(section.get("title")) or stringify(section.get("name"))
+        if not section_title:
+            continue
+        lines.extend([f"{'#' * min(level + 1, 6)} {section_title}", ""])
+        section_requirements = [
+            stringify(item) for item in (section.get("writing_requirements") or []) if stringify(item)
+        ]
+        if section_requirements:
+            lines.extend([*[f"- {item}" for item in section_requirements], ""])
+        else:
+            lines.extend(["本节拟结合项目要求进一步完善实施内容。", ""])
+    if failure_reason:
+        lines.extend(["> 生成记录：已启用写作失败保底策略，原始错误留存在运行日志中。", ""])
+    content = "\n".join(lines).strip() + "\n"
+    content = ensure_placeholders_in_content(content, items_for_chapter(root, job=job))
+    output_path = root / "workspace" / "chapters" / f"{chapter_id}.md"
+    write_text(output_path, content)
+    print(f"[保底完成] 已生成章节 {chapter_id} 第一版草稿: {output_path}")
     return output_path
 
 

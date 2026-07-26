@@ -3001,6 +3001,57 @@ class ControlStore:
             result.append(item)
         return result
 
+    def cancel_active_stage_runs(
+        self,
+        operation_id: str,
+        *,
+        disposition: str,
+        error: dict[str, Any] | None = None,
+    ) -> int:
+        """Close every queued/running attempt left behind by a dead Worker."""
+        operation = str(operation_id or "").strip()
+        if not operation:
+            return 0
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    "SELECT stage_run_id, stage_command, attempt FROM stage_runs "
+                    "WHERE operation_id = ? AND status IN ('queued', 'running')",
+                    (operation,),
+                ).fetchall()
+                if not rows:
+                    connection.commit()
+                    return 0
+                revision = self._bump_revision(connection)
+                for row in rows:
+                    run_id = str(row["stage_run_id"])
+                    connection.execute(
+                        "UPDATE stage_runs SET status = 'cancelled', disposition = ?, "
+                        "error_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                        (disposition, _json(error) if error else None, now, run_id),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "StageRunRecorded",
+                        "StageRun",
+                        run_id,
+                        {
+                            "operation_id": operation,
+                            "command": str(row["stage_command"]),
+                            "attempt": int(row["attempt"]),
+                            "status": "cancelled",
+                            "disposition": disposition,
+                        },
+                    )
+                connection.commit()
+                return len(rows)
+            except Exception:
+                connection.rollback()
+                raise
+
     def latest_stage_run(self, operation_id: str, stage_command: str) -> dict[str, Any] | None:
         """Return the latest attempt for one stage without inferring its state."""
         with self._connection() as connection:
@@ -3419,7 +3470,7 @@ class ControlStore:
                     """,
                     (operation_status, message, _json(error) if error else None, now, terminal_at, operation_id),
                 )
-                if operation_status in {"succeeded", "failed", "cancelled"}:
+                if operation_status in {"succeeded", "failed", "cancelled", "blocked"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 self._event(
                     connection,
@@ -3498,12 +3549,14 @@ class ControlStore:
                     return self._revision(connection)
                 error_json = _json(error) if error else None
                 if str(row["status"]) == status and str(row["message"] or "") == message and row["error_json"] == error_json:
-                    if status not in {"succeeded", "failed", "cancelled"}:
+                    if status not in {"succeeded", "failed", "cancelled", "blocked"}:
                         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat(timespec="milliseconds")
                         connection.execute(
                             "UPDATE workspace_lease SET heartbeat_at = ?, expires_at = ? WHERE operation_id = ?",
                             (now, expires_at, operation_id),
                         )
+                    elif status == "blocked":
+                        connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                     connection.commit()
                     return self._revision(connection)
                 revision = self._bump_revision(connection)
@@ -3516,7 +3569,7 @@ class ControlStore:
                     """,
                     (status, message, error_json, now, terminal_at, operation_id),
                 )
-                if status in {"succeeded", "failed", "cancelled"}:
+                if status in {"succeeded", "failed", "cancelled", "blocked"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 else:
                     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat(timespec="milliseconds")

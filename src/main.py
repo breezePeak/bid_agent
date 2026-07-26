@@ -16,6 +16,7 @@ from compliance_checker import run_compliance_check
 from global_reviewer import run_global_review
 from format_checker import check_output_format
 from outline_generator import generate_outline
+from project_understanding import analyze_project_understanding
 from pipeline_registry import workflow_stage_specs
 from project_profile_registry import project_profile_choices, save_project_profile
 from prompt_registry import required_prompt_files
@@ -28,6 +29,7 @@ from template_evidence import build_template_evidence
 from concurrency import clamp_workers, workers_default, workers_max
 from utils import ensure_dirs, ensure_file, project_root, read_json
 from project_validator import validate_project
+from web_research import research_project_materials
 
 
 DEFAULT_PROMPTS = {
@@ -339,6 +341,8 @@ def init_project(root: Path | None = None) -> None:
             "sources/tender",
             "sources/company",
             "sources/template",
+            "sources/reference",
+            "sources/guidance",
             "inputs",
             "workspace",
             "workspace/chunks",
@@ -359,6 +363,10 @@ def init_project(root: Path | None = None) -> None:
     save_project_profile(root, None)
     for filename in required_prompt_files():
         content = DEFAULT_PROMPTS.get(filename, "")
+        if not content:
+            canonical_prompt = Path(__file__).resolve().parent.parent / "prompts" / filename
+            if canonical_prompt.exists():
+                content = canonical_prompt.read_text(encoding="utf-8")
         ensure_file(root / "prompts" / filename, content)
     print(f"[完成] 项目已初始化: {root}")
 
@@ -456,12 +464,13 @@ def _run_write_all(root: Path, workers: int | None = None, max_retries: int = 0)
         raise RuntimeError("；".join(messages))
 
 
-def run_pipeline(root: Path | None = None, workers: int | None = None, max_retries: int = 0) -> None:
-    root = root or project_root()
-    workers = clamp_workers(workers)
-    core_specs = workflow_stage_specs()
-    total = len(core_specs)
-    stage_runners = {
+def _pipeline_stage_runners(root: Path, workers: int, max_retries: int) -> dict[str, callable]:
+    """Build the only legacy pipeline dispatch table used by ``run_pipeline``.
+
+    Keep this table complete for every auto-run stage.  An incomplete table is
+    an execution error, never a reason to silently skip a registered stage.
+    """
+    return {
         "init_workspace": lambda: init_project(root),
         "prepare_inputs": lambda: _run_prepare_inputs(root),
         "split_docs": lambda: _run_split_docs(root),
@@ -488,10 +497,19 @@ def run_pipeline(root: Path | None = None, workers: int | None = None, max_retri
         "build_docx": lambda: build_docx(root),
         "check_format": lambda: check_output_format(root),
     }
+
+
+def run_pipeline(root: Path | None = None, workers: int | None = None, max_retries: int = 0) -> None:
+    root = root or project_root()
+    workers = clamp_workers(workers)
+    core_specs = workflow_stage_specs()
+    total = len(core_specs)
+    stage_runners = _pipeline_stage_runners(root, workers, max_retries)
+    missing_stage_runners = [spec.id for spec in core_specs if spec.id not in stage_runners]
+    if missing_stage_runners:
+        raise RuntimeError(f"Pipeline 缺少 stage runner: {', '.join(missing_stage_runners)}")
     for index, spec in enumerate(core_specs, start=1):
-        runner = stage_runners.get(spec.id)
-        if runner is None:
-            continue
+        runner = stage_runners[spec.id]
         print(f"[{index}/{total}] {spec.label}...")
         runner()
 
@@ -531,6 +549,8 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("split-docs", help="切分招标文件和公司资料为 chunk")
     subparsers.add_parser("parse-score", help="解析评分标准")
     subparsers.add_parser("extract-facts", help="提取全局事实")
+    subparsers.add_parser("analyze-project", help="整体理解项目并生成资料检索问题")
+    subparsers.add_parser("research-materials", help="根据项目整体理解自动联网搜集资料")
     subparsers.add_parser("build-materials-checklist", help="生成材料/资格待补清单（解析后、写作前）")
     subparsers.add_parser("build-template-evidence", help="根据模板 schema 生成依据映射和质量报告")
     subparsers.add_parser("generate-outline", help="生成标书大纲")
@@ -685,6 +705,12 @@ def main() -> int:
     elif args.command == "extract-facts":
         print("[执行] 提取全局事实...")
         extract_facts(root)
+    elif args.command == "analyze-project":
+        print("[执行] 整体理解项目...")
+        analyze_project_understanding(root)
+    elif args.command == "research-materials":
+        print("[执行] 联网搜集项目资料...")
+        research_project_materials(root)
     elif args.command == "build-materials-checklist":
         print("[执行] 生成材料/资格清单...")
         build_materials_checklist(root)

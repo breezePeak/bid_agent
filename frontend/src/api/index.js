@@ -57,6 +57,10 @@ export function fetchWorkflowStepDetail(runId, command) {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/workflow-step-detail`, { params: { command } })
 }
 
+export function fetchPipelineLogs(runId, lines = 1000) {
+  return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/logs`, { params: { lines } })
+}
+
 export function fetchManualReviewSummary(runId) {
   return api.get(`/v2/workspaces/${encodeURIComponent(runId)}/manual-review/summary`)
 }
@@ -172,7 +176,7 @@ export async function submitWorkspaceCommand(runId, kind, payload = {}, options 
     payload,
     expected_revision: revision,
     idempotency_key: options.idempotencyKey || commandId,
-  })
+  }, options.timeout ? { timeout: options.timeout } : undefined)
 }
 
 export async function startOrResumePipeline(runId, startCommand = '') {
@@ -184,13 +188,14 @@ export async function startOrResumePipeline(runId, startCommand = '') {
   const workflow = Array.isArray(snapshot.presentation?.workflow)
     ? snapshot.presentation.workflow
     : []
+  const workflowCommands = new Set(workflow.map(step => String(step?.command || '')).filter(Boolean))
   const nextStep = workflow.find(step => (
     step
     && step.done !== true
     && ['running', 'ready', 'error', 'paused', 'interrupted'].includes(String(step.state || ''))
   ))
   const derivedCommand = String(
-    operation?.current_stage
+    (workflowCommands.has(String(operation?.current_stage || '')) ? operation?.current_stage : '')
     || nextStep?.command
     || ''
   ).trim()
@@ -248,7 +253,7 @@ export function revalidateGate(runId, command) {
   return submitWorkspaceCommand(runId, 'quality.revalidate', { command })
 }
 
-export function acceptIssueRisk(runId, issueId, reason) {
+export function acceptIssueRisk(runId, issueId, reason = '') {
   return submitWorkspaceCommand(runId, 'issues.accept_risk', { issue_id: issueId, reason })
 }
 
@@ -313,7 +318,7 @@ export function confirmMaterialVerification(runId, payload) {
 }
 
 export function revalidateFormalGate(runId) {
-  return submitWorkspaceCommand(runId, 'gate.revalidate', {})
+  return submitWorkspaceCommand(runId, 'gate.revalidate', {}, { timeout: 30 * 60 * 1000 })
 }
 
 export function fetchLatestGateReceipt(runId) {

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -68,6 +70,24 @@ class ClaimValidatorTests(unittest.TestCase):
                     "我司已具备涉密信息系统集成甲级资质，合同金额 1200 万元。",
                     raise_on_blocker=True,
                 )
+
+    def test_disabling_chapter_review_disables_write_time_claim_blocker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "inputs").mkdir()
+            (root / "workspace").mkdir()
+            (root / "inputs" / "company.md").write_text("示例公司简介。", encoding="utf-8")
+            (root / "inputs" / "tender.md").write_text("招标说明", encoding="utf-8")
+            (root / "workspace" / "company_facts.json").write_text("{}", encoding="utf-8")
+            (root / "workspace" / "global_facts.json").write_text("{}", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "0"}):
+                result = validate_chapter_claims_gate(
+                    root,
+                    "01",
+                    "我司已具备涉密信息系统集成甲级资质，合同金额 1200 万元。",
+                    raise_on_blocker=True,
+                )
+            self.assertGreater(result["blocker_count"], 0)
 
 
 if __name__ == "__main__":

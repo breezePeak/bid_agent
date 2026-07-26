@@ -22,17 +22,17 @@
       <div
         v-if="compliance && compliance.exists"
         class="plan-summary-compliance"
-        :class="{ blocking: compliance.blocking, warn: !compliance.blocking && compliance.need_manual_review }"
+        :class="{ warn: compliance.blocking || compliance.need_manual_review }"
         @click="$emit('preview-compliance')"
       >
-        <span class="plan-summary-kicker">{{ compliance.blocking ? '合规阻断（暂不可出正式稿）' : (compliance.need_manual_review ? '合规待核' : '合规通过') }}</span>
+        <span class="plan-summary-kicker">{{ compliance.blocking || compliance.need_manual_review ? '合规提示（需人工复核）' : '合规通过' }}</span>
         <strong>
           失败 {{ (compliance.counts && compliance.counts.fail) || 0 }} 项
           · 警告 {{ (compliance.counts && compliance.counts.warn) || 0 }} 项
           · 最高级别 {{ severityLabel(compliance.max_severity) }}
         </strong>
         <small>{{ complianceTopHint }}</small>
-        <small class="plan-summary-help">含义：fail=检查未通过；warn=需关注；fatal/critical=阻断交付。点击查看明细。</small>
+        <small class="plan-summary-help">含义：fail=检查未通过；warn=需关注；fatal/critical=高风险提示，均不阻断流程。点击查看明细。</small>
       </div>
     </div>
     <div class="plan-list-body" v-show="!planCollapsed" ref="bodyRef">
@@ -96,7 +96,7 @@ const complianceTopHint = computed(() => {
     const first = items[0]
     return `${first.check_id || ''}${first.check_name ? ' ' + first.check_name : ''}`.trim() || '点击查看详情'
   }
-  if (props.compliance?.blocking) return '存在 fatal/critical 失败，交付已阻断'
+  if (props.compliance?.blocking) return '存在历史 fatal/critical 记录，请人工复核（不阻断流程）'
   if (props.compliance?.need_manual_review) return '需人工复核签章/资格/废标条款等'
   return '专项合规检查已完成'
 })

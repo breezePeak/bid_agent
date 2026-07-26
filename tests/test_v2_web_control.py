@@ -930,10 +930,17 @@ class V2WebControlTests(unittest.TestCase):
                 disposition="started",
             )
 
-            self.assertEqual(
-                web_app._v2_pipeline_resume_command(context),
-                "select-context-all",
-            )
+            commands = web_app.auto_run_commands()
+            target_index = commands.index("select-context-all")
+            with mock.patch.object(
+                web_app,
+                "_v2_stage_artifacts_reusable",
+                side_effect=lambda _context, command: commands.index(command) < target_index,
+            ):
+                self.assertEqual(
+                    web_app._v2_pipeline_resume_command(context),
+                    "select-context-all",
+                )
 
     def test_v2_resume_command_prefers_actual_failed_stage_over_start_command(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -961,7 +968,49 @@ class V2WebControlTests(unittest.TestCase):
             gateway.store.record_stage_run(operation.operation_id, "select-context-all", "succeeded")
             gateway.store.record_stage_run(operation.operation_id, "write-all", "failed")
 
-            self.assertEqual(web_app._v2_pipeline_resume_command(context), "write-all")
+            commands = web_app.auto_run_commands()
+            target_index = commands.index("write-all")
+            with mock.patch.object(
+                web_app,
+                "_v2_stage_artifacts_reusable",
+                side_effect=lambda _context, command: commands.index(command) < target_index,
+            ):
+                self.assertEqual(web_app._v2_pipeline_resume_command(context), "write-all")
+
+    def test_v2_resume_command_advances_after_single_stage_succeeds(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {
+                    "accepted": True,
+                    "operation_status": "succeeded",
+                }},
+            )
+            operation = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "build-source-trace"},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "advance-after-one-stage",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(operation.operation_id, "build-source-trace", "succeeded")
+
+            commands = web_app.auto_run_commands()
+            expected = commands[commands.index("build-source-trace") + 1]
+            target_index = commands.index(expected)
+            with mock.patch.object(
+                web_app,
+                "_v2_stage_artifacts_reusable",
+                side_effect=lambda _context, command: commands.index(command) < target_index,
+            ):
+                self.assertEqual(web_app._v2_pipeline_resume_command(context), expected)
 
     def test_v2_repair_requires_confirmation_and_uses_same_operation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1717,21 +1766,26 @@ class V2WebControlTests(unittest.TestCase):
                 ):
                     with mock.patch.object(web_app, "_v2_export_preflight", return_value=preflight):
                         with mock.patch.object(web_app, "_assert_formal_artifacts_ready"):
-                            issued = _body(
-                                asyncio.run(
-                                    web_app.api_v2_submit_command(
-                                        "alpha",
-                                        _Request(
-                                            {
-                                                "kind": "gate.revalidate",
-                                                "payload": {},
-                                                "expected_revision": 0,
-                                                "idempotency_key": "formal-gate",
-                                            }
-                                        ),
+                            with mock.patch.object(
+                                web_app,
+                                "_synchronize_formal_delivery_artifacts",
+                                return_value=[],
+                            ):
+                                issued = _body(
+                                    asyncio.run(
+                                        web_app.api_v2_submit_command(
+                                            "alpha",
+                                            _Request(
+                                                {
+                                                    "kind": "gate.revalidate",
+                                                    "payload": {},
+                                                    "expected_revision": 0,
+                                                    "idempotency_key": "formal-gate",
+                                                }
+                                            ),
+                                        )
                                     )
                                 )
-                            )
                 self.assertTrue(issued["ok"])
                 latest = _body(web_app.api_v2_latest_gate_receipt("alpha"))["gate_receipt"]
                 allowed = web_app.api_v2_download_final("alpha", latest["receipt_id"])
@@ -1890,6 +1944,52 @@ class V2WebControlTests(unittest.TestCase):
                 {"path": "outputs/final.docx", "reason": "stale"},
                 raised.exception.details["artifacts"],
             )
+
+    def test_formal_gate_inputs_exclude_disabled_review_and_advisory_compliance(self) -> None:
+        with mock.patch("pipeline_registry.chapter_review_enabled", return_value=False):
+            disabled_inputs = web_app._formal_gate_inputs()
+        with mock.patch("pipeline_registry.chapter_review_enabled", return_value=True):
+            enabled_inputs = web_app._formal_gate_inputs()
+
+        self.assertNotIn("workspace/global_review.json", disabled_inputs)
+        self.assertIn("workspace/global_review.json", enabled_inputs)
+        self.assertNotIn("workspace/compliance_report.json", disabled_inputs)
+        self.assertNotIn("workspace/compliance_report.json", enabled_inputs)
+
+    def test_download_sync_rebuilds_word_and_format_from_current_markdown(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            root = runs / "alpha"
+            (root / "outputs").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            current_md = {
+                "artifact_key": "outputs/final.md",
+                "path": "outputs/final.md",
+                "kind": "file",
+                "status": "ready",
+                "sha256": "current-md",
+                "size_bytes": 10,
+                "files": ["outputs/final.md"],
+            }
+
+            with (
+                mock.patch("artifact_manifest.describe_artifact", return_value=current_md),
+                mock.patch("artifact_manifest.record_stage_artifacts") as record_artifacts,
+                mock.patch("artifact_manifest.stage_artifacts_reusable", return_value=False),
+                mock.patch.object(web_app, "_run_sync", return_value=0) as run_sync,
+                mock.patch.object(web_app, "_record_v2_stage_lifecycle"),
+            ):
+                refreshed = web_app._synchronize_formal_delivery_artifacts(context, "gate-op")
+
+        self.assertEqual(refreshed, ["build-md", "build-docx", "check-format"])
+        self.assertEqual(
+            [call.args[0] for call in run_sync.call_args_list],
+            ["build-docx", "check-format"],
+        )
+        self.assertEqual(
+            [call.args[1] for call in record_artifacts.call_args_list],
+            ["build-md", "build-docx", "check-format"],
+        )
 
     def test_formal_gate_requires_artifact_manifest_after_v2_cutover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2206,7 +2306,7 @@ class V2WebControlTests(unittest.TestCase):
                                         "kind": "issues.accept_risk",
                                         "payload": {
                                             "issue_id": "critical-admin",
-                                            "reason": "管理员完成专项复核并记录充分接受理由",
+                                            "reason": "",
                                             "is_admin": False,
                                             "confirm_critical": False,
                                         },
@@ -3151,6 +3251,51 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(snapshot["pipeline"]["current_stage"], "parse-score")
             self.assertEqual(snapshot["presentation"]["workflow"][0]["state"], "running")
 
+    def test_v2_snapshot_does_not_revive_disabled_historical_stage_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {},
+                        "expected_revision": gateway.store.revision(),
+                        "idempotency_key": "snapshot-single-running-stage",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            gateway.store.record_stage_run(
+                receipt.operation_id or "", "review-fix-all", "running", disposition="started"
+            )
+            compatibility = {
+                "pipeline": {},
+                "workflow": [
+                    {"command": "write-all", "done": False, "ready": True, "state": "running"},
+                    {"command": "review-fix-all", "done": False, "ready": True, "state": "running"},
+                ],
+                "outputs": {},
+            }
+
+            with mock.patch.object(web_app, "RUNS_DIR", runs):
+                with mock.patch.object(web_app, "_status_payload", return_value=compatibility):
+                    payload = _body(web_app.api_v2_workspace_snapshot("alpha"))
+
+            workflow = payload["snapshot"]["presentation"]["workflow"]
+            running = [step["command"] for step in workflow if step["state"] == "running"]
+            self.assertEqual(running, [])
+            self.assertNotIn("review-fix-all", [step["command"] for step in workflow])
+            self.assertNotEqual(
+                payload["snapshot"]["pipeline"]["current_stage"],
+                "review-fix-all",
+            )
+
     def test_v2_snapshot_does_not_treat_non_pipeline_operation_as_running_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3525,6 +3670,164 @@ class V2WebControlTests(unittest.TestCase):
         self.assertTrue(pipeline["consistent"])
         self.assertNotIn("checkpoint_source", pipeline)
 
+    def test_pipeline_snapshot_does_not_report_running_without_matching_live_lease(self) -> None:
+        operation = {
+            "operation_id": "pipeline-op",
+            "kind": "pipeline.start",
+            "status": "running",
+            "start_command": "write-all",
+            "fencing_token": 4,
+            "message": "开始执行: write-all",
+        }
+        stage_runs = [
+            {
+                "operation_id": "pipeline-op",
+                "stage_command": "write-all",
+                "status": "running",
+                "started_at": "2026-07-24T00:00:00+00:00",
+            }
+        ]
+        lease = {
+            "operation_id": "repair-op",
+            "expires_at": "2099-01-01T00:00:00+00:00",
+        }
+
+        pipeline = web_app._pipeline_snapshot_from_control(
+            [operation],
+            {},
+            stage_runs,
+            lease=lease,
+            enforce_live_lease=True,
+        )
+
+        self.assertEqual(pipeline["status"], "interrupted")
+        self.assertEqual(pipeline["current_stage"], "write-all")
+        self.assertEqual(pipeline["error"]["code"], "STALE_OPERATION_LEASE")
+
+    def test_queued_pipeline_waits_for_worker_lease_without_false_interruption(self) -> None:
+        operation = {
+            "operation_id": "pipeline-op",
+            "kind": "pipeline.start",
+            "status": "queued",
+            "start_command": "build-source-trace",
+            "fencing_token": 1,
+        }
+
+        pipeline = web_app._pipeline_snapshot_from_control(
+            [operation],
+            {},
+            [],
+            lease=None,
+            enforce_live_lease=True,
+        )
+
+        self.assertEqual(pipeline["status"], "running")
+        self.assertIsNone(pipeline.get("error"))
+
+    def test_disabled_historical_start_stage_migrates_to_current_resume_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+
+            with mock.patch.object(web_app, "auto_run_commands", return_value=["build-md", "build-docx"]):
+                with mock.patch.object(web_app, "_v2_pipeline_resume_command", return_value="build-md"):
+                    command, migrated = web_app._normalize_pipeline_start_command(
+                        context,
+                        "summarize-all",
+                    )
+
+            self.assertEqual(command, "build-md")
+            self.assertTrue(migrated)
+
+    def test_terminal_historical_stage_is_projected_as_paused_at_current_resume_stage(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            pipeline = {
+                "status": "failed",
+                "current_stage": "summarize-all",
+                "message": "无效起始阶段",
+                "error": {"code": "COMMAND_INVALID"},
+            }
+
+            with mock.patch.object(web_app, "auto_run_commands", return_value=["build-md", "build-docx"]):
+                with mock.patch.object(web_app, "_v2_pipeline_resume_command", return_value="build-md"):
+                    projected = web_app._project_current_pipeline_policy(context, pipeline)
+
+            self.assertEqual(projected["status"], "paused")
+            self.assertEqual(projected["current_stage"], "build-md")
+            self.assertEqual(projected["historical_stage"], "summarize-all")
+            self.assertIsNone(projected["error"])
+
+    def test_disabled_review_stages_cannot_use_workspace_utility_bypass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+
+            for command in ("summarize-all", "global-review", "compliance-check", "review-fix-all"):
+                envelope = CommandEnvelope.from_mapping(
+                    {
+                        "kind": "workspace.run_utility",
+                        "payload": {"command": command},
+                        "expected_revision": 0,
+                        "idempotency_key": f"disabled-utility-{command}",
+                    },
+                    workspace_id="alpha",
+                )
+                with self.subTest(command=command):
+                    with self.assertRaises(ControlPlaneError) as rejected:
+                        web_app._handle_workspace_run_utility(context, envelope, "op-disabled")
+                    self.assertEqual(rejected.exception.code, "COMMAND_INVALID")
+
+    def test_legacy_command_endpoint_rejects_policy_disabled_stage_immediately(self) -> None:
+        request = _Request({"command": "summarize-all"})
+        with mock.patch.object(web_app, "auto_run_commands", return_value=["build-md", "build-docx"]):
+            response = asyncio.run(web_app.api_run_command(request))
+        payload = _body(response)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(payload["code"], "STAGE_DISABLED_BY_POLICY")
+
+    def test_restart_reconcile_closes_all_orphaned_stage_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            runs = Path(tmp) / "runs"
+            (runs / "alpha").mkdir(parents=True)
+            context = WorkspaceContext.resolve(runs, "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "pipeline.start",
+                        "payload": {"start_command": "write-all"},
+                        "expected_revision": 0,
+                        "idempotency_key": "orphan-stage-run",
+                    },
+                    workspace_id="alpha",
+                )
+            )
+            operation_id = receipt.operation_id or ""
+            gateway.store.record_stage_run(
+                operation_id,
+                "write-all",
+                "running",
+                disposition="started",
+            )
+
+            resumed = web_app._reconcile_pipeline_from_control(context)
+
+            self.assertFalse(resumed)
+            operation = gateway.store.operation(operation_id) or {}
+            stage_run = gateway.store.latest_stage_run(operation_id, "write-all") or {}
+            self.assertEqual(operation["status"], "blocked")
+            self.assertEqual(stage_run["status"], "cancelled")
+            self.assertEqual(stage_run["disposition"], "orphaned_after_restart")
+
     def test_inactive_workspace_reconcile_blocks_orphaned_pipeline_and_goal(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3883,7 +4186,8 @@ class V2WebControlTests(unittest.TestCase):
                         with mock.patch("agent.root_cause.sync_issues_from_global_review") as sync_review:
                             issues = _body(web_app.api_list_issues("open", "alpha"))
 
-            self.assertTrue(compliance["blocking"])
+            self.assertFalse(compliance["blocking"])
+            self.assertTrue(compliance["need_manual_review"])
             self.assertEqual(compliance["items"][0]["check_id"], "alpha-check")
             preflight.assert_called_once()
             self.assertEqual(preflight.call_args.args[0].root, alpha.resolve())
@@ -3895,6 +4199,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(issues["issues"][0]["id"], "alpha-issue")
             self.assertEqual(issues["summary"]["source"], "control.db")
 
+    @mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "1"})
     def test_v2_export_preflight_is_read_only_and_sqlite_authoritative(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -3980,6 +4285,7 @@ class V2WebControlTests(unittest.TestCase):
             self.assertEqual(item["latest_submission"]["filename"], "license.pdf")
             self.assertEqual(item["latest_verification"]["verdict"], "verified")
 
+    @mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "1"})
     def test_v2_export_preflight_fails_closed_on_malformed_quality_reports(self) -> None:
         for filename, content in (
             ("global_review.json", "{broken"),
@@ -4007,6 +4313,7 @@ class V2WebControlTests(unittest.TestCase):
                 self.assertFalse(payload["ok"])
                 self.assertEqual(payload["error"]["code"], "STATE_UNAVAILABLE")
 
+    @mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "1"})
     def test_v2_export_preflight_rejects_latest_failed_gate_evaluation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -4372,7 +4679,27 @@ class V2WebControlTests(unittest.TestCase):
             (alpha / "workspace").mkdir(parents=True)
             (beta / "workspace").mkdir(parents=True)
             (alpha / "workspace" / "runtime_logs.jsonl").write_text(
-                json.dumps({"line": "alpha-log"}, ensure_ascii=False) + "\n",
+                "\n".join(
+                    [
+                        json.dumps(
+                            {
+                                "ts": "2026-07-24T10:00:00",
+                                "line": "--- [10:00:00] 开始: python src/main.py estimate-score ---",
+                            },
+                            ensure_ascii=False,
+                        ),
+                        json.dumps(
+                            {
+                                "ts": "2026-07-24T10:00:01",
+                                "line": "[完成] 终稿估分: 80/100",
+                                "progress": {"completed": 1, "total": 1},
+                                "progress_text": "(1/1)",
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ]
+                )
+                + "\n",
                 encoding="utf-8",
             )
             (beta / "workspace" / "runtime_logs.jsonl").write_text(
@@ -4399,8 +4726,12 @@ class V2WebControlTests(unittest.TestCase):
                 payload = _body(web_app.api_logs(200, "alpha"))
                 chunk = asyncio.run(first_chunk())
 
-            self.assertEqual(payload["lines"], ["alpha-log", "alpha-appended"])
-            self.assertIn("alpha-log", chunk)
+            self.assertEqual(payload["lines"][-1], "alpha-appended")
+            self.assertEqual(payload["records"][1]["command"], "estimate-score")
+            self.assertEqual(payload["records"][1]["stage"], "终稿估分")
+            self.assertEqual(payload["records"][1]["ts"], "2026-07-24T10:00:01")
+            self.assertEqual(payload["records"][1]["progress_text"], "(1/1)")
+            self.assertIn("estimate-score", chunk)
             self.assertNotIn("beta-log", chunk)
 
     def test_v2_log_stream_reads_control_events_not_v1_run_events(self) -> None:

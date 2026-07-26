@@ -95,6 +95,28 @@ describe('statusFromV2Snapshot', () => {
     assert.equal(status.workflow[1].state, 'running')
   })
 
+  it('does not let a disabled historical StageRun override the current workflow', () => {
+    const status = statusFromV2Snapshot({
+      operation: { operation_id: 'op-stale', status: 'running' },
+      pipeline: { status: 'paused', current_stage: 'build-md', historical_stage: 'summarize-all' },
+      current_stage_runs: [
+        { operation_id: 'op-stale', stage_command: 'summarize-all', status: 'queued' },
+      ],
+      presentation: {
+        running: false,
+        current_task: '',
+        workflow: [
+          { command: 'build-md', done: false, state: 'ready' },
+          { command: 'build-docx', done: false, state: 'blocked' },
+        ],
+      },
+    })
+
+    assert.equal(status.current_task, '')
+    assert.equal(status.pipeline.current_stage, 'build-md')
+    assert.equal(status.workflow.some(step => step.command === 'summarize-all'), false)
+  })
+
   it('does not report a non-pipeline Operation as a running pipeline', () => {
     const status = statusFromV2Snapshot({
       operation: { operation_id: 'repair-1', kind: 'repair.start', status: 'running' },

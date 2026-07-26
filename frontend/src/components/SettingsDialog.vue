@@ -183,14 +183,11 @@
             <div class="form-group"><label for="flow-retries">写作批次重试</label><input id="flow-retries" v-model.number="flowForm.write_batch_retries" type="number" min="0" max="20" /></div>
             <div class="form-group"><label for="flow-repair">最大修复轮次</label><input id="flow-repair" v-model.number="flowForm.max_repair_rounds" type="number" min="0" max="10" /></div>
           </div>
-          <div class="settings-form-title">审核与门禁</div>
+          <div class="settings-form-title">审核</div>
           <div class="form-check-group">
-            <label class="form-check"><input v-model="flowForm.chapter_review_gate" type="checkbox" /><span>启用章节审核门禁</span></label>
-            <label class="form-check"><input v-model="flowForm.global_review_gate" type="checkbox" /><span>启用全文审核门禁</span></label>
-            <label class="form-check"><input v-model="flowForm.anti_fabrication_gate" type="checkbox" /><span>启用防编造检查</span></label>
-            <label class="form-check"><input v-model="flowForm.allow_accept_risk" type="checkbox" /><span>允许用户接受可接受的失败风险</span></label>
+            <label class="form-check"><input v-model="flowForm.chapter_review_enabled" type="checkbox" /><span>启用审核</span></label>
           </div>
-          <p class="settings-hint">关闭任一门禁只是不阻断后续流程，审核结果仍会保留。开启接受风险后仍需填写原因、二次确认；废标项与资格材料缺失不能接受。</p>
+          <p class="settings-hint">开启时，每章生成后在“生成章节”内部完成自审和按需改稿，并执行全文审核；关闭时直接生成第一版，不执行审核相关阶段。</p>
           <p v-if="flowError" class="form-error" role="alert">{{ flowError }}</p>
           <p v-if="flowSuccess" class="form-success">{{ flowSuccess }}</p>
           <div class="settings-form-footer"><button type="button" class="btn" @click="$emit('close')">关闭</button><button type="submit" class="btn btn-primary" :disabled="flowSaving">{{ flowSaving ? '保存中...' : '保存流程设置' }}</button></div>
@@ -262,7 +259,7 @@ const activeTab = ref('model')
 const flowSaving = ref(false)
 const flowError = ref('')
 const flowSuccess = ref('')
-const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false })
+const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false })
 
 async function loadFlow() {
   try {

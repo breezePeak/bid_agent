@@ -81,6 +81,8 @@ npm run dev
 - **招标文件**：招标书、评分办法、技术/商务要求  
 - **公司资料**：介绍、资质、案例、人员、证书、方案素材  
 - **Word 模板**：最终希望套用的样式模板  
+- **外部参考资料（可选）**：政策、标准、行业资料、类似项目技术方法  
+- **项目写作要求（可选）**：章节结构、重点、口径和方案粒度  
 
 命令行整理时的目录：
 
@@ -88,7 +90,11 @@ npm run dev
 sources/tender/     招标文件
 sources/company/    公司资料
 sources/template/   Word 模板
+sources/reference/  外部参考资料（不作为公司资质/业绩证据）
+sources/guidance/   项目写作要求
 ```
+
+外部参考资料和公司证据严格分开，具体见 [外部参考资料与项目写作要求](docs/research_and_writing_brief.md)。
 
 ## 流程概览
 

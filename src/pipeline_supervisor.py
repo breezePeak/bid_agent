@@ -9,7 +9,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from pipeline_registry import auto_run_commands, stage_outputs_ready, stage_spec_by_command
+from pipeline_registry import (
+    artifact_exists,
+    auto_run_commands,
+    next_enabled_command_after,
+    stage_outputs_ready,
+    stage_spec_by_command,
+)
 
 
 RunStage = Callable[[str, str, Path], int]
@@ -267,6 +273,26 @@ class PipelineSupervisor:
         run_id = slot.run_id
         root = slot.root
         commands = auto_run_commands()
+        if start_command and start_command not in commands:
+            migrated_start = next_enabled_command_after(start_command)
+            if not migrated_start and artifact_readiness_evaluator is not None:
+                for command in commands:
+                    try:
+                        ready = artifact_readiness_evaluator(root, command)
+                    except Exception:
+                        # Let the normal stage loop record the authoritative
+                        # readiness failure instead of crashing before its
+                        # guarded execution block.
+                        migrated_start = command
+                        break
+                    if not ready:
+                        migrated_start = command
+                        break
+            start_command = migrated_start
+            if not start_command:
+                # Unknown historical input must never silently restart the
+                # entire workflow from stage one.
+                commands = []
         if single_command and start_command in commands:
             commands = [start_command]
         elif start_command in commands:
@@ -336,6 +362,28 @@ class PipelineSupervisor:
                     )
                     return
                 spec = stage_spec_by_command(command)
+                missing_requires = [
+                    artifact.path
+                    for artifact in getattr(spec, "requires", ())
+                    if not artifact_exists(root, artifact)
+                ]
+                if missing_requires:
+                    message = (
+                        f"阶段 {command} 缺少前置产物，禁止跳步执行: "
+                        + ", ".join(missing_requires)
+                    )
+                    record_stage(command, "failed", "missing_requires", message)
+                    self._save(
+                        root,
+                        {
+                            "status": "failed",
+                            "current_stage": command,
+                            "worker_pid": 0,
+                            "error": message,
+                            "message": "前置阶段尚未完成",
+                        },
+                    )
+                    return
                 outputs_ready = stage_outputs_ready(root, spec.id)
                 if outputs_ready and artifact_readiness_evaluator is not None:
                     try:

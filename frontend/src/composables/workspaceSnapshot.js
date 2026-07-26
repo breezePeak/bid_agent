@@ -31,9 +31,16 @@ export function statusFromV2Snapshot(snapshot) {
         || String(run?.operation_id || '') === String(rawPipeline.operation_id)
       ))
   const activeStageRun = pipelineStageRuns.find(run => ['queued', 'running'].includes(String(run?.status || '')))
-  const activeStageCommand = String(activeStageRun?.stage_command || '')
-  const workflow = Array.isArray(presentation.workflow)
-    ? presentation.workflow.map(step => (
+  const presentationWorkflow = Array.isArray(presentation.workflow) ? presentation.workflow : []
+  const workflowCommands = new Set(
+    presentationWorkflow.map(step => String(step?.command || '')).filter(Boolean),
+  )
+  const activeStageCandidate = String(activeStageRun?.stage_command || '')
+  const activeStageCommand = (
+    !workflowCommands.size || workflowCommands.has(activeStageCandidate)
+  ) ? activeStageCandidate : ''
+  const workflow = presentationWorkflow.length
+    ? presentationWorkflow.map(step => (
       pipelineRunning && activeStageCommand && step?.command === activeStageCommand
         ? { ...step, done: false, ready: true, state: 'running', message: '运行中', artifact_source: 'control.db' }
         : step

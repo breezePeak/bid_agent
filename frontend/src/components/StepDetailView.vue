@@ -128,7 +128,7 @@
       <template v-else-if="isCompliance && compliance">
         <div class="sdv-banner" :class="{ blocking: compliance.blocking }">
           <div class="sdv-banner-title">
-            {{ compliance.blocking ? '合规阻断 · 暂不可出正式稿' : (compliance.need_manual_review ? '合规待人工复核' : '合规检查结果') }}
+            {{ compliance.blocking || compliance.need_manual_review ? '合规风险提示 · 请人工复核（不阻断流程）' : '合规检查结果' }}
           </div>
           <div class="sdv-banner-stats">
             失败 {{ counts.fail || 0 }} · 警告 {{ counts.warn || 0 }} · 通过 {{ counts.pass || 0 }}

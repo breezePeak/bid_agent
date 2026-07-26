@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -67,6 +69,24 @@ class GlobalReviewGateTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with self.assertRaises(RuntimeError):
+                validate_global_review_blocking(root, required=True)
+
+    def test_master_review_switch_disables_global_gate_even_if_child_gate_is_on(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ws = root / "workspace"
+            ws.mkdir(parents=True)
+            (ws / "global_review.json").write_text(
+                json.dumps({"blocking": True}, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "BID_AGENT_CHAPTER_REVIEW_ENABLED": "0",
+                    "GLOBAL_REVIEW_GATE": "1",
+                },
+            ):
                 validate_global_review_blocking(root, required=True)
 
 

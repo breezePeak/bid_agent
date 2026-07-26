@@ -254,7 +254,6 @@ def issues_from_compliance_report(report: dict[str, Any] | None) -> list[dict[st
     if not isinstance(report, dict):
         return []
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
-    blocking = bool(report.get("blocking") or summary.get("blocking"))
     items = report.get("items") if isinstance(report.get("items"), list) else []
     issues: list[dict[str, Any]] = []
 
@@ -265,16 +264,8 @@ def issues_from_compliance_report(report: dict[str, Any] | None) -> list[dict[st
         severity_raw = stringify(item.get("severity")) or "info"
         if status not in {"fail", "warn"}:
             continue
-        # only fail+fatal/critical/major as block when report blocking; else warn
-        is_hard = severity_raw in {"fatal", "critical"} or (
-            blocking and status == "fail" and severity_raw in {"fatal", "critical", "major"}
-        )
-        if status == "warn" and not is_hard:
-            sev = "warn"
-        elif is_hard or (blocking and status == "fail"):
-            sev = "block"
-        else:
-            sev = "warn"
+        # 专项合规问题全部作为提示问题单，原始等级仍保存在 evidence 中。
+        sev = "warn"
 
         check_id = stringify(item.get("check_id")) or "UNKNOWN"
         check_type = stringify(item.get("check_type")) or "unknown"

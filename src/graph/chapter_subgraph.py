@@ -20,6 +20,12 @@ from utils import project_root, read_json, select_score_points, stringify, write
 DEFAULT_MAX_REWRITE_ROUNDS = 2
 
 
+def _chapter_review_enabled() -> bool:
+    from pipeline_registry import chapter_review_enabled
+
+    return chapter_review_enabled()
+
+
 def _max_rewrite_rounds() -> int:
     try:
         from agent.budgets import max_repair_rounds
@@ -71,10 +77,18 @@ def write_chapter(state: ChapterState) -> ChapterState:
     if state.get("chapter_markdown") and int(state.get("rewrite_round") or 0) > 0:
         return {}
     markdown = write_chapter_agent(job, context, root)
-    return {"chapter_markdown": markdown}
+    return {
+        "chapter_markdown": markdown,
+        "chapter_status": str(state.get("chapter_status") or "pending") if _chapter_review_enabled() else "passed",
+    }
 
 
 def self_check_chapter(state: ChapterState) -> ChapterState:
+    if not _chapter_review_enabled():
+        return {
+            "self_check": {"skipped": True, "reason": "chapter_review_disabled"},
+            "chapter_status": "passed",
+        }
     root = Path(state.get("root_dir") or project_root())
     job = state.get("job") or {}
     chapter_id = stringify(job.get("chapter_id") or state.get("chapter_id"))
@@ -184,6 +198,8 @@ def self_check_chapter(state: ChapterState) -> ChapterState:
 
 def rewrite_chapter_node(state: ChapterState) -> ChapterState:
     """In-subgraph rewrite using chapter_rewriter when possible; fallback keeps markdown."""
+    if not _chapter_review_enabled():
+        return {"chapter_status": "passed", "error": ""}
     root = Path(state.get("root_dir") or project_root())
     job = state.get("job") or {}
     chapter_id = stringify(job.get("chapter_id") or state.get("chapter_id"))
@@ -334,6 +350,10 @@ def route_after_self_check(state: ChapterState) -> Literal["save_chapter", "rewr
     return "save_chapter"
 
 
+def route_after_write(state: ChapterState) -> Literal["self_check_chapter", "save_chapter"]:
+    return "self_check_chapter" if _chapter_review_enabled() else "save_chapter"
+
+
 def build_chapter_subgraph():
     graph = StateGraph(ChapterState)
     graph.add_node("load_chapter_job", load_chapter_job)
@@ -346,7 +366,14 @@ def build_chapter_subgraph():
     graph.add_edge(START, "load_chapter_job")
     graph.add_edge("load_chapter_job", "load_chapter_context")
     graph.add_edge("load_chapter_context", "write_chapter")
-    graph.add_edge("write_chapter", "self_check_chapter")
+    graph.add_conditional_edges(
+        "write_chapter",
+        route_after_write,
+        {
+            "self_check_chapter": "self_check_chapter",
+            "save_chapter": "save_chapter",
+        },
+    )
     graph.add_conditional_edges(
         "self_check_chapter",
         route_after_self_check,

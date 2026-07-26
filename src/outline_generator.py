@@ -353,6 +353,18 @@ def generate_outline(root: Path | None = None) -> Path:
     template_evidence = load_template_evidence_map(root)
     prompt = load_agent_prompt(root, "outline_generator")
     profile = load_project_profile(root)
+    writing_brief_path = root / "inputs" / "writing_brief.md"
+    writing_brief = (
+        writing_brief_path.read_text(encoding="utf-8").strip()
+        if writing_brief_path.exists()
+        else ""
+    )
+    reference_path = root / "inputs" / "reference.md"
+    reference_digest = (
+        reference_path.read_text(encoding="utf-8").strip()[:12000]
+        if reference_path.exists()
+        else ""
+    )
     expected_pages = int(profile.get("expected_pages", 0) or 0)
     page_target_section = ""
     if expected_pages > 0:
@@ -406,6 +418,10 @@ def generate_outline(root: Path | None = None) -> Path:
                         "请根据招标文件、评分点和全局事实生成标书大纲。\n\n"
                         f"{page_target_section}"
                         f"{template_section}"
+                        "## 项目写作要求（用户经验与编写偏好）\n\n"
+                        f"{writing_brief or '未提供'}\n\n"
+                        "## 外部参考资料摘要\n\n"
+                        f"{reference_digest or '未提供'}\n\n"
                         "## 招标文件\n\n"
                         f"{tender_markdown}\n\n"
                         "## 评分点 JSON\n\n"

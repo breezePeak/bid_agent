@@ -42,8 +42,10 @@
         <div class="ip-empty-soft">阶段执行细节在此查看，聊天里只保留关键节点。</div>
       </div>
       <div class="ip-log-list" v-if="displayLogs.length">
-        <div v-for="(row, i) in displayLogs" :key="i" class="ip-log-line">
+        <div v-for="(row, i) in displayLogs" :key="row.key || i" class="ip-log-line" :class="logClass(row.line)">
+          <span v-if="row.at" class="ip-log-time">{{ formatLogTime(row.at) }}</span>
           <span v-if="row.stage" class="ip-log-stage">{{ row.stage }}</span>
+          <span v-if="row.progressText" class="ip-log-progress">{{ row.progressText }}</span>
           <span>{{ row.line }}</span>
         </div>
       </div>
@@ -60,7 +62,7 @@
           <div class="ip-banner-kicker">
             {{ report.source === 'issues'
               ? '最小修复失败 · 问题仍未关闭'
-              : (report.blocking ? '合规阻断 · 暂不可出正式稿' : (report.need_manual_review ? '合规待人工复核' : '合规状态正常')) }}
+              : (report.blocking || report.need_manual_review ? '合规风险提示 · 请人工复核（不阻断流程）' : '合规状态正常') }}
           </div>
           <div class="ip-banner-stats">
             <template v-if="report.source === 'issues'">失败 {{ counts.fail || 0 }} · 警告 {{ counts.warn || 0 }}</template>
@@ -102,16 +104,21 @@
             <div class="ip-name">{{ item.check_name || item.check_type || '检查项' }}</div>
             <div class="ip-req" v-if="item.requirement">{{ item.requirement }}</div>
             <div class="ip-detail-summary" v-if="item.failure_reason"><b>最近修复失败：</b>{{ item.failure_reason }}</div>
+            <button
+              v-if="item.issue_id && item.status === 'fail'"
+              class="btn btn-sm"
+              :disabled="acceptingIssue === item.issue_id"
+              @click.stop="acceptRiskAndContinue(item)"
+            >
+              {{ acceptingIssue === item.issue_id ? '提交中...' : '接受风险并继续' }}
+            </button>
             <div class="ip-detail" v-if="selected === item.check_id">
               <div v-if="item.failure_reason"><b>失败原因：</b>{{ item.failure_reason }}</div>
               <div v-if="item.suggestion"><b>建议：</b>{{ item.suggestion }}</div>
               <div v-if="item.check_type"><b>类型：</b>{{ item.check_type }}</div>
               <div><b>处理：</b>{{ item.auto_fixable ? '可尝试系统定向改稿' : '需人工补充材料/正文响应' }}</div>
-              <button v-if="item.failure_reason && item.issue_id" class="btn btn-sm" :disabled="acceptingIssue === item.issue_id" @click.stop="acceptRisk(item)">
-                {{ acceptingIssue === item.issue_id ? '提交中...' : '接受风险并解除该项阻断' }}
-              </button>
               <div v-if="item.need_manual_review" class="ip-man">需人工复核</div>
-          </div>
+            </div>
         </div>
       </div>
       <div v-else-if="report.exists" class="ip-empty-soft">当前筛选下没有条目</div>
@@ -124,7 +131,7 @@ import { ref, computed, watch, onMounted } from 'vue'
 import FileExplorer from './FileExplorer.vue'
 import MaterialsChecklistPanel from './MaterialsChecklistPanel.vue'
 import AgentGoalPanel from './AgentGoalPanel.vue'
-import { acceptIssueRisk, confirmWorkspaceAction, fetchComplianceReport, fetchIssues, fetchMaterialsChecklist } from '../api'
+import { acceptIssueRisk, confirmWorkspaceAction, fetchComplianceReport, fetchIssues, fetchMaterialsChecklist, fetchPipelineLogs } from '../api'
 import { useWorkspaceRuntime } from '../composables/useWorkspaceRuntime'
 
 const props = defineProps({
@@ -196,8 +203,56 @@ const filteredItems = computed(() => {
 
 const displayLogs = computed(() => {
   const fromParent = Array.isArray(props.pipelineLogs) ? props.pipelineLogs : []
-  return fromParent.length ? fromParent.slice().reverse() : localLogs.value.slice().reverse()
+  const merged = [...localLogs.value, ...fromParent]
+  const unique = new Map()
+  merged
+    .filter(row => !String(row?.line || '').includes('[ControlPlane]'))
+    .forEach((row, index) => {
+    const key = `${row?.at || ''}|${row?.stage || ''}|${row?.line || ''}`
+    unique.set(key, { ...row, key: key || String(index) })
+  })
+  return [...unique.values()].slice(-1000).reverse()
 })
+
+function formatLogTime(value) {
+  const text = String(value || '')
+  const match = text.match(/T(\d{2}:\d{2}:\d{2})/)
+  return match ? match[1] : text
+}
+
+function logClass(line) {
+  const text = String(line || '')
+  if (/(错误|失败|Traceback|Exception)/i.test(text)) return 'is-error'
+  if (/(警告|重试|warn)/i.test(text)) return 'is-warn'
+  if (/(完成|成功|exit_code=0)/i.test(text)) return 'is-success'
+  return ''
+}
+
+async function loadPipelineLogHistory() {
+  try {
+    const { data } = await fetchPipelineLogs(props.runId, 1000)
+    const records = Array.isArray(data?.records)
+      ? data.records
+      : (Array.isArray(data?.lines) ? data.lines.map(line => ({ line })) : [])
+    localLogs.value = records
+      .filter(row => (
+        row
+        && row.display !== false
+        && String(row.line || '').trim()
+        && !String(row.line || '').includes('[ControlPlane]')
+      ))
+      .map(row => ({
+        line: String(row.line || ''),
+        stage: String(row.stage || row.command || ''),
+        at: String(row.ts || row.at || ''),
+        kind: 'log',
+        progress: row.progress && typeof row.progress === 'object' ? row.progress : null,
+        progressText: String(row.progress_text || row.progressText || ''),
+      }))
+  } catch (e) {
+    localLogs.value = []
+  }
+}
 
 function severityLabel(sev) {
   const m = { fatal: '致命', critical: '严重', major: '重要', minor: '次要', info: '提示' }
@@ -302,21 +357,26 @@ async function refresh() {
   }
 }
 
-async function acceptRisk(item) {
-  const reason = window.prompt('接受风险会解除该问题的流程阻断，但失败原因、原始证据和你的理由会永久保留在风险登记中。\n\n请填写接受原因（至少 8 个字符）：', '')
-  if (reason === null) return
-  if (reason.trim().replace(/\s/g, '').length < 8) {
-    emptyMsg.value = '接受风险原因至少需要 8 个有效字符。'
-    return
-  }
-  if (!window.confirm('确认接受此风险并允许流程继续？该决定会被审计保留。')) return
+async function acceptRiskAndContinue(item) {
   acceptingIssue.value = item.issue_id
   try {
-    let { data } = await acceptIssueRisk(props.runId, item.issue_id, reason.trim())
+    let { data } = await acceptIssueRisk(props.runId, item.issue_id)
     const actionId = data?.action?.action_id || data?.action?.confirmation_id
     if (actionId) ({ data } = await confirmWorkspaceAction(props.runId, actionId))
     if (!data?.ok && !data?.accepted) throw new Error(data?.message || '接受风险失败')
-    emptyMsg.value = '风险已接受并记录：失败原因、原始证据和接受理由均已保留。现在可继续下一步流程。'
+
+    const openIssuesResponse = await fetchIssues(props.runId, 'open')
+    const remainingBlocks = (openIssuesResponse.data?.issues || []).filter(issue => (
+      ['open', 'in_progress'].includes(String(issue?.status || ''))
+      && String(issue?.severity || '') === 'block'
+    ))
+    if (remainingBlocks.length) {
+      emptyMsg.value = `该风险已接受；还有 ${remainingBlocks.length} 项阻断，全部处理后才会进入下一步。`
+      await refresh()
+      return
+    }
+
+    emptyMsg.value = '风险已接受，当前阻断已解除，可以直接执行下一步。'
     await refresh()
   } catch (e) {
     emptyMsg.value = e.response?.data?.message || e.message || '接受风险失败'
@@ -329,6 +389,7 @@ watch(() => props.runId, () => {
   materialsExists.value = false
   tab.value = 'office'
   refresh()
+  loadPipelineLogHistory()
 })
 watch(() => props.focus, (v) => {
   if (v === 'goal' || v === 'office' || v === 'agent') {
@@ -351,6 +412,7 @@ watch(() => props.focus, (v) => {
 
 onMounted(() => {
   refresh()
+  loadPipelineLogHistory()
 })
 
 defineExpose({

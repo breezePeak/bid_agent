@@ -21,7 +21,7 @@ from agent.goal import (
 )
 from agent.invalidation import mark_invalidated, is_stale
 from agent.tool_registry import get_tool, reset_tool_index
-from agent.tool_runtime import invoke
+from agent.tool_runtime import _execute_run_pipeline_remaining, _execute_stage, invoke
 
 
 class GoalStateTests(unittest.TestCase):
@@ -91,6 +91,33 @@ class BuildExportTests(unittest.TestCase):
         assert spec is not None
         self.assertEqual(spec.risk_level, "high")
         self.assertTrue(spec.human_confirm_required)
+
+    def test_disabled_historical_summary_start_does_not_restart_core_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("pipeline_registry.chapter_review_enabled", return_value=False):
+                result = _execute_run_pipeline_remaining(
+                    Path(tmp),
+                    {"start_command": "summarize-all", "resume": True},
+                    dry_run=True,
+                )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.metrics.get("planned"), [])
+        self.assertEqual(result.metrics.get("started_from"), "")
+
+    def test_agent_run_stage_skips_disabled_historical_review_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("pipeline_registry.chapter_review_enabled", return_value=False):
+                result = _execute_stage(
+                    Path(tmp),
+                    "global_review",
+                    force=True,
+                    actor="repair",
+                )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.metrics.get("reason"), "disabled_by_review_policy")
 
     def test_missing_chapters(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
