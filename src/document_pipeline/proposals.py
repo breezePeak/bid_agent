@@ -153,9 +153,14 @@ class ValidationReport(BaseModel):
             )
         )
 
-    def report_hash(self) -> str:
+    def compute_report_hash(self) -> str:
+        """Content hash of decision fields (not a model field; avoids name clash)."""
         payload = self.model_dump(mode="json", exclude={"created_at"})
         return compute_receipt_hash(payload)
+
+    # Back-compat alias used by existing call sites.
+    def report_hash(self) -> str:
+        return self.compute_report_hash()
 
 
 class GateReceipt(BaseModel):
@@ -164,6 +169,8 @@ class GateReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     receipt_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
+    # Stored content address; never compute via a same-named method.
+    receipt_hash: str = Field(default="", min_length=0)
     receipt_subtype: Literal["gate", "planning"] = "gate"
     workspace_id: str = Field(min_length=1)
     proposal_id: str = Field(min_length=1)
@@ -191,16 +198,16 @@ class GateReceipt(BaseModel):
             object.__setattr__(self, "reviewed_revision", self.base_revision)
         return self
 
-    def receipt_hash(self) -> str:
-        payload = self.model_dump(mode="json", exclude={"receipt_id"})
-        # receipt_hash itself is not included.
+    def compute_receipt_content_hash(self) -> str:
+        """Hash decision fields only; excludes receipt_id and stored receipt_hash."""
+        payload = self.model_dump(mode="json", exclude={"receipt_id", "receipt_hash"})
         return compute_receipt_hash(payload)
 
     def storage_record(self) -> dict[str, Any]:
         value = self.model_dump(mode="json")
-        value["receipt_hash"] = self.receipt_hash()
         if value.get("reviewed_revision") is None:
             value["reviewed_revision"] = self.base_revision
+        value["receipt_hash"] = self.compute_receipt_content_hash()
         return value
 
 
@@ -219,6 +226,38 @@ class PlanningGateReceipt(GateReceipt):
     planning_dag_root_hash: str | None = None
     policy_nonce: str | None = None
 
+    @model_validator(mode="after")
+    def planning_confirmation_fields_are_complete(self) -> "PlanningGateReceipt":
+        decision = self.planning_decision
+        if decision == "reject":
+            if not self.principal_id:
+                raise ValueError("PlanningGateReceipt reject 必须绑定 principal_id")
+            return self
+        if decision == "needs_human":
+            return self
+        # confirm and deterministic_carry_forward share the planning snapshot bindings.
+        required_common = {
+            "planning_confirmation_scope_hash": self.planning_confirmation_scope_hash,
+            "planning_audit_snapshot_hash": self.planning_audit_snapshot_hash,
+            "g2_receipt_id": self.g2_receipt_id,
+            "g2_receipt_hash": self.g2_receipt_hash,
+            "planning_dag_root_hash": self.planning_dag_root_hash,
+            "policy_nonce": self.policy_nonce,
+        }
+        missing = [name for name, value in required_common.items() if not value]
+        if missing:
+            raise ValueError(f"PlanningGateReceipt({decision}) 缺少字段: {', '.join(missing)}")
+        if decision == "confirm" and not self.principal_id:
+            raise ValueError("PlanningGateReceipt confirm 必须绑定认证 principal_id")
+        if decision == "deterministic_carry_forward":
+            if not self.source_h1_receipt_id or not self.source_h1_receipt_hash:
+                raise ValueError(
+                    "PlanningGateReceipt carry-forward 必须绑定原始人工 H1 receipt id/hash"
+                )
+            if not self.principal_id:
+                raise ValueError("PlanningGateReceipt carry-forward 必须保留原确认用户 principal_id")
+        return self
+
 
 class GateReceiptBinding(BaseModel):
     """Immutable id+hash pair stored on PromotionReceipt."""
@@ -234,6 +273,7 @@ class PromotionReceipt(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     receipt_id: str = Field(min_length=1)
+    # Stored content address field — do not name a method receipt_hash().
     receipt_hash: str = Field(default="", min_length=0)
     workspace_id: str = Field(min_length=1)
     proposal_id: str = Field(min_length=1)
@@ -258,9 +298,12 @@ class PromotionReceipt(BaseModel):
             object.__setattr__(self, "gate_receipt_ids", [item.receipt_id for item in self.gate_receipts])
         return self
 
-    def receipt_hash(self) -> str:
-        payload = self.model_dump(mode="json", exclude={"receipt_id", "created_at"})
+    def compute_receipt_content_hash(self) -> str:
+        payload = self.model_dump(mode="json", exclude={"receipt_id", "receipt_hash", "created_at"})
         return compute_receipt_hash(payload)
+
+    def with_content_hash(self) -> "PromotionReceipt":
+        return self.model_copy(update={"receipt_hash": self.compute_receipt_content_hash()})
 
 
 def dependency_fingerprint(*parts: Any) -> str:

@@ -26,6 +26,7 @@ from .gate_policy_registry import (
     ISSUER_HUMAN_GATE_SERVICE,
     GatePolicyRegistry,
 )
+from .kernel_seal import KERNEL_SEAL
 from .proposals import (
     GateReceipt,
     GateReceiptBinding,
@@ -96,9 +97,10 @@ class ProposalValidator:
             findings.append(ValidationFinding(code="CAPABILITY_DENIED", message=str(exc)))
             registration = None
 
+        checker = reference_checker or (lambda source_id: self._source_id_exists(source_id))
         references_valid = True
         for source_id in proposal.cited_source_ids:
-            ok = reference_checker(source_id) if reference_checker is not None else bool(source_id)
+            ok = bool(checker(source_id))
             if not ok:
                 references_valid = False
                 findings.append(
@@ -264,6 +266,19 @@ class ProposalValidator:
             findings.append(ValidationFinding(code="PAYLOAD_SCHEMA_INVALID", message=str(exc)))
             return False
 
+    def _source_id_exists(self, source_id: str) -> bool:
+        """Fail closed: cited sources must resolve to a known workspace input."""
+        if not str(source_id or "").strip():
+            return False
+        try:
+            from .input_manifest import InputManifestService
+
+            manifest = InputManifestService(self.context).load()
+            known = {item.input_id for item in manifest.inputs}
+            return source_id in known
+        except Exception:
+            return False
+
 
 class AgentProposalSandbox:
     """Narrow agent facade: submit candidates only; no database or promotion API."""
@@ -367,7 +382,7 @@ class GateService:
             expires_at=None,
             reviewed_revision=int(proposal_row["base_revision"]),
         )
-        stored = self.store.issue_v3_gate_receipt(receipt.storage_record())
+        stored = self.store.issue_v3_gate_receipt(receipt.storage_record(), kernel_seal=KERNEL_SEAL)
         merged = receipt.model_dump(mode="json")
         for key in GateReceipt.model_fields:
             if key in stored and stored[key] is not None:
@@ -431,7 +446,8 @@ def validate_and_record(
         target_id,
         report.model_dump(mode="json"),
         proposal_hash=report.proposal_hash,
-        report_hash=report.report_hash(),
+        report_hash=report.compute_report_hash(),
+        kernel_seal=KERNEL_SEAL,
     )
     return report
 

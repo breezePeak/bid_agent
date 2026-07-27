@@ -10,13 +10,31 @@
   "commands": [
     "python -m unittest tests.test_v3_pr14_contracts tests.test_v3_proposal_promotion -v"
   ],
+  "hash_normalization": {
+    "newline": "LF",
+    "encoding": "utf-8",
+    "note": "Evidence file hashes are computed after converting CRLF/CR to LF. Readers must normalize newlines before comparing sha256."
+  },
   "evidence_files": {
-    "unittest_kernel.txt": "0fc89f43cb6d5b9f6845d20f865a400dc94f39b24ef57bc8de3d664b6f660c02"
+    "unittest_kernel.txt": {
+      "sha256": "68b1c11ba918c72f33752c5985ae5029c9b6fa63f9030b743a1741dbd3f2ecca",
+      "newline": "LF",
+      "encoding": "utf-8"
+    }
   },
   "canonicalization_version": "v3-canon-1",
   "artifact_registry_version": "v3-artifact-registry-1",
   "gate_policy_registry_version": "v3-gate-policy-1",
-  "result": "PASS",
+  "automated_result": "PASS",
+  "result": "PENDING_HUMAN_APPROVAL",
+  "p0_closures": [
+    "Store direct ValidationReport write sealed (KERNEL_SEAL) + payload schema recheck",
+    "Store direct GateReceipt write sealed (KERNEL_SEAL) + receipt_hash recompute",
+    "Promotion re-validates Store payload schema and recomputes Validation/Gate receipt hashes",
+    "PlanningGateReceipt carry-forward requires source H1 id/hash + DAG/scope fields",
+    "PromotionReceipt/GateReceipt receipt_hash field no longer shadows compute method",
+    "cited_source_ids resolve against InputManifest; unknown IDs fail closed"
+  ],
   "known_risks": [
     "SourceIndex is not yet a promoted canonical Artifact (PR-16.1).",
     "H1 still uses reviewer string path in stage_runner; full principal binding is Gate P / PR-20.1.",
@@ -26,5 +44,6 @@
     "architecture_owner",
     "trusted_kernel_security_reviewer"
   ],
-  "conclusion": "Gate K technical evidence package generated from automated kernel tests. Human approval still required per release process."
+  "approvals": [],
+  "conclusion": "Automated kernel suite passed after P0 seal fixes. Gate K is NOT approved until both required humans sign approvals[]. Do not start PR-16.1 until result becomes PASS with approvals."
 }

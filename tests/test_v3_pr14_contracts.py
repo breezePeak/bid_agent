@@ -145,7 +145,13 @@ class SchemaFixtureTests(unittest.TestCase):
             reviewer="system",
         )
         self.assertEqual(gate.receipt_subtype, "gate")
-        self.assertEqual(len(gate.receipt_hash()), 64)
+        digest = gate.compute_receipt_content_hash()
+        self.assertEqual(len(digest), 64)
+        sealed = gate.storage_record()
+        self.assertEqual(sealed["receipt_hash"], digest)
+        # Field and method must not collide: field is a string after seal, method remains callable.
+        self.assertIsInstance(sealed["receipt_hash"], str)
+        self.assertTrue(callable(gate.compute_receipt_content_hash))
 
         planning = PlanningGateReceipt(
             workspace_id="alpha",
@@ -161,10 +167,62 @@ class SchemaFixtureTests(unittest.TestCase):
             verdict="pass",
             issuer="human_gate_service",
             reviewer="user-1",
+            planning_decision="confirm",
             principal_id="user-1",
             planning_confirmation_scope_hash="scope",
+            planning_audit_snapshot_hash="audit",
+            g2_receipt_id="g2",
+            g2_receipt_hash="g2h",
+            planning_dag_root_hash="dag",
+            policy_nonce="nonce-1",
         )
         self.assertEqual(planning.receipt_subtype, "planning")
+
+    def test_planning_carry_forward_requires_source_h1_and_dag(self) -> None:
+        with self.assertRaises(Exception):
+            PlanningGateReceipt(
+                workspace_id="alpha",
+                proposal_id="p1",
+                proposal_hash="h1",
+                validation_report_id="r1",
+                validation_report_hash="rh",
+                artifact_kind="ChapterBlueprint",
+                base_revision=1,
+                dependency_fingerprint="df",
+                gate_id="H1_PLANNING_CONFIRM",
+                gate_policy_version=GATE_POLICY_REGISTRY_VERSION,
+                verdict="pass",
+                issuer="human_gate_service",
+                reviewer="system",
+                planning_decision="deterministic_carry_forward",
+                # missing source_h1, dag root, scope, etc.
+            )
+        ok = PlanningGateReceipt(
+            workspace_id="alpha",
+            proposal_id="p1",
+            proposal_hash="h1",
+            validation_report_id="r1",
+            validation_report_hash="rh",
+            artifact_kind="ChapterBlueprint",
+            base_revision=1,
+            dependency_fingerprint="df",
+            gate_id="H1_PLANNING_CONFIRM",
+            gate_policy_version=GATE_POLICY_REGISTRY_VERSION,
+            verdict="pass",
+            issuer="human_gate_service",
+            reviewer="carry-forward-service",
+            planning_decision="deterministic_carry_forward",
+            principal_id="user-1",
+            planning_confirmation_scope_hash="scope",
+            planning_audit_snapshot_hash="audit",
+            source_h1_receipt_id="h1-old",
+            source_h1_receipt_hash="h1-old-hash",
+            g2_receipt_id="g2",
+            g2_receipt_hash="g2h",
+            planning_dag_root_hash="dag",
+            policy_nonce="nonce-1",
+        )
+        self.assertEqual(ok.planning_decision, "deterministic_carry_forward")
 
     def test_promotion_receipt_requires_gate_bindings(self) -> None:
         receipt = PromotionReceipt(
@@ -184,6 +242,13 @@ class SchemaFixtureTests(unittest.TestCase):
             created_at="2026-01-01T00:00:00+00:00",
         )
         self.assertEqual(receipt.gate_receipt_ids, ["g1"])
+        sealed = receipt.with_content_hash()
+        self.assertEqual(len(sealed.receipt_hash), 64)
+        self.assertEqual(sealed.receipt_hash, sealed.compute_receipt_content_hash())
+        # Serializing a promotion receipt with content hash must not invoke a method field.
+        payload = sealed.model_dump(mode="json")
+        self.assertIsInstance(payload["receipt_hash"], str)
+        self.assertNotEqual(payload["receipt_hash"], "")
 
 
 class RegistryTests(unittest.TestCase):
@@ -212,6 +277,43 @@ class RegistryTests(unittest.TestCase):
         self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-1")
         self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-1")
         self.assertEqual(len(GATE_POLICY_REGISTRY.registry_fingerprint()), 64)
+
+
+class IllegalFixtureTests(unittest.TestCase):
+    def test_illegal_receipt_and_proposal_fixtures_fail(self) -> None:
+        path = ROOT / "tests" / "fixtures" / "v3_kernel" / "illegal_receipt_fixtures.json"
+        cases = json.loads(path.read_text(encoding="utf-8"))["cases"]
+        models = {
+            "GateReceipt": GateReceipt,
+            "PlanningGateReceipt": PlanningGateReceipt,
+            "PromotionReceipt": PromotionReceipt,
+            "ProposalEnvelope": ProposalEnvelope,
+        }
+        for case in cases:
+            model = models[case["kind"]]
+            with self.subTest(case["name"]):
+                with self.assertRaises(Exception):
+                    model.model_validate(case["payload"])
+
+    def test_canonicalization_version_is_decision_sensitive(self) -> None:
+        base = {
+            "workspace_id": "ws-1",
+            "artifact_kind": "RequirementLedger",
+            "producer_role": "requirement_agent",
+            "operation_id": "op-1",
+            "base_revision": 0,
+            "declared_dependencies": [],
+            "dependency_fingerprint": "abc",
+            "payload": {"schema_version": "v3", "revision": 1, "source_hashes": {}, "requirements": []},
+            "cited_source_ids": [],
+            "prompt_version": "p1",
+            "model_fingerprint": "m1",
+            "payload_schema_version": "v3",
+            "canonicalization_version": CANONICALIZATION_VERSION,
+        }
+        h1 = compute_proposal_hash(base)
+        h2 = compute_proposal_hash({**base, "canonicalization_version": "v3-canon-0-legacy"})
+        self.assertNotEqual(h1, h2)
 
 
 class AdrAndChecklistPresenceTests(unittest.TestCase):

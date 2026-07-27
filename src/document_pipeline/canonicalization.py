@@ -75,12 +75,18 @@ def canonical_payload_hash(payload: dict[str, Any]) -> str:
 
 
 def proposal_decision_document(record: dict[str, Any]) -> dict[str, Any]:
-    """Project a proposal storage/API record onto the frozen decision field set."""
-    doc: dict[str, Any] = {"canonicalization_version": CANONICALIZATION_VERSION}
+    """Project a proposal storage/API record onto the frozen decision field set.
+
+    The declared ``canonicalization_version`` is part of the decision document so
+    version skew changes the proposal hash. Runtime still fail-closes when the
+    declared version is not the currently supported CANONICALIZATION_VERSION.
+    """
+    doc: dict[str, Any] = {}
     for field in PROPOSAL_HASH_FIELDS:
-        if field == "canonicalization_version":
-            continue
         if field not in record:
+            if field == "canonicalization_version":
+                doc[field] = CANONICALIZATION_VERSION
+                continue
             raise KeyError(f"proposal decision field missing: {field}")
         doc[field] = record[field]
     return doc

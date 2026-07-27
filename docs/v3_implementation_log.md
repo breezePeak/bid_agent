@@ -120,29 +120,31 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-14：冻结 Bid Master、投标中间语言与 Golden
 
-- 工程状态：原则、依赖方向和指标定义已冻结；PR-14.0 最小契约冻结包已独立验收。
-- 验收状态：**PR-14.0 已完成；PR-14.1 Golden 资产仍未建立。**
-- 历史提交：`2d775a7 docs(v3): freeze trusted Bid Master architecture`
+- 工程状态：原则、依赖方向和指标定义已冻结；PR-14.0 契约在补齐非法 fixture / PlanningGateReceipt 约束后接近完成。
+- 验收状态：**PR-14.0 技术契约基本完成，仍待 Gate K 人工批准一并收口；PR-14.1 Golden 资产仍未建立。**
+- 历史提交：`2d775a7`、`8d4e45d docs(v3): freeze PR-14.0 trusted kernel contracts`
 - PR-14.0 验收报告：[v3_pr14_0_acceptance.md](./v3_pr14_0_acceptance.md)
-- PR-14.0 已完成：ADR-01/02/11、canonicalization `v3-canon-1` 与 test vectors、ProposalEnvelope/ValidationReport/GateReceipt/PlanningGateReceipt/PromotionReceipt Schema、ArtifactKindRegistry、GatePolicyRegistry、架构审查清单。
+- PR-14.0 已完成：ADR-01/02/11、canonicalization `v3-canon-1` 与固定向量、Proposal/Validation/Gate/Planning/Promotion Schema、ArtifactKindRegistry、GatePolicyRegistry、架构审查清单、非法 Receipt fixture、PlanningGateReceipt carry-forward 必填字段。
 - 未完成（PR-14.1）：至少 8 份匿名真实样本、四套 Golden A～D（其中 Golden-A 含 A1～A4 四层）、双人标注与裁决、当前规则 baseline、ADR-03～ADR-14 余下条目、可执行评测脚本。
 - 结论：不得使用“Golden 已冻结/只需加强”；准确表述是“Golden 指标已定义，PR-14.0 契约已冻结，Golden 资产尚未建立”。
 
 ## PR-15：Proposal / Validation / Gate / Promotion 可信运行内核
 
-- 工程状态：PR-15.1 exact binding 可信内核已实现。
-- 验收状态：**PR-15.1 技术 DoD 已满足；Gate K 证据包已生成，待架构负责人 + 可信内核/安全复核人批准。**
-- 历史提交：`f94f8a6 feat(v3): add trusted proposal promotion kernel`
+- 工程状态：PR-15.1 exact binding + Store 封死路径已实现。
+- 验收状态：**自动化负向矩阵已通过；Gate K 仍为 `PENDING_HUMAN_APPROVAL`，不得开始 PR-16.1。**
+- 历史提交：`f94f8a6`、`adc08b4`；本轮封死 P0 绕过后需新提交。
 - 已完成（PR-15.1）：
   - Validator 仅按 `proposal_id` 从 append-only Store 重载 Proposal；
   - ValidationReport / GateReceipt / PromotionReceipt 绑定 exact `proposal_hash` 与依赖快照；
+  - `record_v3_validation_report` / `issue_v3_gate_receipt` 必须持有 `KERNEL_SEAL`，禁止 Store 直写伪造全通过报告或 Receipt；
+  - 写入与 Promotion 均重算 payload Schema / report_hash / receipt_hash，伪造 hash 与非法 payload 无法晋级；
   - GatePolicyRegistry 强制完整必需 Gate 集合与合法 issuer；
-  - 可信内核重算 dependency fingerprint，禁止 producer 自证；
-  - Promotion 事务内重校验依赖与 Receipt，CAS + revision + Receipt 原子提交；
-  - “验证 A、晋级 B”、伪造 issuer、缺必需 Gate、同 operation 不同 hash、跨 workspace 等负向测试。
-- 验证：`python -m unittest tests.test_v3_pr14_contracts tests.test_v3_proposal_promotion`（31 passed）；相关 Agent/Stage 回归 20 passed。
-- Gate K 证据：`artifacts/release_gates/v3/K/v1/`
-- 遗留：旧 Receipt inventory / `legacy_untrusted` 标记与生产工作空间迁移仍归 Gate M / PR-27；H1 认证 principal 完整绑定归 PR-20.1 / Gate P。
+  - 可信内核重算 dependency fingerprint；cited_source_ids 对 InputManifest 解析，未知 Source 失败；
+  - PlanningGateReceipt carry-forward 缺少原 H1 / DAG / scope 时 Schema 失败；
+  - `receipt_hash` 字段与 `compute_receipt_content_hash()` 分离，避免方法被字段遮蔽。
+- 验证：`python -m unittest tests.test_v3_pr14_contracts tests.test_v3_proposal_promotion`（36 passed）；Agent/Stage 相关回归通过。
+- Gate K 证据：`artifacts/release_gates/v3/K/v1/`（`result=PENDING_HUMAN_APPROVAL`，哈希按 LF 规范化）
+- 遗留：人工批准记录；旧 Receipt inventory / `legacy_untrusted`（Gate M / PR-27）；H1 认证 principal（PR-20.1 / Gate P）。
 
 ## PR-16：canonical InputManifest、SourceIndex 与 TemplateStructureContract
 

@@ -31,11 +31,14 @@
 
 ## DoD 核对
 
-- [x] canonicalization vectors 稳定产出相同 hash
+- [x] canonicalization vectors 稳定产出相同 hash（含 unicode / 列表顺序敏感向量）
 - [x] ProposalEnvelope / ValidationReport / GateReceipt / PlanningGateReceipt / PromotionReceipt 合法/非法 fixture
+- [x] PlanningGateReceipt carry-forward 缺少原 H1 / DAG / scope 失败
+- [x] PromotionReceipt/GateReceipt 的 `receipt_hash` 字段与 `compute_receipt_content_hash()` 不冲突
 - [x] enabled/promotable kind 均有真实 payload Schema 与 GatePolicy；`{}`、未知 kind、未知 policy 失败
 - [x] ADR-01/02/11、checklist、Registry 可被 PR-15.1 测试直接引用
 - [x] 本报告作为 PR-14.0 独立验收记录（不得由 PR-15.1 提交隐式代替）
+- [ ] Gate K 人工双签完成（当前仍为 PENDING_HUMAN_APPROVAL）
 
 ## 验证命令
 
@@ -45,4 +48,4 @@ python -m unittest tests.test_v3_pr14_contracts -v
 
 ## 后续
 
-PR-15.1 必须在本冻结契约上实现 exact binding 与负向内核测试，并争取 Gate K。
+PR-15.1 在本冻结契约上完成 exact binding、Store 封死与 Promotion 重算后，方可申请 Gate K 人工批准；批准前不启动 PR-16.1。

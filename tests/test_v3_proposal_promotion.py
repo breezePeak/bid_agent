@@ -191,7 +191,7 @@ class V3ProposalPromotionTests(unittest.TestCase):
             "proposal_id": proposal.proposal_id,
             "proposal_hash": proposal.proposal_hash(),
             "validation_report_id": report.report_id,
-            "validation_report_hash": report.report_hash(),
+            "validation_report_hash": report.compute_report_hash(),
             "artifact_kind": "RequirementLedger",
             "base_revision": 0,
             "reviewed_revision": 0,
@@ -206,9 +206,61 @@ class V3ProposalPromotionTests(unittest.TestCase):
             "issued_at": "2026-01-01T00:00:00+00:00",
             "expires_at": None,
         }
-        store.issue_v3_gate_receipt(forged)
-        with self.assertRaisesRegex(ControlPlaneError, "issuer 非法"):
-            ArtifactPromotionService(self.context).promote(proposal.proposal_id, [forged["receipt_id"]])
+        # Direct Store write is sealed; even forged gate_service claims are rejected without seal.
+        with self.assertRaisesRegex(ControlPlaneError, "V3_GATE_SEALED|只能由"):
+            store.issue_v3_gate_receipt(forged)
+        with self.assertRaisesRegex(ControlPlaneError, "V3_GATE_SEALED|只能由"):
+            store.issue_v3_gate_receipt({**forged, "issuer": ISSUER_GATE_SERVICE, "receipt_hash": "still-forged"})
+
+    def test_forged_all_pass_validation_report_cannot_launder_invalid_payload(self) -> None:
+        """P0: direct write of a forged all-pass ValidationReport must not promote illegal payload."""
+        proposal = self.proposal(payload={"not": "valid-ledger"})
+        AgentProposalSandbox(self.context, "requirement_agent").submit(proposal)
+        store = ControlStore(self.context)
+        forged_report = {
+            "report_id": uuid4().hex,
+            "workspace_id": self.context.workspace_id,
+            "proposal_id": proposal.proposal_id,
+            "proposal_hash": proposal.proposal_hash(),
+            "canonical_payload_hash": proposal.canonical_payload_hash(),
+            "artifact_kind": "RequirementLedger",
+            "resolved_dependency_snapshot": {},
+            "dependency_fingerprint": proposal.dependency_fingerprint,
+            "validator_id": "forged",
+            "validator_version": "1",
+            "schema_version": "v3",
+            "policy_version": GATE_POLICY_REGISTRY.VERSION,
+            "schema_valid": True,
+            "references_valid": True,
+            "authority_policy_valid": True,
+            "dependency_current": True,
+            "findings": [],
+        }
+        with self.assertRaisesRegex(ControlPlaneError, "V3_VALIDATION_SEALED|只能由"):
+            store.record_v3_validation_report(
+                proposal.proposal_id,
+                forged_report,
+                proposal_hash=proposal.proposal_hash(),
+                report_hash="forged-hash",
+            )
+        # Even the trusted validator path must reject illegal payload (no laundering).
+        report = validate_and_record(self.context, proposal.proposal_id)
+        self.assertFalse(report.passed)
+        blocked = GateService(self.context).evaluate(proposal.proposal_id, gate_id="G1_REQUIREMENT_INTEGRITY")
+        self.assertEqual(blocked.verdict, "block")
+        with self.assertRaises(ControlPlaneError):
+            ArtifactPromotionService(self.context).promote(proposal.proposal_id, [blocked.receipt_id])
+        self.assertIsNone(store.v3_active_artifact("RequirementLedger"))
+
+    def test_unknown_cited_source_id_fails_reference_check(self) -> None:
+        proposal = self.proposal()
+        proposal = proposal.model_copy(update={"cited_source_ids": ["does-not-exist-input"]})
+        # Recompute fingerprint fields after copy — proposal_hash changes with citations.
+        proposal = ProposalEnvelope.model_validate(proposal.model_dump(mode="json"))
+        AgentProposalSandbox(self.context, "requirement_agent").submit(proposal)
+        report = validate_and_record(self.context, proposal.proposal_id)
+        self.assertFalse(report.passed)
+        self.assertTrue(any(f.code == "REFERENCE_INVALID" for f in report.findings))
 
     def test_wrong_gate_id_cannot_promote(self) -> None:
         proposal = self.proposal()
@@ -255,8 +307,11 @@ class V3ProposalPromotionTests(unittest.TestCase):
         self.assertEqual(receipt.workspace_id, self.context.workspace_id)
         self.assertEqual(len(receipt.gate_receipts), 1)
         self.assertEqual(receipt.gate_receipts[0].receipt_id, gate.receipt_id)
-        self.assertEqual(receipt.gate_receipts[0].receipt_hash, gate.receipt_hash())
+        self.assertEqual(receipt.gate_receipts[0].receipt_hash, gate.receipt_hash)
+        self.assertEqual(gate.receipt_hash, gate.compute_receipt_content_hash())
         self.assertEqual(receipt.policy_version, GATE_POLICY_REGISTRY.VERSION)
+        self.assertTrue(receipt.receipt_hash)
+        self.assertEqual(receipt.receipt_hash, receipt.compute_receipt_content_hash())
         # Reverse lookup: active artifact points at exact proposal.
         active = ControlStore(self.context).v3_active_artifact("RequirementLedger")
         self.assertEqual(active["proposal_id"], proposal.proposal_id)
@@ -267,7 +322,7 @@ class V3ProposalPromotionTests(unittest.TestCase):
         AgentProposalSandbox(self.context, "requirement_agent").submit(proposal)
         report = validate_and_record(self.context, proposal.proposal_id)
         self.assertTrue(report.passed)
-        # Fabricate a pass receipt for a non-required gate id that policy does not list.
+        # Fabricating a non-required gate is sealed; only GateService may issue receipts.
         store = ControlStore(self.context)
         bogus = {
             "receipt_id": uuid4().hex,
@@ -276,7 +331,7 @@ class V3ProposalPromotionTests(unittest.TestCase):
             "proposal_id": proposal.proposal_id,
             "proposal_hash": proposal.proposal_hash(),
             "validation_report_id": report.report_id,
-            "validation_report_hash": report.report_hash(),
+            "validation_report_hash": report.compute_report_hash(),
             "artifact_kind": "RequirementLedger",
             "base_revision": 0,
             "reviewed_revision": 0,
@@ -291,8 +346,10 @@ class V3ProposalPromotionTests(unittest.TestCase):
             "issued_at": "2026-01-01T00:00:00+00:00",
             "expires_at": None,
         }
-        store.issue_v3_gate_receipt(bogus)
-        with self.assertRaisesRegex(ControlPlaneError, "缺少必需 Gate"):
+        with self.assertRaisesRegex(ControlPlaneError, "V3_GATE_SEALED|只能由"):
+            store.issue_v3_gate_receipt(bogus)
+        # Promote with empty / wrong receipt set still fails policy completeness.
+        with self.assertRaisesRegex(ControlPlaneError, "缺少|GateReceipt"):
             ArtifactPromotionService(self.context).promote(proposal.proposal_id, [bogus["receipt_id"]])
 
     def test_human_gate_rejects_system_reviewer(self) -> None:

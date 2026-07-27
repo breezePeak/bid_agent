@@ -2765,7 +2765,16 @@ class ControlStore:
         *,
         proposal_hash: str | None = None,
         report_hash: str | None = None,
+        kernel_seal: Any = None,
     ) -> dict[str, Any]:
+        from document_pipeline.kernel_seal import KERNEL_SEAL
+
+        if kernel_seal is not KERNEL_SEAL:
+            raise ControlPlaneError(
+                "V3_VALIDATION_SEALED",
+                "ValidationReport 只能由持有 KERNEL_SEAL 的可信 Validator 写入。",
+                status_code=403,
+            )
         proposal = self.v3_proposal(proposal_id)
         if proposal is None:
             raise ControlPlaneError("V3_PROPOSAL_NOT_FOUND", "Proposal 不存在。", status_code=404)
@@ -2780,11 +2789,45 @@ class ControlStore:
             )
         if str(report.get("workspace_id") or self.context.workspace_id) != self.context.workspace_id:
             raise ControlPlaneError("V3_VALIDATION_WORKSPACE_MISMATCH", "ValidationReport 跨工作空间。", status_code=409)
+
+        # Never trust caller-supplied schema_valid for sealed write: re-check payload.
+        from document_pipeline.artifact_registry import ARTIFACT_REGISTRY
+        from document_pipeline.canonicalization import canonical_payload_hash
+        from document_pipeline.proposals import ValidationReport
+
+        payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
+        try:
+            ARTIFACT_REGISTRY.validate_payload(str(proposal["artifact_kind"]), payload)
+            recomputed_schema_valid = True
+        except Exception:
+            recomputed_schema_valid = False
+        if bool(report.get("schema_valid")) and not recomputed_schema_valid:
+            raise ControlPlaneError(
+                "V3_VALIDATION_FORGED",
+                "ValidationReport 宣称 schema_valid，但 Store payload 未通过 Schema。",
+                status_code=409,
+            )
+        expected_payload_hash = canonical_payload_hash(payload)
+        if str(report.get("canonical_payload_hash") or "") != expected_payload_hash:
+            raise ControlPlaneError(
+                "V3_VALIDATION_HASH_MISMATCH",
+                "ValidationReport canonical_payload_hash 与 Store payload 不一致。",
+                status_code=409,
+            )
+
+        report_model = ValidationReport.model_validate(report)
+        recomputed_report_hash = report_model.compute_report_hash()
+        if report_hash and str(report_hash) != recomputed_report_hash:
+            raise ControlPlaneError(
+                "V3_VALIDATION_HASH_MISMATCH",
+                "ValidationReport report_hash 与内容不一致。",
+                status_code=409,
+            )
+        stored_report_hash = recomputed_report_hash
         valid = all(bool(report.get(field)) for field in (
             "schema_valid", "references_valid", "authority_policy_valid", "dependency_current",
-        ))
+        )) and recomputed_schema_valid
         now = _now()
-        stored_report_hash = str(report_hash or report.get("report_hash") or "")
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -2831,7 +2874,15 @@ class ControlStore:
         value = _decode(str(row["report_json"]), {}) if row is not None else None
         return value if isinstance(value, dict) else None
 
-    def issue_v3_gate_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
+    def issue_v3_gate_receipt(self, receipt: dict[str, Any], *, kernel_seal: Any = None) -> dict[str, Any]:
+        from document_pipeline.kernel_seal import KERNEL_SEAL
+
+        if kernel_seal is not KERNEL_SEAL:
+            raise ControlPlaneError(
+                "V3_GATE_SEALED",
+                "GateReceipt 只能由持有 KERNEL_SEAL 的 GateService 签发。",
+                status_code=403,
+            )
         required = ("receipt_id", "proposal_id", "proposal_hash", "gate_id", "verdict", "reviewer", "issuer")
         if any(not str(receipt.get(key) or "").strip() for key in required) or str(receipt.get("verdict")) not in {
             "pass", "warn", "block", "needs_human",
@@ -2861,24 +2912,72 @@ class ControlStore:
                     raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定 exact proposal_hash。", status_code=409)
                 if str(validation["proposal_hash"] or proposal["proposal_hash"]) != str(proposal["proposal_hash"]):
                     raise ControlPlaneError("V3_GATE_STALE", "ValidationReport 未绑定 exact proposal_hash。", status_code=409)
-                if str(receipt.get("validation_report_hash") or "") and str(
-                    receipt.get("validation_report_hash")
-                ) != str(validation["report_hash"] or ""):
-                    # Allow empty stored report_hash only when both empty (legacy rows).
-                    if str(validation["report_hash"] or ""):
-                        raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定 ValidationReport hash。", status_code=409)
+
+                # Recompute ValidationReport hash; never trust a caller-supplied binding alone.
+                from document_pipeline.artifact_registry import ARTIFACT_REGISTRY
+                from document_pipeline.proposals import GateReceipt, ValidationReport
+
+                report_model = ValidationReport.model_validate(report)
+                expected_report_hash = report_model.compute_report_hash()
+                if str(validation["report_hash"] or "") != expected_report_hash:
+                    raise ControlPlaneError(
+                        "V3_GATE_STALE",
+                        "Store 中 ValidationReport hash 与内容不一致。",
+                        status_code=409,
+                    )
+                if str(receipt.get("validation_report_hash") or "") != expected_report_hash:
+                    raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定 ValidationReport hash。", status_code=409)
+
+                # Re-check payload schema independently of stored booleans.
+                proposal_payload = _decode(str(proposal["payload_json"]), {})
+                try:
+                    ARTIFACT_REGISTRY.validate_payload(str(proposal["artifact_kind"]), proposal_payload)
+                    payload_schema_ok = True
+                except Exception:
+                    payload_schema_ok = False
+
                 reviewed_revision = int(receipt.get("reviewed_revision", receipt.get("base_revision", -1)))
                 if reviewed_revision != int(proposal["base_revision"]):
                     raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定当前 base_revision。", status_code=409)
-                # Automated promotion gates may only be issued as pass when validation passed.
-                if str(receipt["verdict"]) == "pass" and not all(
+                report_passed = all(
                     bool(report.get(field))
                     for field in ("schema_valid", "references_valid", "authority_policy_valid", "dependency_current")
-                ):
-                    raise ControlPlaneError("V3_GATE_FORBIDDEN", "验证未通过，不能签发 pass GateReceipt。", status_code=409)
+                )
+                if str(receipt["verdict"]) == "pass" and (not report_passed or not payload_schema_ok):
+                    raise ControlPlaneError(
+                        "V3_GATE_FORBIDDEN",
+                        "验证未通过或 payload Schema 非法，不能签发 pass GateReceipt。",
+                        status_code=409,
+                    )
+
+                # Recompute receipt content hash; reject forged hash claims.
+                receipt_for_hash = dict(receipt)
+                receipt_for_hash["workspace_id"] = workspace_id
+                receipt_for_hash["validation_report_hash"] = expected_report_hash
+                receipt_for_hash.pop("receipt_hash", None)
+                gate_model = GateReceipt.model_validate(
+                    {**receipt_for_hash, "receipt_hash": "", "reviewed_revision": reviewed_revision}
+                )
+                recomputed_receipt_hash = gate_model.compute_receipt_content_hash()
+                claimed_hash = str(receipt.get("receipt_hash") or "")
+                if claimed_hash and claimed_hash != recomputed_receipt_hash:
+                    raise ControlPlaneError(
+                        "V3_GATE_HASH_MISMATCH",
+                        "GateReceipt receipt_hash 与内容不一致。",
+                        status_code=409,
+                    )
+
                 revision = self._bump_revision(connection)
                 now = _now()
                 issued_at = str(receipt.get("issued_at") or now)
+                sealed_receipt = {
+                    **receipt,
+                    "workspace_id": workspace_id,
+                    "validation_report_hash": expected_report_hash,
+                    "receipt_hash": recomputed_receipt_hash,
+                    "issued_at": issued_at,
+                    "reviewed_revision": reviewed_revision,
+                }
                 connection.execute(
                     """
                     INSERT INTO v3_gate_receipts(
@@ -2891,12 +2990,12 @@ class ControlStore:
                     """,
                     (
                         str(receipt["receipt_id"]),
-                        str(receipt.get("receipt_hash") or ""),
+                        recomputed_receipt_hash,
                         workspace_id,
                         proposal_id,
                         str(receipt["proposal_hash"]),
                         str(receipt.get("validation_report_id") or report.get("report_id") or ""),
-                        str(receipt.get("validation_report_hash") or validation["report_hash"] or ""),
+                        expected_report_hash,
                         str(receipt.get("artifact_kind") or proposal["artifact_kind"]),
                         str(receipt["gate_id"]),
                         str(receipt.get("gate_policy_version") or ""),
@@ -2909,7 +3008,7 @@ class ControlStore:
                         _json(receipt.get("resolved_dependency_snapshot") or {}),
                         issued_at,
                         receipt.get("expires_at"),
-                        _json(receipt),
+                        _json(sealed_receipt),
                         now,
                     ),
                 )
@@ -2924,14 +3023,14 @@ class ControlStore:
                         "verdict": str(receipt["verdict"]),
                         "issuer": str(receipt["issuer"]),
                         "proposal_hash": str(receipt["proposal_hash"]),
-                        "receipt_hash": str(receipt.get("receipt_hash") or ""),
+                        "receipt_hash": recomputed_receipt_hash,
                     },
                 )
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
-        return {**receipt, "created_at": now, "issued_at": issued_at, "workspace_id": workspace_id}
+        return {**sealed_receipt, "created_at": now}
 
     def has_v3_gate_receipt(self, proposal_id: str, gate_id: str) -> bool:
         with self._connection() as connection:
@@ -3038,6 +3137,36 @@ class ControlStore:
                         status_code=409,
                     )
 
+                # Independent re-validation of Store payload Schema (never trust report flags alone).
+                from document_pipeline.artifact_registry import ARTIFACT_REGISTRY as _DEFAULT_ARTIFACT_REGISTRY
+                from document_pipeline.proposals import GateReceipt as _GateReceipt
+                from document_pipeline.proposals import ValidationReport as _ValidationReport
+
+                registry = artifact_registry or _DEFAULT_ARTIFACT_REGISTRY
+                try:
+                    registry.validate_payload(str(proposal["artifact_kind"]), envelope.payload)
+                except Exception as exc:
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        f"Store payload Schema 非法，拒绝晋级: {exc}",
+                        status_code=409,
+                    ) from exc
+
+                report_model = _ValidationReport.model_validate(report)
+                recomputed_report_hash = report_model.compute_report_hash()
+                if str(validation["report_hash"] or "") != recomputed_report_hash:
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "ValidationReport hash 与内容不一致。",
+                        status_code=409,
+                    )
+                if str(report.get("canonical_payload_hash") or "") != envelope.canonical_payload_hash():
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "ValidationReport canonical_payload_hash 与 Store payload 不一致。",
+                        status_code=409,
+                    )
+
                 placeholders = ",".join("?" for _ in ids)
                 gates = connection.execute(
                     f"SELECT * FROM v3_gate_receipts WHERE receipt_id IN ({placeholders}) AND proposal_id = ?",
@@ -3045,6 +3174,34 @@ class ControlStore:
                 ).fetchall()
                 if len(gates) != len(ids):
                     raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "GateReceipt 不完整或不属于该 Proposal。", status_code=409)
+
+                # Recompute every GateReceipt content hash inside the promotion transaction.
+                for gate in gates:
+                    body = _decode(str(gate["receipt_json"]), {})
+                    if not isinstance(body, dict):
+                        raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "GateReceipt JSON 损坏。", status_code=409)
+                    body_for_hash = {**body, "receipt_hash": ""}
+                    try:
+                        gate_model = _GateReceipt.model_validate(body_for_hash)
+                    except Exception as exc:
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_FORBIDDEN",
+                            f"GateReceipt 内容无法解析: {exc}",
+                            status_code=409,
+                        ) from exc
+                    expected_gate_hash = gate_model.compute_receipt_content_hash()
+                    if str(gate["receipt_hash"] or "") != expected_gate_hash:
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_FORBIDDEN",
+                            f"GateReceipt {gate['gate_id']} receipt_hash 与内容不一致。",
+                            status_code=409,
+                        )
+                    if str(gate["validation_report_hash"] or "") != recomputed_report_hash:
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_FORBIDDEN",
+                            f"GateReceipt {gate['gate_id']} 未绑定 exact ValidationReport hash。",
+                            status_code=409,
+                        )
 
                 # Re-resolve active dependencies inside the promotion transaction.
                 resolved_snapshot: dict[str, Any] = {}
@@ -3210,9 +3367,16 @@ class ControlStore:
                     "gate_receipt_ids": [item["receipt_id"] for item in gate_bindings],
                     "policy_version": policy_version,
                 }
-                from document_pipeline.canonicalization import compute_receipt_hash
+                from document_pipeline.proposals import PromotionReceipt as _PromotionReceipt
 
-                receipt_hash = compute_receipt_hash(promotion_body)
+                # receipt_id is assigned below; content hash excludes it and the hash field itself.
+                promotion_for_hash = {
+                    **promotion_body,
+                    "receipt_id": "pending",
+                    "receipt_hash": "",
+                    "created_at": now,
+                }
+                receipt_hash = _PromotionReceipt.model_validate(promotion_for_hash).compute_receipt_content_hash()
                 revision = self._bump_revision(connection)
                 connection.execute(
                     """
