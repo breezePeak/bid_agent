@@ -23,12 +23,30 @@ class BidMaster:
 
     def submit_candidate(self, proposal: ProposalEnvelope) -> dict:
         """Accept an agent candidate without making it a runtime artifact."""
+        if not proposal.workspace_id:
+            proposal = proposal.model_copy(update={"workspace_id": self.context.workspace_id})
         return AgentProposalSandbox(self.context, proposal.producer_role).submit(proposal)
 
-    def validate_candidate(self, proposal: ProposalEnvelope) -> ValidationReport:
-        return validate_and_record(self.context, proposal)
+    def validate_candidate(self, proposal_id: str | ProposalEnvelope) -> ValidationReport:
+        """Validate only by proposal_id. Envelope argument is accepted for migration
+        but its body is never used as validation authority."""
+        if isinstance(proposal_id, ProposalEnvelope):
+            target = proposal_id.proposal_id
+        else:
+            target = str(proposal_id)
+        return validate_and_record(self.context, target)
 
-    def gate_and_promote(self, proposal: ProposalEnvelope, *, gate_id: str, reviewer: str = "system") -> PromotionReceipt:
+    def gate_and_promote(
+        self,
+        proposal_id: str | ProposalEnvelope,
+        *,
+        gate_id: str,
+        reviewer: str = "system",
+    ) -> PromotionReceipt:
         """Use the single Gate → Promotion path after validation has passed."""
-        gate = GateService(self.context).evaluate(proposal.proposal_id, gate_id=gate_id, reviewer=reviewer)
-        return ArtifactPromotionService(self.context).promote(proposal.proposal_id, [gate.receipt_id])
+        if isinstance(proposal_id, ProposalEnvelope):
+            target = proposal_id.proposal_id
+        else:
+            target = str(proposal_id)
+        gate = GateService(self.context).evaluate(target, gate_id=gate_id, reviewer=reviewer)
+        return ArtifactPromotionService(self.context).promote(target, [gate.receipt_id])

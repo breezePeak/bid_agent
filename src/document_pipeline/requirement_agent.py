@@ -17,7 +17,8 @@ from .contracts import (
     SourceAnchor,
     SourceBlock,
 )
-from .proposals import ProposalEnvelope, dependency_fingerprint
+from .artifact_promotion import build_declared_dependency_fingerprint
+from .proposals import ProposalEnvelope
 
 
 class RequirementAgent:
@@ -130,23 +131,28 @@ class RequirementAgent:
             requirements=items,
             coverage_audit=coverage_audit or {},
         )
-
-        dep_fp = dependency_fingerprint(
-            source_hashes or {},
-            cited_source_ids,
-            "v3_requirement_agent_v1.0",
+        prompt_version = "v3_requirement_agent_v1.0"
+        model_fingerprint = "deterministic_v3_agent"
+        # RequirementLedger has no promoted Artifact deps until PR-16.1 Source promotion.
+        dep_fp = build_declared_dependency_fingerprint(
+            resolved_dependency_snapshot={},
+            artifact_kind="RequirementLedger",
+            prompt_version=prompt_version,
+            model_fingerprint=model_fingerprint,
         )
 
         return ProposalEnvelope(
+            workspace_id=self.context.workspace_id,
             artifact_kind="RequirementLedger",
             producer_role="requirement_agent",
             operation_id=operation_id,
             base_revision=base_revision,
+            declared_dependencies=[],
             dependency_fingerprint=dep_fp,
             payload=ledger.model_dump(mode="json"),
             cited_source_ids=cited_source_ids,
-            prompt_version="v3_requirement_agent_v1.0",
-            model_fingerprint="deterministic_v3_agent",
+            prompt_version=prompt_version,
+            model_fingerprint=model_fingerprint,
         )
 
     @staticmethod

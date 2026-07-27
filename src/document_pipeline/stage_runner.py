@@ -82,23 +82,19 @@ class V3StageRunner:
 
             sandbox = AgentProposalSandbox(self.context, role="requirement_agent")
             stored_proposal = sandbox.submit(proposal)
-            proposal = proposal.model_copy(update={"proposal_id": stored_proposal["proposal_id"]})
+            proposal_id = str(stored_proposal["proposal_id"])
 
-            report = validate_and_record(
-                self.context,
-                proposal,
-                expected_dependency_fingerprint=proposal.dependency_fingerprint,
-            )
+            report = validate_and_record(self.context, proposal_id)
             if not report.passed:
                 raise ControlPlaneError("V3_PROPOSAL_INVALID", f"RequirementLedger Proposal 验证未通过: {report.findings}")
 
             gate_service = GateService(self.context)
-            receipt = gate_service.evaluate(proposal.proposal_id, gate_id="G1_REQUIREMENT_INTEGRITY")
+            receipt = gate_service.evaluate(proposal_id, gate_id="G1_REQUIREMENT_INTEGRITY")
             if receipt.verdict != "pass":
                 raise ControlPlaneError("V3_GATE_BLOCKED", f"RequirementLedger 门禁阻断: {receipt.findings}")
 
             promotion_service = ArtifactPromotionService(self.context)
-            promotion_service.promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            promotion_service.promote(proposal_id, gate_receipt_ids=[receipt.receipt_id])
 
             return load_promoted_requirement_ledger(self.context)
 
@@ -136,18 +132,14 @@ class V3StageRunner:
                 return load_promoted_score_model(self.context)
 
             stored_proposal = AgentProposalSandbox(self.context, role="score_agent").submit(proposal)
-            proposal = proposal.model_copy(update={"proposal_id": stored_proposal["proposal_id"]})
-            report = validate_and_record(
-                self.context,
-                proposal,
-                expected_dependency_fingerprint=proposal.dependency_fingerprint,
-            )
+            proposal_id = str(stored_proposal["proposal_id"])
+            report = validate_and_record(self.context, proposal_id)
             if not report.passed:
                 raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ScoreModel Proposal 验证未通过: {report.findings}")
-            receipt = GateService(self.context).evaluate(proposal.proposal_id, gate_id="G1_SCORE_INTEGRITY")
+            receipt = GateService(self.context).evaluate(proposal_id, gate_id="G1_SCORE_INTEGRITY")
             if receipt.verdict != "pass":
                 raise ControlPlaneError("V3_GATE_BLOCKED", f"ScoreModel 门禁阻断: {receipt.findings}")
-            ArtifactPromotionService(self.context).promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            ArtifactPromotionService(self.context).promote(proposal_id, gate_receipt_ids=[receipt.receipt_id])
             return load_promoted_score_model(self.context)
 
         if stage in ("plan_response", "build_project_model"):
@@ -166,14 +158,14 @@ class V3StageRunner:
             project_proposal = agent.proposal("ProjectModel", project, base_revision=project_base, operation_id=operation_id or f"planning-project:{ledger.revision}:{scores.revision}", upstream_revisions=(ledger.revision, scores.revision))
             if active_project is None or active_project["dependency_fingerprint"] != project_proposal.dependency_fingerprint:
                 stored = AgentProposalSandbox(self.context, role="planning_agent").submit(project_proposal)
-                project_proposal = project_proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
-                report = validate_and_record(self.context, project_proposal, expected_dependency_fingerprint=project_proposal.dependency_fingerprint)
+                project_id = str(stored["proposal_id"])
+                report = validate_and_record(self.context, project_id)
                 if not report.passed:
                     raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ProjectModel Proposal 验证未通过: {report.findings}")
-                receipt = GateService(self.context).evaluate(project_proposal.proposal_id, gate_id="G1_PROJECT_MODEL_INTEGRITY")
+                receipt = GateService(self.context).evaluate(project_id, gate_id="G1_PROJECT_MODEL_INTEGRITY")
                 if receipt.verdict != "pass":
                     raise ControlPlaneError("V3_GATE_BLOCKED", f"ProjectModel 门禁阻断: {receipt.findings}")
-                ArtifactPromotionService(self.context).promote(project_proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+                ArtifactPromotionService(self.context).promote(project_id, gate_receipt_ids=[receipt.receipt_id])
             project = load_promoted_project_model(self.context)
 
             active_graph = store.v3_active_artifact("ResponseTopicGraph")
@@ -182,14 +174,14 @@ class V3StageRunner:
             graph_proposal = agent.proposal("ResponseTopicGraph", graph, base_revision=graph_base, operation_id=operation_id or f"planning-graph:{ledger.revision}:{scores.revision}:{project.revision}", upstream_revisions=(ledger.revision, scores.revision, project.revision))
             if active_graph is None or active_graph["dependency_fingerprint"] != graph_proposal.dependency_fingerprint:
                 stored = AgentProposalSandbox(self.context, role="planning_agent").submit(graph_proposal)
-                graph_proposal = graph_proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
-                report = validate_and_record(self.context, graph_proposal, expected_dependency_fingerprint=graph_proposal.dependency_fingerprint)
+                graph_id = str(stored["proposal_id"])
+                report = validate_and_record(self.context, graph_id)
                 if not report.passed:
                     raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ResponseTopicGraph Proposal 验证未通过: {report.findings}")
-                receipt = GateService(self.context).evaluate(graph_proposal.proposal_id, gate_id="G1_TOPIC_GRAPH_INTEGRITY")
+                receipt = GateService(self.context).evaluate(graph_id, gate_id="G1_TOPIC_GRAPH_INTEGRITY")
                 if receipt.verdict != "pass":
                     raise ControlPlaneError("V3_GATE_BLOCKED", f"ResponseTopicGraph 门禁阻断: {receipt.findings}")
-                ArtifactPromotionService(self.context).promote(graph_proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+                ArtifactPromotionService(self.context).promote(graph_id, gate_receipt_ids=[receipt.receipt_id])
             load_promoted_topic_graph(self.context)
             return project
 
@@ -206,14 +198,14 @@ class V3StageRunner:
             if active is not None and active["dependency_fingerprint"] == proposal.dependency_fingerprint:
                 return load_promoted_chapter_blueprint(self.context)
             stored = AgentProposalSandbox(self.context, role="planning_agent").submit(proposal)
-            proposal = proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
-            report = validate_and_record(self.context, proposal, expected_dependency_fingerprint=proposal.dependency_fingerprint)
+            proposal_id = str(stored["proposal_id"])
+            report = validate_and_record(self.context, proposal_id)
             if not report.passed:
                 raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ChapterBlueprint Proposal 验证未通过: {report.findings}")
-            receipt = GateService(self.context).evaluate(proposal.proposal_id, gate_id="G2_BLUEPRINT_INTEGRITY")
+            receipt = GateService(self.context).evaluate(proposal_id, gate_id="G2_BLUEPRINT_INTEGRITY")
             if receipt.verdict != "pass":
                 raise ControlPlaneError("V3_GATE_BLOCKED", f"ChapterBlueprint 门禁阻断: {receipt.findings}")
-            ArtifactPromotionService(self.context).promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            ArtifactPromotionService(self.context).promote(proposal_id, gate_receipt_ids=[receipt.receipt_id])
             return load_promoted_chapter_blueprint(self.context)
 
         if stage == "confirm_planning":

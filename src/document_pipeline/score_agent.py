@@ -19,7 +19,9 @@ from .contracts import (
     SourceAnchor,
     SourceBlock,
 )
-from .proposals import ProposalEnvelope, dependency_fingerprint
+from .artifact_promotion import build_declared_dependency_fingerprint
+from control_plane import ControlStore
+from .proposals import DependencyRef, ProposalEnvelope
 
 
 _SCORE_SIGNAL = re.compile(r"评分|评审|得分|分值|满分|废标|否决|资格")
@@ -108,21 +110,43 @@ class ScoreAgent:
         requirement_revision: int,
     ) -> ProposalEnvelope:
         cited_source_ids = score_model.source_input_ids
+        prompt_version = "v3_score_agent_v1.0"
+        model_fingerprint = "deterministic_v3_agent"
+        active_req = ControlStore(self.context).v3_active_artifact("RequirementLedger")
+        resolved: dict = {}
+        declared: list[DependencyRef] = []
+        if active_req is not None:
+            resolved["RequirementLedger"] = {
+                "artifact_kind": "RequirementLedger",
+                "artifact_id": str(active_req["artifact_id"]),
+                "revision": int(active_req["revision"]),
+                "artifact_hash": str(active_req["artifact_hash"]),
+            }
+            declared.append(
+                DependencyRef(
+                    artifact_kind="RequirementLedger",
+                    expected_revision=int(active_req["revision"]),
+                    expected_hash=str(active_req["artifact_hash"]),
+                )
+            )
+        dep_fp = build_declared_dependency_fingerprint(
+            resolved_dependency_snapshot=resolved,
+            artifact_kind="ScoreModel",
+            prompt_version=prompt_version,
+            model_fingerprint=model_fingerprint,
+        )
         return ProposalEnvelope(
+            workspace_id=self.context.workspace_id,
             artifact_kind="ScoreModel",
             producer_role="score_agent",
             operation_id=operation_id,
             base_revision=base_revision,
-            dependency_fingerprint=dependency_fingerprint(
-                score_model.source_hashes,
-                requirement_revision,
-                cited_source_ids,
-                "v3_score_agent_v1.0",
-            ),
+            declared_dependencies=declared,
+            dependency_fingerprint=dep_fp,
             payload=score_model.model_dump(mode="json"),
             cited_source_ids=cited_source_ids,
-            prompt_version="v3_score_agent_v1.0",
-            model_fingerprint="deterministic_v3_agent",
+            prompt_version=prompt_version,
+            model_fingerprint=model_fingerprint,
         )
 
     @staticmethod

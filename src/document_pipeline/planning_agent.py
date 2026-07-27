@@ -5,14 +5,27 @@ from __future__ import annotations
 import hashlib
 from collections import defaultdict
 
-from control_plane import WorkspaceContext
+from control_plane import ControlStore, WorkspaceContext
 
+from .artifact_promotion import build_declared_dependency_fingerprint
 from .contracts import (
-    BlueprintNode, ChapterBlueprint, EvidenceNeed, InputRole, ProjectFact, ProjectModel, RequirementKind, RequirementLedger,
-    ResponseDuty, ResponseTopic, ResponseTopicGraph, ScoreModel, SourceBlock, TopicEdge,
+    BlueprintNode,
+    ChapterBlueprint,
+    EvidenceNeed,
+    InputRole,
+    ProjectFact,
+    ProjectModel,
+    RequirementKind,
+    RequirementLedger,
+    ResponseDuty,
+    ResponseTopic,
+    ResponseTopicGraph,
+    ScoreModel,
+    SourceBlock,
     TopicChapterAssignment,
+    TopicEdge,
 )
-from .proposals import ProposalEnvelope, dependency_fingerprint
+from .proposals import DependencyRef, ProposalEnvelope
 
 
 class PlanningAgent:
@@ -78,9 +91,60 @@ class PlanningAgent:
                 edges.append(TopicEdge(edge_id=f"E-{point.score_point_id}-{requirement_id}", source_topic_id=topic_id, target_topic_id=requirement_topic, relation="supports_score", order=index, requirement_ids=[requirement_id], rationale="评分点通过 Requirement ID 引用采购义务", confidence=1.0))
         return ResponseTopicGraph(revision=revision, source_hashes={**ledger.source_hashes, **scores.source_hashes}, graph_id=f"TG-{hashlib.sha256((project.project_id + str(revision)).encode()).hexdigest()[:12]}", requirement_ledger_revision=ledger.revision, score_model_revision=scores.revision, project_model_revision=project.revision, root_topic_ids=[topic.topic_id for topic in topics], topics=topics, duties=duties, edges=edges)
 
-    def proposal(self, artifact_kind: str, payload: ProjectModel | ResponseTopicGraph, *, base_revision: int, operation_id: str, upstream_revisions: tuple[int, ...]) -> ProposalEnvelope:
+    def proposal(
+        self,
+        artifact_kind: str,
+        payload: ProjectModel | ResponseTopicGraph | ChapterBlueprint,
+        *,
+        base_revision: int,
+        operation_id: str,
+        upstream_revisions: tuple[int, ...] = (),
+    ) -> ProposalEnvelope:
+        from .artifact_registry import ARTIFACT_REGISTRY
+
         source_ids = sorted(payload.source_hashes)
-        return ProposalEnvelope(artifact_kind=artifact_kind, producer_role="planning_agent", operation_id=operation_id, base_revision=base_revision, dependency_fingerprint=dependency_fingerprint(payload.source_hashes, upstream_revisions, artifact_kind, "v3_planning_agent_v1.0"), payload=payload.model_dump(mode="json"), cited_source_ids=source_ids, prompt_version="v3_planning_agent_v1.0", model_fingerprint="deterministic_v3_agent")
+        prompt_version = "v3_planning_agent_v1.0"
+        model_fingerprint = "deterministic_v3_agent"
+        registration = ARTIFACT_REGISTRY.get(artifact_kind)
+        store = ControlStore(self.context)
+        resolved: dict = {}
+        declared: list[DependencyRef] = []
+        for kind in registration.dependency_kinds:
+            active = store.v3_active_artifact(kind)
+            if active is None:
+                continue
+            resolved[kind] = {
+                "artifact_kind": kind,
+                "artifact_id": str(active["artifact_id"]),
+                "revision": int(active["revision"]),
+                "artifact_hash": str(active["artifact_hash"]),
+            }
+            declared.append(
+                DependencyRef(
+                    artifact_kind=kind,
+                    expected_revision=int(active["revision"]),
+                    expected_hash=str(active["artifact_hash"]),
+                )
+            )
+        dep_fp = build_declared_dependency_fingerprint(
+            resolved_dependency_snapshot=resolved,
+            artifact_kind=artifact_kind,
+            prompt_version=prompt_version,
+            model_fingerprint=model_fingerprint,
+        )
+        return ProposalEnvelope(
+            workspace_id=self.context.workspace_id,
+            artifact_kind=artifact_kind,
+            producer_role="planning_agent",
+            operation_id=operation_id,
+            base_revision=base_revision,
+            declared_dependencies=declared,
+            dependency_fingerprint=dep_fp,
+            payload=payload.model_dump(mode="json"),
+            cited_source_ids=source_ids,
+            prompt_version=prompt_version,
+            model_fingerprint=model_fingerprint,
+        )
 
     def chapter_blueprint(self, graph: ResponseTopicGraph, *, revision: int) -> ChapterBlueprint:
         duties = {duty.duty_id: duty for duty in graph.duties}

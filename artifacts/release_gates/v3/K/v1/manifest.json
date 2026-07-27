@@ -1,0 +1,30 @@
+{
+  "gate": "K",
+  "name": "Kernel Safe",
+  "version": "v1",
+  "date": "2026-07-27",
+  "scope": [
+    "PR-14.0",
+    "PR-15.1"
+  ],
+  "commands": [
+    "python -m unittest tests.test_v3_pr14_contracts tests.test_v3_proposal_promotion -v"
+  ],
+  "evidence_files": {
+    "unittest_kernel.txt": "0fc89f43cb6d5b9f6845d20f865a400dc94f39b24ef57bc8de3d664b6f660c02"
+  },
+  "canonicalization_version": "v3-canon-1",
+  "artifact_registry_version": "v3-artifact-registry-1",
+  "gate_policy_registry_version": "v3-gate-policy-1",
+  "result": "PASS",
+  "known_risks": [
+    "SourceIndex is not yet a promoted canonical Artifact (PR-16.1).",
+    "H1 still uses reviewer string path in stage_runner; full principal binding is Gate P / PR-20.1.",
+    "Existing workspaces with pre-PR-15.1 receipts require legacy_untrusted inventory before migration."
+  ],
+  "approvers_required": [
+    "architecture_owner",
+    "trusted_kernel_security_reviewer"
+  ],
+  "conclusion": "Gate K technical evidence package generated from automated kernel tests. Human approval still required per release process."
+}
