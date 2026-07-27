@@ -1,0 +1,26 @@
+{
+  "registry_version": "v3-golden-1",
+  "description": "V3 Golden registry. Real expert-annotated samples will replace scaffold entries without changing suite/layer contracts.",
+  "suites": [
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "samples": [
+    "G-A1-SYN-001",
+    "G-A1-SCAN-PLACEHOLDER",
+    "G-A-PLACEHOLDER-003",
+    "G-A-PLACEHOLDER-004",
+    "G-A-PLACEHOLDER-005",
+    "G-A-PLACEHOLDER-006",
+    "G-A-PLACEHOLDER-007",
+    "G-A-PLACEHOLDER-008"
+  ],
+  "policy": {
+    "historical_92_198_not_threshold": true,
+    "git_stores_only_anonymized_fixtures": true,
+    "expert_dual_annotation_required_for_gate_a": true,
+    "scaffold_samples_not_gate_a_evidence": true
+  }
+}

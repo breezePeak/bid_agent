@@ -1,0 +1,39 @@
+{
+  "sample_id": "G-A1-SCAN-PLACEHOLDER",
+  "suite": "A",
+  "layers": [
+    "A1"
+  ],
+  "status": "annotation_pending",
+  "title": "Placeholder for scan/OCR-blocked tender (original external)",
+  "tags": [
+    "scan",
+    "ocr_block",
+    "A1",
+    "external_original"
+  ],
+  "input_manifest_hash": "c5d5c58145c1d4e732dad329435c16a2d18a3829e4006c7801f5f173c4974e93",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "inputs/README.external.txt",
+      "content_sha256": "792b6acaaa4b22c78850b4b872401741913edbace5ec6b00c306c93b1b09d9f4",
+      "external_original_ref": "access-controlled://pending/scan-tender.pdf"
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [],
+      "blocking_ids": [],
+      "notes": "Expected pipeline behavior: structure_gap / OCR block before Requirement Agent. Expert labels pending."
+    }
+  ],
+  "annotation": {
+    "guideline_version": "v3-golden-guideline-draft"
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "No sensitive binary in git. Expert annotation pending."
+}
