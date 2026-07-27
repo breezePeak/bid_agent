@@ -30,9 +30,9 @@ python -m unittest tests.test_v3_source_structure tests.test_v3_input_manifest \
 
 ## Gate S
 
-- 自动化矩阵：`tests/test_v3_gate_s_source.py`（晋级权威、JSON 非权威、确定性、PDF gap、198 节点零漂移、真实模板稳定）
+- 自动化矩阵：`tests/test_v3_gate_s_source.py`（晋级权威、JSON 非权威、确定性、PDF gap、合成深层模板冻结结构校验、真实模板稳定）
 - 证据包：`artifacts/release_gates/v3/S/v1/`（`automated_result=PASS`，`result=PENDING_HUMAN_APPROVAL`）
-- 198 节点冻结快照：`tests/fixtures/v3_source/template_198_freeze.json`
+- 合成深层模板冻结快照：`tests/fixtures/v3_source/template_deep_structure_freeze.json`
 
 ### 仍需人工
 
@@ -40,7 +40,7 @@ python -m unittest tests.test_v3_source_structure tests.test_v3_input_manifest \
 
 ### 已知风险
 
-- 历史“198 节点”可能含非标题结构；本门用合成 198 标题模板做零漂移
+- 历史 `198` 只确认旧链路创建的独立任务数，不能证明真实模板节点数；Gate S 使用独立合成深层模板压力参数，并明确不作为业务规模或发布阈值
 - PDF 使用可解析合成件证明 StructureGap/bbox 路径；生产扫描件仍需现场样本
 - 旧工作空间迁移 inventory 仍归 Gate M
 

@@ -166,7 +166,7 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
   - 下游 Stage 强制 promoted SourceIndex；
   - PDF 位置排序 + OCR StructureGap；模板表格 Slot 最近上游章节；
   - block identity 含 parser version；
-  - Gate S 自动化矩阵与证据包（198 节点零漂移、JSON 非权威、PDF gap）。
+  - Gate S 自动化矩阵与证据包（合成深层模板冻结结构校验、JSON 非权威、PDF gap）。
 - 未完成（Gate S 人工）：`source_parser_owner` + `architecture_owner` 双签；生产扫描 PDF 现场样本可后续补强。
 - 收口要求：Gate S 人工批准后进入正式 Golden baseline 与 PR-17.1 语义校准发布路径。
 
@@ -193,7 +193,7 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 验收状态：**工程骨架完成，Golden 发布验收未完成。**
 - 提交：`cd9881a feat(v3): add promoted score model agent`
 - 已完成：ScoreGroup/Point/Level、EvidenceNeed 候选、基本分值/档位解析、引用审计和 CAS Promotion。
-- 未完成：复杂评分表、区间/累加/扣分/封顶、多档、跨文件同义绑定和 92 点真实准确率未验证；当前同 anchor/字符重合规则可能通过复制 `RequirementKind.SCORE` 形成自证。
+- 未完成：复杂评分表、区间/累加/扣分/封顶、多档、跨文件同义绑定和真实人工 Golden 的评分语义准确率未验证；历史 92 点统计不是 Golden，不能代替准确率评测；当前同 anchor/字符重合规则可能通过复制 `RequirementKind.SCORE` 形成自证。
 - 收口要求：按开发计划 20.6 完成 PR-18.1，并达到 Golden-A2 冻结阈值。
 
 ## PR-19：Planning Agent、ProjectModel 与 ResponseTopicGraph

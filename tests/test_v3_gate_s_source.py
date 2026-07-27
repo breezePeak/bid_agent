@@ -191,22 +191,22 @@ class GateSSourceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "OCR_BLOCKED|SOURCE"):
                 SourceNormalizer(context).normalize_active_inputs()
 
-    def test_template_198_node_zero_drift(self) -> None:
-        """Synthetic 198-node template: recompile must keep title/level/order/parent/slots."""
+    def test_synthetic_deep_template_matches_frozen_structure(self) -> None:
+        """A synthetic deep-template profile must match its committed structural snapshot."""
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             base = Path(tmp)
-            path = base / "template_198.docx"
+            path = base / "template_deep_structure.docx"
             document = Document()
-            # 7 H1 chapters * ~28 H2 nodes ≈ 198 headings (including H1s).
+            # Synthetic stress parameter only; it is not a business or release threshold.
             node_count = 0
-            target = 198
+            generated_heading_target = 198
             chapter = 0
-            while node_count < target:
+            while node_count < generated_heading_target:
                 chapter += 1
                 document.add_heading(f"第{chapter}章 主题{chapter}", level=1)
                 node_count += 1
                 section = 0
-                while node_count < target and section < 27:
+                while node_count < generated_heading_target and section < 27:
                     section += 1
                     document.add_heading(f"{chapter}.{section} 小节{section}", level=2)
                     node_count += 1
@@ -224,7 +224,7 @@ class GateSSourceTests(unittest.TestCase):
             # Second compile via new service instance; fingerprint and topology must match.
             second = TemplateContractCompiler(context).compile_structure(item)
 
-            self.assertGreaterEqual(len(first.nodes), 198)
+            self.assertEqual(len(first.nodes), generated_heading_target + 1)
             self.assertEqual(len(first.nodes), len(second.nodes))
             self.assertEqual(
                 [(n.order, n.level, n.title, n.parent_node_id, n.numbering) for n in first.nodes],
@@ -240,8 +240,7 @@ class GateSSourceTests(unittest.TestCase):
             assert promoted is not None
             self.assertEqual(promoted.structural_fingerprint, first.structural_fingerprint)
 
-            # Persist freeze snapshot for Gate S evidence.
-            freeze = {
+            actual_freeze = {
                 "node_count": len(first.nodes),
                 "slot_count": len(first.slots),
                 "structural_fingerprint": first.structural_fingerprint,
@@ -256,9 +255,16 @@ class GateSSourceTests(unittest.TestCase):
                     for n in first.nodes
                 ],
             }
-            out = ROOT / "tests" / "fixtures" / "v3_source" / "template_198_freeze.json"
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_text(json.dumps(freeze, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
+            snapshot_path = ROOT / "tests" / "fixtures" / "v3_source" / "template_deep_structure_freeze.json"
+            expected_freeze = json.loads(snapshot_path.read_text(encoding="utf-8"))
+            self.assertEqual(expected_freeze["fixture_kind"], "synthetic_deep_template_structure_stress")
+            self.assertEqual(expected_freeze["profile"]["generated_heading_count"], generated_heading_target)
+            self.assertEqual(expected_freeze["profile"]["appended_table_heading_count"], 1)
+            self.assertFalse(expected_freeze["profile"]["business_threshold"])
+            self.assertEqual(
+                {key: expected_freeze[key] for key in actual_freeze},
+                actual_freeze,
+            )
 
     def test_real_template_sample_is_promoted_and_stable(self) -> None:
         sample = ROOT / "sources" / "template" / "锡盟24年技术标投标框架.docx"

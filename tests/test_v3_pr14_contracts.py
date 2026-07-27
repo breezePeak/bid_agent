@@ -334,6 +334,37 @@ class AdrAndChecklistPresenceTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertGreater(len(text), 200)
 
+    def test_historical_sample_counts_are_not_release_thresholds(self) -> None:
+        baseline = (ROOT / "agent.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "任何历史运行统计或合成压力参数都不得升级为业务规模、Golden 数量或发布阈值",
+            baseline,
+        )
+        self.assertIn("不得合并成固定的“92/198 样本”", baseline)
+
+        plan = (ROOT / "docs" / "v3_semantic_understanding_and_outline_development_plan.md").read_text(
+            encoding="utf-8"
+        )
+        for retired_wording in (
+            "纳入现有 92 个评分点和 198 个模板节点专项样本",
+            "### 12.7 92/198 复杂样本专项门禁",
+            "198 个模板节点标题、级别、顺序、编号和父子关系零变化",
+        ):
+            self.assertNotIn(retired_wording, plan)
+
+        fixture = json.loads(
+            (ROOT / "tests" / "fixtures" / "v3_source" / "template_deep_structure_freeze.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        profile = fixture["profile"]
+        self.assertEqual(fixture["fixture_kind"], "synthetic_deep_template_structure_stress")
+        self.assertFalse(profile["business_threshold"])
+        self.assertEqual(
+            fixture["node_count"],
+            profile["generated_heading_count"] + profile["appended_table_heading_count"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

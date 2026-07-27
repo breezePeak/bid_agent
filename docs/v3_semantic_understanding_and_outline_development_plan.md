@@ -227,7 +227,7 @@ flowchart TD
 
 这些是逻辑能力角色，不等于常驻进程数。Phase 1 只实现 Bid Master、Requirement、Score、Planning 及规划审计；Writer 在 Phase 3 接入，Integration 与最终 Audit 在 Phase 4 接入。
 
-Writer 是同一无状态角色的短生命周期 Worker Pool，首版默认并发 3，压力测试后再决定是否提高；不得按 198 个模板节点创建 198 个 Agent。
+Writer 是同一无状态角色的短生命周期 Worker Pool，首版默认并发 3，压力测试后再决定是否提高；不得按 Requirement、ScorePoint、Topic、章节或模板节点数量线性创建 Agent。
 
 ### 4.3 Agent 与 Service 的拆分
 
@@ -1140,7 +1140,7 @@ R1 必须最先合入；Golden 资产匿名化、专家标注和评测基础设�
 1. 冻结 Requirement、Score、Topic、Duty、Blueprint、Evidence、Bundle、Content 和 Finding 最小 Schema。
 2. 冻结 Agent/Service/Artifact/Gate 权限边界和中间语言依赖方向。
 3. 为“新增 Agent 不能绕过 Artifact/Gate/Promotion”建立仓库级架构测试要求。
-4. 选取至少 8 份匿名真实标书，包含当前 92 个评分点、198 个模板节点样本。
+4. 选取至少 8 份匿名真实标书，评分点数量和模板结构以原始文件及双人复核的人工 Golden 为准；历史重复绑定场景与合成深层模板压力夹具分别管理，不把 `92/198` 作为固定样本规模。
 5. 建立四套 Golden：A（Requirement/Score/Topic/Blueprint，内部 A1～A4）、B（Evidence）、C（Content）、D（Integration/Audit）。
 6. 为每个样本记录输入 hash、标注人、复核人、裁决人和版本。
 7. 记录当前规则实现的真实基线，不以“字段非空”作为成功。
@@ -1247,7 +1247,7 @@ R1 必须最先合入；Golden 资产匿名化、专家标注和评测基础设�
 - Golden 样本评分行、档位和总分正确率 100%；
 - 每个评分点有来源；
 - Requirement 与 Score 不复制冲突事实；
-- 92 个评分点样本不存在异常批量绑定。
+- 所有人工 Golden 样本不存在静默批量绑定；异常高频映射必须阻断并解释。
 
 工作量：4—7 人日。
 
@@ -1363,7 +1363,7 @@ R1 必须最先合入；Golden 资产匿名化、专家标注和评测基础设�
 - Bundle 外工作区访问被拒绝；
 - 无 Blueprint、无有效 H1 或 source Blueprint hash 不匹配时不能编译 DocumentPlan/Bundle；
 - DocumentContract、DocumentPlan 与 Blueprint 的标题、层级、顺序和 owner 一致率 100%；
-- 198 模板节点不会产生 198 个 Writer；
+- Writer 实例和 Agent 数量不得与模板节点数线性对应，并在多档深层模板压力夹具中验证；
 - 上游变化只使依赖单元 stale；
 - Bundle 可确定性重建并验证 hash；
 - 通过仓库发布验收门 `Gate B：Bundle/Writer Entry Ready`，证明 Writer 的唯一入口只接受由有效 H1 和 promoted Blueprint 编译的 Bundle ID。
@@ -1496,7 +1496,7 @@ Skill 禁止：
 | 对抗测试 | Prompt 注入、证据污染、冲突补遗 | 不越权、不污染、不绕门 | 每次提交 |
 | 故障注入 | 超时、非法 JSON、崩溃、陈旧 revision | 无半成品，可恢复 | 每次提交 |
 | 端到端 | 规划确认到交付 | revision、Receipt 和页面状态一致 | 发布前 |
-| 性能测试 | 200/500 页、多附件、198 节点 | 满足批准预算 | 夜间及发布前 |
+| 性能测试 | 200/500 页、多附件、多档深层/宽型模板（例如 50/200/500 个标题） | 满足批准预算 | 夜间及发布前 |
 | 人工验收 | 专业完整性、可写性、可用性 | 双人评审达阈值 | 每个灰度阶段 |
 
 ### 12.2 Golden-A：Requirement / Score / Topic / Blueprint
@@ -1510,7 +1510,7 @@ Skill 禁止：
 - 补遗冲突；
 - 表格密集项目；
 - 严格 Word 模板；
-- 当前 92 Score / 198 节点样本。
+- 经双人复核的复杂评分表和历史重复绑定来源样本；每份样本的评分点数量由 Golden 独立确定。
 
 发布指标：
 
@@ -1600,11 +1600,13 @@ Skill 禁止：
 - 缓存复用必须基于完全相同 dependency fingerprint；
 - Jaccard 只作为离线模型稳定性观察指标，不得作为运行时复用或错误回退依据。
 
-### 12.7 92/198 复杂样本专项门禁
+### 12.7 历史重复绑定与深层模板专项门禁
 
-- 92 个评分点各有一个 score-response Duty 和一个 primary chapter；
-- 198 个模板节点标题、级别、顺序、编号和父子关系零变化；
-- 不创建 198 个 Writer；
+- 每份人工 Golden 的每个原子评分点各有一个 score-response Duty 和一个 primary chapter；
+- 评分点总数必须与该项目人工 Golden 一致，不设置跨项目固定数量；
+- 冻结的合成深层模板压力夹具在标题、级别、顺序、编号、父子关系和 Slot 上零漂移；
+- 不按模板节点、章节或评分点数量线性创建 Writer/Agent；
+- 历史 `92/1198/S036=131` 仅在原始输入和人工预期正式冻结后启用可执行回归，不能作为发布阈值；
 - ContentUnit 建议不超过 14；超过时必须记录语义拆分理由；
 - 模板固定正文不被覆盖或删除；
 - 项目范围、工期、交付和验收口径全文一致；
@@ -1980,7 +1982,7 @@ DoD：
 
 1. 建立 `GoldenRegistry`、fixture manifest、loader、评测脚本和版本化报告格式。
 2. 至少选择 8 份匿名真实项目，覆盖普通 DOCX、复杂表格、PDF、多页表、补遗冲突、严格模板、扫描件阻断和独立评分文件。
-3. 纳入现有 92 个评分点和 198 个模板节点专项样本。
+3. 纳入历史评分点异常重复绑定场景；待原始输入和人工预期冻结后建立可执行回归。另建立独立的合成深层模板结构压力夹具，不把 `92` 或 `198` 作为业务规模、Golden 数量或发布阈值。
 4. 四套 Golden 固定为 A～D；Golden-A 内部分为 A1 Source→Requirement、A2 Requirement→Score、A3 Requirement/Score→Topic/Duty、A4 Duty→Blueprint 四层独立数据集。
 5. 每条标注记录输入 hash、Schema/评测版本、SourceAnchor、允许变体、严重性、标注人、复核人、裁决人和标签指南版本。
 6. 建立错误分类：漏项、误抽、拆分错误、否定/例外错误、补遗覆盖错误、分值错误、错误绑定、虚构 anchor、Topic 过度拆分/合并、Duty 上下文错误、primary 章节错误。
@@ -2022,7 +2024,7 @@ DoD：
 - DOCX/PDF 的标题、页码、段落、列表、表格单元格和跨页关系可回跳；
 - 伪造 page/bbox/cell anchor 无法通过 Gate；
 - 不支持、结构缺失或 OCR 不可靠的输入在 Agent 调用前阻断；
-- 198 节点模板标题、级别、顺序、编号、父子关系和 Slot 零漂移；
+- 合成深层模板压力夹具的标题、级别、顺序、编号、父子关系和 Slot 与冻结预期一致；
 - 直接修改普通 JSON 不改变权威状态。
 
 ### 20.5 PR-17.1：Requirement 语义校准
@@ -2070,7 +2072,7 @@ DoD：
 - 资格/废标交叉关系 critical 漏项为 0；
 - 每个 ScorePoint 来源可回跳；
 - Requirement/Score 不复制相互冲突事实；
-- 92 点样本不存在静默批量绑定或异常高频映射。
+- 所有人工 Golden 样本不存在静默批量绑定或无法解释的异常高频映射。
 
 ### 20.7 PR-19.1：领域 TopicGraph 与多上下文 Duty
 

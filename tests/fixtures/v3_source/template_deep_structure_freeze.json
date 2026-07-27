@@ -1,4 +1,11 @@
 {
+  "fixture_kind": "synthetic_deep_template_structure_stress",
+  "profile": {
+    "generated_heading_count": 198,
+    "appended_table_heading_count": 1,
+    "business_threshold": false,
+    "purpose": "structural fidelity and non-linear Writer fan-out regression"
+  },
   "node_count": 199,
   "slot_count": 9,
   "structural_fingerprint": "db3ae77029ec5f653cebabeb29fb2e4ae6d212dcdc9ac903528fc2504b595e72",

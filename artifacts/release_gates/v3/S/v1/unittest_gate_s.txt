@@ -6,14 +6,15 @@ test_input_manifest_and_source_index_are_promoted (tests.test_v3_gate_s_source.G
 test_pdf_blank_page_is_structure_gap_not_whole_file_failure_when_other_pages_ok (tests.test_v3_gate_s_source.GateSSourceTests.test_pdf_blank_page_is_structure_gap_not_whole_file_failure_when_other_pages_ok) ... ok
 test_real_template_sample_is_promoted_and_stable (tests.test_v3_gate_s_source.GateSSourceTests.test_real_template_sample_is_promoted_and_stable) ... ok
 test_repeated_normalize_is_deterministic (tests.test_v3_gate_s_source.GateSSourceTests.test_repeated_normalize_is_deterministic) ... ok
-test_template_198_node_zero_drift (tests.test_v3_gate_s_source.GateSSourceTests.test_template_198_node_zero_drift)
-Synthetic 198-node template: recompile must keep title/level/order/parent/slots. ... ok
+test_synthetic_deep_template_matches_frozen_structure (tests.test_v3_gate_s_source.GateSSourceTests.test_synthetic_deep_template_matches_frozen_structure)
+A synthetic deep-template profile must match its committed structural snapshot. ... ok
 test_amendment_keeps_issued_at_and_explicit_supersession (tests.test_v3_source_structure.V3SourceStructureTests.test_amendment_keeps_issued_at_and_explicit_supersession) ... ok
 test_docx_source_index_preserves_heading_paragraph_and_table_order (tests.test_v3_source_structure.V3SourceStructureTests.test_docx_source_index_preserves_heading_paragraph_and_table_order) ... ok
 test_template_structure_compiles_without_requirement_ledger (tests.test_v3_source_structure.V3SourceStructureTests.test_template_structure_compiles_without_requirement_ledger) ... ok
 test_normalization_keeps_company_and_reference_chunks_separate_and_stable (tests.test_v3_input_manifest.V3InputManifestTests.test_normalization_keeps_company_and_reference_chunks_separate_and_stable) ... ok
 test_reference_docx_role_never_activates_template_mode (tests.test_v3_input_manifest.V3InputManifestTests.test_reference_docx_role_never_activates_template_mode) ... ok
 test_template_replacement_deactivates_old_version_and_marks_all_downstream (tests.test_v3_input_manifest.V3InputManifestTests.test_template_replacement_deactivates_old_version_and_marks_all_downstream) ... ok
+test_historical_sample_counts_are_not_release_thresholds (tests.test_v3_pr14_contracts.AdrAndChecklistPresenceTests.test_historical_sample_counts_are_not_release_thresholds) ... ok
 test_required_docs_exist (tests.test_v3_pr14_contracts.AdrAndChecklistPresenceTests.test_required_docs_exist) ... ok
 test_canonical_json_is_stable (tests.test_v3_pr14_contracts.CanonicalizationVectorsTests.test_canonical_json_is_stable) ... ok
 test_fixture_vectors_file (tests.test_v3_pr14_contracts.CanonicalizationVectorsTests.test_fixture_vectors_file) ... ok
@@ -34,6 +35,6 @@ test_render_is_refused_until_the_content_gate_passes (tests.test_v3_stage_runner
 test_runs_v3_content_chain_and_rejects_unknown_stage (tests.test_v3_stage_runner.V3StageRunnerTests.test_runs_v3_content_chain_and_rejects_unknown_stage) ... ok
 
 ----------------------------------------------------------------------
-Ran 33 tests in 11.821s
+Ran 34 tests in 11.463s
 
 OK

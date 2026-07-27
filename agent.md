@@ -195,6 +195,8 @@ Phase 5：灰度切换；Skill 仅作为可选入口
 - 当前 PR-14～PR-20 的收口顺序固定为：首批 PR-14.0 最小冻结包 + PR-15.1 exact binding/Gate policy → PR-16.1 canonical Source → PR-14.1 Golden 正式 baseline → PR-17.1～PR-19.1 语义校准 → PR-20.1 真实 H1/Blueprint 派生契约。
 - `Gate K/S/A/P/B/M` 是仓库发布验收门，不是工作空间运行时 GateReceipt。Gate P 通过前，不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可以并行准备。PR-23 实现实际 Bundle 编译后还必须通过 Gate B，才能启动 PR-24 正式 ContentBlock 生成。
 - Gate M 是 PR-27 内生产切换的硬前置门；只有迁移证据包获批后，Release Service 才能 CAS 切换 production active revision，不能先切换再补门。
+- 任何历史运行统计或合成压力参数都不得升级为业务规模、Golden 数量或发布阈值。历史 `92` 个评分点、`1198` 次绑定、`S036` 绑定 `131` 次只描述旧链路异常；历史 `198` 只描述旧链路创建的独立章节任务数，不能据此断言真实模板具有 `198` 个 canonical 节点。
+- 语义验收必须以逐项目、双人复核的人工 Golden 为准；模板结构与 Writer 扇出必须使用独立、明确标注为 synthetic 的多档压力夹具验证。评分语义样本和模板结构压力夹具不得合并成固定的“92/198 样本”。
 - 不得先做复杂 Writer，再补 Requirement/Topic/Blueprint。
 - 不得先创建 Skill，再把 Skill 中的 Prompt 和状态复制回产品。
 - Skill 不在核心生产链上，只能调用 Bid Master 公开 Command。

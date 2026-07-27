@@ -23,15 +23,17 @@
   },
   "evidence_files": {
     "unittest_gate_s.txt": {
-      "sha256": "f470083f5b5192d8906073157ef6dbc62c3227b3b10890a5fc570e2b0f426bad",
+      "sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5",
       "newline": "LF",
       "encoding": "utf-8"
     },
-    "template_198_freeze.json": {
-      "sha256": "bcd64801ff3d7b2519ee59ac42b736723ed2461818632fc78fffca2feca4a045",
+    "template_deep_structure_freeze.json": {
+      "sha256": "e846353f7b99a6d977d035146d19457c3100c2d09a9a115daf5ea5a93064d962",
       "newline": "LF",
       "encoding": "utf-8",
-      "path": "tests/fixtures/v3_source/template_198_freeze.json"
+      "path": "tests/fixtures/v3_source/template_deep_structure_freeze.json",
+      "fixture_kind": "synthetic_deep_template_structure_stress",
+      "business_threshold": false
     }
   },
   "checks": [
@@ -41,8 +43,8 @@
     "Repeated normalize deterministic block ids/order",
     "PDF mixed pages: text + ocr_gap StructureGap; all-blank blocked",
     "SourceNormalizationCoverage has normalized/exempt/structure_gap",
-    "Synthetic 198-node template title/level/order/parent/slot zero-drift",
-    "Real template sample (锡盟24年技术标投标框架) stable fingerprint"
+    "Synthetic deep-template stress profile matches committed freeze snapshot (not a business threshold)",
+    "Real template sample stable fingerprint and promotion"
   ],
   "automated_result": "PASS",
   "result": "PENDING_HUMAN_APPROVAL",
@@ -51,10 +53,14 @@
     "architecture_owner"
   ],
   "approvals": [],
+  "policy": {
+    "historical_92_198": "legacy anomaly statistics only; not Golden size, business scale, or release threshold",
+    "synthetic_deep_template": "independent structure stress fixture with business_threshold=false"
+  },
   "known_risks": [
-    "Real project 198-node historical count may include non-heading structure; synthetic 198-heading freeze used for zero-drift.",
+    "Historical 198 only records old independent task fan-out and is not a real template-node count, business scale, Golden size, or release threshold.",
     "PDF matrix uses synthetic pdfplumber-parseable fixtures; production scan OCR quality still needs field samples.",
     "Pre-PR-16.1 workspaces still need migration inventory under Gate M."
   ],
-  "conclusion": "Automated Gate S matrix passed after PR-16.1. Gate S is NOT approved until source_parser_owner and architecture_owner sign approvals[]. Do not treat Gate S as PASS for formal Golden baseline until approvals exist."
+  "conclusion": "Automated Gate S matrix passed under revised plan: synthetic deep-template stress is separated from business Golden. Gate S remains PENDING_HUMAN_APPROVAL until source_parser_owner and architecture_owner sign approvals[]."
 }
