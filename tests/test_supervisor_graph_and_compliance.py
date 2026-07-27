@@ -16,33 +16,6 @@ from agent.tool_runtime import invoke
 from agent.policy import is_readonly_tool
 
 
-class SupervisorGraphTests(unittest.TestCase):
-    def test_readonly_goal_runs_to_end(self) -> None:
-        from graph.supervisor_graph import run_supervisor_graph
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            result = run_supervisor_graph("当前状态怎么样", root=root, use_llm=False, max_steps=3)
-            self.assertTrue(result.get("done") or result.get("steps"))
-            # should have used query_status path
-            self.assertIn(result.get("last_tool"), {"query_status", "", None})
-            # if tool executed, steps non-empty for status query
-            if result.get("last_tool") == "query_status":
-                self.assertTrue(result.get("steps"))
-
-    def test_mutation_requires_human(self) -> None:
-        from graph.supervisor_graph import run_supervisor_graph
-
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            result = run_supervisor_graph("继续下一步", root=root, use_llm=False, user_confirmed=False)
-            # either need_confirm or human path without executing mutation
-            if result.get("last_tool") == "run_stage":
-                self.assertTrue(result.get("need_confirm"))
-                executed = any(s.get("executed") for s in (result.get("steps") or []))
-                self.assertFalse(executed)
-
-
 class ComplianceLoopTests(unittest.TestCase):
     def setUp(self) -> None:
         reset_tool_index()

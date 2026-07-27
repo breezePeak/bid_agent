@@ -612,7 +612,17 @@ body {
 }
 .wl-doc-actions { 
   display: flex; 
+  align-items: center;
   gap: 8px; 
+}
+.wl-doc-download-status {
+  max-width: 360px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.wl-doc-download-status.error {
+  color: var(--color-danger);
 }
 .wl-files { 
   width: var(--files-panel-width); 
@@ -3433,9 +3443,18 @@ body {
 .ip-log-line {
   padding: 4px 0; border-bottom: 1px dashed #e2e8f0; color: #334155; word-break: break-word;
 }
+.ip-log-line.is-error { color: #b91c1c; background: #fff7f7; }
+.ip-log-line.is-warn { color: #92400e; background: #fffbeb; }
+.ip-log-line.is-success { color: #166534; }
+.ip-log-time {
+  display: inline-block; min-width: 56px; margin-right: 5px; color: #94a3b8; font-size: 10px;
+}
 .ip-log-stage {
   display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 999px;
   background: #e2e8f0; color: #475569; font-size: 10px;
+}
+.ip-log-progress {
+  display: inline-block; margin-right: 6px; color: #4f46e5; font-size: 10px; font-weight: 700;
 }
 .chat-goal-link { cursor: pointer; }
 .chat-goal-link:hover { filter: brightness(0.97); }

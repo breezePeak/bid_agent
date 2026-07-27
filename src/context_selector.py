@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from chunk_ranker import rank_for_job_separate
+from chunk_ranker import rank_chunks_for_job, rank_for_job_separate
 from concurrency import chapter_workers_scope, clamp_workers, workers_default
 from context_budget import summarize_for_prompt
 from file_loader import load_global_facts, load_score_points, load_template_evidence_map
@@ -142,6 +142,8 @@ def _shared_input_signature(root: Path) -> tuple[Any, ...]:
     paths = [
         root / "workspace" / "chunks" / "tender_chunks.json",
         root / "workspace" / "chunks" / "company_chunks.json",
+        root / "workspace" / "chunks" / "reference_chunks.json",
+        root / "inputs" / "writing_brief.md",
         root / "workspace" / "score_points.json",
         root / "workspace" / "global_facts.json",
         root / "workspace" / "template_evidence_map.json",
@@ -170,12 +172,24 @@ def _load_shared_inputs(root: Path) -> dict[str, Any]:
             return cached[1]
     tender_chunks = read_json(root / "workspace" / "chunks" / "tender_chunks.json")
     company_chunks = read_json(root / "workspace" / "chunks" / "company_chunks.json")
+    reference_path = root / "workspace" / "chunks" / "reference_chunks.json"
+    reference_chunks = read_json(reference_path) if reference_path.exists() else []
     if not isinstance(tender_chunks, list) or not isinstance(company_chunks, list):
         raise ValueError("文档切分结果必须是 JSON 数组。")
+    if not isinstance(reference_chunks, list):
+        reference_chunks = []
+    writing_brief_path = root / "inputs" / "writing_brief.md"
+    writing_brief = (
+        writing_brief_path.read_text(encoding="utf-8").strip()
+        if writing_brief_path.exists()
+        else ""
+    )
     prompt = load_agent_prompt(root, "chapter_context_selector")
     shared = {
         "tender_chunks": tender_chunks,
         "company_chunks": company_chunks,
+        "reference_chunks": reference_chunks,
+        "writing_brief": writing_brief,
         "score_points": load_score_points(root),
         "global_facts": load_global_facts(root),
         "template_evidence": load_template_evidence_map(root),
@@ -477,6 +491,8 @@ def select_context_for_job(
     shared = shared_inputs or _load_shared_inputs(root)
     tender_chunks = shared["tender_chunks"]
     company_chunks = shared["company_chunks"]
+    reference_chunks = shared.get("reference_chunks", [])
+    writing_brief = stringify(shared.get("writing_brief"))
     score_points = shared["score_points"]
     global_facts = shared["global_facts"]
     template_evidence = shared["template_evidence"]
@@ -492,10 +508,17 @@ def select_context_for_job(
 
     ranked_tender = tender_chunks
     ranked_company = company_chunks
+    ranked_reference = reference_chunks
     try:
         ranked_result = rank_for_job_separate(job, related_score_points, tender_chunks, company_chunks)
         ranked_tender = [c for c in tender_chunks if any(r["id"] == c["id"] for r in ranked_result["tender_top_chunks"])]
         ranked_company = [c for c in company_chunks if any(r["id"] == c["id"] for r in ranked_result["company_top_chunks"])]
+        ranked_reference = rank_chunks_for_job(
+            job,
+            related_score_points,
+            reference_chunks,
+            top_k=MAX_RANKED_CHUNKS_PER_SIDE,
+        )
         ranked_tender = _prepend_chunks_by_id(ranked_tender, _chunk_ids_from_template_tasks(job, "tender_chunk_ids"), tender_chunks)
         ranked_company = _prepend_chunks_by_id(ranked_company, _chunk_ids_from_template_tasks(job, "company_chunk_ids"), company_chunks)
         ranked_tender = _prepend_chunks_by_id(ranked_tender, manual_review.get("preferred_tender_chunk_ids", []), tender_chunks)
@@ -506,25 +529,47 @@ def select_context_for_job(
         if not ranked_company:
             ranked_company = company_chunks[:30]
             warnings.append("chunk-ranker 未选出 company chunks，已回退到前 30 个。")
+        if reference_chunks and not ranked_reference:
+            ranked_reference = reference_chunks[:30]
+            warnings.append("chunk-ranker 未选出 reference chunks，已回退到前 30 个。")
+        ranked_result["reference_top_chunks"] = [
+            {
+                "id": c["id"],
+                "rank_score": c.get("rank_score", 0),
+                "rank_reasons": c.get("rank_reasons", []),
+            }
+            for c in ranked_reference
+        ]
         ranked_path = root / "workspace" / "contexts" / f"{chapter_id}_ranked_chunks.json"
         write_json(ranked_path, ranked_result)
-        print(f"[完成] 章节 {chapter_id} chunk-ranker: tender {len(ranked_result['tender_top_chunks'])} / company {len(ranked_result['company_top_chunks'])}")
+        print(
+            f"[完成] 章节 {chapter_id} chunk-ranker: tender {len(ranked_result['tender_top_chunks'])} "
+            f"/ company {len(ranked_result['company_top_chunks'])} "
+            f"/ reference {len(ranked_result['reference_top_chunks'])}"
+        )
     except Exception as exc:
         warnings.append(f"chunk-ranker 失败，已回退到全量 chunks: {exc}")
         print(f"[警告] 章节 {chapter_id} chunk-ranker 失败: {exc}")
 
     tender_catalog = _trim_catalog(
         _chunk_catalog(ranked_tender),
-        max_chars=MAX_RANKED_CONTEXT_CHARS // 2,
+        max_chars=MAX_RANKED_CONTEXT_CHARS // 3,
         max_items=MAX_RANKED_CHUNKS_PER_SIDE,
         label="招标文件",
         warnings=warnings,
     )
     company_catalog = _trim_catalog(
         _chunk_catalog(ranked_company),
-        max_chars=MAX_RANKED_CONTEXT_CHARS // 2,
+        max_chars=MAX_RANKED_CONTEXT_CHARS // 3,
         max_items=MAX_RANKED_CHUNKS_PER_SIDE,
         label="公司资料",
+        warnings=warnings,
+    )
+    reference_catalog = _trim_catalog(
+        _chunk_catalog(ranked_reference),
+        max_chars=MAX_RANKED_CONTEXT_CHARS // 3,
+        max_items=MAX_RANKED_CHUNKS_PER_SIDE,
+        label="外部参考资料",
         warnings=warnings,
     )
 
@@ -537,6 +582,7 @@ def select_context_for_job(
             "score_point_count": len(related_score_points),
             "tender_candidates": len(tender_catalog),
             "company_candidates": len(company_catalog),
+            "reference_candidates": len(reference_catalog),
         },
         chapter_id=chapter_id,
         temperature=0.1,
@@ -555,6 +601,8 @@ def select_context_for_job(
                         f"{compact_json(related_score_points)}\n\n"
                         "## 全局事实\n\n"
                         f"{compact_json(global_facts)}\n\n"
+                        "## 项目写作要求（用户经验与编写偏好）\n\n"
+                        f"{writing_brief or '未提供'}\n\n"
                         "## 当前章节相关模板任务\n\n"
                         f"{compact_json(_compact_template_tasks(job))}\n\n"
                         "## 人工复核补充说明\n\n"
@@ -566,7 +614,9 @@ def select_context_for_job(
                         "## 招标文件 chunk 目录\n\n"
                         f"{compact_json(tender_catalog)}\n\n"
                         "## 公司资料 chunk 目录\n\n"
-                        f"{compact_json(company_catalog)}"
+                        f"{compact_json(company_catalog)}\n\n"
+                        "## 外部参考资料 chunk 目录\n\n"
+                        f"{compact_json(reference_catalog)}"
                     ),
                 },
             ],
@@ -576,6 +626,7 @@ def select_context_for_job(
 
     tender_ids = {stringify(chunk.get("id")) for chunk in ranked_tender}
     company_ids = {stringify(chunk.get("id")) for chunk in ranked_company}
+    reference_ids = {stringify(chunk.get("id")) for chunk in ranked_reference}
     context = {
         "chapter_id": chapter_id,
         "selected_tender_chunks": _normalize_selected(
@@ -592,12 +643,21 @@ def select_context_for_job(
             warnings,
             "公司资料",
         ),
+        "selected_reference_chunks": _normalize_selected(
+            data.get("selected_reference_chunks"),
+            reference_ids,
+            8,
+            warnings,
+            "外部参考资料",
+        ),
         "warnings": warnings,
         "selection_meta": {
             "tender_candidates_total": len(ranked_tender),
             "company_candidates_total": len(ranked_company),
+            "reference_candidates_total": len(ranked_reference),
             "tender_candidates_in_prompt": len(tender_catalog),
             "company_candidates_in_prompt": len(company_catalog),
+            "reference_candidates_in_prompt": len(reference_catalog),
             "max_context_chars": MAX_RANKED_CONTEXT_CHARS,
             "max_chunks_per_side": MAX_RANKED_CHUNKS_PER_SIDE,
             "dropped_reason": "budget_trimmed" if len(tender_catalog) < len(ranked_tender) or len(company_catalog) < len(ranked_company) else "",

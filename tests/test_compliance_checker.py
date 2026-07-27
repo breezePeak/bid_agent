@@ -64,12 +64,14 @@ class ComplianceCheckerTests(unittest.TestCase):
             ),
         ]
         summary = summarize_compliance_items(items)
-        self.assertTrue(summary["blocking"])
+        self.assertFalse(summary["blocking"])
+        self.assertTrue(summary["advisory_only"])
+        self.assertTrue(summary["hard_findings"])
         self.assertFalse(summary["ok"])
         self.assertEqual(summary["counts"]["fail"], 1)
 
     def test_compliance_review_status(self) -> None:
-        self.assertEqual(compliance_review_status({"blocking": True}), "error")
+        self.assertEqual(compliance_review_status({"blocking": True}), "warn")
         self.assertEqual(compliance_review_status({"need_manual_review": True}), "warn")
         self.assertEqual(compliance_review_status({"ok": True, "blocking": False}), "ok")
 
@@ -209,15 +211,19 @@ class ComplianceCheckerTests(unittest.TestCase):
             price_items = [i for i in report["items"] if i.get("check_id") == "PRICE-010"]
             self.assertTrue(price_items)
             self.assertEqual(price_items[0]["status"], "fail")
-            self.assertTrue(report.get("blocking"))
+            self.assertFalse(report.get("blocking"))
+            self.assertTrue(report.get("need_manual_review"))
 
     def test_final_phase_requires_final_md(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._write_json(root / "workspace" / "global_facts.json", {})
             self._write_json(root / "workspace" / "tender_requirements.json", {})
-            with self.assertRaises(RuntimeError):
-                run_compliance_check(root, raise_on_blocking=True, phase="final")
+            report = json.loads(
+                run_compliance_check(root, raise_on_blocking=True, phase="final").read_text(encoding="utf-8")
+            )
+            self.assertFalse(report.get("blocking"))
+            self.assertTrue(report.get("need_manual_review"))
 
     def test_validate_compliance_blocking_gate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -228,8 +234,7 @@ class ComplianceCheckerTests(unittest.TestCase):
                 json.dumps({"blocking": True, "summary": {"blocking": True}, "items": []}, ensure_ascii=False),
                 encoding="utf-8",
             )
-            with self.assertRaises(RuntimeError):
-                validate_compliance_blocking(root, required=True)
+            validate_compliance_blocking(root, required=True)
 
     def test_missing_bid_content_marks_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

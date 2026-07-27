@@ -208,7 +208,11 @@ def _load_chapter_chunks(root: Path, chapter_id: str) -> list[dict[str, Any]]:
         except Exception:
             trace = {}
         if isinstance(trace, dict):
-            for key, source in (("selected_company_chunks", "company"), ("selected_tender_chunks", "tender")):
+            for key, source in (
+                ("selected_company_chunks", "company"),
+                ("selected_tender_chunks", "tender"),
+                ("selected_reference_chunks", "reference"),
+            ):
                 for item in trace.get(key) or []:
                     if not isinstance(item, dict):
                         continue
@@ -245,6 +249,7 @@ def _load_chapter_chunks(root: Path, chapter_id: str) -> list[dict[str, Any]]:
     for key, source, filename in (
         ("selected_company_chunks", "company", "company_chunks.json"),
         ("selected_tender_chunks", "tender", "tender_chunks.json"),
+        ("selected_reference_chunks", "reference", "reference_chunks.json"),
     ):
         index = _chunk_index_map(root, filename)
         for item in context.get(key) or []:
@@ -284,7 +289,10 @@ def _chunk_index_map(root: Path, filename: str) -> dict[str, dict[str, Any]]:
 
 
 def _chunk_full_content(root: Path, chunk_id: str, source: str) -> str:
-    filename = "company_chunks.json" if source == "company" else "tender_chunks.json"
+    filename = {
+        "company": "company_chunks.json",
+        "reference": "reference_chunks.json",
+    }.get(source, "tender_chunks.json")
     index = _chunk_index_map(root, filename)
     item = index.get(chunk_id) or {}
     return stringify(item.get("content"))
@@ -301,6 +309,15 @@ def align_claim_to_chunks(claim: dict[str, Any], chunks: list[dict[str, Any]]) -
     for chunk in chunks:
         content = stringify(chunk.get("content"))
         if not content:
+            continue
+        source = stringify(chunk.get("source"))
+        # 外部参考资料可以支撑技术和行业事实，但不能证明投标人的
+        # 资质、案例或从业年限。
+        if source == "reference" and ctype in {
+            "certification",
+            "case",
+            "experience_years",
+        }:
             continue
         score = 0.0
         method = ""

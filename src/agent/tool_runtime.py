@@ -176,6 +176,33 @@ def _execute_stage(
         "dry_run": dry_run,
     }
 
+    from pipeline_registry import chapter_review_enabled
+
+    disabled_review_stages = {
+        "review_fix_chapters",
+        "summarize_chapters",
+        "global_review",
+        "compliance_check",
+    }
+    if not chapter_review_enabled() and stage.id in disabled_review_stages:
+        return ToolResult(
+            ok=True,
+            tool=tool_name,
+            args=args,
+            started_at=started,
+            ended_at=_now(),
+            skipped=True,
+            summary_for_llm=(
+                f"阶段 {stage.command} 已被当前审核策略关闭；"
+                "忽略历史任务或旧动作，不执行、不阻断后续流程。"
+            ),
+            metrics={
+                "skipped": True,
+                "stage_id": stage.id,
+                "reason": "disabled_by_review_policy",
+            },
+        )
+
     # A repair is always target-driven.  Never let a missing scope silently
     # turn a chapter repair/revalidation into a full-document LLM run.
     if actor == "repair" and stage.id in {"write_chapters", "review_fix_chapters"} and not chapter_ids:
@@ -415,11 +442,37 @@ def _execute_run_pipeline_remaining(root: Path, args: dict[str, Any], *, dry_run
 
     start_idx = 0
     if start_command:
+        matched_start = False
         for i, s in enumerate(specs):
             if s.command == start_command or s.id == start_command:
                 start_idx = i
+                matched_start = True
                 break
-    elif resume:
+        if not matched_start:
+            full_order = [stage.command for stage in STAGE_SPECS if stage.kind != "utility"]
+            requested_command = next(
+                (
+                    stage.command
+                    for stage in STAGE_SPECS
+                    if stage.id == start_command or stage.command == start_command
+                ),
+                start_command,
+            )
+            if requested_command in full_order:
+                requested_index = full_order.index(requested_command)
+                next_index = next(
+                    (
+                        index
+                        for index, spec in enumerate(specs)
+                        if spec.command in full_order
+                        and full_order.index(spec.command) > requested_index
+                    ),
+                    len(specs),
+                )
+                start_idx = next_index
+            elif resume:
+                start_command = ""
+    if not start_command and resume:
         start_idx = 0
         for i, s in enumerate(specs):
             try:

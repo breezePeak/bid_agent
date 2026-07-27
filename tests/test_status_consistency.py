@@ -39,7 +39,7 @@ class StatusConsistencyTests(unittest.TestCase):
             self.assertFalse(has_active_workers(root))
             agents = load_activity(root).get("agents") or []
             statuses = {a.get("chapter_id"): a.get("status") for a in agents if isinstance(a, dict)}
-            self.assertEqual(statuses.get("01"), "failed")
+            self.assertEqual(statuses.get("01"), "interrupted")
             self.assertEqual(statuses.get("02"), "skipped")
 
     def test_criteria_ok_not_succeeded_while_workers_running(self) -> None:

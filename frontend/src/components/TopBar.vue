@@ -24,8 +24,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted } from 'vue'
-import { fetchAgentFlags } from '../api'
+import { computed } from 'vue'
 
 defineProps({
   activeRun: { type: Object, default: null },
@@ -33,26 +32,11 @@ defineProps({
 
 defineEmits(['create', 'toggleSidebar', 'settings'])
 
-const mode = ref('agent')
-const modeLabel = ref('Agent 模式')
-const modeHint = ref('Supervisor 默认入口；AGENT_SUPERVISOR_ENABLED=false 可紧急回退')
+const mode = 'v3'
+const modeLabel = 'V3 模式'
+const modeHint = 'V3 工作区使用唯一 StageRunner 与 V3 CommandGateway。'
 
-const modeClass = computed(() => (mode.value === 'agent' ? 'mode-agent' : 'mode-legacy'))
-
-async function loadMode() {
-  try {
-    const resp = await fetchAgentFlags()
-    const body = resp?.data || {}
-    if (body.ok !== false) {
-      mode.value = body.mode || (body.supervisor_enabled ? 'agent' : 'legacy')
-      modeLabel.value = body.mode_label || (mode.value === 'agent' ? 'Agent 模式' : '流水线模式')
-    }
-  } catch {
-    /* keep default */
-  }
-}
-
-onMounted(loadMode)
+const modeClass = computed(() => (mode === 'v3' ? 'mode-agent' : 'mode-legacy'))
 
 function extractName(id) {
   if (!id) return ''

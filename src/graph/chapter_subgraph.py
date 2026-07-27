@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-"""Chapter subgraph with limited self-check → rewrite loop (PR-11)."""
+"""Direct chapter execution flow with a limited self-check → rewrite loop."""
 
 from pathlib import Path
-from typing import Any, Literal
-
-from langgraph.graph import END, START, StateGraph
+from typing import Any, Literal, TypedDict
 
 from agents.chapter_writer_agent import run as write_chapter_agent
 from chapter_reviewer import (
@@ -14,10 +12,32 @@ from chapter_reviewer import (
     should_auto_rewrite,
 )
 from file_loader import load_global_facts, load_score_points
-from graph.state import ChapterState
 from utils import project_root, read_json, select_score_points, stringify, write_json, write_text
 
 DEFAULT_MAX_REWRITE_ROUNDS = 2
+
+
+class ChapterState(TypedDict, total=False):
+    root_dir: str
+    job: dict[str, Any]
+    context: dict[str, Any]
+    chapter_id: str
+    chapter_markdown: str
+    self_check: dict[str, Any]
+    output_path: str
+    self_check_path: str
+    error: str
+    rewrite_round: int
+    max_rewrite_rounds: int
+    chapter_status: str
+    problem_fingerprints: list[str]
+    last_problem_signature: str
+
+
+def _chapter_review_enabled() -> bool:
+    from pipeline_registry import chapter_review_enabled
+
+    return chapter_review_enabled()
 
 
 def _max_rewrite_rounds() -> int:
@@ -71,10 +91,18 @@ def write_chapter(state: ChapterState) -> ChapterState:
     if state.get("chapter_markdown") and int(state.get("rewrite_round") or 0) > 0:
         return {}
     markdown = write_chapter_agent(job, context, root)
-    return {"chapter_markdown": markdown}
+    return {
+        "chapter_markdown": markdown,
+        "chapter_status": str(state.get("chapter_status") or "pending") if _chapter_review_enabled() else "passed",
+    }
 
 
 def self_check_chapter(state: ChapterState) -> ChapterState:
+    if not _chapter_review_enabled():
+        return {
+            "self_check": {"skipped": True, "reason": "chapter_review_disabled"},
+            "chapter_status": "passed",
+        }
     root = Path(state.get("root_dir") or project_root())
     job = state.get("job") or {}
     chapter_id = stringify(job.get("chapter_id") or state.get("chapter_id"))
@@ -184,6 +212,8 @@ def self_check_chapter(state: ChapterState) -> ChapterState:
 
 def rewrite_chapter_node(state: ChapterState) -> ChapterState:
     """In-subgraph rewrite using chapter_rewriter when possible; fallback keeps markdown."""
+    if not _chapter_review_enabled():
+        return {"chapter_status": "passed", "error": ""}
     root = Path(state.get("root_dir") or project_root())
     job = state.get("job") or {}
     chapter_id = stringify(job.get("chapter_id") or state.get("chapter_id"))
@@ -334,27 +364,22 @@ def route_after_self_check(state: ChapterState) -> Literal["save_chapter", "rewr
     return "save_chapter"
 
 
-def build_chapter_subgraph():
-    graph = StateGraph(ChapterState)
-    graph.add_node("load_chapter_job", load_chapter_job)
-    graph.add_node("load_chapter_context", load_chapter_context)
-    graph.add_node("write_chapter", write_chapter)
-    graph.add_node("self_check_chapter", self_check_chapter)
-    graph.add_node("rewrite_chapter", rewrite_chapter_node)
-    graph.add_node("save_chapter", save_chapter)
+def route_after_write(state: ChapterState) -> Literal["self_check_chapter", "save_chapter"]:
+    return "self_check_chapter" if _chapter_review_enabled() else "save_chapter"
 
-    graph.add_edge(START, "load_chapter_job")
-    graph.add_edge("load_chapter_job", "load_chapter_context")
-    graph.add_edge("load_chapter_context", "write_chapter")
-    graph.add_edge("write_chapter", "self_check_chapter")
-    graph.add_conditional_edges(
-        "self_check_chapter",
-        route_after_self_check,
-        {
-            "rewrite_chapter": "rewrite_chapter",
-            "save_chapter": "save_chapter",
-        },
-    )
-    graph.add_edge("rewrite_chapter", "self_check_chapter")
-    graph.add_edge("save_chapter", END)
-    return graph.compile()
+
+def run_chapter_flow(root: Path, chapter_id: str) -> ChapterState:
+    """Execute the former chapter subgraph deterministically without a graph runtime."""
+    state: ChapterState = {"root_dir": str(root), "chapter_id": chapter_id}
+    state.update(load_chapter_job(state))
+    state.update(load_chapter_context(state))
+    state.update(write_chapter(state))
+
+    if route_after_write(state) == "self_check_chapter":
+        state.update(self_check_chapter(state))
+        while route_after_self_check(state) == "rewrite_chapter":
+            state.update(rewrite_chapter_node(state))
+            state.update(self_check_chapter(state))
+
+    state.update(save_chapter(state))
+    return state

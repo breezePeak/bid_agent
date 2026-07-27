@@ -6,7 +6,7 @@
 
 - **业务使用**：如何上传资料、启动流程、拿到 Word → 看本文即可。
 - **3D 态势大屏**：炼丹阁可视化全流程与 Agent 活动 → 见 [frontend-3d/README.md](frontend-3d/README.md)。
-- **当前控制架构 V2**：Agent 控制面、唯一执行内核与迁移验收 → 见 [docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)。
+- **当前控制架构 V3**：唯一执行链、Artifact 和工作空间状态 → 见 [docs/current_logic_flow_v3.md](docs/current_logic_flow_v3.md)。
 - **V1 历史归档**：仅供迁移取证，不提供兼容接口 → 见 [docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)。
 
 ## 安装
@@ -15,6 +15,13 @@
 conda create -n bid_agent python=3.11 -y
 conda activate bid_agent
 pip install -r requirements.txt
+python -m playwright install chromium
+```
+
+参与开发时安装测试和静态检查依赖：
+
+```bash
+pip install -r requirements-dev.txt
 ```
 
 ## 配置大模型
@@ -38,12 +45,26 @@ BID_AGENT_AUTH_PASSWORD=请替换为高强度随机密码
 启动后端：
 
 ```bash
-python src/web_app.py
+python -m uvicorn api.v3_app:app --app-dir src --host 127.0.0.1 --port 7860
 ```
 
 打开 [http://127.0.0.1:7860](http://127.0.0.1:7860)
 
-Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V2 API 请求都会校验会话及工作区权限；旧 V1 API 统一返回 `410 V1_API_RETIRED`。
+Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V3 API 请求都会校验会话及工作区权限；旧 V1/V2 API 统一返回 `410 LEGACY_API_RETIRED`。
+
+### DeepSeek 联网研究
+
+V3 会在已声明的 `EvidenceNeed` 需要外部资料时调用 `deepseek_web`。首次使用运行 `python scripts/deepseek_login.py`，它会打开 Playwright 自带的可见 Chromium；请在其中登录 DeepSeek。登录会话只保存在本机 `.runtime/deepseek-playwright`，不会保存账号或密码。检索必须启用“联网搜索”并取得可核验的公开来源 URL，否则不会写入证据库。配置项见 `.env.example`。
+
+研究命令可通过 `attachment_input_ids` 显式选择已经上传到 V3 输入清单的招标文件、评分文件、参考资料等。只有列出的活动输入会发送给 DeepSeek；服务会在上传前校验清单状态、文件路径与 SHA-256，不会默认把工作区文件上传到外部服务。示例 payload：
+
+```json
+{
+  "need_id": "EN-1",
+  "provider_id": "deepseek_web",
+  "attachment_input_ids": ["已上传文件的 input_id"]
+}
+```
 
 建议顺序：
 
@@ -81,6 +102,8 @@ npm run dev
 - **招标文件**：招标书、评分办法、技术/商务要求  
 - **公司资料**：介绍、资质、案例、人员、证书、方案素材  
 - **Word 模板**：最终希望套用的样式模板  
+- **外部参考资料（可选）**：政策、标准、行业资料、类似项目技术方法  
+- **项目写作要求（可选）**：章节结构、重点、口径和方案粒度  
 
 命令行整理时的目录：
 
@@ -88,7 +111,11 @@ npm run dev
 sources/tender/     招标文件
 sources/company/    公司资料
 sources/template/   Word 模板
+sources/reference/  外部参考资料（不作为公司资质/业绩证据）
+sources/guidance/   项目写作要求
 ```
+
+外部参考资料和公司证据严格分开，具体见 [外部参考资料与项目写作要求](docs/research_and_writing_brief.md)。
 
 ## 流程概览
 

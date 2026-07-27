@@ -607,41 +607,46 @@ def check_output_format(root: Path | None = None) -> Path:
     _check_template_fill_report(root, results)
     _check_price_and_deviation_tables(root, results)
 
-    # 终稿合规硬门禁：基于 final.md 复检，blocking 记入格式门禁结果并抛错
     compliance_blocking = False
-    try:
-        from compliance_checker import enforce_final_compliance_gate, normalize_compliance_report
+    from pipeline_registry import chapter_review_enabled
 
-        compliance_path = enforce_final_compliance_gate(root)
-        compliance = normalize_compliance_report(read_json(compliance_path))
-        summary = compliance.get("summary") if isinstance(compliance.get("summary"), dict) else {}
-        counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
-        compliance_blocking = bool(compliance.get("blocking"))
-        if compliance_blocking:
-            results.append(
-                _item(
-                    "compliance_blocking",
-                    "fail",
-                    f"专项合规阻断交付：fatal/critical fail={counts.get('fail', 0)}",
-                    "查看 workspace/compliance_report.json 并修复后重跑",
+    if not chapter_review_enabled():
+        results.append(_item("review_disabled", "ok", "审核已关闭，跳过专项合规与防编造复检"))
+    else:
+        # 终稿合规硬门禁：仅在“启用审核”时执行。
+        try:
+            from compliance_checker import enforce_final_compliance_gate, normalize_compliance_report
+
+            compliance_path = enforce_final_compliance_gate(root)
+            compliance = normalize_compliance_report(read_json(compliance_path))
+            summary = compliance.get("summary") if isinstance(compliance.get("summary"), dict) else {}
+            counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+            compliance_blocking = bool(compliance.get("blocking"))
+            if compliance_blocking:
+                results.append(
+                    _item(
+                        "compliance_blocking",
+                        "fail",
+                        f"专项合规阻断交付：fatal/critical fail={counts.get('fail', 0)}",
+                        "查看 workspace/compliance_report.json 并修复后重跑",
+                    )
                 )
-            )
-        elif compliance.get("need_manual_review"):
-            results.append(
-                _item(
-                    "compliance_manual_review",
-                    "warn",
-                    f"专项合规需人工复核：warn={counts.get('warn', 0)} need_manual={counts.get('need_manual_review', 0)}",
-                    "查看 workspace/compliance_report.json",
+            elif compliance.get("need_manual_review"):
+                results.append(
+                    _item(
+                        "compliance_manual_review",
+                        "warn",
+                        f"专项合规需人工复核：warn={counts.get('warn', 0)} need_manual={counts.get('need_manual_review', 0)}",
+                        "查看 workspace/compliance_report.json",
+                    )
                 )
-            )
-        else:
-            results.append(_item("compliance_gate", "ok", "专项合规终稿复检通过"))
-    except RuntimeError as exc:
-        compliance_blocking = True
-        results.append(_item("compliance_blocking", "fail", str(exc), "查看 workspace/compliance_report.json"))
-    except Exception as exc:
-        results.append(_item("compliance_gate", "warn", f"终稿合规复检异常: {exc}", "请手动执行 compliance-check"))
+            else:
+                results.append(_item("compliance_gate", "ok", "专项合规终稿复检通过"))
+        except RuntimeError as exc:
+            compliance_blocking = True
+            results.append(_item("compliance_blocking", "fail", str(exc), "查看 workspace/compliance_report.json"))
+        except Exception as exc:
+            results.append(_item("compliance_gate", "warn", f"终稿合规复检异常: {exc}", "请手动执行 compliance-check"))
 
     fail_count = sum(1 for item in results if item["level"] == "fail")
     warn_count = sum(1 for item in results if item["level"] == "warn")

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Workspace-scoped V2 CLI client.
+"""Workspace-scoped V3 CLI client.
 
-The CLI intentionally talks to the authenticated V2 HTTP application instead
-of importing stage runners, so Chat, buttons and CLI share CommandGateway,
-Policy, confirmations, leases and audit state.
+The CLI intentionally talks to the authenticated V3 HTTP application instead
+of importing stage runners, so the CLI and Web share CommandGateway,
+V3ExecutionController and the same audit state.
 """
 
 import argparse
@@ -60,11 +60,11 @@ class ControlApiClient:
             message = str(value.get("message") or (value.get("error") or {}).get("message") or exc.reason)
             raise ControlCliError(message, status_code=int(exc.code), payload=value) from exc
         except (URLError, OSError) as exc:
-            raise ControlCliError(f"无法连接 V2 服务: {exc}") from exc
+            raise ControlCliError(f"无法连接 V3 服务: {exc}") from exc
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ControlCliError(f"V2 服务返回非 JSON 响应: {exc}") from exc
+            raise ControlCliError(f"V3 服务返回非 JSON 响应: {exc}") from exc
         if not isinstance(value, dict):
-            raise ControlCliError("V2 服务返回格式无效。")
+            raise ControlCliError("V3 服务返回格式无效。")
         return value
 
     def login(self, username: str, password: str) -> dict[str, Any]:
@@ -79,7 +79,7 @@ class ControlApiClient:
         return result
 
     def snapshot(self, workspace_id: str) -> dict[str, Any]:
-        return self._request("GET", f"/api/v2/workspaces/{quote(workspace_id, safe='')}/snapshot")
+        return self._request("GET", f"/api/v3/workspaces/{quote(workspace_id, safe='')}/snapshot")
 
     def submit(
         self,
@@ -92,7 +92,7 @@ class ControlApiClient:
     ) -> dict[str, Any]:
         return self._request(
             "POST",
-            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/commands",
+            f"/api/v3/workspaces/{quote(workspace_id, safe='')}/commands",
             {
                 "kind": kind,
                 "payload": payload,
@@ -101,19 +101,8 @@ class ControlApiClient:
             },
         )
 
-    def action(self, workspace_id: str, action_id: str, *, decision: str) -> dict[str, Any]:
-        if decision not in {"confirm", "decline"}:
-            raise ControlCliError(f"无效 Action 决定: {decision}")
-        return self._request(
-            "POST",
-            f"/api/v2/workspaces/{quote(workspace_id, safe='')}/actions/"
-            f"{quote(action_id, safe='')}/{decision}",
-            {},
-        )
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="标书 Agent V2 控制面 CLI")
+    parser = argparse.ArgumentParser(description="标书 Agent V3 控制面 CLI")
     parser.add_argument(
         "--server",
         default=os.environ.get("BID_AGENT_SERVER_URL", "http://127.0.0.1:8000"),
@@ -124,20 +113,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=30.0)
     commands = parser.add_subparsers(dest="control_command", required=True)
 
-    snapshot = commands.add_parser("snapshot", help="读取工作区 V2 Snapshot")
+    snapshot = commands.add_parser("snapshot", help="读取工作区 V3 Snapshot")
     snapshot.add_argument("--workspace", required=True)
 
-    submit = commands.add_parser("submit", help="提交 Command；高风险命令返回持久化 Action")
+    submit = commands.add_parser("submit", help="提交 V3 Command")
     submit.add_argument("--workspace", required=True)
     submit.add_argument("--kind", required=True)
     submit.add_argument("--payload", default="{}", help="Command payload JSON 对象")
     submit.add_argument("--expected-revision", type=int, default=None)
     submit.add_argument("--idempotency-key", default="")
 
-    for decision in ("confirm", "decline"):
-        action = commands.add_parser(decision, help=f"{decision} 持久化 Action")
-        action.add_argument("--workspace", required=True)
-        action.add_argument("--action-id", required=True)
     return parser
 
 
@@ -161,19 +146,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             revision = args.expected_revision
             if revision is None:
                 snapshot = client.snapshot(args.workspace)
-                revision = int((snapshot.get("snapshot") or {}).get("revision") or 0)
+                revision = int((snapshot.get("snapshot") or {}).get("workspace_revision") or 0)
             result = client.submit(
                 args.workspace,
                 kind=args.kind,
                 payload=payload,
                 expected_revision=revision,
                 idempotency_key=args.idempotency_key or f"cli:{uuid.uuid4()}",
-            )
-        else:
-            result = client.action(
-                args.workspace,
-                args.action_id,
-                decision=args.control_command,
             )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0 if result.get("ok", True) else 1

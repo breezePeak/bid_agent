@@ -32,7 +32,7 @@ class IncrementalPipelineTests(unittest.TestCase):
                 main._run_select_context_all(root)
 
             jobs = select_all.call_args.args[0]
-            self.assertEqual([job["chapter_id"] for job in jobs], ["02"])
+            self.assertEqual([job["chapter_id"] for job in jobs], ["01", "02"])
 
     def test_write_only_dispatches_missing_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -44,8 +44,9 @@ class IncrementalPipelineTests(unittest.TestCase):
             chapter.parent.mkdir(parents=True, exist_ok=True)
             chapter.write_text("# 已完成章节", encoding="utf-8")
 
-            with patch("subagent_runner.run_write_all", return_value={"completed": ["02"], "failed": []}) as write_all:
-                main._run_write_all(root, workers=2)
+            with patch("context_selector.valid_context_ids", return_value={"01", "02"}):
+                with patch("subagent_runner.run_write_all", return_value={"completed": ["02"], "failed": []}) as write_all:
+                    main._run_write_all(root, workers=2)
 
             self.assertEqual(write_all.call_args.kwargs["chapter_ids"], ["02"])
 

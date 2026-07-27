@@ -23,8 +23,15 @@ def _load_context(root: Path, chapter_id: str) -> dict[str, Any]:
     return data
 
 
-def _chunk_index(root: Path, filename: str) -> dict[str, dict[str, Any]]:
+def _chunk_index(
+    root: Path,
+    filename: str,
+    *,
+    optional: bool = False,
+) -> dict[str, dict[str, Any]]:
     path = root / "workspace" / "chunks" / filename
+    if optional and not path.exists():
+        return {}
     data = read_json(path)
     if not isinstance(data, list):
         raise ValueError(f"切块文件必须是 JSON 数组: {path}")
@@ -75,6 +82,7 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
     related_score_points = select_score_points(score_points, job.get("score_point_ids", []))
     tender_index = _chunk_index(root, "tender_chunks.json")
     company_index = _chunk_index(root, "company_chunks.json")
+    reference_index = _chunk_index(root, "reference_chunks.json", optional=True)
 
     selected_tender = [
         _normalize_selected_chunk(item, tender_index, chapter_id, "招标文件")
@@ -83,6 +91,10 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
     selected_company = [
         _normalize_selected_chunk(item, company_index, chapter_id, "公司资料")
         for item in context.get("selected_company_chunks", [])
+    ]
+    selected_reference = [
+        _normalize_selected_chunk(item, reference_index, chapter_id, "外部参考资料")
+        for item in context.get("selected_reference_chunks", [])
     ]
 
     chapter_text = read_text(chapter_path)
@@ -99,6 +111,12 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
         chunk = company_index.get(stringify(item.get("id")), {})
         full["content"] = stringify(chunk.get("content"))
         selected_company_full.append(full)
+    selected_reference_full = []
+    for item in selected_reference:
+        full = dict(item)
+        chunk = reference_index.get(stringify(item.get("id")), {})
+        full["content"] = stringify(chunk.get("content"))
+        selected_reference_full.append(full)
 
     trace = {
         "chapter_id": chapter_id,
@@ -109,8 +127,10 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
         "related_score_points": related_score_points,
         "selected_tender_chunk_count": len(selected_tender_full),
         "selected_company_chunk_count": len(selected_company_full),
+        "selected_reference_chunk_count": len(selected_reference_full),
         "selected_tender_chunks": selected_tender_full,
         "selected_company_chunks": selected_company_full,
+        "selected_reference_chunks": selected_reference_full,
         "context_path": str((root / "workspace" / "contexts" / f"{chapter_id}_context.json").relative_to(root)),
         "job_path": str((root / "workspace" / "jobs" / f"{chapter_id}.json").relative_to(root)),
     }
@@ -134,6 +154,15 @@ def build_chapter_source_trace(chapter_id: str, root: Path | None = None) -> Pat
                 {
                     "chunk_id": stringify(item.get("id")),
                     "source": "tender",
+                    "content": stringify(item.get("content")),
+                    "selected_reason": stringify(item.get("selected_reason")),
+                }
+            )
+        for item in selected_reference_full:
+            chunk_payload.append(
+                {
+                    "chunk_id": stringify(item.get("id")),
+                    "source": "reference",
                     "content": stringify(item.get("content")),
                     "selected_reason": stringify(item.get("selected_reason")),
                 }
@@ -189,6 +218,7 @@ def build_source_trace_index(root: Path | None = None) -> Path:
             "missing_chapter_count": len(missing_chapters),
             "tender_chunk_reference_count": sum(int(trace.get("selected_tender_chunk_count", 0)) for trace in traces),
             "company_chunk_reference_count": sum(int(trace.get("selected_company_chunk_count", 0)) for trace in traces),
+            "reference_chunk_reference_count": sum(int(trace.get("selected_reference_chunk_count", 0)) for trace in traces),
             "claim_count": claim_total,
             "claim_aligned_count": aligned_total,
         },

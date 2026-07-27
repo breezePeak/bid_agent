@@ -44,7 +44,7 @@ import { login } from '../api'
 const router = useRouter()
 
 const username = ref('admin')
-const password = ref('K7m_qP2vL9xR4dT')
+const password = ref('')
 const loading = ref(false)
 const error = ref('')
 

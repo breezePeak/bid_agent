@@ -36,13 +36,13 @@ class ArtifactManifestTests(unittest.TestCase):
             (root / "inputs" / "tender.md").write_text("tender-v2", encoding="utf-8")
             second = record_stage_artifacts(context, "split-docs", disposition="reused")
 
-            self.assertEqual(len(first), 2)
+            self.assertEqual(len(first), 3)
             self.assertTrue(all(item["status"] == "ready" for item in first))
             self.assertTrue(all(item["producer"] == "split-docs" for item in first))
             self.assertTrue(all(item["disposition"] == "reused" for item in second))
             self.assertNotEqual(first_fingerprint, second[0]["input_fingerprint"])
             snapshot = ControlStore(context).snapshot()
-            self.assertEqual(len(snapshot["artifacts"]), 2)
+            self.assertEqual(len(snapshot["artifacts"]), 3)
 
     def test_missing_required_output_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

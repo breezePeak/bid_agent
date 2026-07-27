@@ -91,6 +91,125 @@ class IssuesModelTests(unittest.TestCase):
                 soft = can_proceed(root, next_command="compliance-check")
                 self.assertTrue(soft["can_proceed"])
 
+    def test_compliance_findings_never_block_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workspace").mkdir(parents=True)
+            issue = make_issue(
+                stage_id="compliance_check",
+                command="compliance-check",
+                severity="block",
+                code="COMPLIANCE_FATAL",
+                title="最高限价检查失败",
+            )
+            upsert_issues(root, [issue], replace_stage_id="compliance_check")
+
+            earlier = can_proceed(root, next_command="build-source-trace")
+            self.assertTrue(earlier["can_proceed"])
+            self.assertEqual(earlier["block_count"], 0)
+
+            revalidate = can_proceed(root, next_command="compliance-check")
+            self.assertTrue(revalidate["can_proceed"])
+
+            downstream = can_proceed(root, next_command="build-md")
+            self.assertTrue(downstream["can_proceed"])
+            self.assertEqual(downstream["block_count"], 0)
+
+    def test_revalidating_later_gate_does_not_bypass_earlier_block(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workspace").mkdir(parents=True)
+            global_issue = make_issue(
+                stage_id="global_review",
+                command="global-review",
+                severity="block",
+                code="GLOBAL_REVIEW_BLOCK",
+                title="全文审核失败",
+            )
+            compliance_issue = make_issue(
+                stage_id="compliance_check",
+                command="compliance-check",
+                severity="block",
+                code="COMPLIANCE_FATAL",
+                title="专项合规失败",
+            )
+            upsert_issues(root, [global_issue, compliance_issue])
+
+            result = can_proceed(root, next_command="compliance-check")
+            self.assertFalse(result["can_proceed"])
+            self.assertEqual(result["block_count"], 1)
+
+    def test_disabled_review_keeps_history_but_does_not_block_existing_first_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            chapter = root / "workspace" / "chapters" / "2.2.md"
+            chapter.parent.mkdir(parents=True)
+            chapter.write_text("# 第一版草稿", encoding="utf-8")
+            failed = make_issue(
+                stage_id="write_chapters",
+                command="write-all",
+                severity="block",
+                code="WRITE_CHAPTER_FAILED",
+                title="章节 2.2 写作失败",
+                target_type="chapter",
+                target_ids=["2.2"],
+            )
+            review = make_issue(
+                stage_id="review_fix_chapters",
+                command="review-fix-all",
+                severity="block",
+                code="CHAPTER_REVIEW_BLOCKER",
+                title="章节 2.2 审核未收敛",
+                target_type="chapter",
+                target_ids=["2.2"],
+            )
+            upsert_issues(root, [failed, review])
+
+            with mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "0"}):
+                self.assertEqual(len(load_open_issues(root)), 2)
+                self.assertEqual(open_block_issues(root), [])
+                self.assertTrue(can_proceed(root, next_command="build-docx")["can_proceed"])
+
+    def test_disabled_review_ignores_claim_gate_write_failure_without_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workspace").mkdir(parents=True)
+            audit_failure = make_issue(
+                stage_id="write_chapters",
+                command="write-all",
+                severity="block",
+                code="WRITE_CHAPTER_FAILED",
+                title="章节 3.1 写作失败",
+                detail="章节 claim 防编造门禁失败",
+                target_type="chapter",
+                target_ids=["3.1"],
+                evidence={"error": "防编造门禁发现 blocker"},
+            )
+            upsert_issues(root, [audit_failure])
+
+            with mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "0"}):
+                self.assertEqual(open_block_issues(root), [])
+
+    def test_disabled_review_keeps_real_write_failure_blocking_without_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "workspace").mkdir(parents=True)
+            runtime_failure = make_issue(
+                stage_id="write_chapters",
+                command="write-all",
+                severity="block",
+                code="WRITE_CHAPTER_FAILED",
+                title="章节 3.2 写作失败",
+                detail="模型请求超时",
+                target_type="chapter",
+                target_ids=["3.2"],
+                evidence={"error": "timeout"},
+            )
+            upsert_issues(root, [runtime_failure])
+
+            with mock.patch.dict(os.environ, {"BID_AGENT_CHAPTER_REVIEW_ENABLED": "0"}):
+                self.assertEqual(len(open_block_issues(root)), 1)
+
     def test_replace_stage(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -160,8 +279,8 @@ class RootCauseAdapterTests(unittest.TestCase):
             ],
         }
         issues = issues_from_compliance_report(report)
-        self.assertTrue(any(i["severity"] == "block" for i in issues))
-        self.assertTrue(any(i["severity"] == "warn" for i in issues))
+        self.assertTrue(issues)
+        self.assertTrue(all(i["severity"] == "warn" for i in issues))
 
     def test_sync_persists(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

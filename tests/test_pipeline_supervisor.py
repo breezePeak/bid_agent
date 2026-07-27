@@ -72,6 +72,60 @@ class PipelineSupervisorTests(unittest.TestCase):
 
             self.assertEqual(calls, ["c"])
 
+    def test_disabled_historical_start_never_restarts_from_stage_one(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+            calls: list[str] = []
+
+            def runner(command: str, run_id: str, run_root: Path) -> int:
+                calls.append(command)
+                return 0
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a", "b", "c"]),
+                patch("pipeline_supervisor.next_enabled_command_after", return_value="b"),
+                patch("pipeline_supervisor.stage_spec_by_command", side_effect=lambda c: SimpleNamespace(id=c, validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", return_value=True),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        runner,
+                        start_command="disabled-old-stage",
+                    )
+                )
+                _wait_for_status(supervisor, root, "complete")
+
+            self.assertNotIn("a", calls)
+
+    def test_unknown_historical_start_readiness_error_is_reported_not_crashed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            supervisor = PipelineSupervisor()
+
+            with (
+                patch("pipeline_supervisor.auto_run_commands", return_value=["a"]),
+                patch("pipeline_supervisor.next_enabled_command_after", return_value=""),
+                patch("pipeline_supervisor.stage_spec_by_command", return_value=SimpleNamespace(id="a", validator="")),
+                patch("pipeline_supervisor.stage_outputs_ready", return_value=True),
+            ):
+                self.assertTrue(
+                    supervisor.start(
+                        "run-1",
+                        root,
+                        lambda command, run_id, run_root: 0,
+                        start_command="unknown-old-stage",
+                        artifact_readiness_evaluator=lambda run_root, command: (_ for _ in ()).throw(
+                            RuntimeError("manifest unavailable")
+                        ),
+                    )
+                )
+                payload = _wait_for_status(supervisor, root, "failed")
+
+            self.assertIn("manifest unavailable", payload["error"])
+
     def test_failed_stage_stops_pipeline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

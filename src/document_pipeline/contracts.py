@@ -1,0 +1,385 @@
+from __future__ import annotations
+
+from enum import Enum
+from typing import Annotated, Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+
+
+V3_SCHEMA_VERSION = "v3"
+
+
+class ContractModel(BaseModel):
+    """Common immutable-artifact metadata required by every V3 contract."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    schema_version: Literal["v3"] = V3_SCHEMA_VERSION
+    revision: int = Field(default=1, ge=1)
+    source_hashes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("source_hashes")
+    @classmethod
+    def source_hashes_must_be_complete(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, digest in value.items():
+            if not key.strip() or not digest.strip():
+                raise ValueError("source_hashes 的键和值不能为空")
+        return value
+
+
+class InputRole(str, Enum):
+    TENDER = "tender"
+    SCORE = "score"
+    TEMPLATE = "template"
+    COMPANY = "company"
+    REFERENCE = "reference"
+    GUIDANCE = "guidance"
+
+
+class InputItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    input_id: str = Field(min_length=1)
+    role: InputRole
+    filename: str = Field(min_length=1)
+    mime_type: str = Field(min_length=1)
+    sha256: str = Field(min_length=1)
+    version: int = Field(ge=1)
+    active: bool = True
+    replaces_input_id: str | None = None
+
+
+class InputManifest(ContractModel):
+    inputs: list[InputItem] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_active_inputs(self) -> "InputManifest":
+        ids = [item.input_id for item in self.inputs]
+        if len(ids) != len(set(ids)):
+            raise ValueError("InputManifest 不允许重复 input_id")
+        templates = [item for item in self.inputs if item.role is InputRole.TEMPLATE and item.active]
+        if len(templates) > 1:
+            raise ValueError("同一工作空间只允许一个活动 template")
+        return self
+
+
+class SourceAnchor(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_input_id: str = Field(min_length=1)
+    chunk_id: str = Field(min_length=1)
+    page: int | None = Field(default=None, ge=1)
+    location: str = Field(min_length=1)
+
+
+class NormalizedChunk(BaseModel):
+    """A stable, role-aware source fragment used by every V3 content stage."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chunk_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    role: InputRole
+    ordinal: int = Field(ge=0)
+    content: str = Field(min_length=1)
+    source_anchor: SourceAnchor
+
+
+class RequirementKind(str, Enum):
+    MANDATORY = "mandatory"
+    SCORE = "score"
+    QUALIFICATION = "qualification"
+    DELIVERABLE = "deliverable"
+    ACCEPTANCE = "acceptance"
+    CONTRACT = "contract"
+
+
+class RequirementItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    requirement_id: str = Field(min_length=1)
+    kind: RequirementKind
+    source_anchor: SourceAnchor
+    original_text: str = Field(min_length=1)
+    normalized_requirement: str = Field(min_length=1)
+    severity: Literal["blocking", "major", "normal"] = "normal"
+    response_type: str = Field(min_length=1)
+    evidence_policy: str = Field(min_length=1)
+    status: Literal["open", "confirmed", "blocked", "waived"] = "open"
+
+
+class RequirementLedger(ContractModel):
+    requirements: list[RequirementItem] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_requirement_ids(self) -> "RequirementLedger":
+        ids = [item.requirement_id for item in self.requirements]
+        if len(ids) != len(set(ids)):
+            raise ValueError("RequirementLedger 不允许重复 requirement_id")
+        return self
+
+
+class ProjectFact(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    fact_id: str = Field(min_length=1)
+    statement: str = Field(min_length=1)
+    source_anchor: SourceAnchor | None = None
+    requirement_ids: list[str] = Field(default_factory=list)
+
+
+class EvidenceNeed(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    need_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    topic_id: str = Field(min_length=1)
+    priority: Literal["blocking", "high", "normal", "low"] = "normal"
+    blocking_scope: Literal["workspace", "contract", "content_unit", "none"] = "none"
+    deadline_stage: str = Field(min_length=1)
+    query_budget: int = Field(ge=0, le=20)
+    status: Literal["open", "researching", "satisfied", "gap", "cancelled"] = "open"
+
+
+class EvidenceSourceType(str, Enum):
+    TENDER = "tender"
+    COMPANY = "company"
+    OFFICIAL = "official"
+    STANDARD = "standard"
+    ACADEMIC = "academic"
+    WEB = "web"
+    MANUAL = "manual"
+
+
+class EvidenceItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    evidence_id: str = Field(min_length=1)
+    batch_id: str = Field(min_length=1)
+    source_type: EvidenceSourceType
+    title: str = Field(min_length=1)
+    source_url: str | None = None
+    publisher: str = Field(min_length=1)
+    content: str = Field(min_length=1)
+    claim_types: list[Literal["project_context", "standard", "method", "enterprise_capability"]] = Field(default_factory=list)
+    retrieved_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def enterprise_claims_require_company_evidence(self) -> "EvidenceItem":
+        if "enterprise_capability" in self.claim_types and self.source_type is not EvidenceSourceType.COMPANY:
+            raise ValueError("外部资料不能证明企业能力")
+        return self
+
+
+class EvidenceBatch(ContractModel):
+    batch_id: str = Field(min_length=1)
+    need_id: str = Field(min_length=1)
+    query_count: int = Field(ge=0)
+    items: list[EvidenceItem] = Field(default_factory=list)
+    status: Literal["published", "gap", "failed"]
+    error: str | None = None
+
+
+class ProjectModel(ContractModel):
+    project_id: str = Field(min_length=1)
+    identity: dict[str, str] = Field(default_factory=dict)
+    background: list[str] = Field(default_factory=list)
+    goals: list[str] = Field(default_factory=list)
+    scope: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    work_packages: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
+    processing: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    acceptance_conditions: list[str] = Field(default_factory=list)
+    milestones: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    terminology: dict[str, str] = Field(default_factory=dict)
+    confirmed_facts: list[ProjectFact] = Field(default_factory=list)
+    inferences: list[ProjectFact] = Field(default_factory=list)
+    conflicts: list[ProjectFact] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    evidence_needs: list[EvidenceNeed] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_project_references(self) -> "ProjectModel":
+        fact_ids = [fact.fact_id for group in (self.confirmed_facts, self.inferences, self.conflicts) for fact in group]
+        need_ids = [need.need_id for need in self.evidence_needs]
+        if len(fact_ids) != len(set(fact_ids)) or len(need_ids) != len(set(need_ids)):
+            raise ValueError("ProjectModel 不允许重复事实或 EvidenceNeed ID")
+        return self
+
+
+class DocumentMode(str, Enum):
+    TEMPLATE_STRICT = "template_strict"
+    AUTO_OUTLINE = "auto_outline"
+
+
+class ContractNode(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    node_id: str = Field(min_length=1)
+    parent_node_id: str | None = None
+    order: int = Field(ge=0)
+    writable_target: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    requirement_ids: list[str] = Field(default_factory=list)
+
+
+class TemplateSlot(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    slot_id: str = Field(min_length=1)
+    node_id: str = Field(min_length=1)
+    kind: Literal["text_slot", "cell_slot", "flow_slot", "repeat_slot"]
+    anchor: str = Field(min_length=1)
+
+
+class _DocumentContractBase(ContractModel):
+    nodes: list[ContractNode] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def valid_node_tree(self) -> "_DocumentContractBase":
+        node_ids = [node.node_id for node in self.nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("DocumentContract 不允许重复 node_id")
+        known_ids = set(node_ids)
+        for node in self.nodes:
+            if node.parent_node_id and node.parent_node_id not in known_ids:
+                raise ValueError(f"DocumentContract 存在悬空父节点: {node.parent_node_id}")
+        return self
+
+
+class TemplateContract(_DocumentContractBase):
+    mode: Literal[DocumentMode.TEMPLATE_STRICT] = DocumentMode.TEMPLATE_STRICT
+    template_hash: str = Field(min_length=1)
+    structural_fingerprint: str = Field(min_length=1)
+    slots: list[TemplateSlot] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    blocking_gaps: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def slots_must_target_known_nodes(self) -> "TemplateContract":
+        node_ids = {node.node_id for node in self.nodes}
+        slot_ids = [slot.slot_id for slot in self.slots]
+        if len(slot_ids) != len(set(slot_ids)):
+            raise ValueError("TemplateContract 不允许重复 slot_id")
+        if unknown := {slot.node_id for slot in self.slots} - node_ids:
+            raise ValueError(f"TemplateContract slot 指向未知节点: {sorted(unknown)}")
+        return self
+
+
+class OutlineContract(_DocumentContractBase):
+    mode: Literal[DocumentMode.AUTO_OUTLINE] = DocumentMode.AUTO_OUTLINE
+
+
+DocumentContract = Annotated[TemplateContract | OutlineContract, Field(discriminator="mode")]
+DOCUMENT_CONTRACT_ADAPTER = TypeAdapter(DocumentContract)
+
+
+class DocumentNodePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    node_id: str = Field(min_length=1)
+    primary_requirement_ids: list[str] = Field(default_factory=list)
+    primary_score_ids: list[str] = Field(default_factory=list)
+    owned_topic_ids: list[str] = Field(default_factory=list)
+    required_mentions: list[str] = Field(default_factory=list)
+    forbidden_topic_ids: list[str] = Field(default_factory=list)
+
+
+class DocumentPlan(ContractModel):
+    contract_revision: int = Field(ge=1)
+    nodes: list[DocumentNodePlan] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def primary_owners_are_unique(self) -> "DocumentPlan":
+        node_ids = [node.node_id for node in self.nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("DocumentPlan 不允许重复 node_id")
+        for label, values in (
+            ("requirement", [item for node in self.nodes for item in node.primary_requirement_ids]),
+            ("score", [item for node in self.nodes for item in node.primary_score_ids]),
+            ("topic", [item for node in self.nodes for item in node.owned_topic_ids]),
+        ):
+            if len(values) != len(set(values)):
+                raise ValueError(f"DocumentPlan 每个 {label} 只能有一个 primary_owner")
+        return self
+
+
+class ContentUnit(ContractModel):
+    unit_id: str = Field(min_length=1)
+    contract_revision: int = Field(ge=1)
+    node_ids: list[str] = Field(min_length=1)
+    upstream_unit_ids: list[str] = Field(default_factory=list)
+
+
+class ContentBlock(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    block_id: str = Field(min_length=1)
+    target_node_id: str = Field(min_length=1)
+    type: Literal["paragraph", "list", "table", "figure_ref", "cross_reference"]
+    content: str = Field(min_length=1)
+    topic_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
+    evidence_ids: list[str] = Field(default_factory=list)
+    fact_ids: list[str] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    human_locked: bool = False
+    critical_claims: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def critical_claims_need_sources(self) -> "ContentBlock":
+        if self.critical_claims and not (self.evidence_ids or self.fact_ids):
+            raise ValueError("关键 Claim 必须关联 evidence_ids 或 fact_ids")
+        return self
+
+
+class IntegratedDocument(ContractModel):
+    contract_revision: int = Field(ge=1)
+    plan_revision: int = Field(ge=1)
+    blocks: list[ContentBlock] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def blocks_are_unique(self) -> "IntegratedDocument":
+        ids = [block.block_id for block in self.blocks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("IntegratedDocument 不允许重复 block_id")
+        return self
+
+
+class QualityReport(ContractModel):
+    report_id: str = Field(min_length=1)
+    verdict: Literal["pass", "warn", "fail"]
+    findings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ChangeSet(ContractModel):
+    change_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    changed_inputs: list[str] = Field(default_factory=list)
+    changed_facts: list[str] = Field(default_factory=list)
+    changed_requirements: list[str] = Field(default_factory=list)
+    affected_contract_nodes: list[str] = Field(default_factory=list)
+    affected_content_units: list[str] = Field(default_factory=list)
+    status: Literal["pending", "applied", "cancelled"] = "pending"
+
+
+class ArtifactManifest(ContractModel):
+    artifact_id: str = Field(min_length=1)
+    artifact_path: str = Field(pattern=r"^workspace/v3/")
+    producer: str = Field(min_length=1)
+    dependency_fingerprint: str = Field(min_length=1)
+    dependencies: list[str] = Field(default_factory=list)
+
+
+def document_contract_json_schema() -> dict[str, Any]:
+    """Return the stable JSON Schema for the discriminated contract union."""
+    return DOCUMENT_CONTRACT_ADAPTER.json_schema()

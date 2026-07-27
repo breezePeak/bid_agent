@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from concurrency import chapter_workers_scope, clamp_workers, workers_default
-from graph.chapter_subgraph import build_chapter_subgraph
+from graph.chapter_subgraph import run_chapter_flow
 from utils import project_root
 
 try:
@@ -20,8 +20,7 @@ except Exception:  # pragma: no cover
 
 
 def _write_worker(chapter_id: str, root: Path) -> None:
-    graph = build_chapter_subgraph()
-    graph.invoke({"root_dir": str(root), "chapter_id": chapter_id})
+    run_chapter_flow(root, chapter_id)
 
 
 def _review_worker(chapter_id: str, root: Path) -> None:
@@ -124,6 +123,13 @@ def _writer_batch_retries() -> int:
         return 5
 
 
+def _writer_fallback_enabled() -> bool:
+    import os
+
+    value = str(os.environ.get("BID_AGENT_WRITE_FAILURE_FALLBACK", "1")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
 def run_per_chapter(
     worker: Callable[[str, Path], None],
     root: Path | None = None,
@@ -197,6 +203,27 @@ def run_per_chapter(
                 f"[自动重试] 第 {batch_round}/{batch_retries} 批：写作失败章节继续写 "
                 f"({len(pending)} 章) → {pending}"
             )
+
+    if failed and role == "chapter_writer" and _writer_fallback_enabled():
+        from chapter_writer import write_fallback_chapter
+
+        unresolved: list[dict[str, Any]] = []
+        for item in failed:
+            chapter_id = str(item.get("chapter_id") or "").strip()
+            try:
+                write_fallback_chapter(chapter_id, root, failure_reason=str(item.get("error") or ""))
+                completed.append(chapter_id)
+                mark_agent(
+                    root,
+                    role=role,
+                    chapter_id=chapter_id,
+                    status="done",
+                    message="已生成保底草稿",
+                    attempt=int(item.get("attempts") or 1),
+                )
+            except Exception as exc:
+                unresolved.append({**item, "fallback_error": str(exc)})
+        failed = unresolved
 
     print(f"[完成] {label} 成功 {len(completed)} 个, 失败 {len(failed)} 个")
     if failed:

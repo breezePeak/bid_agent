@@ -198,11 +198,108 @@ def upsert_issues(
 
 
 def open_block_issues(root: Path | None = None) -> list[dict[str, Any]]:
-    return [
+    root = root or project_root()
+    blocks = [
         i
         for i in load_open_issues(root)
         if str(i.get("severity")) == "block" and str(i.get("status")) in {"open", "in_progress"}
     ]
+    return effective_block_issues(root, blocks)
+
+
+def effective_block_issues(root: Path, issues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply the current review policy without deleting historical Issue records."""
+    from pipeline_registry import chapter_review_enabled
+
+    # 专项合规检查只提示。兼容数据库/工作区里遗留的 block 问题单，
+    # 不让旧状态继续阻断任何阶段。
+    issues = [
+        issue
+        for issue in issues
+        if str(issue.get("stage_id") or "") != "compliance_check"
+        and not str(issue.get("code") or "").startswith("COMPLIANCE_")
+    ]
+    if chapter_review_enabled():
+        return list(issues)
+    effective: list[dict[str, Any]] = []
+    audit_stages = {
+        "review_fix_chapters",
+        "global_review",
+        "compliance_check",
+        "claim_validation",
+    }
+    for issue in issues:
+        code = str(issue.get("code") or "")
+        stage_id = str(issue.get("stage_id") or "")
+        if code == "CHAPTER_REVIEW_BLOCKER" or stage_id in audit_stages:
+            continue
+        if code == "WRITE_CHAPTER_FAILED":
+            evidence = issue.get("evidence") if isinstance(issue.get("evidence"), dict) else {}
+            audit_error_text = " ".join(
+                str(value or "")
+                for value in (
+                    issue.get("title"),
+                    issue.get("detail"),
+                    evidence.get("error"),
+                )
+            ).lower()
+            # 旧版本把 claim/防编造审核门禁异常登记成“写作失败”。
+            # 审核关闭后，这类历史问题不能伪装成执行故障继续阻断。
+            audit_failure_markers = (
+                "claim 防编造",
+                "claim防编造",
+                "防编造门禁",
+                "anti-fabrication",
+                "chapter review",
+                "review gate",
+                "章节审核质量门禁",
+            )
+            if any(marker in audit_error_text for marker in audit_failure_markers):
+                continue
+            target = issue.get("target") if isinstance(issue.get("target"), dict) else {}
+            chapter_ids = [str(value) for value in (target.get("ids") or []) if str(value)]
+            drafts_ready = bool(chapter_ids) and all(
+                (root / "workspace" / "chapters" / f"{chapter_id}.md").is_file()
+                and (root / "workspace" / "chapters" / f"{chapter_id}.md").stat().st_size > 0
+                for chapter_id in chapter_ids
+            )
+            if drafts_ready:
+                continue
+        effective.append(issue)
+    return effective
+
+
+def _blocks_applicable_to_command(
+    blocks: list[dict[str, Any]],
+    next_command: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split block issues by pipeline order.
+
+    A finding produced by a later stage must not block an earlier stage. Unknown
+    commands remain blocking so that custom/legacy gates fail conservatively.
+    """
+    if not next_command:
+        return list(blocks), []
+    try:
+        from pipeline_registry import STAGE_SPECS
+
+        command_order = {stage.command: index for index, stage in enumerate(STAGE_SPECS)}
+    except Exception:
+        return list(blocks), []
+    next_index = command_order.get(next_command)
+    if next_index is None:
+        return list(blocks), []
+
+    applicable: list[dict[str, Any]] = []
+    deferred: list[dict[str, Any]] = []
+    for block in blocks:
+        block_command = str(block.get("command") or "")
+        block_index = command_order.get(block_command)
+        if block_index is not None and block_index > next_index:
+            deferred.append(block)
+        else:
+            applicable.append(block)
+    return applicable, deferred
 
 
 def can_proceed(root: Path | None = None, *, next_command: str = "") -> dict[str, Any]:
@@ -228,38 +325,60 @@ def can_proceed(root: Path | None = None, *, next_command: str = "") -> dict[str
             "message": "无 open block 问题",
             "next_command": next_command,
         }
-    # Allow re-running the gate stage that produced the blocks (so repair can revalidate)
+    applicable_blocks, deferred_blocks = _blocks_applicable_to_command(blocks, next_command)
+    if not applicable_blocks:
+        return {
+            "ok": True,
+            "can_proceed": True,
+            "mode": mode,
+            "block_count": 0,
+            "blocks": [],
+            "deferred_block_count": len(deferred_blocks),
+            "deferred_blocks": deferred_blocks,
+            "next_command": next_command,
+            "message": (
+                f"按流程允许进入 `{next_command}`；"
+                f"{len(deferred_blocks)} 个后续阶段问题尚未到阻断时点"
+            ),
+        }
+
+    # Allow re-running a gate only when every applicable block belongs to that
+    # gate. Earlier-stage blockers must still be resolved first.
     if next_command:
-        block_commands = {str(b.get("command") or "") for b in blocks}
-        if next_command in block_commands:
+        block_commands = {str(b.get("command") or "") for b in applicable_blocks}
+        if block_commands == {next_command}:
             return {
                 "ok": True,
                 "can_proceed": True,
                 "mode": mode,
-                "block_count": len(blocks),
-                "blocks": blocks,
+                "block_count": len(applicable_blocks),
+                "blocks": applicable_blocks,
+                "deferred_block_count": len(deferred_blocks),
+                "deferred_blocks": deferred_blocks,
                 "next_command": next_command,
-                "message": f"允许重验门禁阶段 `{next_command}`（当前仍有 {len(blocks)} 条 block）",
+                "message": f"允许重验门禁阶段 `{next_command}`（当前仍有 {len(applicable_blocks)} 条 block）",
                 "revalidate_allowed": True,
             }
-    titles = [str(b.get("title") or b.get("code") or b.get("id")) for b in blocks[:5]]
+    titles = [str(b.get("title") or b.get("code") or b.get("id")) for b in applicable_blocks[:5]]
     try:
-        record_issue_metric(root, "gate_block", next_command=next_command, block_count=len(blocks))
+        record_issue_metric(root, "gate_block", next_command=next_command, block_count=len(applicable_blocks))
     except Exception:
         pass
     return {
         "ok": True,
         "can_proceed": False,
         "mode": mode,
-        "block_count": len(blocks),
-        "blocks": blocks,
+        "block_count": len(applicable_blocks),
+        "blocks": applicable_blocks,
+        "deferred_block_count": len(deferred_blocks),
+        "deferred_blocks": deferred_blocks,
         "next_command": next_command,
         "message": (
-            f"存在 {len(blocks)} 个阻断问题，禁止进入下一步"
+            f"存在 {len(applicable_blocks)} 个阻断问题，禁止进入下一步"
             + (f" `{next_command}`" if next_command else "")
             + "。请先处理："
             + "；".join(titles)
-            + ("…" if len(blocks) > 5 else "")
+            + ("…" if len(applicable_blocks) > 5 else "")
         ),
     }
 

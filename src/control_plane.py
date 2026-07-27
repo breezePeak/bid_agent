@@ -179,7 +179,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 19
+    SCHEMA_VERSION = 20
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -471,6 +471,63 @@ class ControlStore:
                         created_at TEXT NOT NULL,
                         resolved_at TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS document_state (
+                        workspace_id TEXT PRIMARY KEY,
+                        document_mode TEXT NOT NULL DEFAULT '',
+                        project_model_revision INTEGER,
+                        document_contract_revision INTEGER,
+                        document_plan_revision INTEGER,
+                        integration_revision INTEGER,
+                        delivery_status TEXT NOT NULL DEFAULT 'draft_with_gaps',
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS evidence_needs (
+                        need_id TEXT PRIMARY KEY,
+                        question TEXT NOT NULL,
+                        topic_id TEXT NOT NULL,
+                        priority TEXT NOT NULL,
+                        blocking_scope TEXT NOT NULL,
+                        deadline_stage TEXT NOT NULL,
+                        query_budget INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        active_batch_id TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS content_unit_states (
+                        unit_id TEXT PRIMARY KEY,
+                        contract_revision INTEGER NOT NULL,
+                        state TEXT NOT NULL,
+                        attempt INTEGER NOT NULL DEFAULT 0,
+                        evidence_snapshot_hash TEXT NOT NULL DEFAULT '',
+                        output_artifact_id TEXT,
+                        invalidation_reason TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS dependency_edges (
+                        upstream_type TEXT NOT NULL,
+                        upstream_id TEXT NOT NULL,
+                        downstream_type TEXT NOT NULL,
+                        downstream_id TEXT NOT NULL,
+                        edge_kind TEXT NOT NULL,
+                        PRIMARY KEY (upstream_type, upstream_id, downstream_type, downstream_id, edge_kind)
+                    );
+                    CREATE TABLE IF NOT EXISTS change_sets (
+                        change_id TEXT PRIMARY KEY,
+                        source TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        impact_json TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        applied_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS content_locks (
+                        block_id TEXT PRIMARY KEY,
+                        lock_owner TEXT NOT NULL,
+                        reason TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
                     CREATE INDEX IF NOT EXISTS idx_events_revision ON workspace_events(workspace_revision);
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
@@ -478,6 +535,12 @@ class ControlStore:
                     CREATE INDEX IF NOT EXISTS idx_artifact_states_status ON artifact_states(status, producer);
                     CREATE INDEX IF NOT EXISTS idx_migration_conflicts_status
                         ON migration_conflicts(status, domain, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_evidence_needs_status
+                        ON evidence_needs(status, deadline_stage, priority);
+                    CREATE INDEX IF NOT EXISTS idx_content_unit_states_state
+                        ON content_unit_states(state, contract_revision);
+                    CREATE INDEX IF NOT EXISTS idx_dependency_edges_downstream
+                        ON dependency_edges(downstream_type, downstream_id);
                     """
                 )
                 operation_columns = {
@@ -516,6 +579,83 @@ class ControlStore:
                     "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
                 ).fetchall()
         return [self._migration_conflict_row(row) for row in rows]
+
+    def upsert_evidence_need(self, item: dict[str, Any]) -> dict[str, Any]:
+        """Persist scheduling state only; immutable evidence lives in V3 artifacts."""
+        required = ("need_id", "question", "topic_id", "priority", "blocking_scope", "deadline_stage", "query_budget", "status")
+        missing = [
+            key
+            for key in required
+            if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())
+        ]
+        if missing:
+            raise ControlPlaneError("INVALID_EVIDENCE_NEED", f"EvidenceNeed 缺少字段: {', '.join(missing)}", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO evidence_needs(
+                        need_id, question, topic_id, priority, blocking_scope, deadline_stage,
+                        query_budget, status, active_batch_id, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(need_id) DO UPDATE SET
+                        question=excluded.question, topic_id=excluded.topic_id, priority=excluded.priority,
+                        blocking_scope=excluded.blocking_scope, deadline_stage=excluded.deadline_stage,
+                        query_budget=excluded.query_budget, status=excluded.status,
+                        active_batch_id=excluded.active_batch_id, updated_at=excluded.updated_at
+                    """,
+                    (
+                        item["need_id"], item["question"], item["topic_id"], item["priority"],
+                        item["blocking_scope"], item["deadline_stage"], int(item["query_budget"]),
+                        item["status"], item.get("active_batch_id"), now, now,
+                    ),
+                )
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+        return self.evidence_need(str(item["need_id"])) or {}
+
+    def evidence_need(self, need_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM evidence_needs WHERE need_id = ?", (need_id,)).fetchone()
+        return dict(row) if row else None
+
+    def upsert_content_unit_state(self, item: dict[str, Any]) -> dict[str, Any]:
+        required = ("unit_id", "contract_revision", "state")
+        missing = [key for key in required if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())]
+        if missing:
+            raise ControlPlaneError("INVALID_CONTENT_UNIT", f"ContentUnit 缺少字段: {', '.join(missing)}", status_code=400)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO content_unit_states(
+                    unit_id, contract_revision, state, attempt, evidence_snapshot_hash,
+                    output_artifact_id, invalidation_reason, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(unit_id) DO UPDATE SET
+                    contract_revision=excluded.contract_revision, state=excluded.state,
+                    attempt=excluded.attempt, evidence_snapshot_hash=excluded.evidence_snapshot_hash,
+                    output_artifact_id=excluded.output_artifact_id,
+                    invalidation_reason=excluded.invalidation_reason, updated_at=excluded.updated_at
+                """,
+                (
+                    item["unit_id"], int(item["contract_revision"]), item["state"], int(item.get("attempt", 0)),
+                    str(item.get("evidence_snapshot_hash") or ""), item.get("output_artifact_id"),
+                    str(item.get("invalidation_reason") or ""), now,
+                ),
+            )
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (item["unit_id"],)).fetchone()
+        return dict(row) if row else {}
+
+    def content_locks(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM content_locks ORDER BY created_at, block_id").fetchall()
+        return [dict(row) for row in rows]
 
     def migration_state(self) -> dict[str, Any]:
         conflicts = self.migration_conflicts()
@@ -3001,6 +3141,57 @@ class ControlStore:
             result.append(item)
         return result
 
+    def cancel_active_stage_runs(
+        self,
+        operation_id: str,
+        *,
+        disposition: str,
+        error: dict[str, Any] | None = None,
+    ) -> int:
+        """Close every queued/running attempt left behind by a dead Worker."""
+        operation = str(operation_id or "").strip()
+        if not operation:
+            return 0
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    "SELECT stage_run_id, stage_command, attempt FROM stage_runs "
+                    "WHERE operation_id = ? AND status IN ('queued', 'running')",
+                    (operation,),
+                ).fetchall()
+                if not rows:
+                    connection.commit()
+                    return 0
+                revision = self._bump_revision(connection)
+                for row in rows:
+                    run_id = str(row["stage_run_id"])
+                    connection.execute(
+                        "UPDATE stage_runs SET status = 'cancelled', disposition = ?, "
+                        "error_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                        (disposition, _json(error) if error else None, now, run_id),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "StageRunRecorded",
+                        "StageRun",
+                        run_id,
+                        {
+                            "operation_id": operation,
+                            "command": str(row["stage_command"]),
+                            "attempt": int(row["attempt"]),
+                            "status": "cancelled",
+                            "disposition": disposition,
+                        },
+                    )
+                connection.commit()
+                return len(rows)
+            except Exception:
+                connection.rollback()
+                raise
+
     def latest_stage_run(self, operation_id: str, stage_command: str) -> dict[str, Any] | None:
         """Return the latest attempt for one stage without inferring its state."""
         with self._connection() as connection:
@@ -3419,7 +3610,7 @@ class ControlStore:
                     """,
                     (operation_status, message, _json(error) if error else None, now, terminal_at, operation_id),
                 )
-                if operation_status in {"succeeded", "failed", "cancelled"}:
+                if operation_status in {"succeeded", "failed", "cancelled", "blocked"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 self._event(
                     connection,
@@ -3498,12 +3689,14 @@ class ControlStore:
                     return self._revision(connection)
                 error_json = _json(error) if error else None
                 if str(row["status"]) == status and str(row["message"] or "") == message and row["error_json"] == error_json:
-                    if status not in {"succeeded", "failed", "cancelled"}:
+                    if status not in {"succeeded", "failed", "cancelled", "blocked"}:
                         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat(timespec="milliseconds")
                         connection.execute(
                             "UPDATE workspace_lease SET heartbeat_at = ?, expires_at = ? WHERE operation_id = ?",
                             (now, expires_at, operation_id),
                         )
+                    elif status == "blocked":
+                        connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                     connection.commit()
                     return self._revision(connection)
                 revision = self._bump_revision(connection)
@@ -3516,7 +3709,7 @@ class ControlStore:
                     """,
                     (status, message, error_json, now, terminal_at, operation_id),
                 )
-                if status in {"succeeded", "failed", "cancelled"}:
+                if status in {"succeeded", "failed", "cancelled", "blocked"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 else:
                     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat(timespec="milliseconds")

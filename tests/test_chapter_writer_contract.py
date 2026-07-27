@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from chapter_writer import write_chapter_from_job_context
+from subagent_runner import run_per_chapter
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -83,6 +85,29 @@ class ChapterWriterContractTests(unittest.TestCase):
             with patch("chapter_writer.chat", return_value="服务承诺已具备完整能力并完全满足要求。"):
                 with self.assertRaisesRegex(ValueError, "弱证据模板任务被写成既成事实"):
                     write_chapter_from_job_context(job, context, root)
+
+    def test_writer_failure_fallback_setting_produces_completed_draft(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            job, _context = self._build_workspace(root)
+            _write_json(root / "workspace" / "jobs" / "2.1.json", job)
+
+            def always_fail(_chapter_id: str, _root: Path) -> None:
+                raise RuntimeError("model unavailable")
+
+            with (
+                patch.dict(os.environ, {"BID_AGENT_WRITE_FAILURE_FALLBACK": "1", "BID_AGENT_WRITE_BATCH_RETRIES": "0"}),
+                patch("subagent_runner.begin_phase"),
+                patch("subagent_runner.end_phase"),
+                patch("subagent_runner.mark_agent"),
+            ):
+                result = run_per_chapter(always_fail, root, workers=1, label="写作 SubAgent")
+
+            self.assertEqual(result["failed"], [])
+            self.assertEqual(result["completed"], ["2.1"])
+            draft = (root / "workspace" / "chapters" / "2.1.md").read_text(encoding="utf-8")
+            self.assertIn("## 2.1 服务方案", draft)
+            self.assertIn("草稿说明", draft)
 
 
 if __name__ == "__main__":

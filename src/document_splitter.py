@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from utils import project_root, read_nonempty_text, write_json
+from utils import project_root, read_nonempty_text, read_text, write_json
 
 
 DEFAULT_MAX_CHARS = 3500
@@ -125,21 +125,30 @@ def split_docs(root: Path | None = None, max_chars: int = DEFAULT_MAX_CHARS) -> 
     root = root or project_root()
     tender_md = read_nonempty_text(root / "inputs" / "tender.md", "招标文件 inputs/tender.md")
     company_md = read_nonempty_text(root / "inputs" / "company.md", "公司资料 inputs/company.md")
+    reference_md = read_text(root / "inputs" / "reference.md")
 
     chunks_dir = root / "workspace" / "chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
 
     tender_chunks = split_markdown_document(tender_md, "tender.md", "TENDER", max_chars=max_chars)
     company_chunks = split_markdown_document(company_md, "company.md", "COMPANY", max_chars=max_chars)
+    reference_chunks = (
+        split_markdown_document(reference_md, "reference.md", "REFERENCE", max_chars=max_chars)
+        if reference_md.strip()
+        else []
+    )
 
     _validate_chunks(tender_chunks, "招标文件")
     _validate_chunks(company_chunks, "公司资料")
 
     tender_path = chunks_dir / "tender_chunks.json"
     company_path = chunks_dir / "company_chunks.json"
+    reference_path = chunks_dir / "reference_chunks.json"
     write_json(tender_path, tender_chunks)
     write_json(company_path, company_chunks)
+    write_json(reference_path, reference_chunks)
 
     print(f"[完成] 招标文件切分 {len(tender_chunks)} 个片段: {tender_path}")
     print(f"[完成] 公司资料切分 {len(company_chunks)} 个片段: {company_path}")
+    print(f"[完成] 外部参考资料切分 {len(reference_chunks)} 个片段: {reference_path}")
     return tender_path, company_path

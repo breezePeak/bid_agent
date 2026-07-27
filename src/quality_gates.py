@@ -14,6 +14,9 @@ def anti_fabrication_enabled() -> bool:
     """Whether write-time anti-fabrication blockers are enabled."""
     import os
 
+    review_enabled = str(os.environ.get("BID_AGENT_CHAPTER_REVIEW_ENABLED", "1")).strip().lower()
+    if review_enabled in {"0", "false", "no", "off"}:
+        return False
     value = str(os.environ.get("BID_AGENT_ANTI_FABRICATION_GATE", "1")).strip().lower()
     return value not in {"0", "false", "no", "off"}
 
@@ -129,6 +132,12 @@ def validate_global_review_blocking(root: Path, *, required: bool = False) -> No
     """全文审核质量门禁：存在不一致/冲突/编造风险/未覆盖评分点时阻断后续阶段。"""
     import os
 
+    # 章节审核是审核链的总开关。即使子开关或进程环境仍残留为开启，
+    # 总开关关闭时也不得读取历史审核报告并阻断后续流程。
+    review_enabled = str(os.environ.get("BID_AGENT_CHAPTER_REVIEW_ENABLED", "1")).strip().lower()
+    if review_enabled in {"0", "false", "no", "off"}:
+        return
+
     # allow opt-out: GLOBAL_REVIEW_GATE=0/false
     flag = str(os.environ.get("GLOBAL_REVIEW_GATE", "1")).strip().lower()
     if flag in {"0", "false", "no", "off"}:
@@ -163,31 +172,30 @@ def compliance_review_status(compliance_report: dict[str, Any]) -> str:
     summary = compliance_report.get("summary") if isinstance(compliance_report.get("summary"), dict) else {}
     blocking = bool(compliance_report.get("blocking") or summary.get("blocking"))
     if blocking:
-        return "error"
+        # 兼容历史报告中的 blocking=true；专项合规现为提示性检查。
+        return "warn"
     need_manual = bool(compliance_report.get("need_manual_review") or summary.get("need_manual_review"))
     return "warn" if need_manual else "ok"
 
 
 def validate_compliance_blocking(root: Path, *, required: bool = True) -> None:
-    """交付级门禁：fatal/critical 失败阻止流程成功完成。"""
+    """兼容旧调用：同步专项合规提示，但不阻断流程。"""
     report_path = root / "workspace" / "compliance_report.json"
     if not report_path.exists():
-        if required:
-            raise ValueError(f"合规检查报告不存在，无法通过交付门禁: {report_path}")
         return
-    report = read_json(report_path)
+    try:
+        report = read_json(report_path)
+    except Exception:
+        return
     if not isinstance(report, dict):
-        raise ValueError("compliance_report.json 必须是 JSON 对象")
+        return
     try:
         from agent.root_cause import sync_issues_from_compliance
 
         sync_issues_from_compliance(root, report)
     except Exception:
         pass
-    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
-    blocking = bool(report.get("blocking") or summary.get("blocking"))
-    if blocking:
-        raise RuntimeError(f"专项合规检查阻断交付，请修复后重跑 compliance-check: {report_path}")
+    # fatal/critical 仅保留为人工复核提示，不再抛出阻断异常。
 
 
 def validate_chapter_claims_gate(

@@ -88,13 +88,16 @@
                   id="llm-api-key"
                   v-model="form.api_key"
                   :type="showApiKey ? 'text' : 'password'"
-                  placeholder="sk-..."
-                  required
+                  :placeholder="form.has_stored_api_key ? '已配置；留空表示不修改' : 'sk-...'"
+                  :required="isNew || !form.has_stored_api_key"
                 />
                 <button type="button" class="btn btn-sm" @click="showApiKey = !showApiKey">
                   {{ showApiKey ? '隐藏' : '显示' }}
                 </button>
               </div>
+              <p v-if="form.has_stored_api_key && !form.api_key" class="field-hint">
+                已配置 API Key。出于安全原因不会回显；留空保存会保留原值。
+              </p>
             </div>
             <div class="form-group">
               <label for="llm-model">模型 ID <span class="required">*</span></label>
@@ -183,14 +186,11 @@
             <div class="form-group"><label for="flow-retries">写作批次重试</label><input id="flow-retries" v-model.number="flowForm.write_batch_retries" type="number" min="0" max="20" /></div>
             <div class="form-group"><label for="flow-repair">最大修复轮次</label><input id="flow-repair" v-model.number="flowForm.max_repair_rounds" type="number" min="0" max="10" /></div>
           </div>
-          <div class="settings-form-title">审核与门禁</div>
+          <div class="settings-form-title">审核</div>
           <div class="form-check-group">
-            <label class="form-check"><input v-model="flowForm.chapter_review_gate" type="checkbox" /><span>启用章节审核门禁</span></label>
-            <label class="form-check"><input v-model="flowForm.global_review_gate" type="checkbox" /><span>启用全文审核门禁</span></label>
-            <label class="form-check"><input v-model="flowForm.anti_fabrication_gate" type="checkbox" /><span>启用防编造检查</span></label>
-            <label class="form-check"><input v-model="flowForm.allow_accept_risk" type="checkbox" /><span>允许用户接受可接受的失败风险</span></label>
+            <label class="form-check"><input v-model="flowForm.chapter_review_enabled" type="checkbox" /><span>启用审核</span></label>
           </div>
-          <p class="settings-hint">关闭任一门禁只是不阻断后续流程，审核结果仍会保留。开启接受风险后仍需填写原因、二次确认；废标项与资格材料缺失不能接受。</p>
+          <p class="settings-hint">开启时，每章生成后在“生成章节”内部完成自审和按需改稿，并执行全文审核；关闭时直接生成第一版，不执行审核相关阶段。</p>
           <p v-if="flowError" class="form-error" role="alert">{{ flowError }}</p>
           <p v-if="flowSuccess" class="form-success">{{ flowSuccess }}</p>
           <div class="settings-form-footer"><button type="button" class="btn" @click="$emit('close')">关闭</button><button type="submit" class="btn btn-primary" :disabled="flowSaving">{{ flowSaving ? '保存中...' : '保存流程设置' }}</button></div>
@@ -207,6 +207,11 @@ import { fetchLlmSettings, fetchFlowSettings, saveFlowSettings,
   saveLlmModel,
   activateLlmModel,
   deleteLlmModel, testLlmModel } from '../api'
+import {
+  llmModelFormFromApi,
+  llmModelKeyIsReady,
+  llmModelPayload,
+} from '../api/settingsContracts.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -221,20 +226,7 @@ const isNew = ref(false)
 const showApiKey = ref(false)
 const submitting = ref(false)
 const testing = ref(false)
-const form = reactive({
-  id: '',
-  name: '',
-  provider: 'openai',
-  base_url: '',
-  api_key: '',
-  model: '',
-  timeout: 300,
-  max_retries: 3,
-  retry_initial_delay: 2,
-  retry_max_delay: 30,
-  stream: false,
-  verify_ssl: true,
-})
+const form = reactive(llmModelFormFromApi())
 
 const providerHint = computed(() => {
   if (form.provider === 'anthropic') {
@@ -262,7 +254,7 @@ const activeTab = ref('model')
 const flowSaving = ref(false)
 const flowError = ref('')
 const flowSuccess = ref('')
-const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false })
+const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false })
 
 async function loadFlow() {
   try {
@@ -283,40 +275,13 @@ async function saveFlow() {
 
 
 function emptyForm() {
-  form.id = ''
-  form.name = ''
-  form.provider = 'openai'
-  form.base_url = ''
-  form.api_key = ''
-  form.model = ''
-  form.timeout = 300
-  form.max_retries = 3
-  form.retry_initial_delay = 2
-  form.retry_max_delay = 30
-  form.stream = false
-  form.verify_ssl = true
+  Object.assign(form, llmModelFormFromApi())
+  showApiKey.value = false
 }
 
 function fillForm(m) {
-  form.id = m.id || ''
-  form.name = m.name || ''
-  form.provider = m.provider || 'openai'
-  form.base_url = m.base_url || ''
-  form.api_key = m.api_key || ''
-  form.model = m.model || ''
-  form.timeout = Number(m.timeout ?? 300)
-  form.max_retries = Number(m.max_retries ?? 3)
-  form.retry_initial_delay = Number(m.retry_initial_delay ?? 2)
-  form.retry_max_delay = Number(m.retry_max_delay ?? 30)
-  form.stream = _parseBool(m.stream, false)
-  form.verify_ssl = _parseBool(m.verify_ssl, true)
-}
-
-function _parseBool(value, fallback) {
-  if (value === '' || value === null || value === undefined) return fallback
-  if (typeof value === 'boolean') return value
-  const text = String(value).toLowerCase()
-  return text && !['0', 'false', 'no', 'off'].includes(text)
+  Object.assign(form, llmModelFormFromApi(m))
+  showApiKey.value = false
 }
 
 async function loadModels(keepEditing = false) {
@@ -365,26 +330,17 @@ async function handleSave(forceActive = false) {
     error.value = '请填写模型别名'
     return
   }
-  if (!form.base_url.trim() || !form.api_key.trim() || !form.model.trim()) {
+  if (
+    !form.base_url.trim()
+    || !form.model.trim()
+    || !llmModelKeyIsReady(form, { isNew: isNew.value })
+  ) {
     error.value = 'Base URL、API Key、模型 ID 均为必填项'
     return
   }
   submitting.value = true
   try {
-    const payload = {
-      id: isNew.value ? '' : form.id,
-      name: form.name.trim(),
-      provider: form.provider || 'openai',
-      base_url: form.base_url.trim(),
-      api_key: form.api_key.trim(),
-      model: form.model.trim(),
-      timeout: form.timeout,
-      max_retries: form.max_retries,
-      retry_initial_delay: form.retry_initial_delay,
-      retry_max_delay: form.retry_max_delay,
-      stream: form.stream,
-      verify_ssl: form.verify_ssl,
-    }
+    const payload = llmModelPayload(form, { isNew: isNew.value })
     const isEditingActive = !isNew.value && form.id && form.id === activeId.value
     const setActivate = forceActive === true || (isNew.value && models.value.length === 0) || isEditingActive
     const { data } = await saveLlmModel(payload, setActivate)
@@ -418,26 +374,20 @@ async function handleTest() {
   success.value = ''
   testResult.value = ''
   testOk.value = null
-  if (!form.base_url.trim() || !form.api_key.trim() || !form.model.trim()) {
+  if (
+    !form.base_url.trim()
+    || !form.model.trim()
+    || !llmModelKeyIsReady(form, { isNew: isNew.value })
+  ) {
     error.value = '请先填写 Base URL、API Key 和模型 ID 再测试'
     return
   }
   testing.value = true
   try {
-    const payload = {
-      id: form.id || '',
-      name: form.name.trim() || 'test',
-      provider: form.provider || 'openai',
-      base_url: form.base_url.trim(),
-      api_key: form.api_key.trim(),
-      model: form.model.trim(),
-      timeout: form.timeout || 60,
-      max_retries: 1,
-      retry_initial_delay: form.retry_initial_delay,
-      retry_max_delay: form.retry_max_delay,
-      stream: form.stream,
-      verify_ssl: form.verify_ssl,
-    }
+    const payload = llmModelPayload(form, { isNew: isNew.value })
+    payload.name ||= 'test'
+    payload.timeout ||= 60
+    payload.max_retries = 1
     const { data } = await testLlmModel(payload, { useActive: false })
     if (data && data.ok) {
       testOk.value = true

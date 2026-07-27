@@ -16,6 +16,7 @@ from compliance_checker import run_compliance_check
 from global_reviewer import run_global_review
 from format_checker import check_output_format
 from outline_generator import generate_outline
+from project_understanding import analyze_project_understanding
 from pipeline_registry import workflow_stage_specs
 from project_profile_registry import project_profile_choices, save_project_profile
 from prompt_registry import required_prompt_files
@@ -339,6 +340,8 @@ def init_project(root: Path | None = None) -> None:
             "sources/tender",
             "sources/company",
             "sources/template",
+            "sources/reference",
+            "sources/guidance",
             "inputs",
             "workspace",
             "workspace/chunks",
@@ -359,6 +362,10 @@ def init_project(root: Path | None = None) -> None:
     save_project_profile(root, None)
     for filename in required_prompt_files():
         content = DEFAULT_PROMPTS.get(filename, "")
+        if not content:
+            canonical_prompt = Path(__file__).resolve().parent.parent / "prompts" / filename
+            if canonical_prompt.exists():
+                content = canonical_prompt.read_text(encoding="utf-8")
         ensure_file(root / "prompts" / filename, content)
     print(f"[完成] 项目已初始化: {root}")
 
@@ -456,12 +463,13 @@ def _run_write_all(root: Path, workers: int | None = None, max_retries: int = 0)
         raise RuntimeError("；".join(messages))
 
 
-def run_pipeline(root: Path | None = None, workers: int | None = None, max_retries: int = 0) -> None:
-    root = root or project_root()
-    workers = clamp_workers(workers)
-    core_specs = workflow_stage_specs()
-    total = len(core_specs)
-    stage_runners = {
+def _pipeline_stage_runners(root: Path, workers: int, max_retries: int) -> dict[str, callable]:
+    """Build the only legacy pipeline dispatch table used by ``run_pipeline``.
+
+    Keep this table complete for every auto-run stage.  An incomplete table is
+    an execution error, never a reason to silently skip a registered stage.
+    """
+    return {
         "init_workspace": lambda: init_project(root),
         "prepare_inputs": lambda: _run_prepare_inputs(root),
         "split_docs": lambda: _run_split_docs(root),
@@ -488,24 +496,21 @@ def run_pipeline(root: Path | None = None, workers: int | None = None, max_retri
         "build_docx": lambda: build_docx(root),
         "check_format": lambda: check_output_format(root),
     }
+
+
+def run_pipeline(root: Path | None = None, workers: int | None = None, max_retries: int = 0) -> None:
+    root = root or project_root()
+    workers = clamp_workers(workers)
+    core_specs = workflow_stage_specs()
+    total = len(core_specs)
+    stage_runners = _pipeline_stage_runners(root, workers, max_retries)
+    missing_stage_runners = [spec.id for spec in core_specs if spec.id not in stage_runners]
+    if missing_stage_runners:
+        raise RuntimeError(f"Pipeline 缺少 stage runner: {', '.join(missing_stage_runners)}")
     for index, spec in enumerate(core_specs, start=1):
-        runner = stage_runners.get(spec.id)
-        if runner is None:
-            continue
+        runner = stage_runners[spec.id]
         print(f"[{index}/{total}] {spec.label}...")
         runner()
-
-
-def run_graph_pipeline(
-    root: Path | None = None,
-    workers: int | None = None,
-    resume: bool = False,
-    max_retries: int = 0,
-) -> None:
-    from graph.bid_graph import run_bid_graph
-
-    root = root or project_root()
-    run_bid_graph(root, workers=clamp_workers(workers), resume=resume, max_retries=max_retries)
 
 
 def set_project_profile(root: Path | None = None, project_type: str | None = None) -> None:
@@ -531,6 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("split-docs", help="切分招标文件和公司资料为 chunk")
     subparsers.add_parser("parse-score", help="解析评分标准")
     subparsers.add_parser("extract-facts", help="提取全局事实")
+    subparsers.add_parser("analyze-project", help="整体理解项目并生成资料检索问题")
     subparsers.add_parser("build-materials-checklist", help="生成材料/资格待补清单（解析后、写作前）")
     subparsers.add_parser("build-template-evidence", help="根据模板 schema 生成依据映射和质量报告")
     subparsers.add_parser("generate-outline", help="生成标书大纲")
@@ -612,17 +618,6 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
     run_parser.add_argument("--project-type", default="", help=project_type_help)
 
-    graph_run_parser = subparsers.add_parser("graph-run", help="按 LangGraph 主图运行完整流程")
-    graph_run_parser.add_argument(
-        "--workers",
-        type=int,
-        default=None,
-        help=f"章节写作 worker 数，默认 {workers_default()}，最大 {workers_max()}（BID_AGENT_WORKERS_*）",
-    )
-    graph_run_parser.add_argument("--resume", action="store_true", help="从 workspace/run_state.json 和已有产物断点续跑")
-    graph_run_parser.add_argument("--max-retries", type=int, default=0, help="章节写作失败后的最大重试次数，默认 0")
-    graph_run_parser.add_argument("--project-type", default="", help=project_type_help)
-
     subparsers.add_parser("validate", help="项目功能闭环检查：验证文件、环境变量、中间产物完整性")
 
     tool_parser = subparsers.add_parser("tool", help="调用 Agent Tool 层（PR-1: run_stage / 阶段 command）")
@@ -631,13 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     tool_parser.add_argument("--dry-run", action="store_true", help="只预览不执行")
     tool_parser.add_argument("--list", action="store_true", dest="list_tools", help="列出可用 tools 后退出")
 
-    agent_graph_parser = subparsers.add_parser("agent-graph-run", help="LangGraph Supervisor 短循环（只读自动，变更需 --yes）")
-    agent_graph_parser.add_argument("--goal", required=True, help="用户目标自然语言")
-    agent_graph_parser.add_argument("--max-steps", type=int, default=5, help="最大步数")
-    agent_graph_parser.add_argument("--yes", action="store_true", help="确认执行变更类 tool")
-    agent_graph_parser.add_argument("--use-llm", action="store_true", help="使用 LLM 决策（默认规则）")
-
-    control_parser = subparsers.add_parser("control", help="通过 V2 HTTP CommandGateway 控制工作区")
+    control_parser = subparsers.add_parser("control", help="通过 V3 HTTP CommandGateway 控制工作区")
     control_parser.add_argument("control_args", nargs=argparse.REMAINDER)
 
 
@@ -660,7 +649,7 @@ def main() -> int:
     if not execution_worker:
         print(
             "[拒绝] 旧阶段 CLI 已废弃；"
-            "请使用 `python src/main.py control ...` 通过 V2 CommandGateway 操作。"
+            "请使用 `python src/main.py control ...` 通过 V3 CommandGateway 操作。"
         )
         return 2
 
@@ -685,6 +674,9 @@ def main() -> int:
     elif args.command == "extract-facts":
         print("[执行] 提取全局事实...")
         extract_facts(root)
+    elif args.command == "analyze-project":
+        print("[执行] 整体理解项目...")
+        analyze_project_understanding(root)
     elif args.command == "build-materials-checklist":
         print("[执行] 生成材料/资格清单...")
         build_materials_checklist(root)
@@ -786,23 +778,6 @@ def main() -> int:
         if args.project_type:
             save_project_profile(root, args.project_type)
         run_pipeline(root, workers=args.workers, max_retries=args.max_retries)
-    elif args.command == "graph-run":
-        if args.project_type:
-            save_project_profile(root, args.project_type)
-        run_graph_pipeline(root, workers=args.workers, resume=args.resume, max_retries=args.max_retries)
-    elif args.command == "agent-graph-run":
-        from graph.supervisor_graph import run_supervisor_graph
-        import json
-
-        result = run_supervisor_graph(
-            args.goal,
-            root=root,
-            max_steps=int(getattr(args, "max_steps", 5) or 5),
-            use_llm=bool(getattr(args, "use_llm", False)),
-            user_confirmed=bool(getattr(args, "yes", False)),
-        )
-        print(json.dumps({k: result.get(k) for k in ("reply", "steps", "need_confirm", "done", "last_tool", "goal_id", "last_observation")}, ensure_ascii=False, indent=2))
-        return 0 if result.get("done") or result.get("need_confirm") else 1
     elif args.command == "control":
         from control_cli import main as control_main
 

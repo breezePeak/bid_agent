@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,10 +31,12 @@ class StageValidationTests(unittest.TestCase):
                 {"chapter_id": "01", "selected_tender_chunks": []},
             )
 
-            status = stage_collection_status(root, "select_contexts")
+            with patch("context_selector.valid_context_ids", return_value={"01"}):
+                status = stage_collection_status(root, "select_contexts")
             self.assertFalse(status["complete"])
             self.assertEqual(status["missing_ids"], ["02"])
-            self.assertFalse(stage_outputs_ready(root, "select_contexts"))
+            with patch("context_selector.valid_context_ids", return_value={"01"}):
+                self.assertFalse(stage_outputs_ready(root, "select_contexts"))
 
     def test_invalid_json_is_treated_as_missing(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -53,7 +56,8 @@ class StageValidationTests(unittest.TestCase):
                     root / "workspace" / "contexts" / f"{chapter_id}_context.json",
                     {"chapter_id": chapter_id},
                 )
-            self.assertTrue(stage_outputs_ready(root, "select_contexts"))
+            with patch("context_selector.valid_context_ids", return_value={"01", "02"}):
+                self.assertTrue(stage_outputs_ready(root, "select_contexts"))
 
 
 if __name__ == "__main__":
