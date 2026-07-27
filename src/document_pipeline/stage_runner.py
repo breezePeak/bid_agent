@@ -16,6 +16,7 @@ from .renderers.standard_renderer import StandardRenderer
 from .renderers.template_renderer import StrictTemplateRenderer
 from .requirement_ledger import RequirementLedgerBuilder
 from .source_normalizer import SourceNormalizer
+from .template_contract import TemplateContractCompiler
 
 
 class V3StageRunner:
@@ -31,6 +32,10 @@ class V3StageRunner:
             return manifest
         if stage == "normalize_sources":
             return SourceNormalizer(self.context).normalize_active_inputs()
+        if stage == "compile_template_structure":
+            manifest = InputManifestService(self.context).load()
+            template = next((item for item in manifest.inputs if item.active and item.role.value == "template"), None)
+            return TemplateContractCompiler(self.context).compile_structure(template) if template else None
         if stage == "build_requirement_ledger":
             return RequirementLedgerBuilder(self.context).build()
         if stage == "build_project_model":

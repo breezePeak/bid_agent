@@ -135,9 +135,19 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - H1 / 模板：本次不改变 H1 PlanningConfirm，也不修改严格模板结构；后续 PR-16—PR-20 将消费该可信内核。
 - 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr15`（437 passed, 9 subtests）。新增负向测试覆盖 Agent 越权、无 GateReceipt、陈旧 revision、幂等 operation、失败无半 revision 与 Snapshot 隔离。
 
+## PR-16：结构化 SourceIndex 与 TemplateStructureContract
+
+- 状态：已完成
+- SourceIndex：`SourceNormalizer` 现将 Markdown、DOCX 和 PDF 恢复为稳定的 `SourceBlock` 序列，保留输入角色、块类型、原始顺序、标题路径、页码、段落/表格坐标、来源锚点和内容 hash；原兼容 `by_role` 视图仅供尚未迁移的确定性台账读取。
+- 可靠性：PDF 没有可提取文本时以 `V3_SOURCE_OCR_BLOCKED` 阻断，无法支持的格式在 Agent 调用前阻断；每个活动输入均写入 processed/blocked 状态。
+- 补遗：新增 `amendment` 输入角色、`issued_at` 与显式 `supersedes_input_ids`，SourceIndex 按签发时间保留补遗关系，不将其静默混入原招标文件。
+- 模板：新增独立、只读的 `TemplateStructureContract`，在 Requirement/Score 前由 `compile_template_structure` 阶段冻结 DOCX 的标题、层级、顺序、表格/文本 slot 和结构指纹；语义覆盖缺口仍由后续规划阶段计算。
+- H1 / 权限：本次不改变 H1 PlanningConfirm；所有来源与模板工作由确定性 Service 完成，不新增 Agent 或 Artifact 写权限。
+- 验证：`python -m ruff check src tests`；PR-16 定向回归 17 passed。
+
 ## 后续架构基线：Bid Master 与投标中间语言
 
-- 状态：PR-14 与 PR-15 已完成；后续按 PR-16 继续。
+- 状态：PR-14 至 PR-16 已完成；后续按 PR-17 继续。
 - 核心分工：Agent 只产生 Proposal，Artifact 承载权威事实，Service 执行确定性动作，Gate 与 CAS Promotion 决定 Artifact 晋级。
 - 中间语言：`RequirementLedger → ScoreModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → EvidenceSnapshot → WriterInputBundle → ContentBlock`。
 - Agent：Bid Master 复用现有 CommandGateway/StageRunner；Requirement、Score、Planning、Writer、Integration 和 Quality Audit 均读取冻结快照，不直接修改 `control.db` 或 canonical Artifact。

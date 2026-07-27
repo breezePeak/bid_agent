@@ -31,6 +31,7 @@ class InputRole(str, Enum):
     TENDER = "tender"
     SCORE = "score"
     TEMPLATE = "template"
+    AMENDMENT = "amendment"
     COMPANY = "company"
     REFERENCE = "reference"
     GUIDANCE = "guidance"
@@ -47,6 +48,16 @@ class InputItem(BaseModel):
     version: int = Field(ge=1)
     active: bool = True
     replaces_input_id: str | None = None
+    issued_at: str | None = None
+    supersedes_input_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def amendment_requires_issue_date(self) -> "InputItem":
+        if self.role is InputRole.AMENDMENT and not self.issued_at:
+            raise ValueError("补遗输入必须声明 issued_at")
+        if len(self.supersedes_input_ids) != len(set(self.supersedes_input_ids)):
+            raise ValueError("supersedes_input_ids 不允许重复")
+        return self
 
 
 class InputManifest(ContractModel):
@@ -60,6 +71,12 @@ class InputManifest(ContractModel):
         templates = [item for item in self.inputs if item.role is InputRole.TEMPLATE and item.active]
         if len(templates) > 1:
             raise ValueError("同一工作空间只允许一个活动 template")
+        known_ids = set(ids)
+        for item in self.inputs:
+            if item.replaces_input_id and item.replaces_input_id not in known_ids:
+                raise ValueError(f"InputManifest replaces_input_id 不存在: {item.replaces_input_id}")
+            if unknown := set(item.supersedes_input_ids) - known_ids:
+                raise ValueError(f"InputManifest supersedes_input_ids 不存在: {sorted(unknown)}")
         return self
 
 
@@ -83,6 +100,28 @@ class NormalizedChunk(BaseModel):
     ordinal: int = Field(ge=0)
     content: str = Field(min_length=1)
     source_anchor: SourceAnchor
+
+
+class SourceBlock(BaseModel):
+    """Loss-minimising structure recovered from a single frozen input."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    block_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    input_role: InputRole
+    block_kind: Literal["heading", "paragraph", "list_item", "table_cell", "pdf_text", "pdf_table_cell"]
+    ordinal: int = Field(ge=0)
+    content: str = Field(min_length=1)
+    heading_path: list[str] = Field(default_factory=list)
+    page: int | None = Field(default=None, ge=1)
+    paragraph_index: int | None = Field(default=None, ge=0)
+    table_index: int | None = Field(default=None, ge=0)
+    row_index: int | None = Field(default=None, ge=0)
+    column_index: int | None = Field(default=None, ge=0)
+    bbox: list[float] | None = None
+    source_anchor: SourceAnchor
+    content_hash: str = Field(min_length=1)
 
 
 class RequirementKind(str, Enum):
@@ -271,6 +310,23 @@ class TemplateContract(_DocumentContractBase):
             raise ValueError("TemplateContract 不允许重复 slot_id")
         if unknown := {slot.node_id for slot in self.slots} - node_ids:
             raise ValueError(f"TemplateContract slot 指向未知节点: {sorted(unknown)}")
+        return self
+
+
+class TemplateStructureContract(ContractModel):
+    """Read-only template topology compiled before semantic planning."""
+
+    template_input_id: str = Field(min_length=1)
+    template_hash: str = Field(min_length=1)
+    structural_fingerprint: str = Field(min_length=1)
+    nodes: list[ContractNode] = Field(min_length=1)
+    slots: list[TemplateSlot] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def structural_slots_target_known_nodes(self) -> "TemplateStructureContract":
+        node_ids = {node.node_id for node in self.nodes}
+        if unknown := {slot.node_id for slot in self.slots} - node_ids:
+            raise ValueError(f"TemplateStructureContract slot 指向未知节点: {sorted(unknown)}")
         return self
 
 

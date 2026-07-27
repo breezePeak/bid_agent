@@ -9,13 +9,14 @@ from docx import Document
 from docx.text.paragraph import Paragraph
 from utils import read_json
 
-from .contracts import ContractNode, InputItem, RequirementLedger, TemplateContract, TemplateSlot
+from .contracts import ContractNode, InputItem, RequirementLedger, TemplateContract, TemplateSlot, TemplateStructureContract
 from .input_manifest import V3_ROOT
 from .requirement_ledger import LEDGER_PATH
 
 
 _PLACEHOLDER = re.compile(r"\{\{([^{}]+)\}\}|【([^】]+)】|\[([^\[\]]+)\]")
 _HEADING = re.compile(r"(?:heading|标题)\s*([1-9])", re.IGNORECASE)
+TEMPLATE_STRUCTURE_PATH = V3_ROOT / "contracts" / "template_structure.json"
 
 
 class TemplateContractCompiler:
@@ -26,38 +27,69 @@ class TemplateContractCompiler:
         self.root = context.root
 
     def compile(self, template: InputItem) -> TemplateContract:
+        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        structure = self.compile_structure(template)
+        blocking_gaps = self._coverage_gaps(structure.nodes, ledger)
+        return TemplateContract(
+            revision=ledger.revision,
+            source_hashes={**ledger.source_hashes, template.input_id: template.sha256},
+            template_hash=structure.template_hash,
+            structural_fingerprint=structure.structural_fingerprint,
+            nodes=structure.nodes,
+            slots=structure.slots,
+            warnings=[] if structure.slots else ["模板未声明可写 slot；仅允许在后续人工确认的 flow_slot 内填充。"],
+            blocking_gaps=blocking_gaps,
+        )
+
+    def compile_structure(self, template: InputItem) -> TemplateStructureContract:
+        """Freeze template topology before Requirement/Score/Blueprint planning."""
         path = self.root / V3_ROOT / "sources" / template.input_id / template.filename
+        if path.suffix.lower() != ".docx":
+            raise ValueError("TEMPLATE_INVALID: 严格模板当前只支持 DOCX。")
         try:
             document = Document(str(path))
         except Exception as exc:  # python-docx normalizes malformed/package errors
             raise ValueError(f"TEMPLATE_INVALID: 无法读取活动模板: {exc}") from exc
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
         nodes, paragraph_node = self._nodes(document)
         if not nodes:
             raise ValueError("TEMPLATE_INVALID: 未能可靠识别模板标题结构")
-        slots = self._slots(document, paragraph_node)
-        blocking_gaps = self._coverage_gaps(nodes, ledger)
-        return TemplateContract(
-            revision=ledger.revision,
-            source_hashes={**ledger.source_hashes, template.input_id: template.sha256},
+        structure = TemplateStructureContract(
+            revision=template.version,
+            source_hashes={template.input_id: template.sha256},
+            template_input_id=template.input_id,
             template_hash=template.sha256,
             structural_fingerprint=self._fingerprint(path),
             nodes=nodes,
-            slots=slots,
-            warnings=[] if slots else ["模板未声明可写 slot；仅允许在后续人工确认的 flow_slot 内填充。"],
-            blocking_gaps=blocking_gaps,
+            slots=self._slots(document, paragraph_node),
         )
+        from utils import write_json
+        write_json(self.root / TEMPLATE_STRUCTURE_PATH, structure.model_dump(mode="json"))
+        return structure
 
     @staticmethod
     def _fingerprint(path: Path) -> str:
         document = Document(str(path))
         shape = {
             "paragraphs": [
-                {"style": paragraph.style.style_id if paragraph.style else ""}
+                {
+                    "style": paragraph.style.style_id if paragraph.style else "",
+                    # Heading text is part of the immutable template topology.
+                    # Body text may contain a declared slot whose replacement is
+                    # not recoverable from the rendered document alone.
+                    "heading": bool(_HEADING.search(
+                        f"{paragraph.style.name} {paragraph.style.style_id}" if paragraph.style else ""
+                    )),
+                    "text": paragraph.text if _HEADING.search(
+                        f"{paragraph.style.name} {paragraph.style.style_id}" if paragraph.style else ""
+                    ) else "",
+                }
                 for paragraph in document.paragraphs
             ],
             "tables": [
-                {"rows": len(table.rows), "columns": len(table.columns)}
+                {
+                    "rows": len(table.rows),
+                    "columns": len(table.columns),
+                }
                 for table in document.tables
             ],
             "sections": len(document.sections),

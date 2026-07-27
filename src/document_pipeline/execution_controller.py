@@ -11,6 +11,7 @@ from .research_tool import V3ResearchTool
 V3_PIPELINE_STAGES = (
     "ingest_inputs",
     "normalize_sources",
+    "compile_template_structure",
     "build_requirement_ledger",
     "build_project_model",
     "sync_material_requirements",
