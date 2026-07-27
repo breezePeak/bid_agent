@@ -215,6 +215,15 @@ class V3StageRunner:
                 raise ControlPlaneError("V3_GATE_BLOCKED", f"ChapterBlueprint 门禁阻断: {receipt.findings}")
             ArtifactPromotionService(self.context).promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
             return load_promoted_chapter_blueprint(self.context)
+
+        if stage == "confirm_planning":
+            from .artifact_promotion import GateService
+            from control_plane import ControlStore
+
+            active = ControlStore(self.context).v3_active_artifact("ChapterBlueprint")
+            if active is None:
+                raise ValueError("PLANNING_CONFIRM_BLOCKED: ChapterBlueprint 尚未晋级")
+            return GateService(self.context).evaluate(active["proposal_id"], gate_id="H1_PLANNING_CONFIRM", reviewer="user")
         if stage == "sync_material_requirements":
             return MaterialRequirementsSynchronizer(self.context).sync()
         if stage == "compile_document_contract":
@@ -222,6 +231,10 @@ class V3StageRunner:
         if stage == "plan_document":
             return DocumentPlanner(self.context).build()
         if stage == "execute_content_plan":
+            from control_plane import ControlStore
+            blueprint = ControlStore(self.context).v3_active_artifact("ChapterBlueprint")
+            if blueprint is None or not ControlStore(self.context).has_v3_gate_receipt(blueprint["proposal_id"], "H1_PLANNING_CONFIRM"):
+                raise ValueError("PLANNING_CONFIRM_REQUIRED")
             units = ContentUnitScheduler(self.context).initialize()
             writer = ContentWriter(self.context)
             return [writer.write(unit.unit_id, unit.node_ids) for unit in units]

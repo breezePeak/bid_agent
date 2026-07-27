@@ -16,6 +16,7 @@ V3_PIPELINE_STAGES = (
     "analyze_scores",
     "plan_response",
     "compile_chapter_blueprint",
+    "confirm_planning",
     "sync_material_requirements",
     "compile_document_contract",
     "plan_document",

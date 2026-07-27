@@ -2728,6 +2728,14 @@ class ControlStore:
                 raise
         return {**receipt, "created_at": now}
 
+    def has_v3_gate_receipt(self, proposal_id: str, gate_id: str) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM v3_gate_receipts WHERE proposal_id = ? AND gate_id = ? AND verdict = 'pass' LIMIT 1",
+                (str(proposal_id), str(gate_id)),
+            ).fetchone()
+        return row is not None
+
     def promote_v3_proposal(self, *, proposal_id: str, gate_receipt_ids: list[str]) -> dict[str, Any]:
         ids = sorted({str(value).strip() for value in gate_receipt_ids if str(value).strip()})
         if not ids:
