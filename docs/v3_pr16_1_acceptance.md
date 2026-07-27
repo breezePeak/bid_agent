@@ -1,6 +1,6 @@
 # PR-16.1 canonical Source — 验收记录
 
-- 状态：Implemented（技术主链完成；Gate S 证据待完整矩阵与人工批准）
+- 状态：Completed；Gate S **PASS**
 - 日期：2026-07-27
 - 前置：Gate K PASS
 
@@ -31,12 +31,8 @@ python -m unittest tests.test_v3_source_structure tests.test_v3_input_manifest \
 ## Gate S
 
 - 自动化矩阵：`tests/test_v3_gate_s_source.py`（晋级权威、JSON 非权威、确定性、PDF gap、合成深层模板冻结结构校验、真实模板稳定）
-- 证据包：`artifacts/release_gates/v3/S/v1/`（`automated_result=PASS`，`result=PENDING_HUMAN_APPROVAL`）
+- 证据包：`artifacts/release_gates/v3/S/v1/`（`automated_result=PASS`，`result=PASS`，双角色 approvals 已记录）
 - 合成深层模板冻结快照：`tests/fixtures/v3_source/template_deep_structure_freeze.json`
-
-### 仍需人工
-
-- Source 解析负责人 + 架构负责人写入 `approvals[]` 后，`result` 方可改为 PASS
 
 ### 已知风险
 
@@ -44,4 +40,4 @@ python -m unittest tests.test_v3_source_structure tests.test_v3_input_manifest \
 - PDF 使用可解析合成件证明 StructureGap/bbox 路径；生产扫描件仍需现场样本
 - 旧工作空间迁移 inventory 仍归 Gate M
 
-未人工批准前，不得宣称 Gate S PASS；但 PR-17～20 正式路径已不得把普通 `source_index.json` 当作权威事实（Stage 硬阻断）。
+Gate S 已通过；PR-17～20 正式路径只能消费 promoted Source Artifact，不得把普通 `source_index.json` 当作权威事实。

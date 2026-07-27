@@ -120,13 +120,15 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-14：冻结 Bid Master、投标中间语言与 Golden
 
-- 工程状态：原则、依赖方向和指标定义已冻结；PR-14.0 最小契约冻结包已随 Gate K 收口。
-- 验收状态：**PR-14.0 已完成（Gate K PASS）；PR-14.1 Golden 资产仍未建立。**
-- 历史提交：`2d775a7`、`8d4e45d docs(v3): freeze PR-14.0 trusted kernel contracts`、`290571c`
+- 工程状态：PR-14.0 已随 Gate K 收口；PR-14.1 评测基础设施已建立。
+- 验收状态：**PR-14.0 完成；PR-14.1 基础设施完成；专家标注 Golden 资产未完成（Gate A 未通过）。**
+- 历史提交：`2d775a7`、`8d4e45d`、`290571c`；PR-14.1 见后续 commit。
 - PR-14.0 验收报告：[v3_pr14_0_acceptance.md](./v3_pr14_0_acceptance.md)
-- PR-14.0 已完成：ADR-01/02/11、canonicalization `v3-canon-1` 与固定向量、Proposal/Validation/Gate/Planning/Promotion Schema、ArtifactKindRegistry、GatePolicyRegistry、架构审查清单、非法 Receipt fixture、PlanningGateReceipt carry-forward 必填字段。
-- 未完成（PR-14.1）：至少 8 份匿名真实样本、四套 Golden A～D（其中 Golden-A 含 A1～A4 四层）、双人标注与裁决、当前规则 baseline、ADR-03～ADR-14 余下条目、可执行评测脚本。
-- 结论：不得使用“Golden 已冻结/只需加强”；准确表述是“Golden 指标已定义，PR-14.0 契约已冻结并通过 Gate K，Golden 资产尚未建立”。
+- PR-14.1 验收记录：[v3_pr14_1_acceptance.md](./v3_pr14_1_acceptance.md)
+- PR-14.0 已完成：ADR-01/02/11、canonicalization、Receipt Schema、Registry、审查清单。
+- PR-14.1 已完成：`GoldenRegistry`/loader/报告、`evaluate_v3_bid_pipeline.py`、8 样本槽位、合成 A1 烟雾样本、错误分类、ADR-03/12。
+- 未完成（Gate A 前置）：至少 8 份匿名真实双人标注样本、A1～A4/B/C/D 专家期望、当前规则 baseline 报告、ADR-04～10/13/14 全文。
+- 结论：不得使用“Golden 已冻结/只需加强”；准确表述是“评测基础设施已可用，专家 Golden 资产尚未建立”。
 
 ## PR-15：Proposal / Validation / Gate / Promotion 可信运行内核
 
@@ -156,8 +158,8 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 ## PR-16：canonical InputManifest、SourceIndex 与 TemplateStructureContract
 
 - 工程状态：PR-16.1 可信 Source 主链已实现。
-- 验收状态：**PR-16.1 技术主链完成；Gate S 自动化证据 PASS，待人工双签。**
-- 历史提交：`fab7e9a`、`3591f15 feat(v3): promote canonical Source artifacts for PR-16.1`
+- 验收状态：**PR-16.1 完成；Gate S PASS。**
+- 历史提交：`fab7e9a`、`3591f15`、`c435539`
 - 验收记录：[v3_pr16_1_acceptance.md](./v3_pr16_1_acceptance.md)
 - 已完成（PR-16.1）：
   - `SourceIndex` / Coverage / 扩展 SourceBlock Schema；
@@ -167,16 +169,15 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
   - PDF 位置排序 + OCR StructureGap；模板表格 Slot 最近上游章节；
   - block identity 含 parser version；
   - Gate S 自动化矩阵与证据包（合成深层模板冻结结构校验、JSON 非权威、PDF gap）。
-- 未完成（Gate S 人工）：`source_parser_owner` + `architecture_owner` 双签；生产扫描 PDF 现场样本可后续补强。
-- 收口要求：Gate S 人工批准后进入正式 Golden baseline 与 PR-17.1 语义校准发布路径。
+- 遗留：生产扫描 PDF 现场样本可后续补强；旧工作空间迁移 inventory 归 Gate M。
 
 ## Gate S：Source Trusted
 
-- 状态：**PENDING_HUMAN_APPROVAL**（automated PASS）
-- 证据：`artifacts/release_gates/v3/S/v1/manifest.json`
+- 状态：**PASS**
+- 证据：`artifacts/release_gates/v3/S/v1/manifest.json`、`approvals.json`
 - 测试：`tests/test_v3_gate_s_source.py`
 - 依赖：Gate K PASS
-- 解锁条件：人工双签后，允许正式消费 promoted Source 做 Golden baseline / PR-17～20 发布路径
+- 解锁：正式 Golden baseline 与 PR-17～20 可消费 promoted Source Artifact
 
 ## PR-17：Requirement Agent 与 RequirementLedger
 

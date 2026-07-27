@@ -47,12 +47,29 @@
     "Real template sample stable fingerprint and promotion"
   ],
   "automated_result": "PASS",
-  "result": "PENDING_HUMAN_APPROVAL",
+  "result": "PASS",
   "approvers_required": [
     "source_parser_owner",
     "architecture_owner"
   ],
-  "approvals": [],
+  "approvals": [
+    {
+      "role": "source_parser_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T09:12:56+00:00",
+      "basis": "User explicit approval of Gate S after PR-16.1 canonical Source and automated matrix PASS",
+      "evidence_commit": "c435539",
+      "evidence_sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5"
+    },
+    {
+      "role": "architecture_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T09:12:56+00:00",
+      "basis": "User explicit architecture approval of promoted Source authority and synthetic stress fixture policy",
+      "evidence_commit": "c435539",
+      "evidence_sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5"
+    }
+  ],
   "policy": {
     "historical_92_198": "legacy anomaly statistics only; not Golden size, business scale, or release threshold",
     "synthetic_deep_template": "independent structure stress fixture with business_threshold=false"
@@ -62,5 +79,6 @@
     "PDF matrix uses synthetic pdfplumber-parseable fixtures; production scan OCR quality still needs field samples.",
     "Pre-PR-16.1 workspaces still need migration inventory under Gate M."
   ],
-  "conclusion": "Automated Gate S matrix passed under revised plan: synthetic deep-template stress is separated from business Golden. Gate S remains PENDING_HUMAN_APPROVAL until source_parser_owner and architecture_owner sign approvals[]."
+  "conclusion": "Gate S PASS. InputManifest/SourceIndex/TemplateStructureContract are promoted canonical Artifacts; disk JSON is projection only. Formal Golden baseline and PR-17~20 may consume trusted Source Artifacts. Historical 92/198 remain legacy anomaly stats only.",
+  "approved_at": "2026-07-27T09:12:56+00:00"
 }

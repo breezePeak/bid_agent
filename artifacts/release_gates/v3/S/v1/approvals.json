@@ -1,0 +1,51 @@
+{
+  "gate": "S",
+  "version": "v1",
+  "result": "PASS",
+  "approved_at": "2026-07-27T09:12:56+00:00",
+  "approvals": [
+    {
+      "role": "source_parser_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T09:12:56+00:00",
+      "basis": "User explicit approval of Gate S after PR-16.1 canonical Source and automated matrix PASS",
+      "evidence_commit": "c435539",
+      "evidence_sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5"
+    },
+    {
+      "role": "architecture_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T09:12:56+00:00",
+      "basis": "User explicit architecture approval of promoted Source authority and synthetic stress fixture policy",
+      "evidence_commit": "c435539",
+      "evidence_sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5"
+    }
+  ],
+  "evidence_files": {
+    "unittest_gate_s.txt": {
+      "sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5",
+      "newline": "LF",
+      "encoding": "utf-8"
+    },
+    "template_deep_structure_freeze.json": {
+      "sha256": "e846353f7b99a6d977d035146d19457c3100c2d09a9a115daf5ea5a93064d962",
+      "newline": "LF",
+      "encoding": "utf-8",
+      "path": "tests/fixtures/v3_source/template_deep_structure_freeze.json",
+      "fixture_kind": "synthetic_deep_template_structure_stress",
+      "business_threshold": false
+    }
+  },
+  "hash_normalization": {
+    "newline": "LF",
+    "encoding": "utf-8",
+    "note": "Evidence file hashes are computed after converting CRLF/CR to LF."
+  },
+  "depends_on": [
+    {
+      "gate": "K",
+      "version": "v1",
+      "result": "PASS"
+    }
+  ]
+}
