@@ -120,19 +120,19 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-14：冻结 Bid Master、投标中间语言与 Golden
 
-- 工程状态：原则、依赖方向和指标定义已冻结；PR-14.0 契约在补齐非法 fixture / PlanningGateReceipt 约束后接近完成。
-- 验收状态：**PR-14.0 技术契约基本完成，仍待 Gate K 人工批准一并收口；PR-14.1 Golden 资产仍未建立。**
-- 历史提交：`2d775a7`、`8d4e45d docs(v3): freeze PR-14.0 trusted kernel contracts`
+- 工程状态：原则、依赖方向和指标定义已冻结；PR-14.0 最小契约冻结包已随 Gate K 收口。
+- 验收状态：**PR-14.0 已完成（Gate K PASS）；PR-14.1 Golden 资产仍未建立。**
+- 历史提交：`2d775a7`、`8d4e45d docs(v3): freeze PR-14.0 trusted kernel contracts`、`290571c`
 - PR-14.0 验收报告：[v3_pr14_0_acceptance.md](./v3_pr14_0_acceptance.md)
 - PR-14.0 已完成：ADR-01/02/11、canonicalization `v3-canon-1` 与固定向量、Proposal/Validation/Gate/Planning/Promotion Schema、ArtifactKindRegistry、GatePolicyRegistry、架构审查清单、非法 Receipt fixture、PlanningGateReceipt carry-forward 必填字段。
 - 未完成（PR-14.1）：至少 8 份匿名真实样本、四套 Golden A～D（其中 Golden-A 含 A1～A4 四层）、双人标注与裁决、当前规则 baseline、ADR-03～ADR-14 余下条目、可执行评测脚本。
-- 结论：不得使用“Golden 已冻结/只需加强”；准确表述是“Golden 指标已定义，PR-14.0 契约已冻结，Golden 资产尚未建立”。
+- 结论：不得使用“Golden 已冻结/只需加强”；准确表述是“Golden 指标已定义，PR-14.0 契约已冻结并通过 Gate K，Golden 资产尚未建立”。
 
 ## PR-15：Proposal / Validation / Gate / Promotion 可信运行内核
 
 - 工程状态：PR-15.1 exact binding + Store 封死路径已实现。
-- 验收状态：**自动化负向矩阵已通过；Gate K 仍为 `PENDING_HUMAN_APPROVAL`，不得开始 PR-16.1。**
-- 历史提交：`f94f8a6`、`adc08b4`；本轮封死 P0 绕过后需新提交。
+- 验收状态：**PR-15.1 已完成；Gate K PASS。**
+- 历史提交：`f94f8a6`、`adc08b4`、`290571c fix(v3): seal store writes and recompute receipts for Gate K`
 - 已完成（PR-15.1）：
   - Validator 仅按 `proposal_id` 从 append-only Store 重载 Proposal；
   - ValidationReport / GateReceipt / PromotionReceipt 绑定 exact `proposal_hash` 与依赖快照；
@@ -143,13 +143,20 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
   - PlanningGateReceipt carry-forward 缺少原 H1 / DAG / scope 时 Schema 失败；
   - `receipt_hash` 字段与 `compute_receipt_content_hash()` 分离，避免方法被字段遮蔽。
 - 验证：`python -m unittest tests.test_v3_pr14_contracts tests.test_v3_proposal_promotion`（36 passed）；Agent/Stage 相关回归通过。
-- Gate K 证据：`artifacts/release_gates/v3/K/v1/`（`result=PENDING_HUMAN_APPROVAL`，哈希按 LF 规范化）
-- 遗留：人工批准记录；旧 Receipt inventory / `legacy_untrusted`（Gate M / PR-27）；H1 认证 principal（PR-20.1 / Gate P）。
+- Gate K 证据：`artifacts/release_gates/v3/K/v1/`（`result=PASS`，双角色 approvals 已记录，哈希按 LF 规范化）
+- 遗留：旧 Receipt inventory / `legacy_untrusted`（Gate M / PR-27）；H1 认证 principal（PR-20.1 / Gate P）。
+
+## Gate K：Kernel Safe
+
+- 状态：**PASS**
+- 证据：`artifacts/release_gates/v3/K/v1/manifest.json`、`approvals.json`
+- 覆盖：PR-14.0 最小契约冻结 + PR-15.1 exact binding / seal / 负向矩阵
+- 解锁：可启动 PR-16.1 canonical Source；正式语义 baseline 仍需 Gate S 后的可信 Source Artifact
 
 ## PR-16：canonical InputManifest、SourceIndex 与 TemplateStructureContract
 
 - 工程状态：基础 DOCX/PDF 解析、补遗关系和模板结构提取已实现。
-- 验收状态：**部分完成，重新打开。**
+- 验收状态：**部分完成，重新打开；Gate K 已通过，允许启动 PR-16.1。**
 - 提交：`fab7e9a feat(v3): add structured source and template contracts`
 - 已完成：基础 SourceBlock、输入状态、无文本 PDF 阻断、amendment、TemplateStructureContract 和前置 Stage。
 - 未完成：InputManifest/SourceIndex/TemplateStructureContract 尚未全部成为经统一可信内核晋级的 canonical Artifact；SourceIndex/TemplateStructureContract 仍直接写普通 JSON；PDF 文本与表格未按真实位置统一排序且缺 bbox；扫描检测、DOCX 编号/合并结构、表格 Slot 最近章节绑定和 198 节点验收不足。

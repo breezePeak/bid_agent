@@ -38,7 +38,7 @@
 - [x] enabled/promotable kind 均有真实 payload Schema 与 GatePolicy；`{}`、未知 kind、未知 policy 失败
 - [x] ADR-01/02/11、checklist、Registry 可被 PR-15.1 测试直接引用
 - [x] 本报告作为 PR-14.0 独立验收记录（不得由 PR-15.1 提交隐式代替）
-- [ ] Gate K 人工双签完成（当前仍为 PENDING_HUMAN_APPROVAL）
+- [x] Gate K 人工双签完成（见 `artifacts/release_gates/v3/K/v1/approvals.json`，result=PASS）
 
 ## 验证命令
 

@@ -1,0 +1,36 @@
+{
+  "gate": "K",
+  "version": "v1",
+  "result": "PASS",
+  "approved_at": "2026-07-27T08:31:31+00:00",
+  "approvals": [
+    {
+      "role": "architecture_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T08:31:31+00:00",
+      "basis": "User explicit approval of Gate K after PR-14.0/PR-15.1 P0 seal closures and automated suite PASS",
+      "evidence_commit": "290571c",
+      "evidence_sha256": "68b1c11ba918c72f33752c5985ae5029c9b6fa63f9030b743a1741dbd3f2ecca"
+    },
+    {
+      "role": "trusted_kernel_security_reviewer",
+      "decision": "approve",
+      "decided_at": "2026-07-27T08:31:31+00:00",
+      "basis": "User explicit approval covering trusted-kernel/security review of sealed Validation/Gate writes and promotion recompute",
+      "evidence_commit": "290571c",
+      "evidence_sha256": "68b1c11ba918c72f33752c5985ae5029c9b6fa63f9030b743a1741dbd3f2ecca"
+    }
+  ],
+  "evidence_files": {
+    "unittest_kernel.txt": {
+      "sha256": "68b1c11ba918c72f33752c5985ae5029c9b6fa63f9030b743a1741dbd3f2ecca",
+      "newline": "LF",
+      "encoding": "utf-8"
+    }
+  },
+  "hash_normalization": {
+    "newline": "LF",
+    "encoding": "utf-8",
+    "note": "Evidence file hashes are computed after converting CRLF/CR to LF. Readers must normalize newlines before comparing sha256."
+  }
+}

@@ -1,6 +1,6 @@
 # PR-15.1 可信内核阻断修复 — 验收报告
 
-- 状态：Automated suite green；Gate K **未批准**（`PENDING_HUMAN_APPROVAL`）
+- 状态：Completed；Gate K **PASS**
 - 日期：2026-07-27
 - 前置：PR-14.0 最小契约冻结包
 
@@ -44,9 +44,9 @@ python -m unittest tests.test_v3_requirement_agent tests.test_v3_score_agent tes
 
 ## Gate K
 
-证据包：`artifacts/release_gates/v3/K/v1/manifest.json`
+证据包：`artifacts/release_gates/v3/K/v1/manifest.json`、`approvals.json`
 
 - 证据哈希：先将文本规范为 **LF + UTF-8** 再算 SHA-256（见 manifest.`hash_normalization`）
-- `automated_result=PASS`，`result=PENDING_HUMAN_APPROVAL`，`approvals=[]`
-- 人工批准角色：架构负责人 + 可信内核/安全复核人
-- **未写入 approvals 前不得宣布 Gate K 通过，不得启动 PR-16.1**
+- `automated_result=PASS`，`result=PASS`
+- 批准角色：`architecture_owner` + `trusted_kernel_security_reviewer`（用户明确批准已写入 approvals）
+- **已解锁 PR-16.1 canonical Source**；正式语义 baseline 仍须 Gate S 后使用可信 Source Artifact
