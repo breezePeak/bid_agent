@@ -18,10 +18,11 @@ from .contracts import (
     RequirementLedger,
     ResponseTopicGraph,
     ScoreModel,
+    SourceIndex,
     TemplateStructureContract,
 )
 
-ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-1"
+ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-2"
 
 
 @dataclass(frozen=True)
@@ -46,14 +47,43 @@ class ArtifactKindRegistry:
 
     def __init__(self) -> None:
         self._kinds: dict[str, ArtifactKindRegistration] = {
+            "InputManifest": ArtifactKindRegistration(
+                kind="InputManifest",
+                payload_model=InputManifest,
+                legal_producers=frozenset({"source_service"}),
+                dependency_kinds=(),
+                enabled=True,
+                promotable=True,
+                notes="PR-16.1 canonical Source root.",
+            ),
+            "SourceIndex": ArtifactKindRegistration(
+                kind="SourceIndex",
+                payload_model=SourceIndex,
+                legal_producers=frozenset({"source_service"}),
+                dependency_kinds=("InputManifest",),
+                enabled=True,
+                promotable=True,
+                notes="PR-16.1 structured recovery of frozen inputs.",
+            ),
+            "TemplateStructureContract": ArtifactKindRegistration(
+                kind="TemplateStructureContract",
+                payload_model=TemplateStructureContract,
+                legal_producers=frozenset({"source_service"}),
+                dependency_kinds=("InputManifest",),
+                enabled=True,
+                promotable=True,
+                notes="PR-16.1 optional strict-template topology.",
+            ),
             "RequirementLedger": ArtifactKindRegistration(
                 kind="RequirementLedger",
                 payload_model=RequirementLedger,
                 legal_producers=frozenset({"requirement_agent"}),
+                # StageRunner enforces promoted SourceIndex before extraction.
+                # Fingerprint still binds parser/source via agent-declared claim inputs.
                 dependency_kinds=(),
                 enabled=True,
                 promotable=True,
-                notes="Phase-1 semantic ledger; Source deps become promoted after PR-16.1.",
+                notes="Consumers must read promoted SourceIndex; hard dep remains stage-enforced.",
             ),
             "ScoreModel": ArtifactKindRegistration(
                 kind="ScoreModel",
@@ -86,26 +116,6 @@ class ArtifactKindRegistry:
                 dependency_kinds=("ResponseTopicGraph",),
                 enabled=True,
                 promotable=True,
-            ),
-            # Registered with real schemas but not promotable until PR-16.1 wires them
-            # through the trusted kernel as canonical Source artifacts.
-            "InputManifest": ArtifactKindRegistration(
-                kind="InputManifest",
-                payload_model=InputManifest,
-                legal_producers=frozenset({"source_service"}),
-                dependency_kinds=(),
-                enabled=False,
-                promotable=False,
-                notes="Enabled by PR-16.1",
-            ),
-            "TemplateStructureContract": ArtifactKindRegistration(
-                kind="TemplateStructureContract",
-                payload_model=TemplateStructureContract,
-                legal_producers=frozenset({"source_service"}),
-                dependency_kinds=("InputManifest",),
-                enabled=False,
-                promotable=False,
-                notes="Enabled by PR-16.1",
             ),
         }
 

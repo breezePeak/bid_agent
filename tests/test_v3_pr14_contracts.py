@@ -268,14 +268,17 @@ class RegistryTests(unittest.TestCase):
             ARTIFACT_REGISTRY.validate_payload("RequirementLedger", {})
         with self.assertRaises(KeyError):
             ARTIFACT_REGISTRY.get("NotARealKind")
-        with self.assertRaises(PermissionError):
-            ARTIFACT_REGISTRY.require_promotable("InputManifest")
+        self.assertTrue(ARTIFACT_REGISTRY.require_promotable("InputManifest").is_promotable())
+        self.assertTrue(ARTIFACT_REGISTRY.require_promotable("SourceIndex").is_promotable())
+        self.assertTrue(ARTIFACT_REGISTRY.require_promotable("TemplateStructureContract").is_promotable())
         with self.assertRaises(KeyError):
             GATE_POLICY_REGISTRY.policy_for("NotARealKind")
+        with self.assertRaises(KeyError):
+            ARTIFACT_REGISTRY.get("NotARealKind")
 
     def test_registry_versions_are_frozen(self) -> None:
-        self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-1")
-        self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-1")
+        self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-2")
+        self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-2")
         self.assertEqual(len(GATE_POLICY_REGISTRY.registry_fingerprint()), 64)
 
 

@@ -126,6 +126,9 @@ class TestV3ScoreAgent(unittest.TestCase):
             )
 
     def test_score_model_is_promoted_and_idempotent(self) -> None:
+        from document_pipeline.contracts import SourceAnchor, SourceBlock, SourceIndex
+        from document_pipeline.source_artifacts import promote_source_artifact
+
         (self.root / V3_ROOT).mkdir(parents=True, exist_ok=True)
         manifest = InputManifest(
             inputs=[
@@ -147,21 +150,32 @@ class TestV3ScoreAgent(unittest.TestCase):
                 ),
             ]
         )
-        write_json(self.root / MANIFEST_PATH, manifest.model_dump(mode="json"))
-        tender_anchor = {"source_input_id": "in-tender", "chunk_id": "tender-1", "location": "paragraph:1"}
-        score_anchor = {"source_input_id": "in-score", "chunk_id": "score-1", "location": "paragraph:1"}
-        write_json(
-            self.root / SOURCE_INDEX_PATH,
-            {
-                "revision": 1,
-                "source_hashes": {"in-tender": "tenderhash", "in-score": "scorehash"},
-                "blocks": [
-                    {"block_id": "tender-1", "input_id": "in-tender", "input_role": "tender", "block_kind": "paragraph", "ordinal": 0, "content": "投标人须提供技术方案。", "source_anchor": tender_anchor, "content_hash": "t1"},
-                    {"block_id": "score-heading", "input_id": "in-score", "input_role": "score", "block_kind": "heading", "ordinal": 0, "content": "技术评分（10分）", "source_anchor": {"source_input_id": "in-score", "chunk_id": "score-heading", "location": "paragraph:1"}, "content_hash": "s1"},
-                    {"block_id": "score-1", "input_id": "in-score", "input_role": "score", "block_kind": "paragraph", "ordinal": 1, "content": "技术方案完整性，满分10分，提供业绩证明。", "source_anchor": score_anchor, "content_hash": "s2"},
-                ],
-                "by_role": {},
-            },
+        promote_source_artifact(
+            self.context,
+            artifact_kind="InputManifest",
+            payload=manifest.model_dump(mode="json"),
+            operation_id="fixture-manifest-score",
+            gate_id="G0_INPUT_MANIFEST_INTEGRITY",
+        )
+        tender_anchor = SourceAnchor(source_input_id="in-tender", chunk_id="tender-1", location="paragraph:1")
+        score_anchor = SourceAnchor(source_input_id="in-score", chunk_id="score-1", location="paragraph:1")
+        source_index = SourceIndex(
+            revision=1,
+            source_hashes={"in-tender": "tenderhash", "in-score": "scorehash"},
+            input_manifest_revision=1,
+            blocks=[
+                SourceBlock(block_id="tender-1", input_id="in-tender", input_role=InputRole.TENDER, block_kind="paragraph", ordinal=0, content="投标人须提供技术方案。", source_anchor=tender_anchor, content_hash="t1"),
+                SourceBlock(block_id="score-heading", input_id="in-score", input_role=InputRole.SCORE, block_kind="heading", ordinal=0, content="技术评分（10分）", source_anchor=SourceAnchor(source_input_id="in-score", chunk_id="score-heading", location="paragraph:1"), content_hash="s1"),
+                SourceBlock(block_id="score-1", input_id="in-score", input_role=InputRole.SCORE, block_kind="paragraph", ordinal=1, content="技术方案完整性，满分10分，提供业绩证明。", source_anchor=score_anchor, content_hash="s2"),
+            ],
+        )
+        promote_source_artifact(
+            self.context,
+            artifact_kind="SourceIndex",
+            payload=source_index.model_dump(mode="json"),
+            operation_id="fixture-source-score",
+            gate_id="G0_SOURCE_STRUCTURE",
+            cited_source_ids=["in-tender", "in-score"],
         )
         runner = V3StageRunner(self.context)
         runner.run("build_requirement_ledger")

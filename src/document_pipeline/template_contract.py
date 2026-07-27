@@ -12,11 +12,12 @@ from utils import read_json
 from .contracts import ContractNode, InputItem, RequirementLedger, TemplateContract, TemplateSlot, TemplateStructureContract
 from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
+from .source_artifacts import TEMPLATE_STRUCTURE_PATH, promote_source_artifact, write_template_structure_projection
 
 
 _PLACEHOLDER = re.compile(r"\{\{([^{}]+)\}\}|【([^】]+)】|\[([^\[\]]+)\]")
 _HEADING = re.compile(r"(?:heading|标题)\s*([1-9])", re.IGNORECASE)
-TEMPLATE_STRUCTURE_PATH = V3_ROOT / "contracts" / "template_structure.json"
+_NUMBERING = re.compile(r"^([0-9]+(?:\.[0-9]+)*|[一二三四五六七八九十]+[、.．]|（[0-9]+）|\([0-9]+\))\s*")
 
 
 class TemplateContractCompiler:
@@ -62,9 +63,22 @@ class TemplateContractCompiler:
             nodes=nodes,
             slots=self._slots(document, paragraph_node),
         )
-        from utils import write_json
-        write_json(self.root / TEMPLATE_STRUCTURE_PATH, structure.model_dump(mode="json"))
-        return structure
+        promote_source_artifact(
+            self.context,
+            artifact_kind="TemplateStructureContract",
+            payload=structure.model_dump(mode="json"),
+            operation_id=f"template-structure:{template.input_id}:{template.sha256[:16]}:{structure.structural_fingerprint[:16]}",
+            gate_id="G0_TEMPLATE_STRUCTURE",
+            cited_source_ids=[template.input_id],
+        )
+        from control_plane import ControlStore
+
+        promoted = ControlStore(self.context).v3_active_artifact("TemplateStructureContract")
+        if promoted is None:
+            raise ValueError("TEMPLATE_STRUCTURE_PROMOTION_FAILED")
+        promoted_structure = TemplateStructureContract.model_validate(promoted["payload"])
+        write_template_structure_projection(self.context, promoted_structure)
+        return promoted_structure
 
     @staticmethod
     def _fingerprint(path: Path) -> str:
@@ -116,11 +130,14 @@ class TemplateContractCompiler:
             for candidate in list(parents):
                 if candidate > level:
                     del parents[candidate]
+            numbering_match = _NUMBERING.match(text)
             nodes.append(
                 ContractNode(
                     node_id=node_id,
                     parent_node_id=parent,
                     order=len(nodes),
+                    level=level,
+                    numbering=numbering_match.group(1) if numbering_match else None,
                     writable_target=f"paragraph:{index + 1}",
                     title=text,
                 )
@@ -159,8 +176,11 @@ class TemplateContractCompiler:
                         anchor=f"paragraph:{index + 1}:placeholder:{match.group(0)}",
                     )
                 )
+        # Bind each table to the nearest preceding heading in document body order,
+        # not the last heading of the entire document.
+        nearest_before_table = self._nearest_heading_before_each_table(document, paragraph_node)
         for table_index, table in enumerate(document.tables):
-            nearest_node = next(reversed(paragraph_node.values()), "p-1")
+            nearest_node = nearest_before_table.get(table_index) or next(iter(paragraph_node.values()), "p-1")
             for row_index, row in enumerate(table.rows):
                 for cell_index, cell in enumerate(row.cells):
                     if _PLACEHOLDER.search(cell.text):
@@ -173,6 +193,29 @@ class TemplateContractCompiler:
                             )
                         )
         return slots
+
+    @staticmethod
+    def _nearest_heading_before_each_table(document: Document, paragraph_node: dict[int, str]) -> dict[int, str]:
+        """Map table_index → nearest upstream heading node_id by body document order."""
+        paragraphs = iter(document.paragraphs)
+        tables = iter(document.tables)
+        paragraph_index = 0
+        table_index = 0
+        last_heading: str | None = None
+        mapping: dict[int, str] = {}
+        for child in document.element.body.iterchildren():
+            if child.tag.endswith("}p"):
+                next(paragraphs)
+                node_id = paragraph_node.get(paragraph_index)
+                if node_id:
+                    last_heading = node_id
+                paragraph_index += 1
+            elif child.tag.endswith("}tbl"):
+                next(tables)
+                if last_heading is not None:
+                    mapping[table_index] = last_heading
+                table_index += 1
+        return mapping
 
     @staticmethod
     def _coverage_gaps(nodes: list[ContractNode], ledger: RequirementLedger) -> list[str]:

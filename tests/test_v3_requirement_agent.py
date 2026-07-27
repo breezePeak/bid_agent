@@ -196,10 +196,10 @@ class TestV3RequirementAgent(unittest.TestCase):
 
     def test_full_agent_proposal_promotion_pipeline(self) -> None:
         from control_plane import ControlStore
-        from document_pipeline.input_manifest import MANIFEST_PATH, V3_ROOT
-        from document_pipeline.source_normalizer import SOURCE_INDEX_PATH
+        from document_pipeline.contracts import SourceAnchor, SourceBlock, SourceIndex
+        from document_pipeline.input_manifest import V3_ROOT
+        from document_pipeline.source_artifacts import promote_source_artifact
         from document_pipeline.stage_runner import V3StageRunner
-        from utils import write_json
 
         (self.root / V3_ROOT).mkdir(parents=True, exist_ok=True)
         manifest = InputManifest(
@@ -214,27 +214,39 @@ class TestV3RequirementAgent(unittest.TestCase):
                 )
             ]
         )
-        write_json(self.root / MANIFEST_PATH, manifest.model_dump(mode="json"))
-
-        anchor = {"source_input_id": "in-tender", "chunk_id": "c1", "location": "p:1"}
-        source_index = {
-            "revision": 1,
-            "source_hashes": {"in-tender": "hash123"},
-            "blocks": [
-                {
-                    "block_id": "b1",
-                    "input_id": "in-tender",
-                    "input_role": "tender",
-                    "block_kind": "paragraph",
-                    "ordinal": 0,
-                    "content": "投标人须具有良好信誉。",
-                    "source_anchor": anchor,
-                    "content_hash": "ch1",
-                }
+        promote_source_artifact(
+            self.context,
+            artifact_kind="InputManifest",
+            payload=manifest.model_dump(mode="json"),
+            operation_id="fixture-manifest-req",
+            gate_id="G0_INPUT_MANIFEST_INTEGRITY",
+        )
+        anchor = SourceAnchor(source_input_id="in-tender", chunk_id="c1", location="p:1")
+        source_index = SourceIndex(
+            revision=1,
+            source_hashes={"in-tender": "hash123"},
+            input_manifest_revision=1,
+            blocks=[
+                SourceBlock(
+                    block_id="b1",
+                    input_id="in-tender",
+                    input_role=InputRole.TENDER,
+                    block_kind="paragraph",
+                    ordinal=0,
+                    content="投标人须具有良好信誉。",
+                    source_anchor=anchor,
+                    content_hash="ch1",
+                )
             ],
-            "by_role": {"tender": [{"chunk_id": "c1", "content": "投标人须具有良好信誉。", "input_id": "in-tender", "source_anchor": anchor}]},
-        }
-        write_json(self.root / SOURCE_INDEX_PATH, source_index)
+        )
+        promote_source_artifact(
+            self.context,
+            artifact_kind="SourceIndex",
+            payload=source_index.model_dump(mode="json"),
+            operation_id="fixture-source-req",
+            gate_id="G0_SOURCE_STRUCTURE",
+            cited_source_ids=["in-tender"],
+        )
 
         runner = V3StageRunner(self.context)
         ledger = runner.run("build_requirement_ledger")

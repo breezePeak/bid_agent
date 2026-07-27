@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .artifact_registry import ARTIFACT_REGISTRY_VERSION
 
-GATE_POLICY_REGISTRY_VERSION = "v3-gate-policy-1"
+GATE_POLICY_REGISTRY_VERSION = "v3-gate-policy-2"
 
 # Fixed service issuers. Agents and free-form reviewer strings are never issuers.
 ISSUER_GATE_SERVICE = "gate_service"
@@ -51,6 +51,30 @@ class GatePolicyRegistry:
     def __init__(self) -> None:
         system = frozenset({ISSUER_GATE_SERVICE})
         self._policies: dict[str, ArtifactGatePolicy] = {
+            "InputManifest": ArtifactGatePolicy(
+                artifact_kind="InputManifest",
+                policy_version=self.VERSION,
+                required_gates=(
+                    GateRequirement(gate_id="G0_INPUT_MANIFEST_INTEGRITY", allowed_issuers=system),
+                ),
+                validator_id="v3.validator.input_manifest",
+            ),
+            "SourceIndex": ArtifactGatePolicy(
+                artifact_kind="SourceIndex",
+                policy_version=self.VERSION,
+                required_gates=(
+                    GateRequirement(gate_id="G0_SOURCE_STRUCTURE", allowed_issuers=system),
+                ),
+                validator_id="v3.validator.source_index",
+            ),
+            "TemplateStructureContract": ArtifactGatePolicy(
+                artifact_kind="TemplateStructureContract",
+                policy_version=self.VERSION,
+                required_gates=(
+                    GateRequirement(gate_id="G0_TEMPLATE_STRUCTURE", allowed_issuers=system),
+                ),
+                validator_id="v3.validator.template_structure",
+            ),
             "RequirementLedger": ArtifactGatePolicy(
                 artifact_kind="RequirementLedger",
                 policy_version=self.VERSION,

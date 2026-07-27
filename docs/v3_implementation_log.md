@@ -155,12 +155,19 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-16：canonical InputManifest、SourceIndex 与 TemplateStructureContract
 
-- 工程状态：基础 DOCX/PDF 解析、补遗关系和模板结构提取已实现。
-- 验收状态：**部分完成，重新打开；Gate K 已通过，允许启动 PR-16.1。**
-- 提交：`fab7e9a feat(v3): add structured source and template contracts`
-- 已完成：基础 SourceBlock、输入状态、无文本 PDF 阻断、amendment、TemplateStructureContract 和前置 Stage。
-- 未完成：InputManifest/SourceIndex/TemplateStructureContract 尚未全部成为经统一可信内核晋级的 canonical Artifact；SourceIndex/TemplateStructureContract 仍直接写普通 JSON；PDF 文本与表格未按真实位置统一排序且缺 bbox；扫描检测、DOCX 编号/合并结构、表格 Slot 最近章节绑定和 198 节点验收不足。
-- 收口要求：按开发计划 20.4 完成 PR-16.1，并通过 Gate S。
+- 工程状态：PR-16.1 可信 Source 主链已实现。
+- 验收状态：**PR-16.1 技术主链完成；Gate S 待完整证据与人工批准。**
+- 历史提交：`fab7e9a`；本轮 PR-16.1 见后续 commit。
+- 验收记录：[v3_pr16_1_acceptance.md](./v3_pr16_1_acceptance.md)
+- 已完成（PR-16.1）：
+  - `SourceIndex` / Coverage / 扩展 SourceBlock Schema；
+  - InputManifest、SourceIndex、TemplateStructureContract 经 Proposal→G0→CAS 晋级；
+  - 磁盘 JSON 降为 projection；`by_role` 只读派生；
+  - 下游 Stage 强制 promoted SourceIndex；
+  - PDF 位置排序 + OCR StructureGap；模板表格 Slot 最近上游章节；
+  - block identity 含 parser version。
+- 未完成（Gate S 收口）：198 节点模板零漂移专项、大规模 PDF bbox 样本矩阵、Gate S 人工双签。
+- 收口要求：补齐 Gate S 证据包后批准；再进入正式 Golden baseline 与 PR-17.1 语义校准发布路径。
 
 ## PR-17：Requirement Agent 与 RequirementLedger
 

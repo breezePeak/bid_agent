@@ -39,10 +39,24 @@ class V3SourceStructureTests(unittest.TestCase):
             InputManifestService(context).register_local_file(path, InputRole.TENDER)
             index = SourceNormalizer(context).normalize_active_inputs()
             blocks = index["blocks"]
-            self.assertEqual([block["block_kind"] for block in blocks], ["heading", "paragraph", "table_cell", "table_cell", "heading"])
+            self.assertEqual(
+                [block["block_kind"] for block in blocks],
+                ["heading", "paragraph", "table", "table_cell", "table_cell", "heading"],
+            )
             self.assertEqual(blocks[1]["heading_path"], ["第一章 项目概述"])
-            self.assertEqual(blocks[2]["source_anchor"]["location"], "table:1:row:1:cell:1")
+            self.assertEqual(blocks[3]["source_anchor"]["location"], "table:1:row:1:cell:1")
             self.assertTrue(all(block["content_hash"] for block in blocks))
+            self.assertEqual(index.get("authority"), "promoted_artifact_projection")
+            self.assertIn("coverage", index)
+            # Mutating disk projection must not change promoted authority.
+            from control_plane import ControlStore
+            from document_pipeline.contracts import SourceIndex
+
+            promoted = ControlStore(context).v3_active_artifact("SourceIndex")
+            self.assertIsNotNone(promoted)
+            index["blocks"] = []
+            still = SourceIndex.model_validate(promoted["payload"])
+            self.assertGreaterEqual(len(still.blocks), 5)
 
     def test_amendment_keeps_issued_at_and_explicit_supersession(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -71,13 +85,24 @@ class V3SourceStructureTests(unittest.TestCase):
             document = Document()
             document.add_heading("技术方案", level=1)
             document.add_paragraph("项目名称：{{项目名称}}")
+            document.add_heading("实施计划", level=1)
+            table = document.add_table(rows=1, cols=1)
+            table.cell(0, 0).text = "{{实施内容}}"
             document.save(path)
             context = self._context(base)
             item = InputManifestService(context).register_local_file(path, InputRole.TEMPLATE).item
             structure = TemplateContractCompiler(context).compile_structure(item)
-            self.assertEqual([node.title for node in structure.nodes], ["技术方案"])
+            self.assertEqual([node.title for node in structure.nodes], ["技术方案", "实施计划"])
+            self.assertEqual(structure.nodes[0].level, 1)
             self.assertEqual(structure.slots[0].kind, "text_slot")
             self.assertEqual(structure.template_input_id, item.input_id)
+            cell_slots = [slot for slot in structure.slots if slot.kind == "cell_slot"]
+            self.assertEqual(len(cell_slots), 1)
+            # Table under second heading must bind nearest upstream chapter, not the first heading.
+            self.assertEqual(cell_slots[0].node_id, structure.nodes[1].node_id)
+            from control_plane import ControlStore
+
+            self.assertIsNotNone(ControlStore(context).v3_active_artifact("TemplateStructureContract"))
 
 
 if __name__ == "__main__":

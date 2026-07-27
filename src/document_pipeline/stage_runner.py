@@ -22,7 +22,8 @@ from .score_agent import ScoreAgent
 from .score_model import audit_score_model, load_promoted_score_model
 from .topic_graph import load_promoted_topic_graph
 from .chapter_blueprint import load_promoted_chapter_blueprint
-from .source_normalizer import SOURCE_INDEX_PATH, SourceNormalizer
+from .source_artifacts import require_promoted_source_index
+from .source_normalizer import SourceNormalizer
 from .template_contract import TemplateContractCompiler
 from utils import read_json
 
@@ -50,9 +51,9 @@ class V3StageRunner:
             from .contracts import RequirementLedger
 
             manifest = InputManifestService(self.context).load()
-            idx = read_json(self.context.root / SOURCE_INDEX_PATH)
-            blocks_raw = idx.get("blocks", []) if isinstance(idx, dict) else []
-            source_blocks = [SourceBlock.model_validate(b) for b in blocks_raw if isinstance(b, dict)]
+            source_index = require_promoted_source_index(self.context)
+            idx = source_index.model_dump(mode="json")
+            source_blocks = list(source_index.blocks)
 
             agent = RequirementAgent(self.context)
             items = agent.extract_requirements(source_blocks, manifest)
@@ -60,7 +61,7 @@ class V3StageRunner:
             store = ControlStore(self.context)
             active_art = store.v3_active_artifact("RequirementLedger")
             base_rev = int(active_art["revision"]) if active_art is not None else 0
-            source_hashes = idx.get("source_hashes") if isinstance(idx.get("source_hashes"), dict) else {}
+            source_hashes = dict(source_index.source_hashes)
             draft_ledger = RequirementLedger(revision=base_rev + 1, source_hashes=source_hashes, requirements=items)
             coverage_audit = audit_reverse_coverage(draft_ledger, idx)
             if not coverage_audit["passed"]:
@@ -103,10 +104,10 @@ class V3StageRunner:
             from .artifact_promotion import AgentProposalSandbox, ArtifactPromotionService, GateService, validate_and_record
 
             requirement_ledger = load_promoted_requirement_ledger(self.context)
-            idx = read_json(self.context.root / SOURCE_INDEX_PATH)
-            blocks_raw = idx.get("blocks", []) if isinstance(idx, dict) else []
-            source_blocks = [SourceBlock.model_validate(block) for block in blocks_raw if isinstance(block, dict)]
-            source_hashes = idx.get("source_hashes") if isinstance(idx.get("source_hashes"), dict) else {}
+            source_index = require_promoted_source_index(self.context)
+            source_blocks = list(source_index.blocks)
+            source_hashes = dict(source_index.source_hashes)
+            idx = source_index.model_dump(mode="json")
 
             store = ControlStore(self.context)
             active_art = store.v3_active_artifact("ScoreModel")
@@ -148,8 +149,8 @@ class V3StageRunner:
 
             ledger = load_promoted_requirement_ledger(self.context)
             scores = load_promoted_score_model(self.context)
-            idx = read_json(self.context.root / SOURCE_INDEX_PATH)
-            source_blocks = [SourceBlock.model_validate(block) for block in idx.get("blocks", []) if isinstance(block, dict)] if isinstance(idx, dict) else []
+            source_index = require_promoted_source_index(self.context)
+            source_blocks = list(source_index.blocks)
             store = ControlStore(self.context)
             agent = PlanningAgent(self.context)
             active_project = store.v3_active_artifact("ProjectModel")

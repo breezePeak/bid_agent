@@ -102,6 +102,22 @@ class NormalizedChunk(BaseModel):
     source_anchor: SourceAnchor
 
 
+SOURCE_PARSER_VERSION = "v3-source-parser-1"
+
+SourceBlockKind = Literal[
+    "heading",
+    "paragraph",
+    "list_item",
+    "table",
+    "table_cell",
+    "image",
+    "ocr_gap",
+    # Legacy PDF labels retained for deterministic identity continuity.
+    "pdf_text",
+    "pdf_table_cell",
+]
+
+
 class SourceBlock(BaseModel):
     """Loss-minimising structure recovered from a single frozen input."""
 
@@ -110,7 +126,7 @@ class SourceBlock(BaseModel):
     block_id: str = Field(min_length=1)
     input_id: str = Field(min_length=1)
     input_role: InputRole
-    block_kind: Literal["heading", "paragraph", "list_item", "table_cell", "pdf_text", "pdf_table_cell"]
+    block_kind: SourceBlockKind
     ordinal: int = Field(ge=0)
     content: str = Field(min_length=1)
     heading_path: list[str] = Field(default_factory=list)
@@ -120,8 +136,80 @@ class SourceBlock(BaseModel):
     row_index: int | None = Field(default=None, ge=0)
     column_index: int | None = Field(default=None, ge=0)
     bbox: list[float] | None = None
+    reading_order: int | None = Field(default=None, ge=0)
+    parser_version: str = Field(default=SOURCE_PARSER_VERSION, min_length=1)
     source_anchor: SourceAnchor
     content_hash: str = Field(min_length=1)
+
+    @field_validator("bbox")
+    @classmethod
+    def bbox_has_four_numbers(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return value
+        if len(value) != 4:
+            raise ValueError("bbox 必须是 [x0, y0, x1, y1]")
+        return value
+
+
+class SourceNormalizationCoverageItem(BaseModel):
+    """Per physical element coverage record that promotes with SourceIndex."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    element_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    element_kind: str = Field(min_length=1)
+    status: Literal["normalized", "exempt", "structure_gap"]
+    locator: str = Field(min_length=1)
+    reason: str | None = None
+    block_id: str | None = None
+
+
+class SourceNormalizationCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    items: list[SourceNormalizationCoverageItem] = Field(default_factory=list)
+
+    @property
+    def structure_gap_count(self) -> int:
+        return sum(1 for item in self.items if item.status == "structure_gap")
+
+
+class AmendmentRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    input_id: str = Field(min_length=1)
+    issued_at: str = Field(min_length=1)
+    supersedes_input_ids: list[str] = Field(default_factory=list)
+    replaces_input_id: str | None = None
+
+
+class SourceInputStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    input_id: str = Field(min_length=1)
+    status: Literal["processed", "blocked", "partial"]
+    block_count: int = Field(default=0, ge=0)
+    reason: str | None = None
+
+
+class SourceIndex(ContractModel):
+    """Canonical structured recovery of frozen inputs. Disk JSON is only a projection."""
+
+    parser_version: str = Field(default=SOURCE_PARSER_VERSION, min_length=1)
+    input_manifest_revision: int = Field(ge=1)
+    input_manifest_artifact_hash: str = Field(default="", min_length=0)
+    blocks: list[SourceBlock] = Field(default_factory=list)
+    coverage: SourceNormalizationCoverage = Field(default_factory=SourceNormalizationCoverage)
+    amendments: list[AmendmentRelation] = Field(default_factory=list)
+    input_status: list[SourceInputStatus] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def blocks_have_unique_ids(self) -> "SourceIndex":
+        ids = [block.block_id for block in self.blocks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("SourceIndex 不允许重复 block_id")
+        return self
 
 
 class RequirementKind(str, Enum):
@@ -533,6 +621,8 @@ class ContractNode(BaseModel):
     node_id: str = Field(min_length=1)
     parent_node_id: str | None = None
     order: int = Field(ge=0)
+    level: int = Field(default=1, ge=1, le=9)
+    numbering: str | None = None
     writable_target: str = Field(min_length=1)
     title: str = Field(min_length=1)
     requirement_ids: list[str] = Field(default_factory=list)
