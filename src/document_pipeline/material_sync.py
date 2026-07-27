@@ -3,12 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from control_plane import WorkspaceContext
-from utils import read_json, write_json
+from utils import write_json
 
-from .contracts import InputRole, ProjectModel, RequirementKind, RequirementLedger
+from .contracts import InputRole, RequirementKind
 from .input_manifest import InputManifestService, V3_ROOT
-from .project_model import PROJECT_MODEL_PATH
-from .requirement_ledger import LEDGER_PATH
+from .project_model import load_promoted_project_model
+from .requirement_ledger import load_promoted_requirement_ledger
 
 
 MATERIAL_REQUIREMENTS_PATH = V3_ROOT / "materials" / "requirements.json"
@@ -22,8 +22,8 @@ class MaterialRequirementsSynchronizer:
         self.root = context.root
 
     def sync(self) -> dict[str, object]:
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
-        model = ProjectModel.model_validate(read_json(self.root / PROJECT_MODEL_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
+        model = load_promoted_project_model(self.context)
         manifest = InputManifestService(self.context).load()
         company_supplied = any(item.active and item.role is InputRole.COMPANY for item in manifest.inputs)
 

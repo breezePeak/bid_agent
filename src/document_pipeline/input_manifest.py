@@ -63,6 +63,8 @@ class InputManifestService:
         role: InputRole,
         *,
         replaces_input_id: str | None = None,
+        issued_at: str | None = None,
+        supersedes_input_ids: list[str] | None = None,
     ) -> InputRegistration:
         """Copy a local input into immutable V3 storage and record its role/version."""
         source_path = source_path.resolve()
@@ -75,6 +77,14 @@ class InputManifestService:
             raise ValueError(f"不存在的替换目标: {replaces_input_id}")
         if old_item and old_item.role is not role:
             raise ValueError("替换文件必须保持相同输入角色")
+        supersedes = [str(item).strip() for item in (supersedes_input_ids or [])]
+        if any(not item for item in supersedes):
+            raise ValueError("supersedes_input_ids 不能包含空值")
+        known_ids = {item.input_id for item in manifest.inputs}
+        if unknown := set(supersedes) - known_ids:
+            raise ValueError(f"补遗替代目标不存在: {sorted(unknown)}")
+        if role is InputRole.AMENDMENT and not issued_at:
+            raise ValueError("补遗文件必须提供 issued_at")
 
         input_id = uuid4().hex
         version = max((item.version for item in manifest.inputs if item.role is role), default=0) + 1
@@ -90,6 +100,8 @@ class InputManifestService:
             sha256=_sha256(destination),
             version=version,
             replaces_input_id=replaces_input_id,
+            issued_at=issued_at,
+            supersedes_input_ids=supersedes,
         )
         inputs = list(manifest.inputs)
         change_set: ChangeSet | None = None

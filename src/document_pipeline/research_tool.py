@@ -7,11 +7,9 @@ from pathlib import Path
 from typing import Any
 
 from control_plane import WorkspaceContext
-from utils import read_json
-
 from .contracts import EvidenceNeed
 from .input_manifest import InputManifestService, V3_ROOT
-from .project_model import PROJECT_MODEL_PATH
+from .project_model import load_promoted_project_model
 from .research_adapters import ResearchProviderAdapter, create_research_adapter
 from .research_service import ResearchService
 
@@ -47,10 +45,10 @@ class V3ResearchTool:
         }
 
     def _need(self, need_id: str) -> EvidenceNeed:
-        model = read_json(self.context.root / PROJECT_MODEL_PATH)
-        for raw in model.get("evidence_needs", []) if isinstance(model, dict) else []:
-            if isinstance(raw, dict) and str(raw.get("need_id") or "") == need_id:
-                return EvidenceNeed.model_validate(raw)
+        model = load_promoted_project_model(self.context)
+        for need in model.evidence_needs:
+            if need.need_id == need_id:
+                return need
         raise ValueError(f"V3_UNKNOWN_EVIDENCE_NEED: {need_id}")
 
     def _attachments(self, raw_input_ids: list[str]) -> tuple[list[str], list[Path]]:

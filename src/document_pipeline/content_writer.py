@@ -8,7 +8,7 @@ from utils import read_json, write_json
 from .contracts import ContentBlock, DOCUMENT_CONTRACT_ADAPTER, DocumentPlan, TemplateContract
 from .document_contract import DOCUMENT_CONTRACT_PATH
 from .document_planner import DOCUMENT_PLAN_PATH
-from .requirement_ledger import LEDGER_PATH
+from .requirement_ledger import load_promoted_requirement_ledger
 from .contracts import RequirementLedger
 from .input_manifest import V3_ROOT
 
@@ -27,7 +27,7 @@ class ContentWriter:
     def write(self, unit_id: str, node_ids: list[str]) -> list[ContentBlock]:
         contract = DOCUMENT_CONTRACT_ADAPTER.validate_python(read_json(self.root / DOCUMENT_CONTRACT_PATH))
         plan = DocumentPlan.model_validate(read_json(self.root / DOCUMENT_PLAN_PATH))
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
         requirement_by_id = {item.requirement_id: item for item in ledger.requirements}
         targets = {node.node_id for node in contract.nodes}
         slot_by_node: dict[str, str] = {}

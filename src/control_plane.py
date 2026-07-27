@@ -179,7 +179,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 20
+    SCHEMA_VERSION = 21
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -528,6 +528,68 @@ class ControlStore:
                         content_hash TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS v3_proposals (
+                        proposal_id TEXT PRIMARY KEY,
+                        artifact_kind TEXT NOT NULL,
+                        producer_role TEXT NOT NULL,
+                        operation_id TEXT NOT NULL,
+                        base_revision INTEGER NOT NULL,
+                        dependency_fingerprint TEXT NOT NULL,
+                        proposal_hash TEXT NOT NULL UNIQUE,
+                        payload_json TEXT NOT NULL,
+                        cited_source_ids_json TEXT NOT NULL,
+                        prompt_version TEXT NOT NULL,
+                        model_fingerprint TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_validation_reports (
+                        proposal_id TEXT PRIMARY KEY REFERENCES v3_proposals(proposal_id),
+                        report_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_gate_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        proposal_id TEXT NOT NULL REFERENCES v3_proposals(proposal_id),
+                        proposal_hash TEXT NOT NULL,
+                        gate_id TEXT NOT NULL,
+                        verdict TEXT NOT NULL,
+                        findings_json TEXT NOT NULL,
+                        reviewer TEXT NOT NULL,
+                        reviewed_revision INTEGER NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_artifact_revisions (
+                        artifact_kind TEXT NOT NULL,
+                        revision INTEGER NOT NULL,
+                        artifact_id TEXT NOT NULL,
+                        artifact_hash TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        producer_role TEXT NOT NULL,
+                        dependency_fingerprint TEXT NOT NULL,
+                        proposal_id TEXT NOT NULL UNIQUE REFERENCES v3_proposals(proposal_id),
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (artifact_kind, revision)
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_active_artifacts (
+                        artifact_kind TEXT PRIMARY KEY,
+                        artifact_id TEXT NOT NULL,
+                        revision INTEGER NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_promotion_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        proposal_id TEXT NOT NULL UNIQUE REFERENCES v3_proposals(proposal_id),
+                        artifact_kind TEXT NOT NULL,
+                        operation_id TEXT NOT NULL,
+                        artifact_id TEXT NOT NULL,
+                        promoted_revision INTEGER NOT NULL,
+                        artifact_hash TEXT NOT NULL,
+                        dependency_fingerprint TEXT NOT NULL,
+                        gate_receipt_ids_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE (artifact_kind, operation_id)
+                    );
                     CREATE INDEX IF NOT EXISTS idx_events_revision ON workspace_events(workspace_revision);
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
                     CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
@@ -541,6 +603,10 @@ class ControlStore:
                         ON content_unit_states(state, contract_revision);
                     CREATE INDEX IF NOT EXISTS idx_dependency_edges_downstream
                         ON dependency_edges(downstream_type, downstream_id);
+                    CREATE INDEX IF NOT EXISTS idx_v3_proposals_kind_status
+                        ON v3_proposals(artifact_kind, status, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_v3_gate_receipts_proposal
+                        ON v3_gate_receipts(proposal_id, created_at);
                     """
                 )
                 operation_columns = {
@@ -2535,6 +2601,234 @@ class ControlStore:
             }
         )
         return item
+
+    # V3 semantic artifacts deliberately live in their own append-only ledger.
+    # These methods are only called by the Proposal/Gate/Promotion services; V3
+    # agents receive a proposal sandbox and never a ControlStore instance.
+    def append_v3_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
+        required = (
+            "proposal_id", "artifact_kind", "producer_role", "operation_id",
+            "dependency_fingerprint", "proposal_hash", "prompt_version", "model_fingerprint",
+        )
+        if any(not str(proposal.get(key) or "").strip() for key in required):
+            raise ControlPlaneError("V3_PROPOSAL_INVALID", "Proposal 缺少必填字段。", status_code=400)
+        if int(proposal.get("base_revision", -1)) < 0 or not isinstance(proposal.get("payload"), dict):
+            raise ControlPlaneError("V3_PROPOSAL_INVALID", "Proposal 的 revision 或 payload 无效。", status_code=400)
+        proposal_id = str(proposal["proposal_id"])
+        proposal_hash = str(proposal["proposal_hash"])
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                duplicate = connection.execute(
+                    "SELECT * FROM v3_proposals WHERE proposal_id = ? OR proposal_hash = ?",
+                    (proposal_id, proposal_hash),
+                ).fetchone()
+                if duplicate is not None:
+                    if str(duplicate["proposal_hash"]) != proposal_hash:
+                        raise ControlPlaneError("V3_PROPOSAL_CONFLICT", "Proposal ID 已被其他内容使用。", status_code=409)
+                    connection.commit()
+                    return self._v3_proposal_row(duplicate)
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    """
+                    INSERT INTO v3_proposals(
+                        proposal_id, artifact_kind, producer_role, operation_id, base_revision,
+                        dependency_fingerprint, proposal_hash, payload_json, cited_source_ids_json,
+                        prompt_version, model_fingerprint, status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                    """,
+                    (
+                        proposal_id, str(proposal["artifact_kind"]), str(proposal["producer_role"]),
+                        str(proposal["operation_id"]), int(proposal["base_revision"]),
+                        str(proposal["dependency_fingerprint"]), proposal_hash, _json(proposal["payload"]),
+                        _json(proposal.get("cited_source_ids") or []), str(proposal["prompt_version"]),
+                        str(proposal["model_fingerprint"]), now,
+                    ),
+                )
+                self._event(connection, revision, "V3ProposalAppended", "V3Proposal", proposal_id, {
+                    "artifact_kind": str(proposal["artifact_kind"]), "producer_role": str(proposal["producer_role"]),
+                })
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.v3_proposal(proposal_id) or {}
+
+    def v3_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+        return self._v3_proposal_row(row) if row else None
+
+    def record_v3_validation_report(self, proposal_id: str, report: dict[str, Any]) -> dict[str, Any]:
+        proposal = self.v3_proposal(proposal_id)
+        if proposal is None:
+            raise ControlPlaneError("V3_PROPOSAL_NOT_FOUND", "Proposal 不存在。", status_code=404)
+        if str(report.get("proposal_id") or "") != str(proposal_id):
+            raise ControlPlaneError("V3_VALIDATION_INVALID", "ValidationReport 未绑定对应 Proposal。", status_code=400)
+        valid = all(bool(report.get(field)) for field in (
+            "schema_valid", "references_valid", "authority_policy_valid", "dependency_current",
+        ))
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = connection.execute("SELECT status FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+                if current is None or str(current["status"]) == "promoted":
+                    raise ControlPlaneError("V3_VALIDATION_FORBIDDEN", "已晋级 Proposal 不能重新校验。", status_code=409)
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    "INSERT INTO v3_validation_reports(proposal_id, report_json, created_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(proposal_id) DO UPDATE SET report_json = excluded.report_json, created_at = excluded.created_at",
+                    (str(proposal_id), _json(report), now),
+                )
+                connection.execute("UPDATE v3_proposals SET status = ? WHERE proposal_id = ?", ("validated" if valid else "rejected", str(proposal_id)))
+                self._event(connection, revision, "V3ProposalValidated", "V3Proposal", str(proposal_id), {"valid": valid})
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return dict(report)
+
+    def v3_validation_report(self, proposal_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT report_json FROM v3_validation_reports WHERE proposal_id = ?", (str(proposal_id),)
+            ).fetchone()
+        value = _decode(str(row["report_json"]), {}) if row is not None else None
+        return value if isinstance(value, dict) else None
+
+    def issue_v3_gate_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
+        required = ("receipt_id", "proposal_id", "proposal_hash", "gate_id", "verdict", "reviewer")
+        if any(not str(receipt.get(key) or "").strip() for key in required) or str(receipt.get("verdict")) not in {"pass", "warn", "block", "needs_human"}:
+            raise ControlPlaneError("V3_GATE_INVALID", "GateReceipt 输入无效。", status_code=400)
+        proposal_id = str(receipt["proposal_id"])
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                proposal = connection.execute("SELECT * FROM v3_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
+                validation = connection.execute("SELECT report_json FROM v3_validation_reports WHERE proposal_id = ?", (proposal_id,)).fetchone()
+                if proposal is None or validation is None:
+                    raise ControlPlaneError("V3_GATE_FORBIDDEN", "Gate 只能评审已验证的 Proposal。", status_code=409)
+                report = _decode(str(validation["report_json"]), {})
+                if not isinstance(report, dict) or not all(bool(report.get(field)) for field in ("schema_valid", "references_valid", "authority_policy_valid", "dependency_current")):
+                    raise ControlPlaneError("V3_GATE_FORBIDDEN", "验证未通过，不能签发 GateReceipt。", status_code=409)
+                if str(proposal["proposal_hash"]) != str(receipt["proposal_hash"]) or int(proposal["base_revision"]) != int(receipt.get("reviewed_revision", -1)):
+                    raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定当前 Proposal 内容或基线 revision。", status_code=409)
+                revision = self._bump_revision(connection)
+                now = _now()
+                connection.execute(
+                    "INSERT INTO v3_gate_receipts(receipt_id, proposal_id, proposal_hash, gate_id, verdict, findings_json, reviewer, reviewed_revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(receipt["receipt_id"]), proposal_id, str(receipt["proposal_hash"]), str(receipt["gate_id"]), str(receipt["verdict"]), _json(receipt.get("findings") or []), str(receipt["reviewer"]), int(receipt["reviewed_revision"]), now),
+                )
+                self._event(connection, revision, "V3GateReceiptIssued", "V3Proposal", proposal_id, {"gate_id": str(receipt["gate_id"]), "verdict": str(receipt["verdict"])})
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {**receipt, "created_at": now}
+
+    def promote_v3_proposal(self, *, proposal_id: str, gate_receipt_ids: list[str]) -> dict[str, Any]:
+        ids = sorted({str(value).strip() for value in gate_receipt_ids if str(value).strip()})
+        if not ids:
+            raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "缺少通过的 GateReceipt，不能晋级。", status_code=409)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                proposal = connection.execute("SELECT * FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+                if proposal is None:
+                    raise ControlPlaneError("V3_PROPOSAL_NOT_FOUND", "Proposal 不存在。", status_code=404)
+                existing = connection.execute("SELECT * FROM v3_promotion_receipts WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+                if existing is not None:
+                    connection.commit()
+                    return self._v3_promotion_row(existing)
+                duplicate = connection.execute(
+                    "SELECT * FROM v3_promotion_receipts WHERE artifact_kind = ? AND operation_id = ?",
+                    (str(proposal["artifact_kind"]), str(proposal["operation_id"])),
+                ).fetchone()
+                if duplicate is not None:
+                    connection.commit()
+                    return self._v3_promotion_row(duplicate)
+                placeholders = ",".join("?" for _ in ids)
+                gates = connection.execute(
+                    f"SELECT * FROM v3_gate_receipts WHERE receipt_id IN ({placeholders}) AND proposal_id = ?",
+                    [*ids, str(proposal_id)],
+                ).fetchall()
+                if len(gates) != len(ids) or any(
+                    str(gate["verdict"]) != "pass" or str(gate["proposal_hash"]) != str(proposal["proposal_hash"])
+                    or int(gate["reviewed_revision"]) != int(proposal["base_revision"])
+                    for gate in gates
+                ):
+                    raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "GateReceipt 未通过、过期或不属于该 Proposal。", status_code=409)
+                active = connection.execute("SELECT revision FROM v3_active_artifacts WHERE artifact_kind = ?", (str(proposal["artifact_kind"]),)).fetchone()
+                current_revision = int(active["revision"]) if active is not None else 0
+                if current_revision != int(proposal["base_revision"]):
+                    connection.execute("UPDATE v3_proposals SET status = 'stale' WHERE proposal_id = ?", (str(proposal_id),))
+                    raise ControlPlaneError("V3_PROMOTION_STALE", "Proposal 的 base_revision 已过期，不能晋级。", status_code=409)
+                promoted_revision = current_revision + 1
+                artifact_id = f"{proposal['artifact_kind']}@{promoted_revision}"
+                artifact_hash = hashlib.sha256(str(proposal["payload_json"]).encode("utf-8")).hexdigest()
+                receipt_id = str(uuid.uuid4())
+                now = _now()
+                revision = self._bump_revision(connection)
+                connection.execute(
+                    "INSERT INTO v3_artifact_revisions(artifact_kind, revision, artifact_id, artifact_hash, payload_json, producer_role, dependency_fingerprint, proposal_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (str(proposal["artifact_kind"]), promoted_revision, artifact_id, artifact_hash, str(proposal["payload_json"]), str(proposal["producer_role"]), str(proposal["dependency_fingerprint"]), str(proposal_id), now),
+                )
+                connection.execute(
+                    "INSERT INTO v3_active_artifacts(artifact_kind, artifact_id, revision, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(artifact_kind) DO UPDATE SET artifact_id = excluded.artifact_id, revision = excluded.revision, updated_at = excluded.updated_at",
+                    (str(proposal["artifact_kind"]), artifact_id, promoted_revision, now),
+                )
+                connection.execute(
+                    "INSERT INTO v3_promotion_receipts(receipt_id, proposal_id, artifact_kind, operation_id, artifact_id, promoted_revision, artifact_hash, dependency_fingerprint, gate_receipt_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (receipt_id, str(proposal_id), str(proposal["artifact_kind"]), str(proposal["operation_id"]), artifact_id, promoted_revision, artifact_hash, str(proposal["dependency_fingerprint"]), _json(ids), now),
+                )
+                connection.execute("UPDATE v3_proposals SET status = 'promoted' WHERE proposal_id = ?", (str(proposal_id),))
+                self._event(connection, revision, "V3ArtifactPromoted", "V3Artifact", artifact_id, {"artifact_kind": str(proposal["artifact_kind"]), "revision": promoted_revision, "proposal_id": str(proposal_id)})
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.v3_promotion_receipt(receipt_id) or {}
+
+    def v3_promotion_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM v3_promotion_receipts WHERE receipt_id = ?", (str(receipt_id),)).fetchone()
+        return self._v3_promotion_row(row) if row else None
+
+    def v3_active_artifact(self, artifact_kind: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT revision.* FROM v3_active_artifacts active JOIN v3_artifact_revisions revision ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision WHERE active.artifact_kind = ?",
+                (str(artifact_kind),),
+            ).fetchone()
+        return self._v3_artifact_row(row) if row else None
+
+    def v3_promoted_artifacts(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT revision.* FROM v3_active_artifacts active JOIN v3_artifact_revisions revision ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision ORDER BY revision.artifact_kind"
+            ).fetchall()
+        return [self._v3_artifact_row(row) for row in rows]
+
+    @staticmethod
+    def _v3_proposal_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["payload"] = _decode(value.pop("payload_json"), {})
+        value["cited_source_ids"] = _decode(value.pop("cited_source_ids_json"), [])
+        return value
+
+    @staticmethod
+    def _v3_artifact_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["payload"] = _decode(value.pop("payload_json"), {})
+        return value
+
+    @staticmethod
+    def _v3_promotion_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        value["gate_receipt_ids"] = _decode(value.pop("gate_receipt_ids_json"), [])
+        return value
 
     def ensure_goal_state(self, goal: dict[str, Any] | None) -> int:
         """Import the V1 Goal once; absence is also recorded to prevent later stale-file takeover."""

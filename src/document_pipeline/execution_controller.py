@@ -11,8 +11,10 @@ from .research_tool import V3ResearchTool
 V3_PIPELINE_STAGES = (
     "ingest_inputs",
     "normalize_sources",
+    "compile_template_structure",
     "build_requirement_ledger",
-    "build_project_model",
+    "analyze_scores",
+    "plan_response",
     "sync_material_requirements",
     "compile_document_contract",
     "plan_document",
@@ -98,14 +100,14 @@ class V3ExecutionController:
         stage = str(envelope.payload.get("stage") or "").strip()
         if stage not in V3_PIPELINE_STAGES:
             raise ValueError(f"V3_UNKNOWN_STAGE: {stage or '<empty>'}")
-        self.runner.run(stage)
+        self.runner.run(stage, operation_id=operation_id)
         self.store.record_stage_run(operation_id, stage, "succeeded", disposition="v3_command")
         return {"accepted": True, "operation_status": "succeeded", "message": f"V3 阶段完成: {stage}"}
 
     def run_pipeline(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
         completed: list[str] = []
         for stage in V3_PIPELINE_STAGES:
-            self.runner.run(stage)
+            self.runner.run(stage, operation_id=operation_id)
             self.store.record_stage_run(operation_id, stage, "succeeded", disposition="v3_command")
             completed.append(stage)
         return {

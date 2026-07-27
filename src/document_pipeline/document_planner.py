@@ -9,7 +9,7 @@ from utils import read_json, write_json
 from .contracts import ContentUnit, DOCUMENT_CONTRACT_ADAPTER, DocumentNodePlan, DocumentPlan, RequirementLedger, TemplateContract
 from .document_contract import DOCUMENT_CONTRACT_PATH
 from .input_manifest import V3_ROOT
-from .requirement_ledger import LEDGER_PATH
+from .requirement_ledger import load_promoted_requirement_ledger
 
 
 DOCUMENT_PLAN_PATH = V3_ROOT / "document_plan.json"
@@ -26,7 +26,7 @@ class DocumentPlanner:
 
     def build(self) -> tuple[DocumentPlan, list[ContentUnit]]:
         contract = DOCUMENT_CONTRACT_ADAPTER.validate_python(read_json(self.root / DOCUMENT_CONTRACT_PATH))
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
         if isinstance(contract, TemplateContract) and contract.blocking_gaps:
             raise ValueError(f"DOCUMENT_PLAN_BLOCKED: {', '.join(contract.blocking_gaps)}")
         owners = self._owners(contract.nodes, ledger)

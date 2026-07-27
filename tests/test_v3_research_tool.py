@@ -14,10 +14,11 @@ from control_plane import CommandEnvelope, CommandGateway, ControlStore  # noqa:
 from document_pipeline.execution_controller import V3ExecutionController  # noqa: E402
 from document_pipeline.contracts import EvidenceSourceType, InputRole  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService, V3_ROOT  # noqa: E402
-from document_pipeline.project_model import PROJECT_MODEL_PATH  # noqa: E402
+from document_pipeline.artifact_promotion import AgentProposalSandbox, ArtifactPromotionService, GateService, validate_and_record  # noqa: E402
+from document_pipeline.contracts import EvidenceNeed, ProjectModel  # noqa: E402
+from document_pipeline.proposals import ProposalEnvelope, dependency_fingerprint  # noqa: E402
 from document_pipeline.research_service import ResearchCandidate  # noqa: E402
 from document_pipeline.research_tool import V3ResearchTool  # noqa: E402
-from utils import write_json  # noqa: E402
 
 
 class _Provider:
@@ -35,12 +36,24 @@ class _FailingProvider:
 
 
 class V3ResearchToolTests(unittest.TestCase):
+    @staticmethod
+    def _promote_project_model(context: WorkspaceContext, needs: list[dict[str, object]]) -> None:
+        model = ProjectModel(project_id="test-project", evidence_needs=[EvidenceNeed.model_validate(need) for need in needs])
+        proposal = ProposalEnvelope(artifact_kind="ProjectModel", producer_role="planning_agent", operation_id=f"research-fixture:{needs[0]['need_id']}", base_revision=0, dependency_fingerprint=dependency_fingerprint("research-fixture", needs), payload=model.model_dump(mode="json"), cited_source_ids=[], prompt_version="test", model_fingerprint="test")
+        stored = AgentProposalSandbox(context, "planning_agent").submit(proposal)
+        proposal = proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
+        report = validate_and_record(context, proposal, expected_dependency_fingerprint=proposal.dependency_fingerprint)
+        if not report.passed:
+            raise AssertionError(report.findings)
+        receipt = GateService(context).evaluate(proposal.proposal_id, gate_id="G1_TEST")
+        ArtifactPromotionService(context).promote(proposal.proposal_id, [receipt.receipt_id])
+
     def test_agent_tool_resolves_only_declared_need(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
-            write_json(context.root / PROJECT_MODEL_PATH, {"evidence_needs": [{"need_id": "EN-1", "question": "适用标准", "topic_id": "standard", "deadline_stage": "plan_document", "query_budget": 1}]})
+            self._promote_project_model(context, [{"need_id": "EN-1", "question": "适用标准", "topic_id": "standard", "deadline_stage": "plan_document", "query_budget": 1}])
             result = V3ResearchTool(context, _Provider()).invoke("EN-1")
             self.assertEqual(result["provider_id"], "test")
             self.assertEqual(result["batch"]["status"], "published")
@@ -62,20 +75,7 @@ class V3ResearchToolTests(unittest.TestCase):
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
-            write_json(
-                context.root / PROJECT_MODEL_PATH,
-                {
-                    "evidence_needs": [
-                        {
-                            "need_id": "EN-FAIL",
-                            "question": "适用标准",
-                            "topic_id": "standard",
-                            "deadline_stage": "plan_document",
-                            "query_budget": 1,
-                        }
-                    ]
-                },
-            )
+            self._promote_project_model(context, [{"need_id": "EN-FAIL", "question": "适用标准", "topic_id": "standard", "deadline_stage": "plan_document", "query_budget": 1}])
             gateway = CommandGateway(context, V3ExecutionController(context).handlers())
             envelope = CommandEnvelope.from_mapping(
                 {
@@ -104,20 +104,7 @@ class V3ResearchToolTests(unittest.TestCase):
             tender = root / "tender.md"
             tender.write_text("无敏感信息的招标测试内容", encoding="utf-8")
             registration = InputManifestService(context).register_local_file(tender, InputRole.TENDER)
-            write_json(
-                context.root / PROJECT_MODEL_PATH,
-                {
-                    "evidence_needs": [
-                        {
-                            "need_id": "EN-ATTACH",
-                            "question": "查询适用政策",
-                            "topic_id": "policy",
-                            "deadline_stage": "plan_document",
-                            "query_budget": 1,
-                        }
-                    ]
-                },
-            )
+            self._promote_project_model(context, [{"need_id": "EN-ATTACH", "question": "查询适用政策", "topic_id": "policy", "deadline_stage": "plan_document", "query_budget": 1}])
             expected_path = (
                 context.root
                 / V3_ROOT
@@ -142,20 +129,7 @@ class V3ResearchToolTests(unittest.TestCase):
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
-            write_json(
-                context.root / PROJECT_MODEL_PATH,
-                {
-                    "evidence_needs": [
-                        {
-                            "need_id": "EN-1",
-                            "question": "适用标准",
-                            "topic_id": "standard",
-                            "deadline_stage": "plan_document",
-                            "query_budget": 1,
-                        }
-                    ]
-                },
-            )
+            self._promote_project_model(context, [{"need_id": "EN-1", "question": "适用标准", "topic_id": "standard", "deadline_stage": "plan_document", "query_budget": 1}])
             with self.assertRaisesRegex(ValueError, "V3_RESEARCH_ATTACHMENT_NOT_ACTIVE"):
                 V3ResearchTool(context).invoke(
                     "EN-1",

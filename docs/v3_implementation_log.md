@@ -118,9 +118,65 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 数据清理：两个旧 V2 项目目录及其残留的 `workspace/chat.db` 已彻底删除。
 - 运行入口：已移除 `graph-run` 与 `agent-graph-run` 两个 LangGraph CLI 公共命令，主图、Supervisor 图、节点和路由实现均已物理删除，章节循环已改为直接函数流；项目不再依赖 LangGraph/LangChain Core。V3 工作区仅通过 CommandGateway 执行阶段或全流程。
 
+## PR-14：冻结 Bid Master 与投标中间语言架构
+
+- 状态：已完成
+- 提交：`2d775a7 docs(v3): freeze trusted Bid Master architecture`
+- 内容：冻结唯一中间语言、Agent/Service/Artifact/Gate 权限边界、分阶段顺序和 Golden Set 验收指标；仓库级 `agent.md` 将 Proposal → Validation → Gate → Promotion 以及“新增 Agent 不得获得额外权威写入路径”设为强制架构约束。
+
+## PR-15：Proposal / Validation / Gate / Promotion 可信运行内核
+
+- 状态：已完成
+- 输入与输出：Agent 只可通过 `AgentProposalSandbox` 读取其冻结任务输入并追加 `ProposalEnvelope`；唯一输出是候选 Proposal。`BidMaster` 仅协调既有 `ControlStore` 上的校验、Gate 和 Promotion，不新增状态机。
+- Artifact 与晋级：新增 append-only Proposal、ValidationReport、GateReceipt、ArtifactRevision、active pointer 与 PromotionReceipt 表。`ArtifactPromotionService` 在单个 SQLite 事务中写入 revision、CAS active pointer 和 Receipt；同一 `(artifact_kind, operation_id)` 返回原 Receipt，避免重复发布。
+- Validator / Gate：`ProposalValidator` 校验角色、引用、dependency fingerprint 与 base revision；`GateService` 仅对通过验证且绑定同一 Proposal hash/revision 的候选签发 Receipt。无 pass Receipt、陈旧 base revision 或非法角色均不能晋级。
+- 权限与 stale：角色能力表只允许各 Agent 提议其声明的 Artifact kind，未登记工具一律拒绝；Promotion 与 `control.db` 只由 Service 持有。上游 active revision 或 dependency fingerprint 改变会使候选在 Gate/Promotion 时拒绝，不会覆盖当前事实。
+- Snapshot：`V3WorkspaceSnapshotBuilder` 仅投影 promoted Artifact；旧磁盘文件及 draft Proposal 不再被投影为运行时事实。
+- H1 / 模板：本次不改变 H1 PlanningConfirm，也不修改严格模板结构；后续 PR-16—PR-20 将消费该可信内核。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr15`（437 passed, 9 subtests）。新增负向测试覆盖 Agent 越权、无 GateReceipt、陈旧 revision、幂等 operation、失败无半 revision 与 Snapshot 隔离。
+
+## PR-16：结构化 SourceIndex 与 TemplateStructureContract
+
+- 状态：已完成
+- SourceIndex：`SourceNormalizer` 现将 Markdown、DOCX 和 PDF 恢复为稳定的 `SourceBlock` 序列，保留输入角色、块类型、原始顺序、标题路径、页码、段落/表格坐标、来源锚点和内容 hash；原兼容 `by_role` 视图仅供尚未迁移的确定性台账读取。
+- 可靠性：PDF 没有可提取文本时以 `V3_SOURCE_OCR_BLOCKED` 阻断，无法支持的格式在 Agent 调用前阻断；每个活动输入均写入 processed/blocked 状态。
+- 补遗：新增 `amendment` 输入角色、`issued_at` 与显式 `supersedes_input_ids`，SourceIndex 按签发时间保留补遗关系，不将其静默混入原招标文件。
+- 模板：新增独立、只读的 `TemplateStructureContract`，在 Requirement/Score 前由 `compile_template_structure` 阶段冻结 DOCX 的标题、层级、顺序、表格/文本 slot 和结构指纹；语义覆盖缺口仍由后续规划阶段计算。
+- H1 / 权限：本次不改变 H1 PlanningConfirm；所有来源与模板工作由确定性 Service 完成，不新增 Agent 或 Artifact 写权限。
+- 验证：`python -m ruff check src tests`；PR-16 定向回归 17 passed。
+
+## PR-17：Requirement Agent 与 RequirementLedger
+
+- 状态：已完成
+- 内容：新增 `RequirementAgent` 及其 Prompt 契约，支持从只读 `SourceIndex` 分批抽取带结构化语义属性（主体、动作、对象、条件、例外、量化指标）的条款，并完整继承保留父子条款关联（`clause_id`, `parent_clause_id`）。
+- 契约对齐：Proposal `artifact_kind` 已统一对齐为 `RequirementLedger`（与 `CapabilityRegistry` 授权规范一致）。
+- 补遗与消解：按 `amendment` 输入的 `issued_at` 签发时间与 `version` 正序演进，精准判定补遗覆盖并记录 `superseded_by_input_id`。
+- 完整受控链路：重构 `stage_runner.py` 的 `analyze_requirements` / `build_requirement_ledger` 阶段，贯通 **RequirementAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**；运行时下游只读取 active promoted revision，已删除旧 Ledger 直写路径。
+- 门禁与幂等：反向覆盖审计在 G0 前阻断遗漏的 tender/amendment SourceBlock；相同冻结依赖重跑复用 active revision，不重复晋级。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr17_fix`（445 passed, 9 subtests）。
+
+## PR-18：Score Agent 与 ScoreModel
+
+- 状态：已完成
+- 内容：新增 `ScoreAgent`、`ScoreModel`、`ScoreGroup`、`ScorePoint`、评分档位、评分响应深度和证明需求候选契约；评分点只引用已晋级 `RequirementLedger` 的 ID，不复制为另一份采购义务。
+- 解析与门禁：从冻结评分 SourceBlock 提取评分组、分值、档位、资格/废标条件和证明类型；模型契约复核分组小计与总分。G0 现在对 `RequirementLedger` 与 `ScoreModel` payload 执行 Pydantic schema 校验；Score 审计进一步阻断虚构来源、未知或跨锚点 Requirement 引用、未绑定评分点和异常批量绑定。
+- 完整受控链路：新增 `analyze_scores` Stage，贯通 **ScoreAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**。相同冻结输入、Requirement revision 和依赖 fingerprint 重跑会复用 active promoted revision，不产生新 revision。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr18_final`（449 passed, 9 subtests）。
+
+## PR-19：Planning Agent、ProjectModel 与 ResponseTopicGraph
+
+- 状态：已完成
+- 受控投影：ProjectModel 不再写入 `workspace/v3/project_model.json`；它只能由 Planning Agent 从已晋级的 RequirementLedger、ScoreModel 与冻结 SourceIndex 生成 Proposal，并通过 G0/G1/CAS 晋级。材料、目录和 ResearchService 均改为读取 active promoted revision。
+- 响应语义层：新增 ResponseTopicGraph、ResponseTopic、ResponseDuty 和 TopicEdge 契约；confirmed Topic 强制携带来源 Anchor 或上游引用，所有 Topic/Duty/Edge 引用均做完整性校验，`depends_on` 执行边循环会在 Schema 校验时阻断。
+- 映射边界：每个 Requirement 和 ScorePoint 先映射到 Duty；blocking Requirement、废标型 ScorePoint 均有可追溯的响应 Duty。评分证明候选由 ScoreModel 投影为 EvidenceNeed，Feature/BusinessFlow 未被引入为并列权威模型。
+- 执行链：新增 `plan_response`（兼容旧 `build_project_model` Runner 别名），同一 Planning Agent 连续晋级 ProjectModel 与 ResponseTopicGraph；相同冻结依赖重跑复用两个 active revision。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr19_final`（451 passed, 9 subtests）。
+
+
+
 ## 后续架构基线：Bid Master 与投标中间语言
 
-- 状态：详细计划已修订，尚未实施。
+- 状态：PR-14 至 PR-17 已完成；后续按 PR-18 继续。
 - 核心分工：Agent 只产生 Proposal，Artifact 承载权威事实，Service 执行确定性动作，Gate 与 CAS Promotion 决定 Artifact 晋级。
 - 中间语言：`RequirementLedger → ScoreModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → EvidenceSnapshot → WriterInputBundle → ContentBlock`。
 - Agent：Bid Master 复用现有 CommandGateway/StageRunner；Requirement、Score、Planning、Writer、Integration 和 Quality Audit 均读取冻结快照，不直接修改 `control.db` 或 canonical Artifact。

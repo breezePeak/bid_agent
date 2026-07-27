@@ -31,6 +31,7 @@ class InputRole(str, Enum):
     TENDER = "tender"
     SCORE = "score"
     TEMPLATE = "template"
+    AMENDMENT = "amendment"
     COMPANY = "company"
     REFERENCE = "reference"
     GUIDANCE = "guidance"
@@ -47,6 +48,16 @@ class InputItem(BaseModel):
     version: int = Field(ge=1)
     active: bool = True
     replaces_input_id: str | None = None
+    issued_at: str | None = None
+    supersedes_input_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def amendment_requires_issue_date(self) -> "InputItem":
+        if self.role is InputRole.AMENDMENT and not self.issued_at:
+            raise ValueError("补遗输入必须声明 issued_at")
+        if len(self.supersedes_input_ids) != len(set(self.supersedes_input_ids)):
+            raise ValueError("supersedes_input_ids 不允许重复")
+        return self
 
 
 class InputManifest(ContractModel):
@@ -60,6 +71,12 @@ class InputManifest(ContractModel):
         templates = [item for item in self.inputs if item.role is InputRole.TEMPLATE and item.active]
         if len(templates) > 1:
             raise ValueError("同一工作空间只允许一个活动 template")
+        known_ids = set(ids)
+        for item in self.inputs:
+            if item.replaces_input_id and item.replaces_input_id not in known_ids:
+                raise ValueError(f"InputManifest replaces_input_id 不存在: {item.replaces_input_id}")
+            if unknown := set(item.supersedes_input_ids) - known_ids:
+                raise ValueError(f"InputManifest supersedes_input_ids 不存在: {sorted(unknown)}")
         return self
 
 
@@ -85,6 +102,28 @@ class NormalizedChunk(BaseModel):
     source_anchor: SourceAnchor
 
 
+class SourceBlock(BaseModel):
+    """Loss-minimising structure recovered from a single frozen input."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    block_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    input_role: InputRole
+    block_kind: Literal["heading", "paragraph", "list_item", "table_cell", "pdf_text", "pdf_table_cell"]
+    ordinal: int = Field(ge=0)
+    content: str = Field(min_length=1)
+    heading_path: list[str] = Field(default_factory=list)
+    page: int | None = Field(default=None, ge=1)
+    paragraph_index: int | None = Field(default=None, ge=0)
+    table_index: int | None = Field(default=None, ge=0)
+    row_index: int | None = Field(default=None, ge=0)
+    column_index: int | None = Field(default=None, ge=0)
+    bbox: list[float] | None = None
+    source_anchor: SourceAnchor
+    content_hash: str = Field(min_length=1)
+
+
 class RequirementKind(str, Enum):
     MANDATORY = "mandatory"
     SCORE = "score"
@@ -106,16 +145,128 @@ class RequirementItem(BaseModel):
     response_type: str = Field(min_length=1)
     evidence_policy: str = Field(min_length=1)
     status: Literal["open", "confirmed", "blocked", "waived"] = "open"
+    clause_id: str | None = None
+    parent_clause_id: str | None = None
+    subject: str | None = None
+    action: str | None = None
+    target_object: str | None = None
+    conditions: list[str] = Field(default_factory=list)
+    exceptions: list[str] = Field(default_factory=list)
+    quantitative_metrics: dict[str, Any] = Field(default_factory=dict)
+    superseded_by_input_id: str | None = None
 
 
 class RequirementLedger(ContractModel):
     requirements: list[RequirementItem] = Field(default_factory=list)
+    coverage_audit: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def unique_requirement_ids(self) -> "RequirementLedger":
         ids = [item.requirement_id for item in self.requirements]
         if len(ids) != len(set(ids)):
             raise ValueError("RequirementLedger 不允许重复 requirement_id")
+        return self
+
+
+class ScoreGroup(BaseModel):
+    """A named scoring section; points remain the source of scoring truth."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    group_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    declared_points: float | None = Field(default=None, ge=0)
+
+
+class ScoringLevel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    label: str = Field(min_length=1)
+    points: float | None = Field(default=None, ge=0)
+    criterion: str = Field(min_length=1)
+
+
+class ScorePoint(BaseModel):
+    """One source-traceable scoring rule, linked to rather than copied from requirements."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    score_point_id: str = Field(min_length=1)
+    group_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    criterion: str = Field(min_length=1)
+    max_points: float | None = Field(default=None, ge=0)
+    scoring_levels: list[ScoringLevel] = Field(default_factory=list)
+    disqualifying: bool = False
+    response_expectation: str = Field(min_length=1)
+    response_depth: Literal["basic", "substantive", "detailed"] = "basic"
+    required_evidence_types: list[str] = Field(default_factory=list)
+    linked_requirement_ids: list[str] = Field(default_factory=list)
+    source_anchors: list[SourceAnchor] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+    @model_validator(mode="after")
+    def score_point_references_are_unique(self) -> "ScorePoint":
+        if len(self.linked_requirement_ids) != len(set(self.linked_requirement_ids)):
+            raise ValueError("ScorePoint 不允许重复 linked_requirement_ids")
+        anchor_ids = [(anchor.source_input_id, anchor.chunk_id) for anchor in self.source_anchors]
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise ValueError("ScorePoint 不允许重复 source_anchors")
+        return self
+
+
+class ScoreEvidenceNeedCandidate(BaseModel):
+    """A non-canonical evidence gap proposed by Score Agent for later planning."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    need_id: str = Field(min_length=1)
+    score_point_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    required_evidence_types: list[str] = Field(default_factory=list)
+    priority: Literal["blocking", "high", "normal"] = "normal"
+
+
+class ScoreModel(ContractModel):
+    model_id: str = Field(min_length=1)
+    source_input_ids: list[str] = Field(default_factory=list)
+    total_points: float = Field(ge=0)
+    groups: list[ScoreGroup] = Field(default_factory=list)
+    points: list[ScorePoint] = Field(default_factory=list)
+    evidence_need_candidates: list[ScoreEvidenceNeedCandidate] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def score_totals_and_references_are_consistent(self) -> "ScoreModel":
+        if not self.model_id.strip() or any(not source_id.strip() for source_id in self.source_input_ids):
+            raise ValueError("ScoreModel model_id 与 source_input_ids 不能为空")
+        if len(self.source_input_ids) != len(set(self.source_input_ids)):
+            raise ValueError("ScoreModel 不允许重复 source_input_ids")
+        group_ids = [group.group_id for group in self.groups]
+        point_ids = [point.score_point_id for point in self.points]
+        if len(group_ids) != len(set(group_ids)) or len(point_ids) != len(set(point_ids)):
+            raise ValueError("ScoreModel 不允许重复 group_id 或 score_point_id")
+        if unknown := {point.group_id for point in self.points} - set(group_ids):
+            raise ValueError(f"ScorePoint 指向未知评分组: {sorted(unknown)}")
+        if unknown := {
+            anchor.source_input_id
+            for point in self.points
+            for anchor in point.source_anchors
+        } - set(self.source_input_ids):
+            raise ValueError(f"ScorePoint 指向未知评分输入: {sorted(unknown)}")
+        scored_points = [point.max_points for point in self.points if point.max_points is not None]
+        if len(scored_points) == len(self.points) and abs(sum(scored_points) - self.total_points) > 1e-6:
+            raise ValueError("ScoreModel total_points 与 ScorePoint 分值合计不一致")
+        for group in self.groups:
+            points = [point.max_points for point in self.points if point.group_id == group.group_id]
+            if group.declared_points is not None and points and all(point is not None for point in points):
+                if abs(sum(point for point in points if point is not None) - group.declared_points) > 1e-6:
+                    raise ValueError(f"ScoreGroup {group.group_id} 小计与 ScorePoint 分值不一致")
+        candidate_ids = [candidate.need_id for candidate in self.evidence_need_candidates]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("ScoreModel 不允许重复 EvidenceNeed 候选 ID")
+        if unknown := {candidate.score_point_id for candidate in self.evidence_need_candidates} - set(point_ids):
+            raise ValueError(f"EvidenceNeed 候选指向未知 ScorePoint: {sorted(unknown)}")
         return self
 
 
@@ -204,6 +355,7 @@ class ProjectModel(ContractModel):
     conflicts: list[ProjectFact] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     requirement_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
     evidence_needs: list[EvidenceNeed] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -212,6 +364,109 @@ class ProjectModel(ContractModel):
         need_ids = [need.need_id for need in self.evidence_needs]
         if len(fact_ids) != len(set(fact_ids)) or len(need_ids) != len(set(need_ids)):
             raise ValueError("ProjectModel 不允许重复事实或 EvidenceNeed ID")
+        return self
+
+
+TopicType = Literal[
+    "business_domain", "business_flow", "business_capability", "function", "architecture", "data", "integration",
+    "security", "non_functional", "implementation", "project_management", "service_operation", "training",
+    "deliverable", "acceptance", "qualification", "commercial", "compliance",
+]
+DutyType = Literal["summarize", "explain", "design", "implement", "operate", "verify", "accept", "commit", "cross_reference"]
+TopicRelation = Literal["parent_of", "depends_on", "realizes", "constrained_by", "step_of", "produces", "consumes", "interfaces_with", "verified_by", "supports_score"]
+
+
+class ResponseTopic(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    topic_id: str = Field(min_length=1)
+    parent_topic_id: str | None = None
+    topic_type: TopicType
+    canonical_name: str = Field(min_length=1)
+    intent: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    source_anchors: list[SourceAnchor] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+
+class ResponseDuty(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    duty_id: str = Field(min_length=1)
+    topic_id: str = Field(min_length=1)
+    duty_type: DutyType
+    requirement_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
+    response_expectations: list[str] = Field(default_factory=list)
+    evidence_need_ids: list[str] = Field(default_factory=list)
+    priority: Literal["blocking", "high", "normal", "low"] = "normal"
+    confidence: float = Field(ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+
+class TopicEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    edge_id: str = Field(min_length=1)
+    source_topic_id: str = Field(min_length=1)
+    target_topic_id: str = Field(min_length=1)
+    relation: TopicRelation
+    order: int = Field(ge=0)
+    requirement_ids: list[str] = Field(default_factory=list)
+    rationale: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class ResponseTopicGraph(ContractModel):
+    graph_id: str = Field(min_length=1)
+    requirement_ledger_revision: int = Field(ge=1)
+    score_model_revision: int = Field(ge=1)
+    project_model_revision: int = Field(ge=1)
+    root_topic_ids: list[str] = Field(default_factory=list)
+    topics: list[ResponseTopic] = Field(default_factory=list)
+    duties: list[ResponseDuty] = Field(default_factory=list)
+    edges: list[TopicEdge] = Field(default_factory=list)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+    @model_validator(mode="after")
+    def graph_references_are_complete_and_dependencies_acyclic(self) -> "ResponseTopicGraph":
+        topic_ids = [topic.topic_id for topic in self.topics]
+        duty_ids = [duty.duty_id for duty in self.duties]
+        edge_ids = [edge.edge_id for edge in self.edges]
+        if any(len(values) != len(set(values)) for values in (topic_ids, duty_ids, edge_ids)):
+            raise ValueError("ResponseTopicGraph 不允许重复 Topic、Duty 或 Edge ID")
+        known_topics = set(topic_ids)
+        if unknown := set(self.root_topic_ids) - known_topics:
+            raise ValueError(f"ResponseTopicGraph 存在悬空根 Topic: {sorted(unknown)}")
+        if unknown := {topic.parent_topic_id for topic in self.topics if topic.parent_topic_id} - known_topics:
+            raise ValueError(f"ResponseTopicGraph 存在悬空父 Topic: {sorted(unknown)}")
+        if unknown := {duty.topic_id for duty in self.duties} - known_topics:
+            raise ValueError(f"ResponseDuty 指向未知 Topic: {sorted(unknown)}")
+        for topic in self.topics:
+            if topic.review_status == "confirmed" and not (topic.source_anchors or topic.attributes.get("upstream_refs")):
+                raise ValueError(f"已确认 Topic 缺少来源或上游引用: {topic.topic_id}")
+        dependencies: dict[str, set[str]] = {topic_id: set() for topic_id in known_topics}
+        for edge in self.edges:
+            if edge.source_topic_id not in known_topics or edge.target_topic_id not in known_topics:
+                raise ValueError(f"TopicEdge 指向未知 Topic: {edge.edge_id}")
+            if edge.relation == "depends_on":
+                dependencies[edge.source_topic_id].add(edge.target_topic_id)
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        def visit(topic_id: str) -> None:
+            if topic_id in visiting:
+                raise ValueError("ResponseTopicGraph 执行依赖存在环")
+            if topic_id not in visited:
+                visiting.add(topic_id)
+                for downstream in dependencies[topic_id]:
+                    visit(downstream)
+                visiting.remove(topic_id)
+                visited.add(topic_id)
+        for topic_id in known_topics:
+            visit(topic_id)
         return self
 
 
@@ -271,6 +526,23 @@ class TemplateContract(_DocumentContractBase):
             raise ValueError("TemplateContract 不允许重复 slot_id")
         if unknown := {slot.node_id for slot in self.slots} - node_ids:
             raise ValueError(f"TemplateContract slot 指向未知节点: {sorted(unknown)}")
+        return self
+
+
+class TemplateStructureContract(ContractModel):
+    """Read-only template topology compiled before semantic planning."""
+
+    template_input_id: str = Field(min_length=1)
+    template_hash: str = Field(min_length=1)
+    structural_fingerprint: str = Field(min_length=1)
+    nodes: list[ContractNode] = Field(min_length=1)
+    slots: list[TemplateSlot] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def structural_slots_target_known_nodes(self) -> "TemplateStructureContract":
+        node_ids = {node.node_id for node in self.nodes}
+        if unknown := {slot.node_id for slot in self.slots} - node_ids:
+            raise ValueError(f"TemplateStructureContract slot 指向未知节点: {sorted(unknown)}")
         return self
 
 
