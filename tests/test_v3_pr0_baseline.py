@@ -22,7 +22,7 @@ class V3Pr0BaselineTests(unittest.TestCase):
             for spec in STAGE_SPECS
             if not spec.auto_run
         }
-        self.assertEqual(experimental, {"analyze_project_understanding", "research_project_materials"})
+        self.assertEqual(experimental, {"analyze_project_understanding"})
         self.assertFalse(experimental & {spec.id for spec in workflow_stage_specs()})
 
     def test_every_automatic_stage_has_exactly_one_main_runner(self) -> None:

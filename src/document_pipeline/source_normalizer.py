@@ -13,6 +13,7 @@ from .input_manifest import InputManifestService, V3_ROOT
 
 
 SOURCE_INDEX_PATH = V3_ROOT / "source_index.json"
+NORMALIZABLE_EXTENSIONS = frozenset({".md", ".txt", ".docx", ".pdf"})
 
 
 class SourceNormalizer:
@@ -43,6 +44,12 @@ class SourceNormalizer:
 
     @staticmethod
     def _markdown(source: Path) -> str:
+        if source.suffix.lower() not in NORMALIZABLE_EXTENSIONS:
+            supported = ", ".join(sorted(NORMALIZABLE_EXTENSIONS))
+            raise ValueError(
+                f"V3_SOURCE_FORMAT_UNSUPPORTED: {source.suffix or '<无扩展名>'}；"
+                f"支持的格式: {supported}"
+            )
         if source.suffix.lower() in {".md", ".txt"}:
             return source.read_text(encoding="utf-8")
         return convert_to_markdown(source)

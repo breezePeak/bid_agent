@@ -17,6 +17,7 @@ from utils import (
     select_score_points,
     stringify,
     write_json,
+    write_text,
 )
 
 

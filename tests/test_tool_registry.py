@@ -28,9 +28,10 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_stage_count_matches_registry(self) -> None:
         stages = stage_tools()
-        self.assertEqual(len(stages), len(STAGE_SPECS))
-        self.assertEqual([t.stage_id for t in stages], [s.id for s in STAGE_SPECS])
-        self.assertEqual([t.command for t in stages], [s.command for s in STAGE_SPECS])
+        registered = workflow_stage_specs(include_utility=True)
+        self.assertEqual(len(stages), len(registered))
+        self.assertEqual([t.stage_id for t in stages], [s.id for s in registered])
+        self.assertEqual([t.command for t in stages], [s.command for s in registered])
 
     def test_list_tools_includes_run_stage_and_all_stages(self) -> None:
         tools = list_tools()
@@ -38,7 +39,7 @@ class ToolRegistryTests(unittest.TestCase):
         ids = {t.id for t in tools}
         self.assertIn("run_stage", names)
         self.assertIn("run_stage", ids)
-        for stage in STAGE_SPECS:
+        for stage in workflow_stage_specs(include_utility=True):
             self.assertIn(stage.command, names)
             self.assertIn(f"stage:{stage.id}", ids)
 

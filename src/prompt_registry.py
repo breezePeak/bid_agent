@@ -76,23 +76,6 @@ AGENT_SPECS: dict[str, AgentSpec] = {
             ],
         },
     ),
-    "web_research": AgentSpec(
-        name="web_research",
-        prompt_file="web_research.md",
-        version="1.0.0",
-        input_contract={
-            "documents": [
-                "workspace/project_understanding.json",
-                "workspace/research_raw_results.json",
-            ],
-            "mode": "web_research_synthesis",
-        },
-        output_contract={
-            "type": "json_object",
-            "required_keys": ["sections", "research_gaps"],
-        },
-        context_budget={"max_context_chars": 30000},
-    ),
     "outline_generator": AgentSpec(
         name="outline_generator",
         prompt_file="generate_outline.md",

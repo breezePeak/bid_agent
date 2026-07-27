@@ -146,29 +146,6 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         auto_run=False,
     ),
     StageSpec(
-        id="research_project_materials",
-        label="联网搜集资料",
-        command="research-materials",
-        kind="core",
-        requires=(
-            _artifact("workspace/project_understanding.json"),
-            _artifact("inputs/reference.md", required_nonempty=False),
-        ),
-        produces=(
-            _artifact("workspace/research_raw_results.json", required_nonempty=False),
-            _artifact("workspace/research_report.json"),
-            _artifact("inputs/reference.md", required_nonempty=False),
-            _artifact("workspace/chunks/reference_chunks.json", required_nonempty=False),
-        ),
-        runner="web_research.research_project_materials",
-        notes=(
-            "根据整体理解自动检索政策、标准、技术方法、成果规范、验收质控和公开案例",
-            "无联网结果且无人工参考资料时阻断，禁止静默跳过研究",
-        ),
-        prompt_agents=("web_research",),
-        auto_run=False,
-    ),
-    StageSpec(
         id="build_materials_checklist",
         label="材料资格清单",
         command="build-materials-checklist",

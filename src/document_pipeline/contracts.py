@@ -177,6 +177,7 @@ class EvidenceBatch(ContractModel):
     query_count: int = Field(ge=0)
     items: list[EvidenceItem] = Field(default_factory=list)
     status: Literal["published", "gap", "failed"]
+    error: str | None = None
 
 
 class ProjectModel(ContractModel):

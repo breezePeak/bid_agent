@@ -36,7 +36,7 @@
           </div>
         </div>
         <button
-          v-if="!collapsed"
+          v-if="!collapsed && deletable"
           class="sidebar-item-delete"
           title="删除工作空间"
           @click.stop="$emit('delete', run.id)"
@@ -70,6 +70,7 @@ defineProps({
   activeRunId: { type: String, default: '' },
   loading: { type: Boolean, default: false },
   collapsed: { type: Boolean, default: false },
+  deletable: { type: Boolean, default: true },
 })
 
 defineEmits(['select', 'toggle', 'create', 'delete'])

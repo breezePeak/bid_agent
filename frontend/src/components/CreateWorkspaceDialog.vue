@@ -18,30 +18,6 @@
               required
             />
           </div>
-          <div class="form-group">
-            <label for="ws-type">项目类型 <span class="required">*</span></label>
-            <select id="ws-type" v-model="form.projectType" required>
-              <option value="">请选择项目类型</option>
-              <option
-                v-for="choice in projectChoices"
-                :key="choice.project_type"
-                :value="choice.project_type"
-              >
-                {{ choice.label }} - {{ choice.description }}
-              </option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="ws-pages">期望页数</label>
-            <input
-              id="ws-pages"
-              v-model.number="form.expectedPages"
-              type="number"
-              min="1"
-              max="9999"
-              placeholder="请输入期望页数（可选）"
-            />
-          </div>
           <p v-if="error" class="form-error">{{ error }}</p>
           <div class="dialog-footer">
             <button type="button" class="btn" @click="$emit('close')">取消</button>
@@ -56,8 +32,8 @@
 </template>
 
 <script setup>
-import { ref, reactive, onMounted } from 'vue'
-import { createRun, fetchProjectProfileChoices } from '../api'
+import { ref, reactive } from 'vue'
+import { createRun } from '../api'
 
 defineProps({
   visible: { type: Boolean, default: false },
@@ -71,20 +47,8 @@ const form = reactive({
   expectedPages: null,
 })
 
-const projectChoices = ref([])
 const submitting = ref(false)
 const error = ref('')
-
-onMounted(async () => {
-  try {
-    const { data } = await fetchProjectProfileChoices()
-    if (data.ok && data.choices) {
-      projectChoices.value = data.choices
-    }
-  } catch (e) {
-    console.error('加载项目类型失败', e)
-  }
-})
 
 async function handleSubmit() {
   error.value = ''
@@ -92,16 +56,11 @@ async function handleSubmit() {
     error.value = '请输入项目名称'
     return
   }
-  if (!form.projectType) {
-    error.value = '请选择项目类型'
-    return
-  }
-
   submitting.value = true
   try {
-    const { data } = await createRun(form.name.trim(), form.projectType, form.expectedPages || 0)
-    if (data.ok && data.run) {
-      emit('created', data.run.id)
+    const { data } = await createRun(form.name.trim(), '', 0)
+    if (data.ok && data.workspace) {
+      emit('created', data.workspace.id)
     } else {
       error.value = data.message || '创建失败'
     }

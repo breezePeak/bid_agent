@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import io
 import sys
 import tempfile
@@ -14,7 +15,15 @@ sys.path.insert(0, str(ROOT / "src"))
 import main  # noqa: E402
 
 
-class MainV2CliGuardTests(unittest.TestCase):
+class MainCliGuardTests(unittest.TestCase):
+    def test_legacy_langgraph_commands_are_not_public_cli_commands(self) -> None:
+        parser = main.build_parser()
+        for command in ("graph-run", "agent-graph-run"):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit) as error:
+                    parser.parse_args([command])
+            self.assertEqual(error.exception.code, 2)
+
     def test_managed_workspace_rejects_direct_stage_cli(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             runs = Path(tmp) / "runs"
@@ -33,7 +42,7 @@ class MainV2CliGuardTests(unittest.TestCase):
                                 with mock.patch("sys.stdout", output):
                                     exit_code = main.main()
             self.assertEqual(exit_code, 2)
-            self.assertIn("V2 CommandGateway", output.getvalue())
+            self.assertIn("V3 CommandGateway", output.getvalue())
             runner.assert_not_called()
 
     def test_pipeline_execution_worker_can_run_stage(self) -> None:

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from concurrency import chapter_workers_scope, clamp_workers, workers_default
-from graph.chapter_subgraph import build_chapter_subgraph
+from graph.chapter_subgraph import run_chapter_flow
 from utils import project_root
 
 try:
@@ -20,8 +20,7 @@ except Exception:  # pragma: no cover
 
 
 def _write_worker(chapter_id: str, root: Path) -> None:
-    graph = build_chapter_subgraph()
-    graph.invoke({"root_dir": str(root), "chapter_id": chapter_id})
+    run_chapter_flow(root, chapter_id)
 
 
 def _review_worker(chapter_id: str, root: Path) -> None:

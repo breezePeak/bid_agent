@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node --test src/components/__tests__/materialsChecklistApi.spec.js src/components/__tests__/workspaceSnapshot.spec.js",
+    "test": "node --test test",
     "preview": "vite preview"
   },
   "dependencies": {

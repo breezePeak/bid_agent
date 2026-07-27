@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Protocol
 
 from control_plane import ControlStore, WorkspaceContext
@@ -41,20 +40,28 @@ class ResearchService:
 
     def resolve(self, need: EvidenceNeed) -> EvidenceBatch:
         self.store.upsert_evidence_need(need.model_dump(mode="json"))
-        existing_path = self._batch_path(need)
-        if existing_path.exists():
-            existing = EvidenceBatch.model_validate(read_json(existing_path))
+        existing = self._published_batch(need)
+        if existing is not None:
             self.store.upsert_evidence_need(
-                {**need.model_dump(mode="json"), "status": "satisfied" if existing.status == "published" else "gap", "active_batch_id": existing.batch_id}
+                {**need.model_dump(mode="json"), "status": "satisfied", "active_batch_id": existing.batch_id}
             )
             return existing
         if need.query_budget <= 0:
+            latest = self._latest_batch(need)
+            if latest is not None and latest.status == "gap":
+                return latest
             return self._publish(need, [], query_count=0, status="gap")
         self.store.upsert_evidence_need({**need.model_dump(mode="json"), "status": "researching"})
         try:
             candidates = self.provider.search(need.question, limit=need.query_budget)
-        except Exception:
-            return self._publish(need, [], query_count=need.query_budget, status="failed")
+        except Exception as exc:
+            return self._publish(
+                need,
+                [],
+                query_count=1,
+                status="failed",
+                error=f"{type(exc).__name__}: {exc}"[:2000],
+            )
         items = [self._validate_candidate(need, candidate, index) for index, candidate in enumerate(candidates[: need.query_budget])]
         items = [item for item in items if item is not None]
         return self._publish(need, items, query_count=min(len(candidates), need.query_budget), status="published" if items else "gap")
@@ -68,8 +75,7 @@ class ResearchService:
             return None
         if "enterprise_capability" in candidate.claim_types:
             return None
-        batch_seed = f"{need.need_id}:{need.question}"
-        batch_id = f"EB-{hashlib.sha256(batch_seed.encode('utf-8')).hexdigest()[:16]}"
+        batch_id = self._base_batch_id(need)
         evidence_id = f"E-{hashlib.sha256(f'{batch_id}:{index}:{candidate.source_url or candidate.title}'.encode('utf-8')).hexdigest()[:16]}"
         return EvidenceItem(
             evidence_id=evidence_id,
@@ -83,19 +89,44 @@ class ResearchService:
             retrieved_at=datetime.now(UTC).isoformat(),
         )
 
-    def _publish(self, need: EvidenceNeed, items: list[EvidenceItem], *, query_count: int, status: str) -> EvidenceBatch:
-        batch_id = f"EB-{hashlib.sha256(f'{need.need_id}:{need.question}'.encode('utf-8')).hexdigest()[:16]}"
-        # Rebuild items with the canonical batch ID if an implementation supplied
-        # a candidate transformation from a previous seed.
-        normalized = [item.model_copy(update={"batch_id": batch_id}) for item in items]
+    def _publish(
+        self,
+        need: EvidenceNeed,
+        items: list[EvidenceItem],
+        *,
+        query_count: int,
+        status: str,
+        error: str | None = None,
+    ) -> EvidenceBatch:
+        previous = self._batches(need)
+        revision = max((batch.revision for batch in previous), default=0) + 1
+        base_id = self._base_batch_id(need)
+        batch_id = base_id if revision == 1 else f"{base_id}-R{revision}"
+        normalized = []
+        for index, item in enumerate(items):
+            evidence_seed = f"{batch_id}:{index}:{item.source_url or item.title}"
+            normalized.append(
+                item.model_copy(
+                    update={
+                        "batch_id": batch_id,
+                        "evidence_id": f"E-{hashlib.sha256(evidence_seed.encode('utf-8')).hexdigest()[:16]}",
+                    }
+                )
+            )
+        source_hashes = {
+            need.need_id: hashlib.sha256(need.question.encode("utf-8")).hexdigest(),
+        }
+        if provider_fingerprint := self._provider_fingerprint():
+            source_hashes["research_attachments"] = provider_fingerprint
         batch = EvidenceBatch(
-            revision=1,
-            source_hashes={need.need_id: hashlib.sha256(need.question.encode("utf-8")).hexdigest()},
+            revision=revision,
+            source_hashes=source_hashes,
             batch_id=batch_id,
             need_id=need.need_id,
             query_count=query_count,
             items=normalized,
             status=status,
+            error=error,
         )
         path = self.root / EVIDENCE_BATCH_DIR / f"{batch_id}.json"
         if path.exists():
@@ -108,6 +139,36 @@ class ResearchService:
         self.store.upsert_evidence_need({**need.model_dump(mode="json"), "status": next_status, "active_batch_id": batch_id})
         return batch
 
-    def _batch_path(self, need: EvidenceNeed) -> Path:
-        batch_id = f"EB-{hashlib.sha256(f'{need.need_id}:{need.question}'.encode('utf-8')).hexdigest()[:16]}"
-        return self.root / EVIDENCE_BATCH_DIR / f"{batch_id}.json"
+    def _base_batch_id(self, need: EvidenceNeed) -> str:
+        seed = f"{need.need_id}:{need.question}"
+        if provider_fingerprint := self._provider_fingerprint():
+            seed += f":{provider_fingerprint}"
+        return f"EB-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"
+
+    def _provider_fingerprint(self) -> str:
+        return str(getattr(self.provider, "cache_fingerprint", "") or "").strip()
+
+    def _batches(self, need: EvidenceNeed) -> list[EvidenceBatch]:
+        directory = self.root / EVIDENCE_BATCH_DIR
+        if not directory.is_dir():
+            return []
+        prefix = self._base_batch_id(need)
+        batches: list[EvidenceBatch] = []
+        for path in directory.glob(f"{prefix}*.json"):
+            try:
+                batch = EvidenceBatch.model_validate(read_json(path))
+            except Exception:
+                continue
+            if batch.need_id == need.need_id:
+                batches.append(batch)
+        return sorted(batches, key=lambda item: item.revision)
+
+    def _latest_batch(self, need: EvidenceNeed) -> EvidenceBatch | None:
+        batches = self._batches(need)
+        return batches[-1] if batches else None
+
+    def _published_batch(self, need: EvidenceNeed) -> EvidenceBatch | None:
+        return next(
+            (batch for batch in reversed(self._batches(need)) if batch.status == "published"),
+            None,
+        )

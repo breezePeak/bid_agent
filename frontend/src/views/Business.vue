@@ -5,8 +5,8 @@
       :active-run-id="activeRunId"
       :loading="runsLoading"
       :collapsed="sidebarCollapsed"
+      :deletable="false"
       @select="handleSelectRun"
-      @delete="handleDeleteRun"
       @toggle="sidebarCollapsed = !sidebarCollapsed"
       @create="showCreateDialog = true"
     />
@@ -26,10 +26,9 @@
           </div>
         </template>
         <template v-else>
-          <WorkspaceView
+          <V3WorkspaceView
             :key="activeRunId"
             :run-id="activeRunId"
-            :run="activeRun"
           />
         </template>
       </div>
@@ -44,14 +43,6 @@
       @close="showSettingsDialog = false"
       @saved="onSettingsSaved"
     />
-    <ConfirmDialog
-      :visible="showDeleteConfirm"
-      title="删除工作空间"
-      :message="`确定要删除「${pendingDeleteName}」吗？此操作不可恢复。`"
-      confirm-text="删除"
-      @confirm="doDeleteRun"
-      @cancel="showDeleteConfirm = false"
-    />
   </div>
 </template>
 
@@ -61,9 +52,8 @@ import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
 import TopBar from '../components/TopBar.vue'
 import CreateWorkspaceDialog from '../components/CreateWorkspaceDialog.vue'
 import SettingsDialog from '../components/SettingsDialog.vue'
-import WorkspaceView from '../components/WorkspaceView.vue'
-import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { fetchRuns, deleteRun } from '../api'
+import V3WorkspaceView from '../components/V3WorkspaceView.vue'
+import { fetchRuns } from '../api'
 
 const runs = ref([])
 const activeRunId = ref('')
@@ -71,9 +61,6 @@ const runsLoading = ref(false)
 const showCreateDialog = ref(false)
 const showSettingsDialog = ref(false)
 const sidebarCollapsed = ref(false)
-const showDeleteConfirm = ref(false)
-const pendingDeleteId = ref('')
-const pendingDeleteName = ref('')
 
 const activeRun = computed(() => {
   return runs.value.find(r => r.id === activeRunId.value) || null
@@ -84,7 +71,7 @@ async function loadRuns() {
   try {
     const { data } = await fetchRuns()
     if (data.ok) {
-      runs.value = data.runs || []
+      runs.value = data.workspaces || []
       if (!activeRunId.value && runs.value.length) {
         activeRunId.value = runs.value[0].id
       }
@@ -99,33 +86,6 @@ async function loadRuns() {
 function handleSelectRun(runId) {
   if (runId === activeRunId.value) return
   activeRunId.value = runId
-}
-
-function handleDeleteRun(runId) {
-  pendingDeleteId.value = runId
-  const run = runs.value.find(r => r.id === runId)
-  pendingDeleteName.value = run ? extractName(run.id) : runId
-  showDeleteConfirm.value = true
-}
-
-async function doDeleteRun() {
-  try {
-    const { data } = await deleteRun(pendingDeleteId.value)
-    if (data.ok) {
-      if (pendingDeleteId.value === activeRunId.value) {
-        activeRunId.value = ''
-      }
-      showDeleteConfirm.value = false
-      await loadRuns()
-    }
-  } catch (e) {
-    console.error('删除工作空间失败', e)
-  }
-}
-
-function extractName(id) {
-  const match = id.match(/^(.+?)_(\d{8}_\d{6})/)
-  return match ? match[1].replace(/_/g, ' ') : id
 }
 
 function onWorkspaceCreated(runId) {
