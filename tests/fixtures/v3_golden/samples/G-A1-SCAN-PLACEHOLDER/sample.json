@@ -16,7 +16,7 @@
   "inputs": [
     {
       "role": "tender",
-      "relative_path": "inputs/README.external.txt",
+      "relative_path": "source/README.external.txt",
       "content_sha256": "792b6acaaa4b22c78850b4b872401741913edbace5ec6b00c306c93b1b09d9f4",
       "external_original_ref": "access-controlled://pending/scan-tender.pdf"
     }

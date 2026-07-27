@@ -16,7 +16,7 @@
   "inputs": [
     {
       "role": "tender",
-      "relative_path": "inputs/tender.md",
+      "relative_path": "source/tender.md",
       "content_sha256": "e2f06460ffe477059965d7063f8478f1f92529a6b199586f27460dbbb924edfa",
       "external_original_ref": null
     }

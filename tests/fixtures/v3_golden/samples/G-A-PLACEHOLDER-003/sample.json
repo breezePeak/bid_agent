@@ -17,7 +17,7 @@
   "inputs": [
     {
       "role": "tender",
-      "relative_path": "inputs/README.pending.txt",
+      "relative_path": "source/README.pending.txt",
       "content_sha256": "74f75a4783271d044740d513e3eb8217d7bda92df1fc7dc06ebe552f53877e8f",
       "external_original_ref": "access-controlled://pending/sample-3"
     }
