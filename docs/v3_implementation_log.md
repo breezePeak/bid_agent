@@ -2,6 +2,8 @@
 
 本记录与 [v3_development_plan.md](./v3_development_plan.md) 同步。每个完成的 PR 都必须包含验证证据和独立 Git 提交。
 
+Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文审计的后续建设见 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)。
+
 ## PR-0：冻结基线与消除半接入状态
 
 - 状态：已完成
@@ -49,11 +51,15 @@
 
 ## PR-6：按需研究服务
 
-- 状态：已完成
-- 内容：新增 `ResearchService` 与 Provider 接口；研究仅由 `EvidenceNeed` 触发，发布到不可变的 `workspace/v3/evidence/batches` 快照，不会修改 `inputs/reference.md` 或触发全量切分。
-- 控制状态：`control.db.evidence_needs` 记录预算、状态与活动证据批次；预算为零或检索失败会显式形成 gap。
+- 状态：已完成（真实 DeepSeek 搜索与附件上传已人工冒烟）
+- 已完成：新增 `ResearchService` 与 Provider 接口；研究仅由 `EvidenceNeed` 触发，发布到不可变的 `workspace/v3/evidence/batches` 快照，不会修改 `inputs/reference.md` 或触发全量切分。
+- 工具注册：`research.resolve` 已接入 `V3ExecutionController`，只允许解析 `ProjectModel` 中已声明的 EvidenceNeed。
+- 实现路线：网页研究采用 Provider Adapter，而非绑定 DeepSeek；`deepseek_web` 是首个适配器，使用 Playwright 持久化浏览器会话。首次由用户在本机可见浏览器中登录，系统不保存账号或密码。每次问答均由明确的 EvidenceNeed 触发，回答作为外部二级证据并保留网页 URL、提问、回答和检索时间；不允许证明企业能力，也不绕过 V3 质量门。
+- Agent 工具：新增 `V3ResearchTool`，只允许按 `need_id` 解析 `ProjectModel` 中已声明的 EvidenceNeed，并调用 Provider Adapter 发布证据批次；前端按钮只能触发已声明的 EvidenceNeed，发送文件还必须显式选择活动 `attachment_input_ids`，不允许任意网页问答直接写入标书。
+- 默认 Provider：未设置 `BID_AGENT_RESEARCH_PROVIDER` 时使用 `deepseek_web`；适配器会强制启用“联网搜索”，提取并去重公开来源 URL，无法取得来源时拒绝发布。
+- 控制状态：`control.db.evidence_needs` 记录预算、状态与活动证据批次；失败批次保留错误信息且不可覆盖，后续调用以新 revision 重试。
 - 安全边界：外部 Provider 不能发布企业能力 Claim；企业事实仍必须来自 `company` 输入角色。
-- 验证：`python -m unittest tests.test_v3_research_service tests.test_v3_contracts tests.test_v3_document_planner`（11 tests passed）。
+- 已验证：Provider 契约、来源 URL 解析、预算限制、失败重试和证据批次均有自动化测试；已使用 Playwright 持久化登录态完成真实联网搜索及无敏感测试附件上传，公开来源 URL 可正常进入候选证据。
 
 ## PR-7：ContentUnit Scheduler 与 Writer
 
@@ -86,9 +92,39 @@
 - 内容：新增 StandardRenderer，仅从 OutlineContract 与 IntegratedDocument 输出 Markdown/DOCX，禁止临时标题和章节文件拼接。
 - 验证：`python -m unittest tests.test_v3_standard_renderer tests.test_v3_template_renderer`（2 tests passed）。
 
-## PR-12：唯一 V3 StageRunner（后端）
+## PR-12：V3 API、前端和唯一执行入口
+
+- 状态：已完成
+- 已完成的后端内容：新增 `V3StageRunner`，覆盖 12 个正常内容阶段；`ingest_inputs` 只接受已登记的 V3 输入，材料清单由 V3 台账/项目模型派生，`verify_delivery` 只检查 `outputs/v3` 产物。
+- 执行入口：新增 `V3ExecutionController`，由现有 `CommandGateway` 驱动 `document.run_stage` 或 `document.run_pipeline`；每个 V3 stage 都记录到同一 Command 的控制面 StageRun，拒绝未登记 stage。
+- 状态投影：新增只读 `V3WorkspaceSnapshotBuilder`，统一展示 V3 输入、文档模式/契约/计划、项目模型、EvidenceNeed、材料缺口、ContentUnit、质量门禁和交付状态；不读取 V1 投影。
+- 工作空间：V3 创建与列表 API 只识别 `workspace/v3` 布局，旧 V1/V2 工作空间不再出现在 V3 控制台；新 V3 工作空间不创建旧 pipeline 目录。
+- API：新增 `/api/v3/workspaces/{id}` 下的 uploads、commands、snapshot、events、evidence、document、gate 和 export 端点；上传端点强制输入角色并写入 V3 不可变输入存储，Command 只经 `V3ExecutionController`，快照和读取端点只返回 V3 状态，导出必须有 `verify_delivery=ready`。CLI 已切换至 V3。
+- 前端：主工作区视图替换为 V3 输入、执行、质量、证据缺口、材料和下载界面；生产构建不再包含 `/api/v2/workspaces` 或 `/v2/workspaces` 调用。
+- 门禁：`render_document` 仅在 `verify_document=pass` 后执行；`verify_delivery` 校验 V3 DOCX 可读性、可见内容和哈希，并将结果写入 V3 渲染报告与控制面 GateEvaluation。
+- 后续：PR-13 物理删除旧 V1/V2 控制面、前端组件、运行入口及相关依赖。
+- 验证：`python -m unittest tests.test_v3_execution_controller tests.test_control_cli`（8 tests passed）；`npm run build` 与 `npm test` 通过。
+- 汇总验证：`python -m unittest discover -s tests -p "test_v3_*.py"`（34 tests passed）。
+
+## PR-13：删除 V1/V2 废弃逻辑
 
 - 状态：进行中
-- 内容：新增 `V3StageRunner`，串联来源规范化、台账、模型、契约、规划、写作、整合、质量与渲染；未知阶段显式失败。
-- 验证：`python -m unittest tests.test_v3_stage_runner`（1 test passed）。
-- 汇总验证：`python -m unittest discover -s tests -p "test_v3_*.py"`（28 tests passed）。
+- 已删除：V2 前端工作区视图、聊天、终稿编辑、问题单、材料清单、文件浏览、旧状态适配及相关前端测试；`frontend/src/api/index.js` 不再保留 V2 工作区 API 封装。
+- 安全修正：认证中间件现在从 `/api/v3/workspaces/{id}` 正确提取工作区 ID，并在所有 V3 工作区读写接口上执行同一 ACL 校验。
+- 公开服务面：所有 V1/V2 HTTP 路由已从 FastAPI 路由表移除，旧路径统一返回 `410 LEGACY_API_RETIRED` 并指向 `/api/v3/workspaces/`；物理实现和 Legacy Pipeline 正在继续收缩。
+- 隔离：V3 Web 入口不再导入旧 `graph.state_recorder`；V3 请求只使用 `V3ExecutionController`、V3 输入清单、V3 快照与控制库事件，旧 V2 Web 集成测试已删除。
+- Web 拆分：新增独立 `api.v3_app`，V3 服务启动命令已切换为 `python -m uvicorn api.v3_app:app --app-dir src --host 127.0.0.1 --port 7860`。
+- 物理收缩：历史 `web_app.py` 及其 V1/V2 Web 测试已删除，运行代码和测试直接使用 `api.v3_app`。
+- 数据清理：两个旧 V2 项目目录及其残留的 `workspace/chat.db` 已彻底删除。
+- 运行入口：已移除 `graph-run` 与 `agent-graph-run` 两个 LangGraph CLI 公共命令，主图、Supervisor 图、节点和路由实现均已物理删除，章节循环已改为直接函数流；项目不再依赖 LangGraph/LangChain Core。V3 工作区仅通过 CommandGateway 执行阶段或全流程。
+
+## 后续架构基线：Bid Master 与投标中间语言
+
+- 状态：详细计划已修订，尚未实施。
+- 核心分工：Agent 只产生 Proposal，Artifact 承载权威事实，Service 执行确定性动作，Gate 与 CAS Promotion 决定 Artifact 晋级。
+- 中间语言：`RequirementLedger → ScoreModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → EvidenceSnapshot → WriterInputBundle → ContentBlock`。
+- Agent：Bid Master 复用现有 CommandGateway/StageRunner；Requirement、Score、Planning、Writer、Integration 和 Quality Audit 均读取冻结快照，不直接修改 `control.db` 或 canonical Artifact。
+- Evidence：新增统一 EvidenceRepository；DeepSeek 继续只是显式 EvidenceNeed 的 Research Provider，附件上传仍需逐次选择和授权。
+- 规划门：正文前只增加一个 `PlanningConfirm`，统一确认项目摘要、异常要求、Topic/Duty、章节树和主责映射。
+- Writer 边界：ChapterBlueprint 是唯一结构和响应责任来源，Writer 的唯一调用参数是冻结的 `WriterInputBundle`。
+- 已知待修：现有 Integrator 不能再以共享 Requirement ID 作为删除 supporting 内容的依据；现有 QualityGate 需升级为独立只读 Audit 与最终语义门。
