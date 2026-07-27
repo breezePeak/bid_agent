@@ -24,6 +24,7 @@ class ProposalValidator:
         expected_dependency_fingerprint: str | None = None,
     ) -> ValidationReport:
         findings: list[ValidationFinding] = []
+        schema_valid = self._payload_is_valid(proposal, findings)
         try:
             self.registry.authorize_proposal(proposal.producer_role, proposal.artifact_kind)
             authority_policy_valid = True
@@ -42,12 +43,29 @@ class ProposalValidator:
             findings.append(ValidationFinding(code="DEPENDENCY_STALE", message="base_revision 或 dependency fingerprint 已失效。"))
         return ValidationReport(
             proposal_id=proposal.proposal_id,
-            schema_valid=True,
+            schema_valid=schema_valid,
             references_valid=references_valid,
             authority_policy_valid=authority_policy_valid,
             dependency_current=dependency_current,
             findings=findings,
         )
+
+    @staticmethod
+    def _payload_is_valid(proposal: ProposalEnvelope, findings: list[ValidationFinding]) -> bool:
+        """Validate artifact-specific payloads before a Gate can bind a proposal."""
+        try:
+            if proposal.artifact_kind == "RequirementLedger":
+                from .contracts import RequirementLedger
+
+                RequirementLedger.model_validate(proposal.payload)
+            elif proposal.artifact_kind == "ScoreModel":
+                from .contracts import ScoreModel
+
+                ScoreModel.model_validate(proposal.payload)
+        except ValueError as exc:
+            findings.append(ValidationFinding(code="PAYLOAD_SCHEMA_INVALID", message=str(exc)))
+            return False
+        return True
 
 
 class AgentProposalSandbox:

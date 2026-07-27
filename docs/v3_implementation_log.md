@@ -155,6 +155,14 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 门禁与幂等：反向覆盖审计在 G0 前阻断遗漏的 tender/amendment SourceBlock；相同冻结依赖重跑复用 active revision，不重复晋级。
 - 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr17_fix`（445 passed, 9 subtests）。
 
+## PR-18：Score Agent 与 ScoreModel
+
+- 状态：已完成
+- 内容：新增 `ScoreAgent`、`ScoreModel`、`ScoreGroup`、`ScorePoint`、评分档位、评分响应深度和证明需求候选契约；评分点只引用已晋级 `RequirementLedger` 的 ID，不复制为另一份采购义务。
+- 解析与门禁：从冻结评分 SourceBlock 提取评分组、分值、档位、资格/废标条件和证明类型；模型契约复核分组小计与总分。G0 现在对 `RequirementLedger` 与 `ScoreModel` payload 执行 Pydantic schema 校验；Score 审计进一步阻断虚构来源、未知或跨锚点 Requirement 引用、未绑定评分点和异常批量绑定。
+- 完整受控链路：新增 `analyze_scores` Stage，贯通 **ScoreAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**。相同冻结输入、Requirement revision 和依赖 fingerprint 重跑会复用 active promoted revision，不产生新 revision。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr18_final`（449 passed, 9 subtests）。
+
 
 
 ## 后续架构基线：Bid Master 与投标中间语言

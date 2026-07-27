@@ -17,6 +17,8 @@ from .renderers.standard_renderer import StandardRenderer
 from .renderers.template_renderer import StrictTemplateRenderer
 from .requirement_agent import RequirementAgent
 from .requirement_ledger import audit_reverse_coverage, load_promoted_requirement_ledger
+from .score_agent import ScoreAgent
+from .score_model import audit_score_model, load_promoted_score_model
 from .source_normalizer import SOURCE_INDEX_PATH, SourceNormalizer
 from .template_contract import TemplateContractCompiler
 from utils import read_json
@@ -96,6 +98,54 @@ class V3StageRunner:
             promotion_service.promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
 
             return load_promoted_requirement_ledger(self.context)
+
+        if stage == "analyze_scores":
+            from control_plane import ControlPlaneError, ControlStore
+            from .artifact_promotion import AgentProposalSandbox, ArtifactPromotionService, GateService, validate_and_record
+
+            requirement_ledger = load_promoted_requirement_ledger(self.context)
+            idx = read_json(self.context.root / SOURCE_INDEX_PATH)
+            blocks_raw = idx.get("blocks", []) if isinstance(idx, dict) else []
+            source_blocks = [SourceBlock.model_validate(block) for block in blocks_raw if isinstance(block, dict)]
+            source_hashes = idx.get("source_hashes") if isinstance(idx.get("source_hashes"), dict) else {}
+
+            store = ControlStore(self.context)
+            active_art = store.v3_active_artifact("ScoreModel")
+            base_rev = int(active_art["revision"]) if active_art is not None else 0
+            agent = ScoreAgent(self.context)
+            score_model = agent.build_score_model(
+                source_blocks,
+                requirement_ledger,
+                revision=base_rev + 1,
+                source_hashes=source_hashes,
+            )
+            score_audit = audit_score_model(score_model, requirement_ledger, source_blocks)
+            if not score_audit["passed"]:
+                raise ControlPlaneError("V3_SCORE_INTEGRITY_BLOCKED", f"ScoreModel 引用审计失败: {score_audit}", status_code=409)
+            op_id = operation_id or f"score:{requirement_ledger.revision}:{idx.get('revision', 0)}"
+            proposal = agent.create_score_model_proposal(
+                score_model,
+                base_revision=base_rev,
+                operation_id=op_id,
+                requirement_revision=requirement_ledger.revision,
+            )
+            if active_art is not None and active_art["dependency_fingerprint"] == proposal.dependency_fingerprint:
+                return load_promoted_score_model(self.context)
+
+            stored_proposal = AgentProposalSandbox(self.context, role="score_agent").submit(proposal)
+            proposal = proposal.model_copy(update={"proposal_id": stored_proposal["proposal_id"]})
+            report = validate_and_record(
+                self.context,
+                proposal,
+                expected_dependency_fingerprint=proposal.dependency_fingerprint,
+            )
+            if not report.passed:
+                raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ScoreModel Proposal 验证未通过: {report.findings}")
+            receipt = GateService(self.context).evaluate(proposal.proposal_id, gate_id="G1_SCORE_INTEGRITY")
+            if receipt.verdict != "pass":
+                raise ControlPlaneError("V3_GATE_BLOCKED", f"ScoreModel 门禁阻断: {receipt.findings}")
+            ArtifactPromotionService(self.context).promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            return load_promoted_score_model(self.context)
 
         if stage == "build_project_model":
             return ProjectModelBuilder(self.context).build()

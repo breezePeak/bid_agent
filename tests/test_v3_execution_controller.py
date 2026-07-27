@@ -53,7 +53,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
    self.assertIsNone(snapshot['document']['delivery'])
    self.assertEqual(snapshot['content_units'], [])
    stage_runs=ControlStore(context).stage_runs(str(receipt.operation_id))
-  self.assertEqual({item['stage_command'] for item in stage_runs},{'ingest_inputs','normalize_sources','compile_template_structure','build_requirement_ledger','build_project_model','sync_material_requirements','compile_document_contract','plan_document','execute_content_plan','integrate_document','verify_document','render_document','verify_delivery'})
+  self.assertEqual({item['stage_command'] for item in stage_runs},{'ingest_inputs','normalize_sources','compile_template_structure','build_requirement_ledger','analyze_scores','build_project_model','sync_material_requirements','compile_document_contract','plan_document','execute_content_plan','integrate_document','verify_document','render_document','verify_delivery'})
 
  def test_controller_rejects_unregistered_stage(self):
   with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
@@ -71,7 +71,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
     snapshot=v3_app.snapshot('alpha')
    payload=json.loads(snapshot.body)
    self.assertIsNone(payload['snapshot']['document']['delivery'])
-   self.assertEqual([item['artifact_kind'] for item in payload['snapshot']['promoted_artifacts']], ['RequirementLedger'])
+   self.assertEqual([item['artifact_kind'] for item in payload['snapshot']['promoted_artifacts']], ['RequirementLedger', 'ScoreModel'])
    with mock.patch.object(v3_app,'RUNS_DIR',runs):
     self.assertTrue(json.loads(v3_app.latest_gate('alpha').body)['ok'])
     self.assertTrue(json.loads(v3_app.evidence('alpha').body)['ok'])

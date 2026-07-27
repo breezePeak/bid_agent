@@ -111,3 +111,12 @@ class ExtractionProposalPayload(BaseModel):
     requirements: list[dict[str, Any]] = Field(default_factory=list)
     reconciled_conflicts: list[dict[str, Any]] = Field(default_factory=list)
     audit_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class ScoreModelProposalPayload(BaseModel):
+    """Payload schema for a candidate ScoreModel proposal."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    score_model: dict[str, Any]
+    audit_summary: dict[str, Any] = Field(default_factory=dict)

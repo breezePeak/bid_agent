@@ -168,6 +168,108 @@ class RequirementLedger(ContractModel):
         return self
 
 
+class ScoreGroup(BaseModel):
+    """A named scoring section; points remain the source of scoring truth."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    group_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    declared_points: float | None = Field(default=None, ge=0)
+
+
+class ScoringLevel(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    label: str = Field(min_length=1)
+    points: float | None = Field(default=None, ge=0)
+    criterion: str = Field(min_length=1)
+
+
+class ScorePoint(BaseModel):
+    """One source-traceable scoring rule, linked to rather than copied from requirements."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    score_point_id: str = Field(min_length=1)
+    group_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    criterion: str = Field(min_length=1)
+    max_points: float | None = Field(default=None, ge=0)
+    scoring_levels: list[ScoringLevel] = Field(default_factory=list)
+    disqualifying: bool = False
+    response_expectation: str = Field(min_length=1)
+    response_depth: Literal["basic", "substantive", "detailed"] = "basic"
+    required_evidence_types: list[str] = Field(default_factory=list)
+    linked_requirement_ids: list[str] = Field(default_factory=list)
+    source_anchors: list[SourceAnchor] = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+    @model_validator(mode="after")
+    def score_point_references_are_unique(self) -> "ScorePoint":
+        if len(self.linked_requirement_ids) != len(set(self.linked_requirement_ids)):
+            raise ValueError("ScorePoint 不允许重复 linked_requirement_ids")
+        anchor_ids = [(anchor.source_input_id, anchor.chunk_id) for anchor in self.source_anchors]
+        if len(anchor_ids) != len(set(anchor_ids)):
+            raise ValueError("ScorePoint 不允许重复 source_anchors")
+        return self
+
+
+class ScoreEvidenceNeedCandidate(BaseModel):
+    """A non-canonical evidence gap proposed by Score Agent for later planning."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    need_id: str = Field(min_length=1)
+    score_point_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    required_evidence_types: list[str] = Field(default_factory=list)
+    priority: Literal["blocking", "high", "normal"] = "normal"
+
+
+class ScoreModel(ContractModel):
+    model_id: str = Field(min_length=1)
+    source_input_ids: list[str] = Field(default_factory=list)
+    total_points: float = Field(ge=0)
+    groups: list[ScoreGroup] = Field(default_factory=list)
+    points: list[ScorePoint] = Field(default_factory=list)
+    evidence_need_candidates: list[ScoreEvidenceNeedCandidate] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def score_totals_and_references_are_consistent(self) -> "ScoreModel":
+        if not self.model_id.strip() or any(not source_id.strip() for source_id in self.source_input_ids):
+            raise ValueError("ScoreModel model_id 与 source_input_ids 不能为空")
+        if len(self.source_input_ids) != len(set(self.source_input_ids)):
+            raise ValueError("ScoreModel 不允许重复 source_input_ids")
+        group_ids = [group.group_id for group in self.groups]
+        point_ids = [point.score_point_id for point in self.points]
+        if len(group_ids) != len(set(group_ids)) or len(point_ids) != len(set(point_ids)):
+            raise ValueError("ScoreModel 不允许重复 group_id 或 score_point_id")
+        if unknown := {point.group_id for point in self.points} - set(group_ids):
+            raise ValueError(f"ScorePoint 指向未知评分组: {sorted(unknown)}")
+        if unknown := {
+            anchor.source_input_id
+            for point in self.points
+            for anchor in point.source_anchors
+        } - set(self.source_input_ids):
+            raise ValueError(f"ScorePoint 指向未知评分输入: {sorted(unknown)}")
+        scored_points = [point.max_points for point in self.points if point.max_points is not None]
+        if len(scored_points) == len(self.points) and abs(sum(scored_points) - self.total_points) > 1e-6:
+            raise ValueError("ScoreModel total_points 与 ScorePoint 分值合计不一致")
+        for group in self.groups:
+            points = [point.max_points for point in self.points if point.group_id == group.group_id]
+            if group.declared_points is not None and points and all(point is not None for point in points):
+                if abs(sum(point for point in points if point is not None) - group.declared_points) > 1e-6:
+                    raise ValueError(f"ScoreGroup {group.group_id} 小计与 ScorePoint 分值不一致")
+        candidate_ids = [candidate.need_id for candidate in self.evidence_need_candidates]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("ScoreModel 不允许重复 EvidenceNeed 候选 ID")
+        if unknown := {candidate.score_point_id for candidate in self.evidence_need_candidates} - set(point_ids):
+            raise ValueError(f"EvidenceNeed 候选指向未知 ScorePoint: {sorted(unknown)}")
+        return self
+
+
 class ProjectFact(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
