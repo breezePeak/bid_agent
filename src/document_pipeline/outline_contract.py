@@ -7,7 +7,7 @@ from utils import read_json
 
 from .contracts import ContractNode, OutlineContract, ProjectModel, RequirementKind, RequirementLedger
 from .project_model import PROJECT_MODEL_PATH
-from .requirement_ledger import LEDGER_PATH
+from .requirement_ledger import load_promoted_requirement_ledger
 
 
 class OutlineContractCompiler:
@@ -18,7 +18,7 @@ class OutlineContractCompiler:
         self.root = context.root
 
     def compile(self) -> OutlineContract:
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
         project = ProjectModel.model_validate(read_json(self.root / PROJECT_MODEL_PATH))
         groups: dict[RequirementKind, list[str]] = defaultdict(list)
         for item in ledger.requirements:

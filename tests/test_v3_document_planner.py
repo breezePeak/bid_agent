@@ -15,7 +15,7 @@ from document_pipeline.document_contract import DocumentContractCompiler  # noqa
 from document_pipeline.document_planner import DocumentPlanner  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.project_model import ProjectModelBuilder  # noqa: E402
-from document_pipeline.requirement_ledger import RequirementLedgerBuilder  # noqa: E402
+from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 from document_pipeline.source_normalizer import SourceNormalizer  # noqa: E402
 
 
@@ -34,7 +34,7 @@ class V3DocumentPlannerTests(unittest.TestCase):
             inputs.register_local_file(tender, InputRole.TENDER)
             inputs.register_local_file(score, InputRole.SCORE)
             SourceNormalizer(context).normalize_active_inputs()
-            ledger = RequirementLedgerBuilder(context).build()
+            ledger = V3StageRunner(context).run("build_requirement_ledger")
             ProjectModelBuilder(context).build()
             contract = DocumentContractCompiler(context).compile()
             plan, units = DocumentPlanner(context).build()

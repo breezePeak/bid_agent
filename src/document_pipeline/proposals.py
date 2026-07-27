@@ -101,3 +101,13 @@ def dependency_fingerprint(*parts: Any) -> str:
     """Stable fingerprint for frozen upstream revisions, prompts and model config."""
     encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+class ExtractionProposalPayload(BaseModel):
+    """Payload schema for candidate RequirementLedger extraction proposals."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    requirements: list[dict[str, Any]] = Field(default_factory=list)
+    reconciled_conflicts: list[dict[str, Any]] = Field(default_factory=list)
+    audit_summary: dict[str, Any] = Field(default_factory=dict)

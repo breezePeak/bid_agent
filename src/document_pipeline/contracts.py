@@ -145,10 +145,20 @@ class RequirementItem(BaseModel):
     response_type: str = Field(min_length=1)
     evidence_policy: str = Field(min_length=1)
     status: Literal["open", "confirmed", "blocked", "waived"] = "open"
+    clause_id: str | None = None
+    parent_clause_id: str | None = None
+    subject: str | None = None
+    action: str | None = None
+    target_object: str | None = None
+    conditions: list[str] = Field(default_factory=list)
+    exceptions: list[str] = Field(default_factory=list)
+    quantitative_metrics: dict[str, Any] = Field(default_factory=dict)
+    superseded_by_input_id: str | None = None
 
 
 class RequirementLedger(ContractModel):
     requirements: list[RequirementItem] = Field(default_factory=list)
+    coverage_audit: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def unique_requirement_ids(self) -> "RequirementLedger":

@@ -145,9 +145,21 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - H1 / 权限：本次不改变 H1 PlanningConfirm；所有来源与模板工作由确定性 Service 完成，不新增 Agent 或 Artifact 写权限。
 - 验证：`python -m ruff check src tests`；PR-16 定向回归 17 passed。
 
+## PR-17：Requirement Agent 与 RequirementLedger
+
+- 状态：已完成
+- 内容：新增 `RequirementAgent` 及其 Prompt 契约，支持从只读 `SourceIndex` 分批抽取带结构化语义属性（主体、动作、对象、条件、例外、量化指标）的条款，并完整继承保留父子条款关联（`clause_id`, `parent_clause_id`）。
+- 契约对齐：Proposal `artifact_kind` 已统一对齐为 `RequirementLedger`（与 `CapabilityRegistry` 授权规范一致）。
+- 补遗与消解：按 `amendment` 输入的 `issued_at` 签发时间与 `version` 正序演进，精准判定补遗覆盖并记录 `superseded_by_input_id`。
+- 完整受控链路：重构 `stage_runner.py` 的 `analyze_requirements` / `build_requirement_ledger` 阶段，贯通 **RequirementAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**；运行时下游只读取 active promoted revision，已删除旧 Ledger 直写路径。
+- 门禁与幂等：反向覆盖审计在 G0 前阻断遗漏的 tender/amendment SourceBlock；相同冻结依赖重跑复用 active revision，不重复晋级。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr17_fix`（445 passed, 9 subtests）。
+
+
+
 ## 后续架构基线：Bid Master 与投标中间语言
 
-- 状态：PR-14 至 PR-16 已完成；后续按 PR-17 继续。
+- 状态：PR-14 至 PR-17 已完成；后续按 PR-18 继续。
 - 核心分工：Agent 只产生 Proposal，Artifact 承载权威事实，Service 执行确定性动作，Gate 与 CAS Promotion 决定 Artifact 晋级。
 - 中间语言：`RequirementLedger → ScoreModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → EvidenceSnapshot → WriterInputBundle → ContentBlock`。
 - Agent：Bid Master 复用现有 CommandGateway/StageRunner；Requirement、Score、Planning、Writer、Integration 和 Quality Audit 均读取冻结快照，不直接修改 `control.db` 或 canonical Artifact。

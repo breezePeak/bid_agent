@@ -11,7 +11,7 @@ from utils import read_json
 
 from .contracts import ContractNode, InputItem, RequirementLedger, TemplateContract, TemplateSlot, TemplateStructureContract
 from .input_manifest import V3_ROOT
-from .requirement_ledger import LEDGER_PATH
+from .requirement_ledger import load_promoted_requirement_ledger
 
 
 _PLACEHOLDER = re.compile(r"\{\{([^{}]+)\}\}|【([^】]+)】|\[([^\[\]]+)\]")
@@ -27,7 +27,7 @@ class TemplateContractCompiler:
         self.root = context.root
 
     def compile(self, template: InputItem) -> TemplateContract:
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
         structure = self.compile_structure(template)
         blocking_gaps = self._coverage_gaps(structure.nodes, ledger)
         return TemplateContract(

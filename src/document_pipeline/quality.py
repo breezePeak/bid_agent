@@ -9,7 +9,7 @@ from utils import read_json, write_json
 from .contracts import IntegratedDocument, QualityReport, RequirementLedger
 from .input_manifest import V3_ROOT
 from .integrator import INTEGRATED_DOCUMENT_PATH
-from .requirement_ledger import LEDGER_PATH
+from .requirement_ledger import load_promoted_requirement_ledger
 
 
 FINAL_COVERAGE_PATH = V3_ROOT / "reports" / "final_coverage.json"
@@ -25,7 +25,7 @@ class QualityGate:
         self.store = ControlStore(context)
 
     def verify(self) -> QualityReport:
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
         document = IntegratedDocument.model_validate(read_json(self.root / INTEGRATED_DOCUMENT_PATH))
         covered = {requirement_id for block in document.blocks for requirement_id in block.requirement_ids}
         findings: list[dict[str, object]] = []

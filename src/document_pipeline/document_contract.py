@@ -9,7 +9,6 @@ from .contracts import DocumentContract, DOCUMENT_CONTRACT_ADAPTER, InputRole
 from .input_manifest import InputManifestService, V3_ROOT
 from .outline_contract import OutlineContractCompiler
 from .project_model import PROJECT_MODEL_PATH
-from .requirement_ledger import LEDGER_PATH
 from .template_contract import TemplateContractCompiler
 
 

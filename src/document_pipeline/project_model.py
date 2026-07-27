@@ -8,7 +8,7 @@ from utils import read_json, write_json
 
 from .contracts import EvidenceNeed, ProjectFact, ProjectModel, RequirementKind, RequirementLedger, SourceAnchor
 from .input_manifest import V3_ROOT
-from .requirement_ledger import LEDGER_PATH
+from .requirement_ledger import load_promoted_requirement_ledger
 from .source_normalizer import SOURCE_INDEX_PATH
 
 
@@ -24,7 +24,7 @@ class ProjectModelBuilder:
         self.root = context.root
 
     def build(self) -> ProjectModel:
-        ledger = RequirementLedger.model_validate(read_json(self.root / LEDGER_PATH))
+        ledger = load_promoted_requirement_ledger(self.context)
         index = read_json(self.root / SOURCE_INDEX_PATH)
         roles = index.get("by_role") if isinstance(index, dict) and isinstance(index.get("by_role"), dict) else {}
         tender_chunks = roles.get("tender", []) if isinstance(roles.get("tender", []), list) else []
