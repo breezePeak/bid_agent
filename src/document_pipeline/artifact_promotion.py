@@ -62,6 +62,14 @@ class ProposalValidator:
                 from .contracts import ScoreModel
 
                 ScoreModel.model_validate(proposal.payload)
+            elif proposal.artifact_kind == "ProjectModel":
+                from .contracts import ProjectModel
+
+                ProjectModel.model_validate(proposal.payload)
+            elif proposal.artifact_kind == "ResponseTopicGraph":
+                from .contracts import ResponseTopicGraph
+
+                ResponseTopicGraph.model_validate(proposal.payload)
         except ValueError as exc:
             findings.append(ValidationFinding(code="PAYLOAD_SCHEMA_INVALID", message=str(exc)))
             return False

@@ -15,7 +15,6 @@ from control_plane import WorkspaceContext  # noqa: E402
 from document_pipeline.contracts import DocumentMode, InputRole, OutlineContract, TemplateContract  # noqa: E402
 from document_pipeline.document_contract import DocumentContractCompiler  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService  # noqa: E402
-from document_pipeline.project_model import ProjectModelBuilder  # noqa: E402
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 from document_pipeline.source_normalizer import SourceNormalizer  # noqa: E402
 
@@ -45,8 +44,10 @@ class V3DocumentContractTests(unittest.TestCase):
             document.save(docx)
             inputs.register_local_file(docx, InputRole.TEMPLATE)
         SourceNormalizer(context).normalize_active_inputs()
-        V3StageRunner(context).run("build_requirement_ledger")
-        ProjectModelBuilder(context).build()
+        runner = V3StageRunner(context)
+        runner.run("build_requirement_ledger")
+        runner.run("analyze_scores")
+        runner.run("plan_response")
         return context
 
     def test_template_mode_preserves_template_titles_and_discovers_slots(self) -> None:

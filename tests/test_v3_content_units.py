@@ -16,7 +16,6 @@ from document_pipeline.contracts import InputRole  # noqa: E402
 from document_pipeline.document_contract import DocumentContractCompiler  # noqa: E402
 from document_pipeline.document_planner import DocumentPlanner  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService  # noqa: E402
-from document_pipeline.project_model import ProjectModelBuilder  # noqa: E402
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 from document_pipeline.source_normalizer import SourceNormalizer  # noqa: E402
 
@@ -36,8 +35,10 @@ class V3ContentUnitTests(unittest.TestCase):
             inputs.register_local_file(tender, InputRole.TENDER)
             inputs.register_local_file(score, InputRole.SCORE)
             SourceNormalizer(context).normalize_active_inputs()
-            V3StageRunner(context).run("build_requirement_ledger")
-            ProjectModelBuilder(context).build()
+            runner = V3StageRunner(context)
+            runner.run("build_requirement_ledger")
+            runner.run("analyze_scores")
+            runner.run("plan_response")
             contract = DocumentContractCompiler(context).compile()
             _, units = DocumentPlanner(context).build()
             scheduler = ContentUnitScheduler(context)

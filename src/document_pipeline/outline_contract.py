@@ -3,10 +3,8 @@ from __future__ import annotations
 from collections import defaultdict
 
 from control_plane import WorkspaceContext
-from utils import read_json
-
-from .contracts import ContractNode, OutlineContract, ProjectModel, RequirementKind, RequirementLedger
-from .project_model import PROJECT_MODEL_PATH
+from .contracts import ContractNode, OutlineContract, RequirementKind
+from .project_model import load_promoted_project_model
 from .requirement_ledger import load_promoted_requirement_ledger
 
 
@@ -19,7 +17,7 @@ class OutlineContractCompiler:
 
     def compile(self) -> OutlineContract:
         ledger = load_promoted_requirement_ledger(self.context)
-        project = ProjectModel.model_validate(read_json(self.root / PROJECT_MODEL_PATH))
+        project = load_promoted_project_model(self.context)
         groups: dict[RequirementKind, list[str]] = defaultdict(list)
         for item in ledger.requirements:
             groups[item.kind].append(item.requirement_id)

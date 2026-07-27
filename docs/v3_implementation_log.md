@@ -163,6 +163,15 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 完整受控链路：新增 `analyze_scores` Stage，贯通 **ScoreAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**。相同冻结输入、Requirement revision 和依赖 fingerprint 重跑会复用 active promoted revision，不产生新 revision。
 - 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr18_final`（449 passed, 9 subtests）。
 
+## PR-19：Planning Agent、ProjectModel 与 ResponseTopicGraph
+
+- 状态：已完成
+- 受控投影：ProjectModel 不再写入 `workspace/v3/project_model.json`；它只能由 Planning Agent 从已晋级的 RequirementLedger、ScoreModel 与冻结 SourceIndex 生成 Proposal，并通过 G0/G1/CAS 晋级。材料、目录和 ResearchService 均改为读取 active promoted revision。
+- 响应语义层：新增 ResponseTopicGraph、ResponseTopic、ResponseDuty 和 TopicEdge 契约；confirmed Topic 强制携带来源 Anchor 或上游引用，所有 Topic/Duty/Edge 引用均做完整性校验，`depends_on` 执行边循环会在 Schema 校验时阻断。
+- 映射边界：每个 Requirement 和 ScorePoint 先映射到 Duty；blocking Requirement、废标型 ScorePoint 均有可追溯的响应 Duty。评分证明候选由 ScoreModel 投影为 EvidenceNeed，Feature/BusinessFlow 未被引入为并列权威模型。
+- 执行链：新增 `plan_response`（兼容旧 `build_project_model` Runner 别名），同一 Planning Agent 连续晋级 ProjectModel 与 ResponseTopicGraph；相同冻结依赖重跑复用两个 active revision。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr19_final`（451 passed, 9 subtests）。
+
 
 
 ## 后续架构基线：Bid Master 与投标中间语言

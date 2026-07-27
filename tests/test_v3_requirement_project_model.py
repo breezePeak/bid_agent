@@ -12,7 +12,6 @@ sys.path.insert(0, str(ROOT / "src"))
 from control_plane import WorkspaceContext  # noqa: E402
 from document_pipeline.contracts import InputRole, RequirementKind  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService  # noqa: E402
-from document_pipeline.project_model import ProjectModelBuilder  # noqa: E402
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 from document_pipeline.source_normalizer import SourceNormalizer  # noqa: E402
 
@@ -54,9 +53,10 @@ class V3RequirementProjectModelTests(unittest.TestCase):
     def test_project_model_can_form_tender_skeleton_without_external_research(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._prepare(Path(tmp), with_company=False)
-            V3StageRunner(context).run("build_requirement_ledger")
-            model = ProjectModelBuilder(context).build()
-            report = ProjectModelBuilder.evaluate(model)
+            runner = V3StageRunner(context)
+            runner.run("build_requirement_ledger")
+            runner.run("analyze_scores")
+            model = runner.run("plan_response")
             self.assertTrue(model.goals)
             self.assertTrue(model.scope)
             self.assertTrue(model.deliverables)
@@ -64,13 +64,14 @@ class V3RequirementProjectModelTests(unittest.TestCase):
             self.assertTrue(model.milestones)
             self.assertEqual(model.confirmed_facts, [])
             self.assertIn("EN-company-qualification", [need.need_id for need in model.evidence_needs])
-            self.assertEqual(report["status"], "passed")
 
     def test_external_reference_never_becomes_company_fact(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._prepare(Path(tmp), with_company=True)
-            V3StageRunner(context).run("build_requirement_ledger")
-            model = ProjectModelBuilder(context).build()
+            runner = V3StageRunner(context)
+            runner.run("build_requirement_ledger")
+            runner.run("analyze_scores")
+            model = runner.run("plan_response")
             facts = [fact.statement for fact in model.confirmed_facts]
             self.assertEqual(facts, ["本企业已提供有效资质证书。"])
             self.assertFalse(any("外部案例" in fact for fact in facts))

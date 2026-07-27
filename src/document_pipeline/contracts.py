@@ -355,6 +355,7 @@ class ProjectModel(ContractModel):
     conflicts: list[ProjectFact] = Field(default_factory=list)
     unknowns: list[str] = Field(default_factory=list)
     requirement_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
     evidence_needs: list[EvidenceNeed] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -363,6 +364,109 @@ class ProjectModel(ContractModel):
         need_ids = [need.need_id for need in self.evidence_needs]
         if len(fact_ids) != len(set(fact_ids)) or len(need_ids) != len(set(need_ids)):
             raise ValueError("ProjectModel 不允许重复事实或 EvidenceNeed ID")
+        return self
+
+
+TopicType = Literal[
+    "business_domain", "business_flow", "business_capability", "function", "architecture", "data", "integration",
+    "security", "non_functional", "implementation", "project_management", "service_operation", "training",
+    "deliverable", "acceptance", "qualification", "commercial", "compliance",
+]
+DutyType = Literal["summarize", "explain", "design", "implement", "operate", "verify", "accept", "commit", "cross_reference"]
+TopicRelation = Literal["parent_of", "depends_on", "realizes", "constrained_by", "step_of", "produces", "consumes", "interfaces_with", "verified_by", "supports_score"]
+
+
+class ResponseTopic(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    topic_id: str = Field(min_length=1)
+    parent_topic_id: str | None = None
+    topic_type: TopicType
+    canonical_name: str = Field(min_length=1)
+    intent: str = Field(min_length=1)
+    summary: str = Field(min_length=1)
+    aliases: list[str] = Field(default_factory=list)
+    attributes: dict[str, Any] = Field(default_factory=dict)
+    source_anchors: list[SourceAnchor] = Field(default_factory=list)
+    confidence: float = Field(ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+
+class ResponseDuty(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    duty_id: str = Field(min_length=1)
+    topic_id: str = Field(min_length=1)
+    duty_type: DutyType
+    requirement_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
+    response_expectations: list[str] = Field(default_factory=list)
+    evidence_need_ids: list[str] = Field(default_factory=list)
+    priority: Literal["blocking", "high", "normal", "low"] = "normal"
+    confidence: float = Field(ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+
+class TopicEdge(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    edge_id: str = Field(min_length=1)
+    source_topic_id: str = Field(min_length=1)
+    target_topic_id: str = Field(min_length=1)
+    relation: TopicRelation
+    order: int = Field(ge=0)
+    requirement_ids: list[str] = Field(default_factory=list)
+    rationale: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+
+
+class ResponseTopicGraph(ContractModel):
+    graph_id: str = Field(min_length=1)
+    requirement_ledger_revision: int = Field(ge=1)
+    score_model_revision: int = Field(ge=1)
+    project_model_revision: int = Field(ge=1)
+    root_topic_ids: list[str] = Field(default_factory=list)
+    topics: list[ResponseTopic] = Field(default_factory=list)
+    duties: list[ResponseDuty] = Field(default_factory=list)
+    edges: list[TopicEdge] = Field(default_factory=list)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+    @model_validator(mode="after")
+    def graph_references_are_complete_and_dependencies_acyclic(self) -> "ResponseTopicGraph":
+        topic_ids = [topic.topic_id for topic in self.topics]
+        duty_ids = [duty.duty_id for duty in self.duties]
+        edge_ids = [edge.edge_id for edge in self.edges]
+        if any(len(values) != len(set(values)) for values in (topic_ids, duty_ids, edge_ids)):
+            raise ValueError("ResponseTopicGraph 不允许重复 Topic、Duty 或 Edge ID")
+        known_topics = set(topic_ids)
+        if unknown := set(self.root_topic_ids) - known_topics:
+            raise ValueError(f"ResponseTopicGraph 存在悬空根 Topic: {sorted(unknown)}")
+        if unknown := {topic.parent_topic_id for topic in self.topics if topic.parent_topic_id} - known_topics:
+            raise ValueError(f"ResponseTopicGraph 存在悬空父 Topic: {sorted(unknown)}")
+        if unknown := {duty.topic_id for duty in self.duties} - known_topics:
+            raise ValueError(f"ResponseDuty 指向未知 Topic: {sorted(unknown)}")
+        for topic in self.topics:
+            if topic.review_status == "confirmed" and not (topic.source_anchors or topic.attributes.get("upstream_refs")):
+                raise ValueError(f"已确认 Topic 缺少来源或上游引用: {topic.topic_id}")
+        dependencies: dict[str, set[str]] = {topic_id: set() for topic_id in known_topics}
+        for edge in self.edges:
+            if edge.source_topic_id not in known_topics or edge.target_topic_id not in known_topics:
+                raise ValueError(f"TopicEdge 指向未知 Topic: {edge.edge_id}")
+            if edge.relation == "depends_on":
+                dependencies[edge.source_topic_id].add(edge.target_topic_id)
+        visiting: set[str] = set()
+        visited: set[str] = set()
+        def visit(topic_id: str) -> None:
+            if topic_id in visiting:
+                raise ValueError("ResponseTopicGraph 执行依赖存在环")
+            if topic_id not in visited:
+                visiting.add(topic_id)
+                for downstream in dependencies[topic_id]:
+                    visit(downstream)
+                visiting.remove(topic_id)
+                visited.add(topic_id)
+        for topic_id in known_topics:
+            visit(topic_id)
         return self
 
 

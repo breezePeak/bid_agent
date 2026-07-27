@@ -10,7 +10,8 @@ from .document_planner import DocumentPlanner
 from .integrator import DocumentIntegrator
 from .input_manifest import InputManifestService
 from .material_sync import MaterialRequirementsSynchronizer
-from .project_model import ProjectModelBuilder
+from .planning_agent import PlanningAgent
+from .project_model import load_promoted_project_model
 from .quality import CONTENT_QUALITY_PATH, QualityGate
 from .renderers.render_verifier import DeliveryVerifier
 from .renderers.standard_renderer import StandardRenderer
@@ -19,6 +20,7 @@ from .requirement_agent import RequirementAgent
 from .requirement_ledger import audit_reverse_coverage, load_promoted_requirement_ledger
 from .score_agent import ScoreAgent
 from .score_model import audit_score_model, load_promoted_score_model
+from .topic_graph import load_promoted_topic_graph
 from .source_normalizer import SOURCE_INDEX_PATH, SourceNormalizer
 from .template_contract import TemplateContractCompiler
 from utils import read_json
@@ -147,8 +149,48 @@ class V3StageRunner:
             ArtifactPromotionService(self.context).promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
             return load_promoted_score_model(self.context)
 
-        if stage == "build_project_model":
-            return ProjectModelBuilder(self.context).build()
+        if stage in ("plan_response", "build_project_model"):
+            from control_plane import ControlPlaneError, ControlStore
+            from .artifact_promotion import AgentProposalSandbox, ArtifactPromotionService, GateService, validate_and_record
+
+            ledger = load_promoted_requirement_ledger(self.context)
+            scores = load_promoted_score_model(self.context)
+            idx = read_json(self.context.root / SOURCE_INDEX_PATH)
+            source_blocks = [SourceBlock.model_validate(block) for block in idx.get("blocks", []) if isinstance(block, dict)] if isinstance(idx, dict) else []
+            store = ControlStore(self.context)
+            agent = PlanningAgent(self.context)
+            active_project = store.v3_active_artifact("ProjectModel")
+            project_base = int(active_project["revision"]) if active_project is not None else 0
+            project = agent.project_model(ledger, scores, source_blocks, revision=project_base + 1)
+            project_proposal = agent.proposal("ProjectModel", project, base_revision=project_base, operation_id=operation_id or f"planning-project:{ledger.revision}:{scores.revision}", upstream_revisions=(ledger.revision, scores.revision))
+            if active_project is None or active_project["dependency_fingerprint"] != project_proposal.dependency_fingerprint:
+                stored = AgentProposalSandbox(self.context, role="planning_agent").submit(project_proposal)
+                project_proposal = project_proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
+                report = validate_and_record(self.context, project_proposal, expected_dependency_fingerprint=project_proposal.dependency_fingerprint)
+                if not report.passed:
+                    raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ProjectModel Proposal 验证未通过: {report.findings}")
+                receipt = GateService(self.context).evaluate(project_proposal.proposal_id, gate_id="G1_PROJECT_MODEL_INTEGRITY")
+                if receipt.verdict != "pass":
+                    raise ControlPlaneError("V3_GATE_BLOCKED", f"ProjectModel 门禁阻断: {receipt.findings}")
+                ArtifactPromotionService(self.context).promote(project_proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            project = load_promoted_project_model(self.context)
+
+            active_graph = store.v3_active_artifact("ResponseTopicGraph")
+            graph_base = int(active_graph["revision"]) if active_graph is not None else 0
+            graph = agent.topic_graph(ledger, scores, project, revision=graph_base + 1)
+            graph_proposal = agent.proposal("ResponseTopicGraph", graph, base_revision=graph_base, operation_id=operation_id or f"planning-graph:{ledger.revision}:{scores.revision}:{project.revision}", upstream_revisions=(ledger.revision, scores.revision, project.revision))
+            if active_graph is None or active_graph["dependency_fingerprint"] != graph_proposal.dependency_fingerprint:
+                stored = AgentProposalSandbox(self.context, role="planning_agent").submit(graph_proposal)
+                graph_proposal = graph_proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
+                report = validate_and_record(self.context, graph_proposal, expected_dependency_fingerprint=graph_proposal.dependency_fingerprint)
+                if not report.passed:
+                    raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ResponseTopicGraph Proposal 验证未通过: {report.findings}")
+                receipt = GateService(self.context).evaluate(graph_proposal.proposal_id, gate_id="G1_TOPIC_GRAPH_INTEGRITY")
+                if receipt.verdict != "pass":
+                    raise ControlPlaneError("V3_GATE_BLOCKED", f"ResponseTopicGraph 门禁阻断: {receipt.findings}")
+                ArtifactPromotionService(self.context).promote(graph_proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            load_promoted_topic_graph(self.context)
+            return project
         if stage == "sync_material_requirements":
             return MaterialRequirementsSynchronizer(self.context).sync()
         if stage == "compile_document_contract":

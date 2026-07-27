@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from control_plane import WorkspaceContext
-from utils import read_json, write_json
+from utils import write_json
 
-from .contracts import InputRole, ProjectModel, RequirementKind, RequirementLedger
+from .contracts import InputRole, RequirementKind
 from .input_manifest import InputManifestService, V3_ROOT
-from .project_model import PROJECT_MODEL_PATH
+from .project_model import load_promoted_project_model
 from .requirement_ledger import load_promoted_requirement_ledger
 
 
@@ -23,7 +23,7 @@ class MaterialRequirementsSynchronizer:
 
     def sync(self) -> dict[str, object]:
         ledger = load_promoted_requirement_ledger(self.context)
-        model = ProjectModel.model_validate(read_json(self.root / PROJECT_MODEL_PATH))
+        model = load_promoted_project_model(self.context)
         manifest = InputManifestService(self.context).load()
         company_supplied = any(item.active and item.role is InputRole.COMPANY for item in manifest.inputs)
 

@@ -14,7 +14,7 @@ V3_PIPELINE_STAGES = (
     "compile_template_structure",
     "build_requirement_ledger",
     "analyze_scores",
-    "build_project_model",
+    "plan_response",
     "sync_material_requirements",
     "compile_document_contract",
     "plan_document",
