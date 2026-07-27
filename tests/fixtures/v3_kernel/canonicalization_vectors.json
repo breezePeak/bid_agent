@@ -1,0 +1,38 @@
+{
+  "canonicalization_version": "v3-canon-1",
+  "vectors": [
+    {
+      "name": "empty_object",
+      "input": {},
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "sorted_keys",
+      "input": {
+        "b": 1,
+        "a": 2
+      },
+      "sha256": "d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772"
+    },
+    {
+      "name": "nested",
+      "input": {
+        "x": {
+          "y": [
+            1,
+            2
+          ],
+          "z": true
+        }
+      },
+      "sha256": "f7584beb63f21f50fdb1fd233cd42c82d92af8c7a5642f1eba5dff3f1d768339"
+    },
+    {
+      "name": "unicode",
+      "input": {
+        "msg": "投标文件"
+      },
+      "sha256": "8c7c273c6a8d40e8254d210e92e7184425c6cf3168464cffd9607ba6ef6b4317"
+    }
+  ]
+}

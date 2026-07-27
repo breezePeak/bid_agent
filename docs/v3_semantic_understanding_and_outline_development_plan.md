@@ -1,9 +1,9 @@
 # V3 Bid Master Agent 与投标中间语言详细开发计划
 
-> 状态：V3 主架构基线已冻结，待 PR-14
+> 状态：PR-14～PR-20 已形成工程骨架但尚未通过 M0/M1 收口验收，PR-21 暂停
 > 日期：2026-07-27
-> 适用基线：V3 PR-13 收尾后的唯一执行链
-> 上位方案：[v3_development_plan.md](./v3_development_plan.md)
+> 审计基线：`45c7715 feat(v3): require planning confirmation before writing`
+> 历史 PR-0～PR-13 方案：[v3_development_plan.md](./v3_development_plan.md)
 > 当前逻辑：[current_logic_flow_v3.md](./current_logic_flow_v3.md)
 > 实施记录：[v3_implementation_log.md](./v3_implementation_log.md)
 
@@ -63,6 +63,48 @@ Phase 4：Integration + Audit
 
 不得先投入复杂 Writer、自由 Agent 编排或 Skill，再补中间语义层。
 
+### 1.1 当前实施审计与纠偏结论
+
+2026-07-27 对 PR-14～PR-20 的代码、测试、调用链和计划验收项进行复核后，必须区分三个状态：
+
+1. **Implemented**：类、Schema、Stage 或测试夹具已经存在。
+2. **Integrated**：唯一运行入口真实消费该实现，上下游权威关系已接通。
+3. **Accepted**：安全负向测试、Golden 阈值、人工验收和迁移门全部通过。
+
+只有第三种状态才能在实施日志中写“已完成”。构造样本单元测试通过不能替代真实标书语义验收。
+
+当前准确状态为：
+
+| PR | 当前状态 | 阻断原因 |
+|---|---|---|
+| PR-14 | 原则和部分契约已实现，验收重开 | Golden、ADR、评测基线和部分领域 Schema 尚未建立 |
+| PR-15 | 事务晋级骨架已实现，P0 阻断 | Validation 未强绑定被持久化的 exact Proposal 内容；Gate、引用和依赖策略仍需收口 |
+| PR-16 | 基础结构恢复已实现，验收重开 | InputManifest/SourceIndex/TemplateStructureContract 尚未统一成为 canonical Artifact；普通 JSON 直写与 PDF/DOCX 结构保真仍需收口 |
+| PR-17 | 受控 Requirement 骨架已实现，未验收 | 规则抽取、补遗、遗漏审计和真实召回率未达到 Golden 证明 |
+| PR-18 | 受控 Score 骨架已实现，未验收 | 复杂评分表、档位、总分和跨来源绑定没有真实准确率证据 |
+| PR-19 | Topic/Duty 契约和晋级链已实现，未验收 | 当前仍接近“一 Requirement/Score 一个根 Topic”，领域聚合和多上下文 Duty 未形成 |
+| PR-20 | 进行中，P0 阻断 | H1 可被流水线自动代签；Blueprint 尚未成为下游唯一结构权威 |
+
+当前实际链路是：
+
+```text
+文件态 InputManifest / SourceIndex
+→ promoted RequirementLedger
+→ promoted ScoreModel
+→ promoted ProjectModel / ResponseTopicGraph
+→ promoted ChapterBlueprint
+↛ H1 真实人工确认
+↛ Blueprint 派生 DocumentContract / DocumentPlan / WriterInputBundle
+```
+
+因此当前不能宣称“已经进入纯领域准确性优化阶段”。架构方向不需要推翻，但必须先完成可信内核、canonical Source、真实 H1 和 Blueprint 下游权威四项工程收口，再以 Golden Set 校准语义质量。
+
+在本计划第 20 章定义的 Gate K、Gate S、Gate A、Gate P 全部通过前：
+
+- PR-21 及后续生产能力暂停；
+- Gate K/S 通过前，PR-17～PR-20 输出只允许用于开发和 shadow evaluation；Gate K/S 通过后，可在隔离的 acceptance/staging workspace 按新可信内核晋级 candidate Artifact，用于 Golden、G2、H1 和迁移预览，但不得切换生产 active chain；
+- 不得把现有自动 H1 Receipt、旧 SourceIndex JSON 或仅按 `proposal_id` 绑定的 Receipt 视为可信生产事实。
+
 ## 2. 目标与非目标
 
 ### 2.1 目标
@@ -116,6 +158,13 @@ Phase 4：Integration + Audit
 13. **严格模板先冻结结构**：必须先编译只读 `TemplateStructureContract`，再做 Blueprint 映射。
 14. **无票据不晋级**：任何 canonical Artifact 都必须有 Validation、Gate 和 Promotion Receipt。
 15. **新增 Agent 权限不扩张**：任何新增 Agent 必须用代码和负向测试证明无法绕过 Artifact、Gate 和 Promotion。
+16. **Validation 必须内容寻址**：ValidationReport 必须绑定 Store 中 exact `proposal_id + proposal_hash + dependency snapshot + validator/policy version`；Validator 必须重新读取持久化 Proposal，禁止验证调用方另传的同 ID 不同内容。
+17. **Gate 必须按策略签发**：`GatePolicyRegistry` 固定每种 Artifact 所需 gate、issuer、validator 和 policy version；任意一个名为 `pass` 的 Receipt 不能替代必需 Gate 集合。
+18. **依赖不得由生产者自证**：Agent 只声明依赖，Validator 和 Promotion 必须从 active promoted Artifact 独立解析并重算 dependency fingerprint，Promotion 前再次校验。
+19. **H1 必须是真人动作**：全流程在 H1 产生 Receipt verdict `needs_human`，StageRun 返回 `blocked_human`；只有已认证用户通过显式 Command 对冻结规划快照作出决定，HumanGateService 才能签发 Receipt。字符串 `reviewer="user"` 不构成身份。
+20. **Source 也是 canonical Artifact**：InputManifest、SourceIndex 和 TemplateStructureContract 必须是强类型、不可变、带 revision/hash/Receipt 的版本化事实；JSON 只允许作为序列化或可重建投影。
+21. **引用必须 fail closed**：引用必须解析到同 workspace、正确 artifact kind、明确 promoted revision/hash；悬空、draft、跨 workspace、类型错误或无权限引用一律阻断。
+22. **Blueprint 是下游结构权威**：DocumentContract、DocumentPlan 和 WriterInputBundle 只能由有效 H1 所绑定的 ChapterBlueprint 确定性编译，必须携带 Blueprint revision/hash，不得成为第二套可编辑规划。
 
 ## 4. 总体架构
 
@@ -258,7 +307,8 @@ content_hash
 - DOCX 段落和表格保持原始顺序；
 - PDF 页码对应原文件；
 - OCR 不可靠时产生结构缺口，不生成假文本；
-- 所有活动 SourceBlock 必须有处理状态；
+- `SourceNormalizationCoverage` 记录物理元素已规范化、豁免或形成 `StructureGap`，并随 SourceIndex 晋级；
+- Requirement/Score 对条款的处理状态写入强类型、内容寻址的 `SemanticProcessingCoverageReport`；它是绑定 exact Source revision 与 Requirement/Score Proposal hash 的 ValidationReport 子报告，不是 canonical 业务 Artifact、没有 active revision，不得回写 immutable SourceIndex，也不得被下游当作领域事实；
 - 原始输入保持只读，Proposal 只能引用真实 anchor。
 
 ### 5.2 `RequirementLedger`
@@ -682,41 +732,102 @@ Audit Finding 的修复路由必须确定：
 ```text
 ProposalEnvelope
   proposal_id
+  proposal_hash
+  workspace_id
   artifact_kind
   producer_role
   operation_id
   base_revision
-  dependency_fingerprint
+  declared_dependencies[]
+  declared_dependency_fingerprint
+  schema_version
   payload
+  canonical_payload_hash
   cited_source_ids[]
   prompt_version
   model_fingerprint
   created_at
 
 ValidationReport
+  validation_report_id
+  workspace_id
+  artifact_kind
   proposal_id
+  proposal_hash
+  canonical_payload_hash
+  base_revision
+  resolved_dependency_snapshot[]
+  resolved_dependency_fingerprint
+  validator_version
+  validation_policy_version
   schema_valid
   references_valid
   authority_policy_valid
   dependency_current
   findings[]
+  validation_report_hash
+  issued_at
 
 GateReceipt
+  receipt_id
   proposal_id
+  proposal_hash
+  workspace_id
+  artifact_kind
   gate_id
+  gate_policy_version
+  validation_report_refs[]    id + immutable report_hash
   verdict                    pass | warn | block | needs_human
   findings[]
-  reviewer
-  reviewed_revision
+  issuer
+  principal_id
+  base_revision
+  resolved_dependency_snapshot[]
+  resolved_dependency_fingerprint
+  receipt_hash
+  issued_at
+  expires_at
+  permanent_stale_policy
+
+PlanningGateReceipt extends GateReceipt
+  receipt_mode               human_confirmation | deterministic_carry_forward
+  planning_audit_snapshot_hash
+  planning_confirmation_scope_hash
+  planning_dependency_snapshot[]
+  planning_dependency_root
+  g2_receipt_ref             id + immutable receipt_hash
+  nonce                      required for human confirmation
+  decision                   required for human confirmation: approve | reject
+  origin_human_receipt_ref   required for carry-forward: id + immutable receipt_hash
+  origin_human_principal_id  required for carry-forward
+  previous_dependency_snapshot[] required for carry-forward
+  previous_dependency_root   required for carry-forward
+  carry_forward_algorithm_version
+  carry_forward_policy_version
 
 PromotionReceipt
+  promotion_receipt_id
+  workspace_id
   proposal_id
+  proposal_hash
   artifact_id
+  base_revision
   promoted_revision
   artifact_hash
+  resolved_dependency_snapshot[]
   dependency_fingerprint
-  gate_receipt_ids[]
+  promotion_policy_version
+  gate_receipt_refs[]         id + immutable receipt_hash
+  promotion_receipt_hash
+  promoted_at
 ```
+
+`PlanningGateReceipt` 是 `GateReceipt` 的判别子类型：
+
+- `human_confirmation` 只能由 HumanGateService 根据认证用户的显式 Command 签发，保存真实 principal、nonce 和用户 decision；
+- `deterministic_carry_forward` 只能由注册的 H1ApplicabilityService 签发，必须引用原始 `human_confirmation` Receipt `id/hash`、原用户、旧/新 dependency root、相同 scope hash 和算法/policy version；
+- carry-forward 的 issuer 是 Service，不能把原 principal 填成新决策人，也不能改变原 decision；
+- 两种模式都必须保存完整 exact planning dependency snapshot。该快照至少包含 InputManifest、SourceIndex、RequirementLedger、ScoreModel、ProjectModel、ResponseTopicGraph、ChapterBlueprint，以及适用的 TemplateStructureContract 的 `artifact_id/revision/hash`，并计算完整 DAG/Merkle root。
 
 ### 6.2 生命周期
 
@@ -738,11 +849,16 @@ stateDiagram-v2
 ### 6.3 晋级硬约束
 
 - Agent、LLM 和普通 Service 不得直接写 canonical Artifact 路径；
-- Validator 检查 Schema、引用、来源权威、访问权限和依赖版本；
+- Validator 必须从 append-only Store 重新加载 Proposal，按冻结 canonicalization/version 重算 proposal hash 和 payload hash；
+- ValidationReport 必须绑定 exact Proposal hash、resolved dependency snapshot 和 validator/policy version，不能只绑定 `proposal_id`；
+- Validator 检查 Schema、同 workspace promoted 引用、来源权威、访问权限和依赖版本；
 - LLM Reviewer 只能输出 Finding，不能签发最终 Gate；
-- Promotion 使用 `base_revision` 做 CAS，陈旧 Proposal 必须拒绝；
-- 人工确认绑定 proposal hash、依赖 revision 和决策人；
-- 同一 `operation_id` 幂等重试不能重复晋级；
+- GateService 必须按 `GatePolicyRegistry` 校验 artifact kind、所需 Validator、issuer 和 policy version；
+- 未知 finding、未知 policy、`block`、`needs_human`、过期 Receipt 或非授权 reviewer 试图降级结论时一律 fail closed；
+- Promotion 必须重新加载 Proposal、重算依赖，并验证该 Artifact 所需的完整 GateReceipt 集合；
+- Promotion 使用 `base_revision` 做 CAS，陈旧 Proposal 或上游依赖已变化时必须拒绝；
+- 人工确认绑定 promoted ChapterBlueprint 的 artifact ID/revision/hash、完整审计快照 hash、`planning_confirmation_scope_hash` 和认证决策人；
+- 同一 `operation_id` 幂等重试不能重复晋级，且幂等键必须同时绑定 proposal hash；
 - 晋级、active revision 更新和 Receipt 写入必须原子化；
 - 进程中断不能留下半有效 revision；
 - canonical Artifact 的确定性 Service 输出也必须经过同一晋级通道。
@@ -758,17 +874,18 @@ stateDiagram-v2
 | 3 | `compile_template_structure` | Service | 可选 `TemplateStructureContract` |
 | 4 | `analyze_requirements` | Requirement Agent | `RequirementLedger` |
 | 5 | `analyze_scores` | Score Agent | `ScoreModel` |
-| 6 | `plan_response` | Planning Agent | `ProjectModel`、`ResponseTopicGraph`、`ChapterBlueprint` |
-| 7 | `confirm_planning` | Gate Service / 用户 | `PlanningGateReceipt` |
-| 8 | `resolve_evidence` | Evidence Service / ResearchService | `EvidenceRepository revision`、`EvidenceSnapshot` |
-| 9 | `compile_writing_packets` | Service | `WriterInputBundle` |
-| 10 | `write_content` | Writer Pool | `ContentBlock` |
-| 11 | `integrate_document` | Integration Service + Agent | `IntegratedDocument` |
-| 12 | `audit_document` | Quality Audit Agent + Gate | `AuditReport`、`FinalGateReceipt` |
-| 13 | `render_document` | Renderer | Markdown/DOCX |
-| 14 | `verify_delivery` | 既有交付门 | 交付结果 |
+| 6 | `plan_response` | Planning Agent | `ProjectModel`、`ResponseTopicGraph` |
+| 7 | `compile_chapter_blueprint` | Planning Agent | `ChapterBlueprint` |
+| 8 | `confirm_planning` | HumanGateService / 认证用户 | `PlanningGateReceipt` |
+| 9 | `resolve_evidence` | Evidence Service / ResearchService | `EvidenceRepository revision`、`EvidenceSnapshot` |
+| 10 | `compile_writing_packets` | Service | `DocumentContract`、`DocumentPlan`、`WriterInputBundle` |
+| 11 | `write_content` | Writer Pool | `ContentBlock` |
+| 12 | `integrate_document` | Integration Service + Agent | `IntegratedDocument` |
+| 13 | `audit_document` | Quality Audit Agent + Gate | `AuditReport`、`FinalGateReceipt` |
+| 14 | `render_document` | Renderer | Markdown/DOCX |
+| 15 | `verify_delivery` | 既有交付门 | 交付结果 |
 
-Requirement 与 Score 在 SourceIndex 晋级后可分批并行，但 Planning 必须读取两者已经晋级且 fingerprint 相容的 revision。
+Requirement 抽取与 Score 原文结构/算术候选在 SourceIndex 晋级后可分批并行 shadow；Score→Requirement reconcile、Validation 和 Promotion 必须依赖 promoted RequirementLedger。Planning 必须读取两者已经晋级且 fingerprint 相容的 revision。
 
 ### 7.2 模板模式顺序
 
@@ -792,7 +909,8 @@ InputManifest
 - 新 Stage 可先作为现有阶段内部子步骤接入，再在前端状态投影准备好后公开；
 - `Bid Master` 是现有 Supervisor/执行控制器的角色化薄层，不实现第二套循环；
 - `DocumentContract` 和 `DocumentPlan` 是已确认 Blueprint 的确定性派生物；
-- 未取得 `PlanningGateReceipt` 时，Pipeline 返回可恢复的 `blocked_human`；
+- Pipeline 不得自动执行人工确认；到达 H1 时必须返回可恢复的 `blocked_human`；
+- 只有显式、已认证的 `ConfirmPlanning` Command 可以使 H1 从 `needs_human` 进入 `pass`；
 - 研究和材料补充按显式 EvidenceNeed 触发，不作为无条件线性 Stage；
 - 正式切换后不允许回退旧的 kind 分组目录或首节点匹配逻辑。
 
@@ -835,6 +953,10 @@ prompts/v3_quality_audit_agent.md
 - 不允许输出或保存 Cookie、密码、Token 和浏览器配置路径。
 
 ## 9. Gate 设计
+
+本章 `G0`～`G6`、`H1` 是工作空间运行时 Gate，会产生或消费具体 Artifact 的 Receipt。第 20 章的 `Gate K/S/A/P/B/M` 是仓库发布验收门，只汇总测试、Golden、迁移和发布证据，不签发运行时 `GateReceipt`，两类 Gate 不得混用。
+
+运行时需要人工处理时，Receipt verdict 统一为 `needs_human`；StageRun 对外状态统一为 `blocked_human`。不得把 StageRun 状态写成 `needs_human`，也不得把 Receipt verdict 写成 `blocked_human`。
 
 ### 9.1 `G0 ProposalValidationGate`
 
@@ -884,14 +1006,27 @@ prompts/v3_quality_audit_agent.md
 - primary/supporting/mention 覆盖矩阵；
 - 模板映射缺口和规划风险。
 
-只有以下变化使 H1 失效：
+H1 的签发规则是强制安全边界：
+
+- `run_pipeline` 到达 H1 后必须暂停：运行时 Receipt verdict 为 `needs_human`，StageRun 状态为 `blocked_human`；不得把 H1 当作普通自动 Stage 连续执行；
+- 只有认证用户通过显式 `ConfirmPlanning` Command 提交 `decision=approve|reject`，HumanGateService 才能签发 Receipt；
+- Command 必须绑定 workspace、用户 principal、CSRF/认证上下文、InputManifest/SourceIndex/RequirementLedger/ScoreModel/ProjectModel/ResponseTopicGraph/promoted ChapterBlueprint 各自的 `artifact_id/revision/hash`、适用的 TemplateStructureContract `artifact_id/revision/hash`、完整 Artifact DAG/root、G2 Receipt `id/hash`、完整规划审计快照 hash、`planning_confirmation_scope_hash`、policy version、nonce 和时间；
+- StageRunner、Agent、LLM、普通 Service、脚本和后台任务不得传入或伪造 `reviewer="user"` 代签；
+- 前端确认页必须显示其正在确认的 revision/hash 和相对上次确认的变更 diff；
+- H1 Receipt 只表示用户确认所见规划，不替代 G2 的机器完整性校验。
+
+完整规划审计快照 hash 用于证明“用户当时看到了什么”，`planning_confirmation_scope_hash` 只包含会改变规划责任的字段，用于选择性失效；两者不得混为一个 hash。
+
+只有以下变化会改变 `planning_confirmation_scope_hash` 并使 H1 失效：
 
 - blocking Requirement 或 Score 变化；
 - 核心 Topic/Duty 变化；
 - 标题、层级、primary owner 或模板目标变化；
 - 项目范围、工期、交付、验收等全局约束变化。
 
-新增普通 Evidence、正文重写、格式调整和非关键 supporting mention 变化不应要求重审规划。
+新增普通 Evidence、正文重写、格式调整和非关键 supporting mention 变化不应要求重审规划，但这不等于忽略上游 revision 变化。
+
+任何 H1 依赖 revision/hash 变化都先把当前适用性置为待重评。H1ApplicabilityService 必须先证明整个 Artifact DAG 对当前 InputManifest/SourceIndex 仍 current，再验证新 G2 和完整依赖快照：若 `planning_confirmation_scope_hash` 与原 H1 相同，可签发一个引用原始人工 H1、同时绑定新 exact snapshot 的 `deterministic_carry_forward` Receipt；若 scope hash 变化，原 H1 才进入 stale 并要求用户重新确认。原 H1 Receipt 始终不可变，carry-forward 也不得伪装成新的人工决定。Evidence、DocumentContract、DocumentPlan、WriterInputBundle 和 Writer 在读取时都必须验证当前 exact snapshot 对应的人工 H1 或 carry-forward Receipt 链，不能只检查某个同名 gate 是否曾经存在。
 
 ### 9.5 `G3 EvidenceGate`
 
@@ -975,9 +1110,30 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 
 ## 11. 分阶段 PR 实施计划
 
+### 11.0 审计后的重新验收规则
+
+PR-14～PR-20 保留原编号和 Git 历史，不把“收口补丁”伪装成新业务功能。后续提交使用 `PR-14.1`～`PR-20.1` 表示原 PR 的重新验收批次；只有原工作项和本章增补工作项同时通过，原 PR 才能改回“Accepted”。
+
+收口顺序固定为：
+
+```text
+R0：暂停 PR-21+ 生产扩展，现有语义链仅用于 shadow
+→ R1 / PR-14.0 + PR-15.1：最小契约冻结、exact Proposal binding、Gate policy、可信依赖
+→ R2 / PR-16.1：canonical Source、结构保真
+→ R3 / PR-14.1：Golden Registry、ADR、正式评测基线
+→ R4 / PR-17.1～PR-19.1：分层语义校准
+→ R5 / PR-20.1：真实 H1、Blueprint 下游唯一链
+→ R6：仓库发布验收门 Gate K/S/A/P 完成，解锁 PR-21
+→ PR-21
+```
+
+R1 必须最先合入；Golden 资产匿名化、专家标注和评测基础设施可以与 R1/R2 并行建设，但正式语义 baseline/report 只能在 Gate K + Gate S 后消费可信内核和 canonical Source 产生的 Artifact。不得为了尽快进入 Writer/Evidence 而跳过任何收口门。
+
 ### Phase 0：语义与权限内核
 
 #### PR-14：冻结中间语言、架构约束与 Golden Set
+
+当前验收状态：**部分实现，重新打开验收。** 已冻结原则和指标定义，但 Golden 数据、Registry、ADR、代码审查模板和当前规则基线不存在。Gate K 所需的 PR-14.0 最小冻结包见 20.2，其余 PR-14.1 收口见 20.3。
 
 工作：
 
@@ -985,7 +1141,7 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 2. 冻结 Agent/Service/Artifact/Gate 权限边界和中间语言依赖方向。
 3. 为“新增 Agent 不能绕过 Artifact/Gate/Promotion”建立仓库级架构测试要求。
 4. 选取至少 8 份匿名真实标书，包含当前 92 个评分点、198 个模板节点样本。
-5. 建立 Requirement/Score、Topic/Blueprint、Evidence、Content、Integration/Audit 四组 Golden。
+5. 建立四套 Golden：A（Requirement/Score/Topic/Blueprint，内部 A1～A4）、B（Evidence）、C（Content）、D（Integration/Audit）。
 6. 为每个样本记录输入 hash、标注人、复核人、裁决人和版本。
 7. 记录当前规则实现的真实基线，不以“字段非空”作为成功。
 
@@ -1001,6 +1157,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 工作量：4—7 人日，不含业务专家标注。
 
 #### PR-15：Proposal / Validate / Gate / Promotion 可信运行内核
+
+当前验收状态：**P0 阻断，重新打开验收。** 事务/CAS 骨架已存在，但 Validation 可以只按 `proposal_id` 关联，尚未强绑定被持久化的 exact Proposal 内容。详细补充见 20.2。
 
 工作：
 
@@ -1020,10 +1178,14 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 - 中途崩溃不产生半有效 revision；
 - 相同 operation 重试不会重复发布。
 - 更换 GPT、Claude、DeepSeek 或本地模型不会改变权限和晋级路径。
+- ValidationReport、GateReceipt 和 PromotionReceipt 必须绑定同一 exact proposal hash；同 ID 替换 payload、artifact kind、base revision 或依赖时全部拒绝。
+- Promotion 必须按 artifact kind 验证 GatePolicyRegistry 声明的完整 Receipt 集合，并从 active Artifact 独立重算依赖。
 
 工作量：5—8 人日。
 
 #### PR-16：结构化 SourceIndex 与 TemplateStructureContract
+
+当前验收状态：**基础解析已实现，canonical Artifact 与结构保真验收未完成。** 详细补充见 20.4。
 
 工作：
 
@@ -1047,6 +1209,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 
 #### PR-17：Requirement Agent 与 RequirementLedger
 
+当前验收状态：**受控骨架已实现，Golden 发布验收未完成。** 当前确定性规则是 baseline，不得标记为专业语义能力。详细补充见 20.5。
+
 工作：
 
 1. 实现分批 ExtractionProposal。
@@ -1067,6 +1231,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 
 #### PR-18：Score Agent 与 ScoreModel
 
+当前验收状态：**受控骨架已实现，Golden 发布验收未完成。** 详细补充见 20.6。
+
 工作：
 
 1. 解析评分组、评分点、档位、分值和证明要求。
@@ -1086,6 +1252,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 工作量：4—7 人日。
 
 #### PR-19：Planning Agent、ProjectModel 与 ResponseTopicGraph
+
+当前验收状态：**契约和晋级骨架已实现，领域 TopicGraph 验收未完成。** 当前一对一根 Topic 投影只允许作为 baseline。详细补充见 20.7。
 
 工作：
 
@@ -1108,6 +1276,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 
 #### PR-20：ChapterBlueprint、规划门与统一确认页
 
+当前验收状态：**进行中，P0 阻断。** 自动代签 H1、平铺 Blueprint 和旧 DocumentPlan 路径均不能通过验收。详细补充见 20.8。
+
 工作：
 
 1. Planning Agent 生成 BlueprintProposal。
@@ -1115,8 +1285,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 3. 严格模板模式只映射冻结节点和 Slot。
 4. 用 TopicChapterAssignment 表达 primary/supporting/mention/cross-reference。
 5. 实现 G2 与 H1 PlanningConfirm。
-6. 编译 DocumentContract 和 DocumentPlan。
-7. 删除按 RequirementKind 生成目录及首节点回退。
+6. 冻结 Blueprint → DocumentContract/DocumentPlan/WriterInputBundle 的单向派生契约和硬阻断接口；实际编译器在 PR-23 实现。
+7. 禁止按 RequirementKind 生成目录、首节点回退和旧 DocumentPlan 进入正式写作链。
 
 验收：
 
@@ -1124,7 +1294,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 - 每个 blocking Requirement/Score 可反向追到 primary；
 - 模板结构变化为 0；
 - 用户可一次审阅项目摘要、Topic/Duty、目录和覆盖；
-- 未确认规划不能进入 Evidence/Writer 阶段。
+- 未确认规划不能进入 Evidence/Writer 阶段；
+- PR-20 不以 Writer 实际编译作为自身验收条件，避免与 PR-23 形成循环依赖。
 
 工作量：8—12 人日。
 
@@ -1173,24 +1344,29 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 
 ### Phase 3：受控生成 ContentBlock
 
-#### PR-23：DocumentPlan 与 WriterInputBundleAssembler
+#### PR-23：DocumentContract、DocumentPlan 与 WriterInputBundleAssembler
 
 工作：
 
-1. Planner 直接消费已确认 Blueprint。
-2. ContentUnit 按语义工作包生成，不按叶子标题数量生成。
-3. 编译 Blueprint slice、Duty、Requirement、Score、Evidence、术语和全局约束。
-4. 实现 Bundle 大小预算和最小权限切片。
-5. 实现 bundle hash、stale 和 target 校验。
-6. 在 API/前端展示 Bundle 状态而非完整敏感内容。
+1. Service 只消费 promoted 且具有有效 H1 Receipt 的 ChapterBlueprint。
+2. 从 Blueprint 确定性编译 DocumentContract 和 DocumentPlan；两者必须保存 `source_blueprint_revision/hash`，只能是只读派生物。
+3. 删除或阻断旧 RequirementKind 目录、首节点回退和可独立编辑的 DocumentPlan。
+4. ContentUnit 按语义工作包生成，不按叶子标题数量生成。
+5. 编译 Blueprint slice、Duty、Requirement、Score、Evidence、术语和全局约束。
+6. 实现 Bundle 大小预算和最小权限切片。
+7. 实现 bundle hash、H1/Blueprint stale 和 target 校验。
+8. 在 API/前端展示 Bundle 状态而非完整敏感内容。
 
 验收：
 
 - Writer 的公开入口只接受 Bundle ID；
 - Bundle 外工作区访问被拒绝；
+- 无 Blueprint、无有效 H1 或 source Blueprint hash 不匹配时不能编译 DocumentPlan/Bundle；
+- DocumentContract、DocumentPlan 与 Blueprint 的标题、层级、顺序和 owner 一致率 100%；
 - 198 模板节点不会产生 198 个 Writer；
 - 上游变化只使依赖单元 stale；
-- Bundle 可确定性重建并验证 hash。
+- Bundle 可确定性重建并验证 hash；
+- 通过仓库发布验收门 `Gate B：Bundle/Writer Entry Ready`，证明 Writer 的唯一入口只接受由有效 H1 和 promoted Blueprint 编译的 Bundle ID。
 
 工作量：5—8 人日。
 
@@ -1269,7 +1445,7 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 1. 打通四阶段状态、预算、重试、停止和恢复。
 2. 在只读工作空间克隆上执行 shadow compare。
 3. 完成统一规划页、Evidence gap、Content、Integration 和 Audit 状态投影。
-4. 达标后切换 V3 唯一写路径。
+4. 生成 Gate M 迁移证据包；只有 Gate M 获批后，Release Service 才能 CAS 切换 production active revision 和 V3 唯一写路径，禁止先切换后补验收。
 5. 删除旧 Feature 中央模型、kind 分组目录、首节点回退和错误去重。
 6. 更新逻辑文档、实施记录、操作文档和恢复演练。
 
@@ -1279,7 +1455,8 @@ Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Fi
 - 无第二状态机和隐藏 fallback；
 - 全量后端测试、前端测试和生产构建通过；
 - 旧工作空间有明确重建提示；
-- Golden、灰度和恢复演练全部通过。
+- Golden、灰度和恢复演练全部通过；
+- Gate M 证据包由数据迁移负责人和发布负责人批准，production CAS trace、active revision 校验和回滚点完整。
 
 工作量：6—10 人日。
 
@@ -1314,7 +1491,7 @@ Skill 禁止：
 | 契约测试 | Proposal、Topic/Duty、Blueprint、Evidence、Bundle、Finding | 非法引用和越权对象无法晋级 | 每次提交 |
 | 权限测试 | Agent 读写范围、外部工具、Artifact promotion | 角色越权全部失败 | 每次提交 |
 | 单元测试 | 原子要求、评分、Topic、Duty、映射、证据权限 | 固定夹具符合预期 | 每次提交 |
-| Golden Set | 四阶段语义质量 | 达到发布阈值 | Prompt、模型或代码变化 |
+| Golden Set | 四套 Golden A～D 的分层质量 | 达到发布阈值 | Prompt、模型或代码变化 |
 | 变形测试 | 空白、换行、文件顺序、重复条款 | 非语义变化不改变硬门结果 | 每次提交 |
 | 对抗测试 | Prompt 注入、证据污染、冲突补遗 | 不越权、不污染、不绕门 | 每次提交 |
 | 故障注入 | 超时、非法 JSON、崩溃、陈旧 revision | 无半成品，可恢复 | 每次提交 |
@@ -1453,6 +1630,53 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
+以上命令是目标验收矩阵；不存在的测试、fixture 或评测脚本必须在对应收口批次中建立，不能把“命令尚不存在”解释为跳过验收。
+
+### 12.9 可信内核与 H1 必备负向矩阵
+
+以下内核用例全部通过前，仓库发布验收门 Gate K 不得通过：
+
+- Store 中保存无效 Proposal，再用相同 `proposal_id` 的另一份有效 payload 生成 ValidationReport；
+- 使用 Proposal B 的 ValidationReport 或 GateReceipt 晋级 Proposal A；
+- 替换 payload、artifact kind、base revision、workspace、dependency snapshot 或 policy version；
+- 使用伪造、过期、跨 workspace、错误 artifact kind、错误 issuer 或缺少必需 Gate 的 Receipt；
+- producer 自行提供一个与自身声明恒等的 dependency fingerprint；
+- 上游 active revision/hash 已变化但旧 Proposal 仍尝试晋级；
+- 同一 operation ID 对应不同 proposal hash；
+- Agent、Reviewer、StageRunner 或普通 Service 自签 `pass`。
+
+以下规划用例全部通过前，仓库发布验收门 Gate P 不得通过；Gate P 同时继承 Gate K、Gate S、Gate A 均已通过这一前提：
+
+- 全流程自动执行 H1，或通过字符串 `reviewer="user"` 冒充认证用户；
+- 匿名用户、另一 workspace/用户、旧规划快照或已 stale Blueprint 重放 H1；
+- 无原始人工 H1 `id/hash`、Source root 已变化但下游 DAG 未重建、scope hash 不同、错误 Service issuer 或缺少旧/新 exact snapshot 时签发 carry-forward；
+- 无 Blueprint、无有效 H1、旧 DocumentPlan 或 Blueprint 外标题进入 Writer 前置入口。
+
+PR-23 完成实际编译后，以下入口用例全部通过前，仓库发布验收门 Gate B 不得通过；Gate B 同时继承 Gate P 已通过这一前提：
+
+- Writer 公开入口接受 Bundle ID 以外的结构输入；
+- Bundle 的 Blueprint/H1/scope hash 不匹配仍可启动 Writer；
+- 旧 DocumentPlan、Blueprint 外标题或未晋级 Evidence 被编入 WriterInputBundle。
+
+### 12.10 Golden Registry 与评测报告
+
+Golden 不是若干测试 JSON，而是可治理的专家标注资产。每个样本必须登记：
+
+- `sample_id`、匿名输入 manifest/hash、外置敏感原件引用；
+- Artifact schema/version、Prompt/model/tool/policy version；
+- 标注指南版本、标注人、复核人、裁决人和裁决时间；
+- SourceAnchor、预期对象、允许变体、严重性和 error taxonomy；
+- baseline/current 指标、逐样本差异、最差样本和 paired regression 结论。
+
+本计划只有四套 Golden：Golden-A（理解与规划）、Golden-B（Evidence）、Golden-C（ContentBlock）、Golden-D（Integration/Audit）。Golden-A 内部再拆成四层独立计分，不得把 A1～A4写成四套 Golden：
+
+1. Golden-A1：Source → Requirement；
+2. Golden-A2：Requirement → Score；
+3. Golden-A3：Requirement/Score → Topic/Duty；
+4. Golden-A4：Duty → ChapterBlueprint。
+
+Gate A 只验收 Golden-A1～A3；Golden-A4 属于 PR-20/Gate P 的规划验收。不得用最终目录或总平均分掩盖上游漏项。报告至少输出 precision、recall、F1、critical recall、anchor accuracy、mapping accuracy、结构差异、abstain/needs_human 率、双人标注一致率和置信区间。任一 blocking 漏项按失败处理。
+
 ## 13. 数据安全与外部模型边界
 
 1. 在任何外部 LLM、DeepSeek 或网页上传接入生产前，部署方必须批准工作空间数据处理、出境、保留和删除策略。
@@ -1499,7 +1723,7 @@ npm --prefix frontend run build
 
 - 保留 InputManifest 和原始只读 Source；
 - 旧 RequirementLedger、ProjectModel、DocumentContract 和下游 Artifact 标记 stale；
-- 从 SourceIndex 重新构建新中间语言；
+- 从原始只读输入按新 parser/schema 重建 promoted SourceIndex，再重建新中间语言；旧 SourceIndex JSON 只用于 diff/诊断；
 - 旧 FeatureModel 只读展示，不迁移为权威 Topic；
 - 人工锁定正文不自动搬运到未确认的新 Blueprint；
 - 旧 GateReceipt 立即失效；
@@ -1544,6 +1768,12 @@ npm --prefix frontend run build
 | M4：全文可交付 | PR-25—PR-27 | Integration、Audit、灰度和唯一写路径完成 |
 | M5：可选协作入口 | PR-28 | Skill 只编排稳定 Bid Master 能力 |
 
+当前里程碑状态：
+
+- M0 未通过：PR-15 exact content binding、PR-16 canonical Source 和 PR-14 Golden/ADR 尚未闭合；
+- M1 未通过：PR-17～PR-19 只有工程骨架，PR-20 的真实 H1 和 Blueprint 下游唯一链未完成；
+- M2～M5 不得进入生产实施；只允许进行不依赖未验收 Artifact 的设计准备。
+
 核心生产链 PR-14—PR-27 粗略工作量为 79—118 人日，另需招投标专家完成标注、裁决和灰度验收。PR-28 另计 2—4 人日。
 
 估算用于排期，不是交付承诺。每个 PR 开发前应根据真实样本、模型、文档格式和前端范围重新拆分。
@@ -1552,7 +1782,7 @@ npm --prefix frontend run build
 
 只有同时满足以下条件，才能宣布 V3“理解整标、规划响应、基于证据写作并完成全文审计”：
 
-1. Requirement、Score、Topic/Duty、Blueprint 四层达到 Golden-A 阈值。
+1. Requirement、Score、Topic/Duty、Blueprint 分别达到 Golden-A1～A4 的冻结阈值。
 2. FeatureModel 不再承担中央权威；功能是 Topic 子图或派生 View。
 3. 同一 Topic 可在多个章节承担不同 Duty，但每个 Duty 只有一个 primary chapter。
 4. ProjectModel 不复制另一套可编辑事实。
@@ -1647,7 +1877,7 @@ FeatureModel 的中央权威路径
 
 ## 19. 架构决策记录
 
-实施前应把以下内容分别固化为 ADR：
+PR-14.1 重新验收前必须把以下内容分别固化为 ADR，并在仓库代码审查模板中引用：
 
 1. ADR-01：Agent / Artifact / Service 权限模型；
 2. ADR-02：Proposal、Gate 和 CAS Promotion；
@@ -1659,3 +1889,261 @@ FeatureModel 的中央权威路径
 8. ADR-08：TemplateStructureContract 的前置顺序；
 9. ADR-09：Bid Master 复用 V3 唯一状态机；
 10. ADR-10：Skill 仅作为可选外部入口。
+11. ADR-11：Proposal 内容寻址、Validation/Gate 精确绑定与 GatePolicyRegistry；
+12. ADR-12：canonical Source、解析器版本与 SourceBlock 稳定身份；
+13. ADR-13：H1 认证签发、快照绑定和失效规则；
+14. ADR-14：ChapterBlueprint 到 DocumentContract/DocumentPlan/WriterInputBundle 的单向权威关系。
+
+## 20. PR-14～PR-20 审计后架构收口计划
+
+### 20.1 收口目标与停止条件
+
+本章是 2026-07-27 审计后的强制增补，优先级高于各 PR 原有的“已实现”描述。目标不是继续增加模块，而是证明：
+
+1. 晋级的确实是被验证的 exact 内容；
+2. Source、语义 Artifact 和人工决定都可追溯、不可伪造；
+3. PR-17～PR-19 的输出接近投标专家，而不是仅满足 Schema；
+4. ChapterBlueprint 经真实 H1 后成为写作唯一结构权威。
+
+`Gate K/S/A/P/B/M` 是 repository release acceptance gates，不是运行时 GateReceipt；它们由版本化证据包和评审结论通过。运行时仍只使用 G0～G6/H1 Receipt。
+
+立即执行以下停止条件：
+
+- PR-15.1 合入前先 inventory 现有 Validation/Gate/Promotion 链；只有无法证明 exact Proposal binding、完整依赖和合法 policy 的记录才标记为 `legacy_untrusted`，不得迁移为新链 active revision；
+- Gate K 未通过时，任何新语义 Artifact 只能 shadow 生成；Gate K/S 通过后允许在隔离的 acceptance/staging workspace 按新内核晋级 candidate Artifact，以执行 Golden、G2、H1 和迁移验收，但不得切换生产 active chain；
+- Gate S 未通过时，PR-17～PR-20 不得读取普通 `source_index.json` 作为生产事实；
+- Gate A 未通过时，不得把规则命中、字段非空或构造测试通过写成“语义完成”；
+- Gate P 未通过时，不得进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口设计、Schema 讨论和测试准备可以继续。
+
+### 20.2 首批：PR-14.0 最小冻结包 + PR-15.1 可信内核
+
+PR-14.0 与 PR-15.1 是同一首批的两个不可分割交付。PR-14.0 先冻结 ADR-01/02/11、canonicalization test vectors、ProposalEnvelope/ValidationReport/GateReceipt/PlanningGateReceipt/PromotionReceipt Schema 和当前 `enabled/promotable` artifact-kind registry；未完成这些最小契约时 Gate K 不得通过。这里的 Registry 只要求当前已启用、可晋级的 kind 具有真实 payload Schema，PR-21～PR-27 尚未启用的 kind 默认拒绝，不反向阻塞 Gate K。
+
+#### 20.2.1 PR-14.0：最小契约冻结包
+
+必须完成：
+
+1. 冻结 ADR-01 Agent/Artifact/Service 权限模型、ADR-02 Proposal/Gate/CAS Promotion、ADR-11 exact Proposal/Receipt binding；唯一中间语言与依赖方向作为同批独立架构契约冻结，不冒用 ADR-02 编号。
+2. 冻结 canonicalization version、跨语言 test vectors、包含/排除字段和 hash 稳定性规则。
+3. 冻结 ProposalEnvelope、ValidationReport、GateReceipt、PlanningGateReceipt 和 PromotionReceipt Schema；Receipt subtype、内容哈希、有效期、stale 与 carry-forward 规则必须可执行。
+4. 建立当前 `enabled/promotable` artifact-kind registry，逐项登记 payload Schema、合法 producer、Validator、Gate policy、依赖 kind 和 issuer。
+5. 建立架构 review checklist，要求每个新增 Agent/artifact kind 证明无法绕过 Artifact/Gate/Promotion。
+6. 未登记、未启用或 Schema/Policy 未实现的 kind 默认拒绝。
+
+DoD：
+
+- canonicalization vectors 在受支持运行时产生相同 proposal/payload/receipt hash；
+- 四类基础契约及 PlanningGateReceipt 判别子类型均通过合法/非法 fixture；
+- Registry 当前所有 `enabled/promotable` kind 均有真实 payload Schema 和完整 GatePolicy，空 `{}`、未知 kind 与未知 policy 全部失败；
+- ADR-01/02/11、review checklist 和版本化 Registry 可由 PR-15.1 测试直接引用；
+- PR-14.0 有独立验收报告和提交，不得被 PR-15.1 的实现提交隐式代替。
+
+#### 20.2.2 PR-15.1：可信内核阻断修复
+
+这是第一合入批次。先保证晋级对象正确，再评价对象语义是否正确。
+
+必须完成：
+
+1. Proposal 持久化后由可信 Service 按冻结 canonicalization version 计算 `proposal_hash` 和 `canonical_payload_hash`。
+2. hash 覆盖 workspace、artifact kind、producer、operation、base revision、完整 payload、声明依赖、Schema、Prompt 和模型版本；仅排除显示型、非决策字段。
+3. Validator 只接受 `proposal_id`，从 append-only Store 重新加载 Proposal；禁止调用方同时传入另一份 payload 参与验证。
+4. ValidationReport 绑定 `proposal_id + proposal_hash + canonical_payload_hash + resolved dependency snapshot/fingerprint + validator/schema/policy version`。
+5. GateReceipt 绑定 exact Proposal、ValidationReport hash 集合、artifact kind、base revision、依赖快照、Gate policy、issuer 和 decision。
+6. 建立版本化 `GatePolicyRegistry`，声明每种 Artifact 所需 Gate、Validator、issuer、允许 verdict 和 stale 条件。
+7. Promotion 只从 Store 重新加载已验证 Proposal，重算 hash 和 active 依赖，并校验该 Artifact 的完整必需 Receipt 集合。
+8. 引用必须解析到同 workspace、正确 kind、明确 promoted revision/hash；draft、stale、悬空、跨 workspace 和类型错误引用 fail closed。
+9. dependency fingerprint 由可信内核根据 Artifact DAG、active revision/hash、Schema/Prompt/model/policy version 确定性计算；producer 只能声明，不能自证。
+10. operation 幂等键必须绑定 proposal hash；相同 operation 的不同内容必须冲突，不能静默返回另一 Proposal 的 Receipt。
+11. CAS active pointer、Artifact revision、PromotionReceipt 和审计事件在一个事务中原子提交。
+12. Bid Master 接入唯一 StageRunner/CommandGateway；Stage 不再分别复制一套 sandbox → validate → gate → promote 逻辑。
+13. capability denied、非法 Gate、引用失败和 stale 拒绝必须产生不可变审计事件。
+14. Registry 当前 `enabled/promotable` 的每个 artifact kind 都必须有实际 payload Schema；未知、未启用或未实现 kind 默认拒绝，不能把 `{}` 当作合法对象。
+15. Receipt 必须内容寻址并绑定 workspace、base revision、完整 resolved dependency snapshot、issued/expires 或永久失效规则；`block`、`needs_human`、未知 finding 或未知 policy 一律 fail closed，非授权角色不得降级为 `pass`。
+
+DoD：
+
+- 任一 promoted revision 可反查 exact Proposal、ValidationReport、GateReceipt、dependency snapshot 和 policy version；
+- “Store 中无效 payload + 同 proposal_id 的另一份有效 payload”漏洞复现稳定失败；
+- Proposal A 不能使用 Proposal B 的 Validation 或 Gate；
+- 同 ID 替换 payload、kind、revision、workspace 或依赖全部失败；
+- 伪造、过期、跨 workspace、错误 issuer、错误 kind、旧 policy 或缺 Gate Receipt 全部失败；
+- 上游 revision/hash 变化后，旧 Proposal 在 Promotion 事务内再次失败；
+- 并发晋级只允许一个 CAS 成功；
+- 故障注入不产生半有效 revision；
+- 更换模型 Provider 不改变验证和晋级路径。
+
+### 20.3 PR-14.1：Golden、ADR 与评测基础设施
+
+匿名化和专家标注可与首批 PR-14.0/PR-15.1 并行，但正式语义 baseline 必须在 Gate K 与 Gate S 都通过后，使用可信 Source Artifact 运行。
+
+必须完成：
+
+1. 建立 `GoldenRegistry`、fixture manifest、loader、评测脚本和版本化报告格式。
+2. 至少选择 8 份匿名真实项目，覆盖普通 DOCX、复杂表格、PDF、多页表、补遗冲突、严格模板、扫描件阻断和独立评分文件。
+3. 纳入现有 92 个评分点和 198 个模板节点专项样本。
+4. 四套 Golden 固定为 A～D；Golden-A 内部分为 A1 Source→Requirement、A2 Requirement→Score、A3 Requirement/Score→Topic/Duty、A4 Duty→Blueprint 四层独立数据集。
+5. 每条标注记录输入 hash、Schema/评测版本、SourceAnchor、允许变体、严重性、标注人、复核人、裁决人和标签指南版本。
+6. 建立错误分类：漏项、误抽、拆分错误、否定/例外错误、补遗覆盖错误、分值错误、错误绑定、虚构 anchor、Topic 过度拆分/合并、Duty 上下文错误、primary 章节错误。
+7. 双人独立标注，冲突由第三方专家裁决；报告标注一致率和争议率。
+8. 记录当前规则 baseline，不修改阈值来迁就当前结果。
+9. 建立 ADR-01～ADR-14 和 PR 架构审查模板。
+10. Git 只保存匿名 fixture、manifest、hash、标签和评测结果；敏感原件外置并受访问控制。
+
+DoD：
+
+- 8 份样本、四套 Golden A～D 及 Golden-A1～A4 分层可重复加载；
+- baseline/current 做 paired regression 并输出逐样本差异；
+- 指标包含 precision、recall、F1、critical recall、anchor accuracy、mapping accuracy、abstain/needs_human 率、结构 diff 和置信区间；
+- 任一 blocking 漏项不能被总平均分掩盖；
+- 后续 Prompt、模型、规则、Schema 或 Gate 变化必须引用冻结评测版本；
+- ADR 和权限证明成为代码审查强制项。
+
+### 20.4 PR-16.1：canonical Source 与结构保真
+
+必须完成：
+
+1. 为 InputManifest、SourceIndex、TemplateStructureContract 建立强类型 Schema。
+2. Input/Template Service 只输出 ServiceProposal，经 Validation、结构 Gate 和 CAS Promotion 形成 immutable Artifact；磁盘 JSON 只作为可重建投影。
+3. SourceIndex 绑定输入 content hash、parser/schema version、amendment 关系和完整 `SourceNormalizationCoverage`。
+4. SourceBlock 使用判别类型，至少包含 heading、paragraph、list item、table、table cell、image 和 OCR gap。
+5. block identity 基于文件 hash、确定性 locator、block kind 和 parser version；Agent 无权生成或修改。
+6. DOCX 使用单一 document-order 流保存段落、编号列表、表格、合并单元格和嵌套结构的相对顺序。
+7. PDF 保存 page、bbox、reading order、table/row/column/span；正文块与表格按真实位置统一排序，不能先全文本后全表格。
+8. 扫描或低置信度页面产生明确 StructureGap；合法空白页不能被误判为整份扫描件。
+9. amendment 显式保存 issued_at、supersedes/replaces 方向和版本链。
+10. TemplateStructureContract 保存标题 level、numbering、parent、order、slot 和结构 fingerprint；表格 Slot 必须绑定真实最近上游章节，而不是全文最后标题。
+11. `SourceNormalizationCoverage` 为每个物理元素记录 normalized、exempt 或 StructureGap，随 SourceIndex 晋级；Requirement/Score 的 `SemanticProcessingCoverageReport` 是绑定 exact Proposal/Source revision 的 ValidationReport 子报告，由 G1 生成、Gate A 汇总，不是 canonical Artifact，不得拥有 active revision、回写 SourceIndex 或被下游作为领域事实消费。
+12. 移除权威 `by_role` 兼容写路径；如保留，只能由 promoted SourceIndex 生成只读派生 View。
+
+DoD：
+
+- InputManifest、SourceIndex 和适用的 TemplateStructureContract 均已 promoted；下游只按它们的 active revision/hash 读取；
+- 同一文件和 parser version 重复解析得到相同 block ID、顺序和 hash；
+- DOCX/PDF 的标题、页码、段落、列表、表格单元格和跨页关系可回跳；
+- 伪造 page/bbox/cell anchor 无法通过 Gate；
+- 不支持、结构缺失或 OCR 不可靠的输入在 Agent 调用前阻断；
+- 198 节点模板标题、级别、顺序、编号、父子关系和 Slot 零漂移；
+- 直接修改普通 JSON 不改变权威状态。
+
+### 20.5 PR-17.1：Requirement 语义校准
+
+确定性规则保留为 parser、候选生成器和 Validator，但不得继续冒充完整 Requirement Agent。
+
+必须完成：
+
+1. 真正接入版本化抽取/协调 Prompt 或等价受控推理接口；模型仍只输出 ExtractionProposal。
+2. 分批处理冻结 SourceBlock，并在 reconcile 阶段跨批去重、合并和识别冲突。
+3. 提取主体、动作、对象、条件、否定、例外、量词、期限和可验证指标。
+4. 使用稳定 clause ID/parent clause ID，不能用标题文本代替父条款 ID。
+5. 补遗按条款和语义作用域覆盖，不得因文件级 supersedes 就无差别 waive 整份文件全部 Requirement。
+6. 反向遗漏审计必须识别“一个块内漏掉某个义务”，不能靠“每个块至少生成一个 Requirement”得到恒定 100%。
+7. 对低置信度、冲突和不可解析条款输出 abstain/needs_human，不得静默猜测。
+8. Proposal 记录 SourceIndex revision/hash、Prompt/model/tool/schema/policy fingerprint。
+
+DoD：
+
+- critical Requirement 召回率 100%；
+- 全部 Requirement 召回率/精确率达到 Golden-A1 阈值；
+- 虚构或不可回跳 anchor 为 0；
+- 跨页、列表、表格、否定、例外和补遗样本无 critical 漏项；
+- 重复/冲突/覆盖关系可由专家复核；
+- 未达到 Golden-A1 阈值时，不得向 PR-18 reconcile/Validation/Promotion 或 PR-19 提供正式输入；Score 原文结构与算术候选可以在 acceptance workspace 中与 Requirement 抽取并行 shadow 生成。
+
+### 20.6 PR-18.1：Score 语义与算术校准
+
+必须完成：
+
+1. 将评分表结构、分值、档位、小计和总分的确定性解析/算术校验与语义映射分离。
+2. Score 原文结构和算术候选可与 Requirement 抽取并行 shadow；Score→Requirement reconcile、Validation 和 Promotion 必须依赖 promoted RequirementLedger。
+3. 支持表格跨行/跨列、区间分、累加分、扣分、封顶、最低档、资格/废标和证明材料要求。
+4. ScorePoint 引用真实采购义务 Requirement；不得为使审计通过而给每个评分行制造一条同文复制的 `RequirementKind.SCORE`。
+5. 允许纯评分偏好在无对应采购义务时显式标记 `unlinked_reason` 和 needs_review，而不是强制错误绑定。
+6. 跨文件同义 Requirement 绑定不能只依赖同 anchor 或字符集合重合。
+7. 异常一对多、多对一和高频绑定必须阻断或提供可解释理由。
+8. 评分 EvidenceNeed 候选保留来源、证明类型、期限和 authority 要求。
+
+DoD：
+
+- ScorePoint 对 Golden-A2 的 precision/recall 达到冻结阈值，虚构评分行、档位和证明要求为 0；
+- Golden 的评分行、档位、分值、小计和总分正确率 100%；
+- 档位边界和 EvidenceNeed/证明材料要求映射达到 Golden-A2 冻结阈值；
+- 资格/废标交叉关系 critical 漏项为 0；
+- 每个 ScorePoint 来源可回跳；
+- Requirement/Score 不复制相互冲突事实；
+- 92 点样本不存在静默批量绑定或异常高频映射。
+
+### 20.7 PR-19.1：领域 TopicGraph 与多上下文 Duty
+
+必须完成：
+
+1. Topic 是跨 Requirement/Score 聚合的响应概念，禁止默认“一 Requirement/Score 一个根 Topic”。
+2. 建立功能、架构、数据、安全、实施、服务、交付、验收、资格、商务和合规主题层级。
+3. Topic 合并/拆分必须保留 upstream refs、rationale、置信度和专家可审阅差异。
+4. 语义关系边与执行依赖边分离；执行依赖必须形成 DAG。
+5. ResponseDuty 表达同一 Topic 在总体设计、安全、实施、验收等不同章节的响应责任。
+6. ProjectModel 只能是上游 Artifact 的受控投影；企业原始文本不能未经证据校验全部写成 confirmed fact。
+7. 输出冲突、未知、低置信度和 EvidenceNeed，不得用空列表掩盖未建模。
+8. 对异常高频 Duty、悬空引用和过度拆分/合并建立 Gate。
+
+DoD：
+
+- blocking Requirement/Score → Duty 覆盖 100%；
+- confirmed Topic 均有来源或上游引用；
+- 悬空引用、执行依赖环和异常高频绑定为 0；
+- Topic 合并/拆分与 Duty 上下文达到 Golden-A3 和专家阈值；
+- 真实样本能表达“同一 Topic、多种 Duty、多个章节上下文”，而不是平铺复制上游条目。
+
+### 20.8 PR-20.1：真实 H1 与 Blueprint 下游唯一链
+
+必须完成：
+
+1. ChapterBlueprint 支持项目专用多层树和严格模板 Slot 映射。
+2. TopicChapterAssignment 完整支持 primary、supporting、mention 和 cross-reference。
+3. G2 校验每个核心 Duty 恰好一个 primary、blocking Requirement/Score 可反向追到 primary、标题与 Duty 语义一致、模板结构零变化。
+4. `confirm_planning` 改为暂停点，不得由 `run_pipeline` 自动签发。
+5. 只有认证用户在统一规划页显式提交 ConfirmPlanning Command，HumanGateService 才签发 H1。
+6. H1 绑定用户、workspace、G2 Receipt `id/hash`、完整 planning dependency snapshot/root、完整审计快照 hash、`planning_confirmation_scope_hash`、policy version、nonce、decision 和时间；dependency snapshot 至少逐项保存 InputManifest、SourceIndex、RequirementLedger、ScoreModel、ProjectModel、ResponseTopicGraph、ChapterBlueprint，以及适用的 TemplateStructureContract 的 `artifact_id/revision/hash`。
+7. 完整审计快照用于证明用户所见；`planning_confirmation_scope_hash` 只覆盖 blocking Requirement/Score、核心 Topic/Duty、标题层级、primary owner、模板目标和全局规划约束。任何 dependency revision/hash 变化都触发适用性重评；H1ApplicabilityService 先证明完整 DAG 对当前 Source root 仍 current，新 G2 有效且 scope hash 相同时只签发绑定新 exact snapshot、原人工 H1 和算法/policy version 的 `deterministic_carry_forward` Receipt，scope hash 变化才使旧 H1 stale 并要求重新人工确认。普通 Evidence、正文和格式变化不误伤规划确认。
+8. 统一规划页展示项目摘要、异常 Requirement/Score、Topic/Duty 图、章节树、覆盖矩阵、模板缺口、revision/hash 和 diff。
+9. 冻结 DocumentContract、DocumentPlan 和 WriterInputBundle 只能由 promoted 且 H1-confirmed Blueprint 确定性派生的接口契约和硬阻断测试；实际编译器由 PR-23 实现。
+10. 删除或阻断 RequirementKind 目录、首节点回退、旧 DocumentPlan 自主规划和 Writer 新增/移动标题。
+11. 迁移期采用 shadow-read、single-write，不允许旧 Plan 和 Blueprint 双写 canonical。
+
+DoD：
+
+- run-all 在 H1 稳定暂停，Receipt verdict 为 `needs_human`、StageRun 状态为 `blocked_human`；
+- 匿名、自动、伪造 reviewer、跨用户/workspace、旧 snapshot 和 stale H1 全部失败；
+- 用户可一次审阅并确认完整规划；
+- 每个核心 Duty 恰好一个 primary，supporting 不冒充主责；
+- 严格模板结构变化为 0；
+- ChapterBlueprint → DocumentContract/DocumentPlan/WriterInputBundle 的派生契约冻结，旧链在统一入口被硬阻断；
+- 无 Blueprint、无有效 H1 或旧 DocumentPlan 时，Writer 前置入口拒绝；实际 Bundle 编译和 Writer 唯一入口由 PR-23/Gate B 验收；
+- Golden-A4 达到冻结阈值，Writer 结构越界的实际执行测试归 Gate B。
+
+### 20.9 仓库发布验收门
+
+| Gate | 完成定义 | 未通过时 |
+|---|---|---|
+| Gate K：Kernel Safe | PR-14.0 最小冻结包、PR-15.1 exact binding、Gate policy、引用/依赖和内核负向测试全部通过 | 禁止 candidate Artifact 晋级 |
+| Gate S：Source Trusted | InputManifest、SourceIndex 及适用的 TemplateStructureContract 已 promoted、可回跳，SourceNormalizationCoverage 完整 | PR-17～PR-20 仅可 shadow |
+| Gate A：Semantic Accepted | Golden-A1～A3 达阈值且专家裁决完成 | 禁止把语义结果交给正式规划、Evidence 或 Writer |
+| Gate P：Planning Closed | Golden-A4、G2、真实 H1、统一确认页、派生契约冻结和旧链硬阻断通过 | 禁止 PR-21 及后续生产实现 |
+| Gate B：Bundle/Writer Entry Ready | PR-23 实际编译器、Bundle-only Writer 入口和对应负向测试通过 | 禁止 PR-24 Writer 生成正式 ContentBlock |
+| Gate M：Migration Ready | 旧数据重建、Receipt inventory/失效、single-write、回滚和 active revision 校验通过 | 不得切换生产工作空间 |
+
+这些是 repository release acceptance gates，由版本化证据包通过，不产生运行时 GateReceipt。每个 Gate 的证据包必须写入 `artifacts/release_gates/v3/<gate>/<version>/`，包含 manifest、输入/代码/评测版本、命令、原始报告 hash、差异、已知风险、审批人和结论；禁止只在聊天或 PR 评论中口头宣布通过。批准角色固定为：K=架构负责人+可信内核/安全复核人，S=Source 解析负责人+架构负责人，A=投标领域专家+评测负责人，P=投标领域专家+产品负责人+架构负责人，B=Writer 链负责人+质量负责人，M=数据迁移负责人+发布负责人。PR-14～PR-20 的主收口顺序为 K → S → A → P，通过 P 后解锁 PR-21；PR-23 后追加 B；Gate M 只在 PR-27 生产切换前执行。下游 Gate 不能补偿或掩盖上游失败。M1 仅表示“知道怎么写”的里程碑，不再作为 Gate 名称。
+
+### 20.10 迁移与回滚
+
+迁移原则：
+
+- 保留原始输入和历史审计记录，不原地修补旧 Artifact；
+- 从原始只读输入文件按新 parser/schema 全量重建 SourceIndex Proposal；旧 SourceIndex JSON 只用于 diff 和诊断，不得成为新 Proposal 的权威输入；
+- Requirement、Score、Project、Topic 和 Blueprint 从 promoted SourceIndex 全量重建；
+- 先输出旧 Validation/Gate/Promotion Receipt inventory 与 impact report；只有无法证明 exact Proposal binding、完整依赖快照和合法 policy/issuer 的旧 Receipt 才标记 `legacy_untrusted` 且不得继承，能证明符合新契约的记录也必须经迁移校验而不能直接信任；
+- 旧 H1 不继承，必须由用户重新确认新规划快照；
+- 旧 DocumentContract/DocumentPlan 只读归档，不进入新 Writer；
+- 所有迁移先生成 preview 和差异报告，经仓库发布验收门 Gate M 后再 CAS 切换 active revision；
+- 回滚只能回到已通过新可信内核的 promoted revision，不能回到 legacy_untrusted 链。
+
+完成 Gate K/S/A/P 后，PR-14～PR-20 才可以从“工程骨架”转为“可信、可评测的投标语义平台”，并继续 PR-21 Evidence Layer。Gate B 在 PR-23 后验收实际 Bundle/Writer 入口，Gate M 在 PR-27 生产切换前验收迁移，两者不得被提前宣称完成。

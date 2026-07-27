@@ -1,9 +1,12 @@
 # 标书 Agent V3 详细开发计划
 
-> 状态：待实施  
-> 日期：2026-07-26  
-> 总体方案：[current_logic_flow_v3.md](./current_logic_flow_v3.md)  
+> 状态：PR-0～PR-13 历史实施基线；后续编号和收口计划已迁移
+> 日期：2026-07-26
+> 总体方案：[current_logic_flow_v3.md](./current_logic_flow_v3.md)
 > 当前基线：[current_logic_flow_v2.md](./current_logic_flow_v2.md)
+> 当前权威计划：[v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)
+
+本文件保留 PR-0～PR-13 的历史建设背景。原草案中的“PR-14：迁移、真实项目验收与发布”未作为活动 PR 实施，其职责已拆入当前权威计划的 PR-14～PR-20 收口发布门和 PR-27/Gate M。自 PR-13 以后，PR 编号、完成状态和进入条件均以当前权威计划与 [v3_implementation_log.md](./v3_implementation_log.md) 为准，禁止继续沿用本文件的旧 PR-14 编号。
 
 ## 1. 计划目标
 
@@ -679,7 +682,7 @@ DocumentContract =
 - 无一标题一 job 的执行路径；
 - 无生产代码读取 V2 内容 Artifact。
 
-### PR-14：迁移、真实项目验收与发布
+### 历史发布草案：迁移、真实项目验收与发布（原草案 PR-14，已废止编号）
 
 #### V1 工作空间
 
@@ -804,4 +807,4 @@ PR-13 后运行静态搜索和 import 测试，证明：
 - [ ] 真实模板和无模板项目均通过人工验收。
 - [ ] README、架构导航、CLI 和部署配置全部指向 V3。
 
-实施必须严格按 PR-0 → PR-14 顺序推进。不得先删除旧逻辑再补 V3 替代，也不得为了短期兼容在 V3 正式版保留第二套状态机、第二套 Runner 或静默 fallback。
+历史 PR-0～PR-13 已按本文件推进；后续必须转入当前权威计划的 PR-14～PR-28 和仓库发布验收门 Gate K/S/A/P/B/M。不得为了短期兼容在 V3 正式版保留第二套状态机、第二套 Runner 或静默 fallback。
