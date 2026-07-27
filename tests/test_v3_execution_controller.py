@@ -47,9 +47,11 @@ class V3ExecutionControllerTests(unittest.TestCase):
    self.assertEqual(receipt.status,'accepted')
    self.assertTrue((context.root/'outputs/v3/final.docx').is_file())
    snapshot=V3WorkspaceSnapshotBuilder(context).build()
-   self.assertEqual(snapshot['document']['mode'],'auto_outline')
-   self.assertEqual(snapshot['document']['delivery']['status'],'ready')
-   self.assertTrue(snapshot['content_units'])
+   # The legacy stage files are deliberately not runtime facts. Snapshot only
+   # projects revisions that travelled through Proposal → Gate → Promotion.
+   self.assertIsNone(snapshot['document']['mode'])
+   self.assertIsNone(snapshot['document']['delivery'])
+   self.assertEqual(snapshot['content_units'], [])
    stage_runs=ControlStore(context).stage_runs(str(receipt.operation_id))
    self.assertEqual({item['stage_command'] for item in stage_runs},{'ingest_inputs','normalize_sources','build_requirement_ledger','build_project_model','sync_material_requirements','compile_document_contract','plan_document','execute_content_plan','integrate_document','verify_document','render_document','verify_delivery'})
 
@@ -68,7 +70,8 @@ class V3ExecutionControllerTests(unittest.TestCase):
     self.assertTrue(json.loads(response.body)['ok'])
     snapshot=v3_app.snapshot('alpha')
    payload=json.loads(snapshot.body)
-   self.assertEqual(payload['snapshot']['document']['delivery']['status'],'ready')
+   self.assertIsNone(payload['snapshot']['document']['delivery'])
+   self.assertEqual(payload['snapshot']['promoted_artifacts'], [])
    with mock.patch.object(v3_app,'RUNS_DIR',runs):
     self.assertTrue(json.loads(v3_app.latest_gate('alpha').body)['ok'])
     self.assertTrue(json.loads(v3_app.evidence('alpha').body)['ok'])

@@ -118,9 +118,26 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 数据清理：两个旧 V2 项目目录及其残留的 `workspace/chat.db` 已彻底删除。
 - 运行入口：已移除 `graph-run` 与 `agent-graph-run` 两个 LangGraph CLI 公共命令，主图、Supervisor 图、节点和路由实现均已物理删除，章节循环已改为直接函数流；项目不再依赖 LangGraph/LangChain Core。V3 工作区仅通过 CommandGateway 执行阶段或全流程。
 
+## PR-14：冻结 Bid Master 与投标中间语言架构
+
+- 状态：已完成
+- 提交：`2d775a7 docs(v3): freeze trusted Bid Master architecture`
+- 内容：冻结唯一中间语言、Agent/Service/Artifact/Gate 权限边界、分阶段顺序和 Golden Set 验收指标；仓库级 `agent.md` 将 Proposal → Validation → Gate → Promotion 以及“新增 Agent 不得获得额外权威写入路径”设为强制架构约束。
+
+## PR-15：Proposal / Validation / Gate / Promotion 可信运行内核
+
+- 状态：已完成
+- 输入与输出：Agent 只可通过 `AgentProposalSandbox` 读取其冻结任务输入并追加 `ProposalEnvelope`；唯一输出是候选 Proposal。`BidMaster` 仅协调既有 `ControlStore` 上的校验、Gate 和 Promotion，不新增状态机。
+- Artifact 与晋级：新增 append-only Proposal、ValidationReport、GateReceipt、ArtifactRevision、active pointer 与 PromotionReceipt 表。`ArtifactPromotionService` 在单个 SQLite 事务中写入 revision、CAS active pointer 和 Receipt；同一 `(artifact_kind, operation_id)` 返回原 Receipt，避免重复发布。
+- Validator / Gate：`ProposalValidator` 校验角色、引用、dependency fingerprint 与 base revision；`GateService` 仅对通过验证且绑定同一 Proposal hash/revision 的候选签发 Receipt。无 pass Receipt、陈旧 base revision 或非法角色均不能晋级。
+- 权限与 stale：角色能力表只允许各 Agent 提议其声明的 Artifact kind，未登记工具一律拒绝；Promotion 与 `control.db` 只由 Service 持有。上游 active revision 或 dependency fingerprint 改变会使候选在 Gate/Promotion 时拒绝，不会覆盖当前事实。
+- Snapshot：`V3WorkspaceSnapshotBuilder` 仅投影 promoted Artifact；旧磁盘文件及 draft Proposal 不再被投影为运行时事实。
+- H1 / 模板：本次不改变 H1 PlanningConfirm，也不修改严格模板结构；后续 PR-16—PR-20 将消费该可信内核。
+- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr15`（437 passed, 9 subtests）。新增负向测试覆盖 Agent 越权、无 GateReceipt、陈旧 revision、幂等 operation、失败无半 revision 与 Snapshot 隔离。
+
 ## 后续架构基线：Bid Master 与投标中间语言
 
-- 状态：详细计划已修订，尚未实施。
+- 状态：PR-14 与 PR-15 已完成；后续按 PR-16 继续。
 - 核心分工：Agent 只产生 Proposal，Artifact 承载权威事实，Service 执行确定性动作，Gate 与 CAS Promotion 决定 Artifact 晋级。
 - 中间语言：`RequirementLedger → ScoreModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → EvidenceSnapshot → WriterInputBundle → ContentBlock`。
 - Agent：Bid Master 复用现有 CommandGateway/StageRunner；Requirement、Score、Planning、Writer、Integration 和 Quality Audit 均读取冻结快照，不直接修改 `control.db` 或 canonical Artifact。
