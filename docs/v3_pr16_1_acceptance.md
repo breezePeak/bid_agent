@@ -28,10 +28,20 @@ python -m unittest tests.test_v3_source_structure tests.test_v3_input_manifest \
   tests.test_v3_requirement_agent tests.test_v3_score_agent tests.test_v3_stage_runner -v
 ```
 
-## Gate S 剩余
+## Gate S
 
-- 198 节点模板零漂移专项 fixture/报告
-- 更大规模 PDF bbox 真实样本矩阵
-- Gate S 证据包人工双签（Source 解析负责人 + 架构负责人）
+- 自动化矩阵：`tests/test_v3_gate_s_source.py`（晋级权威、JSON 非权威、确定性、PDF gap、198 节点零漂移、真实模板稳定）
+- 证据包：`artifacts/release_gates/v3/S/v1/`（`automated_result=PASS`，`result=PENDING_HUMAN_APPROVAL`）
+- 198 节点冻结快照：`tests/fixtures/v3_source/template_198_freeze.json`
 
-未完成上述项前，不得宣称 Gate S PASS；但 PR-17～20 正式路径已不得把普通 `source_index.json` 当作权威事实（Stage 硬阻断）。
+### 仍需人工
+
+- Source 解析负责人 + 架构负责人写入 `approvals[]` 后，`result` 方可改为 PASS
+
+### 已知风险
+
+- 历史“198 节点”可能含非标题结构；本门用合成 198 标题模板做零漂移
+- PDF 使用可解析合成件证明 StructureGap/bbox 路径；生产扫描件仍需现场样本
+- 旧工作空间迁移 inventory 仍归 Gate M
+
+未人工批准前，不得宣称 Gate S PASS；但 PR-17～20 正式路径已不得把普通 `source_index.json` 当作权威事实（Stage 硬阻断）。

@@ -156,8 +156,8 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 ## PR-16：canonical InputManifest、SourceIndex 与 TemplateStructureContract
 
 - 工程状态：PR-16.1 可信 Source 主链已实现。
-- 验收状态：**PR-16.1 技术主链完成；Gate S 待完整证据与人工批准。**
-- 历史提交：`fab7e9a`；本轮 PR-16.1 见后续 commit。
+- 验收状态：**PR-16.1 技术主链完成；Gate S 自动化证据 PASS，待人工双签。**
+- 历史提交：`fab7e9a`、`3591f15 feat(v3): promote canonical Source artifacts for PR-16.1`
 - 验收记录：[v3_pr16_1_acceptance.md](./v3_pr16_1_acceptance.md)
 - 已完成（PR-16.1）：
   - `SourceIndex` / Coverage / 扩展 SourceBlock Schema；
@@ -165,9 +165,18 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
   - 磁盘 JSON 降为 projection；`by_role` 只读派生；
   - 下游 Stage 强制 promoted SourceIndex；
   - PDF 位置排序 + OCR StructureGap；模板表格 Slot 最近上游章节；
-  - block identity 含 parser version。
-- 未完成（Gate S 收口）：198 节点模板零漂移专项、大规模 PDF bbox 样本矩阵、Gate S 人工双签。
-- 收口要求：补齐 Gate S 证据包后批准；再进入正式 Golden baseline 与 PR-17.1 语义校准发布路径。
+  - block identity 含 parser version；
+  - Gate S 自动化矩阵与证据包（198 节点零漂移、JSON 非权威、PDF gap）。
+- 未完成（Gate S 人工）：`source_parser_owner` + `architecture_owner` 双签；生产扫描 PDF 现场样本可后续补强。
+- 收口要求：Gate S 人工批准后进入正式 Golden baseline 与 PR-17.1 语义校准发布路径。
+
+## Gate S：Source Trusted
+
+- 状态：**PENDING_HUMAN_APPROVAL**（automated PASS）
+- 证据：`artifacts/release_gates/v3/S/v1/manifest.json`
+- 测试：`tests/test_v3_gate_s_source.py`
+- 依赖：Gate K PASS
+- 解锁条件：人工双签后，允许正式消费 promoted Source 做 Golden baseline / PR-17～20 发布路径
 
 ## PR-17：Requirement Agent 与 RequirementLedger
 
