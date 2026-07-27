@@ -70,6 +70,10 @@ class ProposalValidator:
                 from .contracts import ResponseTopicGraph
 
                 ResponseTopicGraph.model_validate(proposal.payload)
+            elif proposal.artifact_kind == "ChapterBlueprint":
+                from .contracts import ChapterBlueprint
+
+                ChapterBlueprint.model_validate(proposal.payload)
         except ValueError as exc:
             findings.append(ValidationFinding(code="PAYLOAD_SCHEMA_INVALID", message=str(exc)))
             return False

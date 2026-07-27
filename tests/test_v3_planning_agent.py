@@ -37,6 +37,7 @@ class V3PlanningAgentTests(unittest.TestCase):
             scores = runner.run("analyze_scores")
             project = runner.run("plan_response")
             graph = load_promoted_topic_graph(context)
+            blueprint = runner.run("compile_chapter_blueprint")
 
             self.assertEqual(project.requirement_ids, [item.requirement_id for item in ledger.requirements])
             self.assertEqual(project.score_point_ids, [point.score_point_id for point in scores.points])
@@ -47,6 +48,8 @@ class V3PlanningAgentTests(unittest.TestCase):
             self.assertEqual(duty_scores, {item.score_point_id for item in scores.points})
             self.assertEqual(ControlStore(context).v3_active_artifact("ProjectModel")["revision"], 1)
             self.assertEqual(ControlStore(context).v3_active_artifact("ResponseTopicGraph")["revision"], 1)
+            self.assertEqual(ControlStore(context).v3_active_artifact("ChapterBlueprint")["revision"], 1)
+            self.assertEqual({item.duty_id for item in blueprint.assignments if item.role == "primary"}, {item.duty_id for item in graph.duties})
             self.assertEqual(runner.run("plan_response").revision, 1)
             self.assertEqual(load_promoted_topic_graph(context).revision, 1)
 

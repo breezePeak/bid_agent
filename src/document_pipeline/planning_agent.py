@@ -8,8 +8,9 @@ from collections import defaultdict
 from control_plane import WorkspaceContext
 
 from .contracts import (
-    EvidenceNeed, InputRole, ProjectFact, ProjectModel, RequirementKind, RequirementLedger,
+    BlueprintNode, ChapterBlueprint, EvidenceNeed, InputRole, ProjectFact, ProjectModel, RequirementKind, RequirementLedger,
     ResponseDuty, ResponseTopic, ResponseTopicGraph, ScoreModel, SourceBlock, TopicEdge,
+    TopicChapterAssignment,
 )
 from .proposals import ProposalEnvelope, dependency_fingerprint
 
@@ -80,6 +81,19 @@ class PlanningAgent:
     def proposal(self, artifact_kind: str, payload: ProjectModel | ResponseTopicGraph, *, base_revision: int, operation_id: str, upstream_revisions: tuple[int, ...]) -> ProposalEnvelope:
         source_ids = sorted(payload.source_hashes)
         return ProposalEnvelope(artifact_kind=artifact_kind, producer_role="planning_agent", operation_id=operation_id, base_revision=base_revision, dependency_fingerprint=dependency_fingerprint(payload.source_hashes, upstream_revisions, artifact_kind, "v3_planning_agent_v1.0"), payload=payload.model_dump(mode="json"), cited_source_ids=source_ids, prompt_version="v3_planning_agent_v1.0", model_fingerprint="deterministic_v3_agent")
+
+    def chapter_blueprint(self, graph: ResponseTopicGraph, *, revision: int) -> ChapterBlueprint:
+        duties = {duty.duty_id: duty for duty in graph.duties}
+        topics = {topic.topic_id: topic for topic in graph.topics}
+        nodes: list[BlueprintNode] = []
+        assignments: list[TopicChapterAssignment] = []
+        for order, duty in enumerate(graph.duties):
+            topic = topics[duty.topic_id]
+            chapter_id = f"chapter-{order + 1}"
+            nodes.append(BlueprintNode(chapter_id=chapter_id, order=order, title=topic.canonical_name[:80], purpose=topic.intent, writing_objectives=duty.response_expectations, target_size=1200 if duty.priority == "blocking" else 800))
+            assignments.append(TopicChapterAssignment(assignment_id=f"A-{duty.duty_id}", duty_id=duty.duty_id, chapter_id=chapter_id, role="primary", response_scope="完整响应该 Duty", rationale="由已晋级 ResponseTopicGraph 的 Duty 生成", confidence=duty.confidence))
+        coverage = {"duty_count": len(duties), "primary_duty_count": len(assignments), "uncovered_duty_ids": sorted(set(duties) - {item.duty_id for item in assignments})}
+        return ChapterBlueprint(revision=revision, source_hashes=graph.source_hashes, blueprint_id=f"BP-{hashlib.sha256((graph.graph_id + str(revision)).encode()).hexdigest()[:12]}", mode="auto_outline", topic_graph_revision=graph.revision, nodes=nodes, assignments=assignments, coverage_summary=coverage)
 
     @staticmethod
     def _requirement_topic_type(kind: RequirementKind, text: str) -> tuple[str, str]:

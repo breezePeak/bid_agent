@@ -172,6 +172,11 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 执行链：新增 `plan_response`（兼容旧 `build_project_model` Runner 别名），同一 Planning Agent 连续晋级 ProjectModel 与 ResponseTopicGraph；相同冻结依赖重跑复用两个 active revision。
 - 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr19_final`（451 passed, 9 subtests）。
 
+## PR-20：ChapterBlueprint、规划门与统一确认页
+
+- 状态：进行中
+- 已完成基础：Planning Agent 可从已晋级的 ResponseTopicGraph 生成 `ChapterBlueprintProposal`，以每个 Duty 一个 primary assignment 的方式通过 G2/CAS 晋级；Blueprint 契约已阻断悬空章节引用和重复 primary Duty。
+
 
 
 ## 后续架构基线：Bid Master 与投标中间语言

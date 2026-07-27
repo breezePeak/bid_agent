@@ -21,6 +21,7 @@ from .requirement_ledger import audit_reverse_coverage, load_promoted_requiremen
 from .score_agent import ScoreAgent
 from .score_model import audit_score_model, load_promoted_score_model
 from .topic_graph import load_promoted_topic_graph
+from .chapter_blueprint import load_promoted_chapter_blueprint
 from .source_normalizer import SOURCE_INDEX_PATH, SourceNormalizer
 from .template_contract import TemplateContractCompiler
 from utils import read_json
@@ -191,6 +192,29 @@ class V3StageRunner:
                 ArtifactPromotionService(self.context).promote(graph_proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
             load_promoted_topic_graph(self.context)
             return project
+
+        if stage == "compile_chapter_blueprint":
+            from control_plane import ControlPlaneError, ControlStore
+            from .artifact_promotion import AgentProposalSandbox, ArtifactPromotionService, GateService, validate_and_record
+
+            graph = load_promoted_topic_graph(self.context)
+            store = ControlStore(self.context)
+            active = store.v3_active_artifact("ChapterBlueprint")
+            base_revision = int(active["revision"]) if active is not None else 0
+            blueprint = PlanningAgent(self.context).chapter_blueprint(graph, revision=base_revision + 1)
+            proposal = PlanningAgent(self.context).proposal("ChapterBlueprint", blueprint, base_revision=base_revision, operation_id=operation_id or f"blueprint:{graph.revision}", upstream_revisions=(graph.revision,))
+            if active is not None and active["dependency_fingerprint"] == proposal.dependency_fingerprint:
+                return load_promoted_chapter_blueprint(self.context)
+            stored = AgentProposalSandbox(self.context, role="planning_agent").submit(proposal)
+            proposal = proposal.model_copy(update={"proposal_id": stored["proposal_id"]})
+            report = validate_and_record(self.context, proposal, expected_dependency_fingerprint=proposal.dependency_fingerprint)
+            if not report.passed:
+                raise ControlPlaneError("V3_PROPOSAL_INVALID", f"ChapterBlueprint Proposal 验证未通过: {report.findings}")
+            receipt = GateService(self.context).evaluate(proposal.proposal_id, gate_id="G2_BLUEPRINT_INTEGRITY")
+            if receipt.verdict != "pass":
+                raise ControlPlaneError("V3_GATE_BLOCKED", f"ChapterBlueprint 门禁阻断: {receipt.findings}")
+            ArtifactPromotionService(self.context).promote(proposal.proposal_id, gate_receipt_ids=[receipt.receipt_id])
+            return load_promoted_chapter_blueprint(self.context)
         if stage == "sync_material_requirements":
             return MaterialRequirementsSynchronizer(self.context).sync()
         if stage == "compile_document_contract":

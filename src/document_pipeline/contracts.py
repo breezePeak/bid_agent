@@ -470,6 +470,58 @@ class ResponseTopicGraph(ContractModel):
         return self
 
 
+class BlueprintNode(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    chapter_id: str = Field(min_length=1)
+    parent_chapter_id: str | None = None
+    order: int = Field(ge=0)
+    title: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    writing_objectives: list[str] = Field(default_factory=list)
+    forbidden_topic_ids: list[str] = Field(default_factory=list)
+    required_mentions: list[str] = Field(default_factory=list)
+    cross_references: list[str] = Field(default_factory=list)
+    planned_tables: list[str] = Field(default_factory=list)
+    planned_figures: list[str] = Field(default_factory=list)
+    target_size: int = Field(default=800, ge=1)
+    template_target: str | None = None
+
+
+class TopicChapterAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    assignment_id: str = Field(min_length=1)
+    duty_id: str = Field(min_length=1)
+    chapter_id: str = Field(min_length=1)
+    role: Literal["primary", "supporting", "mention", "cross_reference"]
+    response_scope: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    needs_human: bool = False
+
+
+class ChapterBlueprint(ContractModel):
+    blueprint_id: str = Field(min_length=1)
+    mode: DocumentMode
+    topic_graph_revision: int = Field(ge=1)
+    template_structure_revision: int | None = Field(default=None, ge=1)
+    nodes: list[BlueprintNode] = Field(min_length=1)
+    assignments: list[TopicChapterAssignment] = Field(default_factory=list)
+    coverage_summary: dict[str, Any] = Field(default_factory=dict)
+    review_status: Literal["draft", "confirmed", "blocked"] = "draft"
+
+    @model_validator(mode="after")
+    def primary_duties_are_complete(self) -> "ChapterBlueprint":
+        node_ids = [node.chapter_id for node in self.nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("ChapterBlueprint 不允许重复 chapter_id")
+        if unknown := {assignment.chapter_id for assignment in self.assignments} - set(node_ids):
+            raise ValueError(f"TopicChapterAssignment 指向未知章节: {sorted(unknown)}")
+        primaries = [assignment.duty_id for assignment in self.assignments if assignment.role == "primary"]
+        if len(primaries) != len(set(primaries)):
+            raise ValueError("每个 Duty 只能有一个 primary chapter")
+        return self
+
+
 class DocumentMode(str, Enum):
     TEMPLATE_STRICT = "template_strict"
     AUTO_OUTLINE = "auto_outline"
