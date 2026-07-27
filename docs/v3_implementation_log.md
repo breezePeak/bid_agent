@@ -181,12 +181,19 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-17：Requirement Agent 与 RequirementLedger
 
-- 工程状态：Proposal → G0/G1 → CAS Promotion 受控骨架已实现。
-- 验收状态：**工程骨架完成，Golden 发布验收未完成。**
-- 提交：`027640e feat(v3): promote requirement agent artifacts`
-- 已完成：Requirement 契约、结构化字段、active promoted revision 读取、基本来源覆盖和幂等链。
-- 未完成：运行时仍以正则/关键词为主，Prompt 未接入；父条款使用标题文本，补遗按文件整体 waive，块级覆盖审计会被“每块至少生成一项”满足，未证明块内语义遗漏、跨页/表格和真实召回率。
-- 收口要求：按开发计划 20.5 完成 PR-17.1；未达到 Golden-A1 阈值不得作为 PR-18 reconcile/Validation/Promotion 或 PR-19 的正式输入，Score 原文结构/算术候选只可并行 shadow。
+- 工程状态：PR-17.1 语义校准工程增强已合入。
+- 验收状态：**工程增强完成；Golden-A1 未达标，正式语义发布未完成。**
+- 历史提交：`027640e`；PR-17.1 见后续 commit。
+- 验收记录：[v3_pr17_1_acceptance.md](./v3_pr17_1_acceptance.md)
+- 已完成（PR-17.1）：
+  - 分批抽取 + 跨批去重/冲突；
+  - 稳定 clause/parent clause ID；
+  - 补遗作用域覆盖（非整文件 waive）；
+  - 语句级反向漏检；
+  - abstain/needs_human；
+  - Proposal 绑定 SourceIndex hash 与 prompt/model/policy 指纹。
+- 未完成：真实 LLM 路径、专家 Golden-A1 阈值、跨页/表格 critical 召回证明。
+- 收口要求：未达 Golden-A1 不得作为 PR-18 正式输入；Score 结构/算术可并行 shadow。
 
 ## PR-18：Score Agent 与 ScoreModel
 
@@ -219,9 +226,10 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 ## PR-14～PR-20 架构收口门
 
 - 当前结论：PR-14～PR-20 已形成中间语言和受控晋级骨架，但 M0/M1 均未通过。
-- 实施顺序：首批 PR-14.0 + PR-15.1 → Gate K → PR-16.1 → Gate S → PR-14.1 正式 baseline → PR-17.1～PR-19.1 → Gate A → PR-20.1 → Gate P；通过 Gate P 后解锁 PR-21，PR-23 后补 Gate B，PR-27 生产切换前最终通过 Gate M。
+- 实施顺序：首批 PR-14.0 + PR-15.1 → Gate K → PR-16.1 → Gate S → PR-14.1 正式 baseline → PR-17.1～PR-19.1 → Gate A → PR-20.1 → Gate P；通过 Gate P 后解锁 PR-21，PR-23 后通过 Gate B，PR-24～PR-27 staging 完整链通过独立真实项目盲测后通过 Gate U，最后以依赖 exact Gate U 的 Gate M 执行生产切换。
 - PR-14.1 的匿名化、专家标注和评测基础设施可与首批并行，但正式语义 baseline/report 只能消费 Gate K + Gate S 后的可信 Artifact。
-- Gate K/S/A/P/B/M 是仓库发布验收门，不是运行时 GateReceipt。Gate P 通过前不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可并行准备。PR-23 的实际编译器通过 Gate B 后，PR-24 才可生成正式 ContentBlock。
+- Gate K/S/A/P/B/U/M 是仓库发布验收门，不是运行时 GateReceipt。Gate P 通过前不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可并行准备。PR-23 的实际编译器通过 Gate B 后，PR-24 才可生成正式 ContentBlock；Gate U 未通过时所有整标输出只能标记为 `test_draft`，Gate M 必须绑定已通过的 exact Gate U。
+- Gate U 当前未开始：尚无独立 Usability Holdout、supported profile 覆盖矩阵、最终 Word 逐页验收、专家盲审和人工改写量证据，因此任何现有版本均不得宣称能生成正式可投标书。
 - 核心分工保持不变：Agent 只产生 Proposal，Artifact 承载版本化事实，Service 执行确定性动作，Gate/Promotion 决定权威晋级。
 - 权威链保持：`InputManifest / SourceIndex / 可选 TemplateStructureContract → RequirementLedger → ScoreModel → ProjectModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → H1 PlanningGateReceipt → EvidenceSnapshot → Blueprint 派生的 DocumentContract/DocumentPlan → WriterInputBundle → ContentBlock`；H1 是授权 Receipt，DocumentContract/DocumentPlan 不是独立可编辑规划。
 - DeepSeek 仍只是显式 EvidenceNeed 的 Research Provider，不获得招标解析或 Artifact 写权限。

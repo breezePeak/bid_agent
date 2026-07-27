@@ -6,7 +6,7 @@
 > 当前基线：[current_logic_flow_v2.md](./current_logic_flow_v2.md)
 > 当前权威计划：[v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)
 
-本文件保留 PR-0～PR-13 的历史建设背景。原草案中的“PR-14：迁移、真实项目验收与发布”未作为活动 PR 实施，其职责已拆入当前权威计划的 PR-14～PR-20 收口发布门和 PR-27/Gate M。自 PR-13 以后，PR 编号、完成状态和进入条件均以当前权威计划与 [v3_implementation_log.md](./v3_implementation_log.md) 为准，禁止继续沿用本文件的旧 PR-14 编号。
+本文件保留 PR-0～PR-13 的历史建设背景。原草案中的“PR-14：迁移、真实项目验收与发布”未作为活动 PR 实施，其职责已拆入当前权威计划的 PR-14～PR-20 收口发布门和 PR-27/Gate U/Gate M。自 PR-13 以后，PR 编号、完成状态和进入条件均以当前权威计划与 [v3_implementation_log.md](./v3_implementation_log.md) 为准，禁止继续沿用本文件的旧 PR-14 编号。
 
 ## 1. 计划目标
 
@@ -807,6 +807,8 @@ PR-13 后运行静态搜索和 import 测试，证明：
 - [ ] 旧内容模块和 LangGraph Pipeline 已删除。
 - [ ] V2 工作空间迁移和 V1 拒绝策略通过测试。
 - [ ] 真实模板和无模板项目均通过人工验收。
+- [ ] 独立真实项目盲测达到逐项目零容忍、专家评分、人工改写量和最终 Word 逐页验收阈值，Gate U 正式通过。
+- [ ] Gate M 绑定已通过的 exact Gate U，Gate U/Gate M 均通过后才执行 production CAS。
 - [ ] README、架构导航、CLI 和部署配置全部指向 V3。
 
-历史 PR-0～PR-13 已按本文件推进；后续必须转入当前权威计划的 PR-14～PR-28 和仓库发布验收门 Gate K/S/A/P/B/M。不得为了短期兼容在 V3 正式版保留第二套状态机、第二套 Runner 或静默 fallback。
+历史 PR-0～PR-13 已按本文件推进；后续必须转入当前权威计划的 PR-14～PR-28 和仓库发布验收门 Gate K/S/A/P/B/U/M。不得为了短期兼容在 V3 正式版保留第二套状态机、第二套 Runner 或静默 fallback。

@@ -189,18 +189,30 @@ Phase 1：Requirement + Score + Topic/Duty + ChapterBlueprint
 Phase 2：EvidenceRepository + EvidenceSnapshot
 Phase 3：WriterInputBundle + ContentBlock Writer
 Phase 4：Integration + Quality Audit
-Phase 5：灰度切换；Skill 仅作为可选入口
+Phase 5：真实标书盲测 + Gate U + Gate M 灰度切换；Skill 仅作为可选入口
 ```
 
 - 当前 PR-14～PR-20 的收口顺序固定为：首批 PR-14.0 最小冻结包 + PR-15.1 exact binding/Gate policy → PR-16.1 canonical Source → PR-14.1 Golden 正式 baseline → PR-17.1～PR-19.1 语义校准 → PR-20.1 真实 H1/Blueprint 派生契约。
-- `Gate K/S/A/P/B/M` 是仓库发布验收门，不是工作空间运行时 GateReceipt。Gate P 通过前，不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可以并行准备。PR-23 实现实际 Bundle 编译后还必须通过 Gate B，才能启动 PR-24 正式 ContentBlock 生成。
-- Gate M 是 PR-27 内生产切换的硬前置门；只有迁移证据包获批后，Release Service 才能 CAS 切换 production active revision，不能先切换再补门。
+- `Gate K/S/A/P/B/U/M` 是仓库发布验收门，不是工作空间运行时 GateReceipt。Gate P 通过前，不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可以并行准备。PR-23 实现实际 Bundle 编译后还必须通过 Gate B，才能启动 PR-24 正式 ContentBlock 生成。
+- Gate U 是真实标书可用性硬门，必须在 PR-24～PR-27 的完整 staging 链、独立盲测和最终 Word 逐页验收后通过。Gate U 未通过时，任何输出只能标记为 `test_draft`，不得宣称为正式标书、不得启用生产写路径。
+- Gate M 是 PR-27 内生产切换的最后硬门，其证据清单必须依赖已通过的 exact Gate U `id/version/hash`；只有 Gate U 与 Gate M 均获批后，Release Service 才能 CAS 切换 production active revision，不能先切换再补门。
 - 任何历史运行统计或合成压力参数都不得升级为业务规模、Golden 数量或发布阈值。历史 `92` 个评分点、`1198` 次绑定、`S036` 绑定 `131` 次只描述旧链路异常；历史 `198` 只描述旧链路创建的独立章节任务数，不能据此断言真实模板具有 `198` 个 canonical 节点。
 - 语义验收必须以逐项目、双人复核的人工 Golden 为准；模板结构与 Writer 扇出必须使用独立、明确标注为 synthetic 的多档压力夹具验证。评分语义样本和模板结构压力夹具不得合并成固定的“92/198 样本”。
 - 不得先做复杂 Writer，再补 Requirement/Topic/Blueprint。
 - 不得先创建 Skill，再把 Skill 中的 Prompt 和状态复制回产品。
 - Skill 不在核心生产链上，只能调用 Bid Master 公开 Command。
 - Web/API 在没有 Skill 时必须具备完整产品能力。
+
+### 10.1 真实标书可用性与 Gate U
+
+- Gate U 使用未参与 Prompt、模型、规则、Golden 或阈值调优的匿名真实项目盲测集；Golden-A～D 通过不能替代 Gate U。
+- Gate U 只批准证据包中明确声明的 `supported_bid_profiles`。每个拟上线的输入类型、评分复杂度、模板模式、附件组合和 OCR 能力分支都必须由预先冻结的覆盖矩阵命中；未覆盖或超出能力边界的项目必须显式阻断。
+- 每次盲测必须生成内容寻址的 `UsabilityRunManifest`，绑定输入 hash、Evidence 快照、全部 promoted Artifact revision/hash、Prompt/模型/规则/Renderer 版本、最终 DOCX hash、逐页渲染 hash、审计 Finding、专家意见和人工编辑记录。
+- 每份盲测标书分别验收，禁止用跨样本平均分掩盖单份 blocking 失败。强制/资格/废标/critical Score 漏项、无证据企业 Claim、跨章硬事实冲突、未关闭 critical Finding、模板未授权变化和 blocking 页面缺陷必须全部为 0。
+- 两名投标专家必须独立盲审；争议由第三名专家裁决。单份标书专家可用性平均分必须 `≥4.2/5` 且任一维度 `≥4.0/5`，无需实质性重写的 ContentUnit 比例必须 `≥80%`，实质性重写比例必须 `≤20%`，critical 主责章节整章推倒重写必须为 0。
+- 最终 Word 必须逐页渲染检查目录、标题编号、表格、图片、页眉页脚、交叉引用、分页、裁切、溢出和空白占位；JSON、单元测试、Golden-C/D 或运行时 G6 均不能替代页面验收。
+- Gate U 不替代每个工作空间的运行时 G0～G6/H1；它只证明特定版本在声明的生产范围内可发布。影响语义、Evidence policy、Writer、Integration、Audit、Prompt、模型、Renderer 或模板适配器的变化必须使对应 Gate U scope stale 并重新盲测。
+- Gate U 证据包固定保存于 `artifacts/release_gates/v3/U/<version>/`，批准角色为投标领域负责人、质量负责人和产品负责人。Gate M 不得豁免、降级或补偿 Gate U。
 
 ### 11. 强制测试与架构审查
 
@@ -226,6 +238,11 @@ Phase 5：灰度切换；Skill 仅作为可选入口
 18. `run_pipeline` 必须在 H1 暂停；自动、匿名、伪造 reviewer、跨用户/workspace 和 stale snapshot 确认全部失败。
 19. 直接修改 InputManifest/SourceIndex/TemplateStructure JSON 不改变权威事实，下游只读取 promoted Source revision。
 20. 无 Blueprint、无有效 H1、旧 DocumentPlan 或 Blueprint 外标题不能驱动 Writer。
+21. Gate U 未通过时只能生成 `test_draft`，不能切换生产写路径或宣称正式标书。
+22. Golden、训练/调优样本或开发人员自评不能冒充 Gate U 独立盲测。
+23. 任一盲测项目出现 blocking 失败时 Gate U 必须失败，不能被总平均分掩盖。
+24. Prompt、模型、Writer、Integration、Audit 或 Renderer 等决策敏感版本变化后，旧 Gate U scope 必须 stale。
+25. Gate M 缺少已通过的 exact Gate U `id/version/hash` 依赖时不得批准生产 CAS。
 
 提交实现前必须在设计说明或 PR 描述中明确：
 
@@ -238,7 +255,8 @@ Phase 5：灰度切换；Skill 仅作为可选入口
 - stale 传播范围；
 - 权限边界及负向测试；
 - 是否影响 H1 PlanningConfirm；
-- 是否影响严格模板结构。
+- 是否影响严格模板结构；
+- 是否影响 Gate U 的 `supported_bid_profiles`、盲测结果、人工改写率、最终 Word 页面质量或失效范围；
 - 新增 Agent 如何证明无法绕过 Artifact/Gate/Promotion。
 
 以下情况一律按 P0 架构违规处理：
@@ -255,6 +273,8 @@ Phase 5：灰度切换；Skill 仅作为可选入口
 - 未授权外发文件；
 - 外部资料冒充企业能力；
 - 未关闭 critical Finding 仍交付；
+- Gate U 未通过却宣称正式标书、复用旧 Gate U 证据或执行生产切换；
+- Gate M 未绑定已通过的 exact Gate U 仍批准 production CAS；
 - 引入第二套权威状态或隐藏 fallback；
 - 为方便重新引入普通可变 JSON 作为跨阶段事实。
 

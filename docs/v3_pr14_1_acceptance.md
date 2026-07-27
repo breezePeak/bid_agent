@@ -35,9 +35,15 @@ python -m unittest tests.test_v3_golden_registry -v
 python scripts/evaluate_v3_bid_pipeline.py --suite A --layer A1
 ```
 
+## 当前规则 baseline
+
+- 报告：`artifacts/golden_eval/baseline_current_rules_a1.json`
+- 样本：`G-A1-SYN-001`（synthetic）
+- 口径：冻结当前确定性规则在合成样本上的抽取结果；**不调阈值迁就结果**；**不是 Gate A 证据**
+
 ## 后续
 
 1. 入库至少 8 份匿名真实项目（覆盖计划所列形态）
 2. 双人标注 + 第三方裁决，生成 A1～A4 / B / C / D 期望
-3. 记录当前规则 baseline 报告（不调阈值迁就结果）
+3. 用专家样本替换 scaffold 槽位并重跑 baseline/current paired regression
 4. 达成后申请 Gate A

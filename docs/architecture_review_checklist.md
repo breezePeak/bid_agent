@@ -46,7 +46,9 @@
 
 ## F. 发布门
 
-17. 本次变更是否触及 Gate K/S/A/P/B/M？证据包路径？
+17. 本次变更是否触及 Gate K/S/A/P/B/U/M？证据包路径？
 18. Gate K 未通过时是否仍避免把 candidate 语义 Artifact 当作生产事实？
+19. 本次变更是否影响 Gate U 的 supported profile、盲测输入隔离、人工改写率、专家评分、最终 DOCX 或逐页渲染结果？旧 Gate U scope 如何 stale？
+20. Gate U 未通过时是否仍只输出 `test_draft`？Gate M 是否绑定已通过的 exact Gate U `id/version/hash`？
 
-审查人必须在 PR 描述中粘贴本清单的填写结果，并链接相关 ADR（至少 ADR-01/02/11）。
+审查人必须在 PR 描述中粘贴本清单的填写结果，并链接相关 ADR（至少 ADR-01/02/11；涉及 Writer、Integration、Audit、Renderer、模型/Prompt 或生产切换时还必须链接 ADR-15）。
