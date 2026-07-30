@@ -3,6 +3,8 @@ import { csrfToken } from '../csrf'
 import {
   V3_WORKSPACES_PATH,
   buildResearchResolveCommand,
+  buildConfirmPlanningCommand,
+  buildPrepareOutlineCommand,
   buildRunPipelineCommand,
   v3WorkspacePath,
   workspaceRevisionFromV3Payload,
@@ -95,12 +97,59 @@ export function fetchV3WorkspaceSnapshot(runId) {
   return api.get(v3WorkspacePath(runId, 'snapshot'), { headers: { 'Cache-Control': 'no-cache' } })
 }
 
+export function fetchV3ContentUnit(runId, unitId) {
+  const encodedUnitId = encodeURIComponent(String(unitId || '').trim())
+  if (!encodedUnitId) throw new TypeError('unitId is required')
+  return api.get(v3WorkspacePath(runId, `content-units/${encodedUnitId}`), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchV3GenerationStage(runId, stageId) {
+  const encodedStageId = encodeURIComponent(String(stageId || '').trim())
+  if (!encodedStageId) throw new TypeError('stageId is required')
+  return api.get(v3WorkspacePath(runId, `generation-stages/${encodedStageId}`), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchV3DocumentPreview(runId) {
+  return api.get(v3WorkspacePath(runId, 'document-preview'), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
 export async function runV3Pipeline(runId) {
   const snapshot = await fetchV3WorkspaceSnapshot(runId)
   const commandId = newCommandId()
   const command = buildRunPipelineCommand(
     commandId,
     workspaceRevisionFromV3Payload(snapshot?.data),
+  )
+  // Full generation may include several bounded DeepSeek research turns before
+  // Writer bundles are frozen.
+  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 900000 })
+}
+
+export async function prepareV3Outline(runId) {
+  const snapshot = await fetchV3WorkspaceSnapshot(runId)
+  const commandId = newCommandId()
+  const command = buildPrepareOutlineCommand(
+    commandId,
+    workspaceRevisionFromV3Payload(snapshot?.data),
+  )
+  // Score semantics may need an initial response plus one controlled repair;
+  // the backend model timeout alone can be 300 seconds per attempt.
+  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 720000 })
+}
+
+export async function confirmV3Planning(runId, planningSnapshot) {
+  const snapshot = await fetchV3WorkspaceSnapshot(runId)
+  const commandId = newCommandId()
+  const command = buildConfirmPlanningCommand(
+    commandId,
+    workspaceRevisionFromV3Payload(snapshot?.data),
+    planningSnapshot,
   )
   return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 120000 })
 }

@@ -1,0 +1,229 @@
+{
+  "sample_id": "G-A-SI-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名系统集成项目",
+  "tags": [
+    "system_integration",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "b03b29bacb6a4df5b3ca600cb2bddc27b733248afd17140f497a42cca9801552",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "7529e2f324147b29c574b2247e4c00f2e7cfaa277516b48d4c9ebcbd8d3ce444",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "b33746a0eba5f81960de660d4796e868fc786139e38deb23136634cadce951a5",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-si-sso",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须完成业务系统与统一身份认证平台的对接",
+          "match_key": "投标人须完成业务系统与统一身份认证平台的对接",
+          "source_anchor": {
+            "location_contains": "身份认证"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-si-mlps",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "系统必须满足等保二级基本要求",
+          "match_key": "系统必须满足等保二级基本要求",
+          "source_anchor": {
+            "location_contains": "等保"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-si-data",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "禁止将生产数据用于测试环境且未经脱敏",
+          "match_key": "禁止将生产数据用于测试环境且未经脱敏",
+          "source_anchor": {
+            "location_contains": "脱敏"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-si-days",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "实施周期不得超过90天，不可抗力除外",
+          "match_key": "实施周期不得超过90天，不可抗力除外",
+          "source_anchor": {
+            "location_contains": "90天"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-si-train",
+          "kind": "deliverable",
+          "severity": "normal",
+          "normalized_requirement": "须提供不少于2次现场操作培训",
+          "match_key": "须提供不少于2次现场操作培训",
+          "source_anchor": {
+            "location_contains": "培训"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-si-sso",
+        "R-si-mlps",
+        "R-si-data",
+        "R-si-days"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-si-arch",
+          "title": "对接架构与接口设计",
+          "criterion": "对接架构与接口设计，满分40分",
+          "max_points": 40,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "interface_design"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须完成业务系统与统一身份认证平台的对接"
+          ],
+          "match_key": "对接架构与接口设计，满分40分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-si-sec",
+          "title": "等保与数据安全措施",
+          "criterion": "等保与数据安全措施，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "security_plan"
+          ],
+          "linked_requirement_match_keys": [
+            "系统必须满足等保二级基本要求",
+            "禁止将生产数据用于测试环境且未经脱敏"
+          ],
+          "match_key": "等保与数据安全措施，满分30分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-si-impl",
+          "title": "进度计划与培训安排",
+          "criterion": "进度计划与培训安排，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "schedule",
+            "training"
+          ],
+          "linked_requirement_match_keys": [
+            "实施周期不得超过90天，不可抗力除外",
+            "须提供不少于2次现场操作培训"
+          ],
+          "match_key": "进度计划与培训安排，满分30分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-si-arch",
+        "SP-si-sec",
+        "SP-si-impl"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-si-int",
+          "topic_type": "architecture",
+          "canonical_name": "系统对接架构",
+          "duty_type": "design",
+          "requirement_match_keys": [
+            "投标人须完成业务系统与统一身份认证平台的对接"
+          ],
+          "score_match_keys": [
+            "对接架构与接口设计，满分40分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-si-sec",
+          "topic_type": "security",
+          "canonical_name": "安全与等保",
+          "duty_type": "secure",
+          "requirement_match_keys": [
+            "系统必须满足等保二级基本要求",
+            "禁止将生产数据用于测试环境且未经脱敏"
+          ],
+          "score_match_keys": [
+            "等保与数据安全措施，满分30分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-si-impl",
+          "topic_type": "implementation",
+          "canonical_name": "实施与培训",
+          "duty_type": "implement",
+          "requirement_match_keys": [
+            "实施周期不得超过90天，不可抗力除外",
+            "须提供不少于2次现场操作培训"
+          ],
+          "score_match_keys": [
+            "进度计划与培训安排，满分30分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-si-int",
+        "T-si-sec",
+        "T-si-impl"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=system_integration; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

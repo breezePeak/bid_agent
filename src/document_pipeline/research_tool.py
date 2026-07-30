@@ -6,10 +6,11 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from control_plane import WorkspaceContext
+from control_plane import ControlStore, WorkspaceContext
 from .contracts import EvidenceNeed
 from .input_manifest import InputManifestService, V3_ROOT
 from .project_model import load_promoted_project_model
+from .score_model import load_promoted_score_model
 from .research_adapters import ResearchProviderAdapter, create_research_adapter
 from .research_service import ResearchService
 
@@ -45,10 +46,46 @@ class V3ResearchTool:
         }
 
     def _need(self, need_id: str) -> EvidenceNeed:
-        model = load_promoted_project_model(self.context)
-        for need in model.evidence_needs:
-            if need.need_id == need_id:
-                return need
+        try:
+            model = load_promoted_score_model(self.context)
+        except Exception:
+            model = None
+        if model is not None:
+            for candidate in model.evidence_need_candidates:
+                if candidate.need_id == need_id:
+                    return EvidenceNeed(
+                        need_id=candidate.need_id,
+                        question=candidate.question,
+                        topic_id=f"score:{candidate.score_point_id}",
+                        priority=candidate.priority,
+                        blocking_scope=(
+                            "content_unit"
+                            if candidate.priority in {"blocking", "high"}
+                            else "none"
+                        ),
+                        deadline_stage="execute_content_plan",
+                        query_budget=5,
+                    )
+        # Explicit legacy planning calls may still have promoted ProjectModel
+        # evidence needs. This fallback is read-only and is not part of the
+        # score-direct automatic pipeline.
+        try:
+            project = load_promoted_project_model(self.context)
+        except Exception:
+            project = None
+        if project is not None:
+            for need in project.evidence_needs:
+                if need.need_id == need_id:
+                    return need
+        scheduled = ControlStore(self.context).evidence_need(need_id)
+        if scheduled is not None:
+            return EvidenceNeed.model_validate(
+                {
+                    key: value
+                    for key, value in scheduled.items()
+                    if key in EvidenceNeed.model_fields
+                }
+            )
         raise ValueError(f"V3_UNKNOWN_EVIDENCE_NEED: {need_id}")
 
     def _attachments(self, raw_input_ids: list[str]) -> tuple[list[str], list[Path]]:

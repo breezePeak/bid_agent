@@ -20,6 +20,8 @@ V2 的主要失败不是缺少生成调用，而是结构或流程跑通后就�
 7. Gate U 未通过时，产品输出只能标记为 `test_draft`，不得宣称正式标书、不得启用生产唯一写路径。
 8. Gate M 的证据清单必须绑定已通过的 exact Gate U `id/version/hash`；Gate M 不得豁免、降级或补偿 Gate U。
 9. Gate U 不替代每个工作空间的运行时 G0～G6/H1。影响语义、Evidence policy、Writer、Integration、Audit、Prompt、模型、Renderer 或模板适配器的变化，必须使受影响的 Gate U scope stale 并重新盲测。
+10. 发布候选、覆盖矩阵、编辑 taxonomy 和阈值 policy 必须在 holdout 揭盲前冻结并绑定 hash，满足 `policy.frozen_at < holdout.unsealed_at < first_run_at`。原始机器输出必须先归档；揭盲后修改阈值、Prompt 或候选，挑选最佳重跑，或手工修补后冒充原始输出一律使该次 Gate U 失败。
+11. Gate U 失败后必须形成新候选；已揭盲项目只能转为回归集，新一轮 PASS 必须使用尚未消费的独立 holdout。
 
 ## 单项目硬指标
 
@@ -46,6 +48,8 @@ Gate U 证据包保存在 `artifacts/release_gates/v3/U/<version>/`，至少包�
 - 自动评测、逐页检查、专家独立评分、裁决和人工编辑分类原始记录；
 - 逐项目结果、blocking finding、差异、已知风险和适用范围；
 - 投标领域负责人、质量负责人和产品负责人的审批。
+
+三名审批人必须是不同的认证 principal。敏感原件、逐页图像和专家修订稿可以存放在外部受控库，仓库保存不可替换的引用与 hash。
 
 ## 后果
 

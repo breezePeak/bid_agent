@@ -4,6 +4,11 @@ PR-0～PR-13 与历史基线 [v3_development_plan.md](./v3_development_plan.md) 
 
 Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文审计的后续建设见 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)。
 
+> 当前生效架构：以本文“2026-07-29：满分条件驱动的分批评分理解主链”为准。
+> PR-19、PR-20 及 2026-07-28 记录中的
+> `ProjectModel → ResponseTopicGraph/ResponseDuty` 是保留的历史实现记录，不再是
+> `document.prepare_outline` 自动主链；legacy 只允许显式兼容调用。
+
 ## PR-0：冻结基线与消除半接入状态
 
 - 状态：已完成
@@ -231,5 +236,104 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - Gate K/S/A/P/B/U/M 是仓库发布验收门，不是运行时 GateReceipt。Gate P 通过前不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可并行准备。PR-23 的实际编译器通过 Gate B 后，PR-24 才可生成正式 ContentBlock；Gate U 未通过时所有整标输出只能标记为 `test_draft`，Gate M 必须绑定已通过的 exact Gate U。
 - Gate U 当前未开始：尚无独立 Usability Holdout、supported profile 覆盖矩阵、最终 Word 逐页验收、专家盲审和人工改写量证据，因此任何现有版本均不得宣称能生成正式可投标书。
 - 核心分工保持不变：Agent 只产生 Proposal，Artifact 承载版本化事实，Service 执行确定性动作，Gate/Promotion 决定权威晋级。
-- 权威链保持：`InputManifest / SourceIndex / 可选 TemplateStructureContract → RequirementLedger → ScoreModel → ProjectModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → H1 PlanningGateReceipt → EvidenceSnapshot → Blueprint 派生的 DocumentContract/DocumentPlan → WriterInputBundle → ContentBlock`；H1 是授权 Receipt，DocumentContract/DocumentPlan 不是独立可编辑规划。
+- 历史设计链记录（不再是当前自动目录主链）：`InputManifest / SourceIndex / 可选 TemplateStructureContract → RequirementLedger → ScoreModel → ProjectModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → H1 PlanningGateReceipt → EvidenceSnapshot → Blueprint 派生的 DocumentContract/DocumentPlan → WriterInputBundle → ContentBlock`；当前替代关系见 2026-07-29 记录，H1 仍是授权 Receipt，DocumentContract/DocumentPlan 不是独立可编辑规划。
 - DeepSeek 仍只是显式 EvidenceNeed 的 Research Provider，不获得招标解析或 Artifact 写权限。
+
+## Gate U：Real-Bid Usability
+
+- 状态：**NOT_STARTED**
+- 依赖：Gate K/S/A/P/B PASS，PR-21～PR-26 Accepted，PR-27 staging 候选冻结
+- 当前缺口：无独立 Usability Holdout、无预冻结 supported profile/threshold policy、无最终 Word 逐页 QA、无专家独立盲审、无人工改写量证据
+- 证据：尚未建立；不得创建空壳或虚假 PASS manifest
+- 解锁：Gate U 由投标领域负责人、质量负责人和产品负责人批准后，Gate M 才可进入最终审批；Gate U 与 Gate M 必须绑定同一发布候选并共同通过，Release Service 才可执行 production CAS
+
+## 2026-07-28：V3 受控大模型语义规划改造（历史链路记录）
+
+- 工程状态：已实现；真实模型 smoke、专家 Golden 和真实标书盲测仍按 Gate A/U 单独验收。
+- 当时的正式链路（现已由 2026-07-29 主链替代）：确定性评分结构解析 → `ScoreSemanticProvider` → `ProjectUnderstandingProvider`
+  → `TopicDutyPlanningProvider` → BidAgent 内部
+  `planning.chapter_outline_split` → G1/G2 → H1。
+- 评分语义：新增稳定 `condition_id` 和 `ScoreResponseUnit`；一个物理评分规则可包含多个
+  独立响应任务，评分档次不再误拆成任务。G2 按
+  `condition → ScoreResponseUnit → Duty → primary subtree` 校验。
+- 评分完整性：Provider 与 G1 均按最高档原文做无损覆盖复核；每个条件绑定精确
+  `SourceBlock`、字符区间和档次。遗漏实质要求、伪造区间或引用错块均在唯一一次受控
+  修复后 fail closed。
+- 评分语义修复：首次 Candidate 逐个物理 `rule_id` 独立校验；仅把失败规则、必要评分组
+  和精简失败片段送入唯一修复调用，再与已通过的规则合并并重做全局校验。避免一个局部
+  引用错误触发整张评分表的重复生成或因修复只返回局部而丢失其余规则。`Unit.source_excerpt`
+  明确为语义说明，权威逐字取证仅来自满分 `condition` 的 `SourceBlock`/span；Capability、
+  Prompt 与 Schema 已升至 `1.2.0` / `v1.2` / `candidate-3`，旧规划自动失效。
+- 目录编译：只分配稳定 ID、顺序和元数据，保留模型标题与父子结构；不再调用规则目录
+  生成器，不追加兜底章节。全文质量 Unit 进入 `DocumentQualityGate`，不生成空洞章节。
+- 严格模板：Blueprint 冻结 template node、level、numbering、Slot 和 writable target；
+  G2 独立复核标题、层级、顺序、父子与 Slot，H1 后可单向编译为可写
+  `TemplateContract`，不再固定抛出模板映射异常。
+- 推理凭证：Score、Project、Topic 和 Outline Proposal 均绑定 append-only
+  `InferenceReceipt`，覆盖 exact 输入快照、Capability/Skill、Prompt、模型、温度、Schema、
+  Provider 指纹、原始输出、规范化 Candidate 和编译 payload hash。Validator 按 Capability
+  从 Store 的当前 active dependencies 独立重建 exact Provider 输入，不能只相信调用方 hash。
+- 失效策略：Capability/Skill、Prompt、模型、温度、Schema、上游 Artifact 或模板变化均
+  阻止复用；活动模型设置变化会清空运行时 Provider 元数据；模型非法输出只有一次受控
+  修复机会，失败后 fail closed。
+- 测试隔离：部署环境变量不能开启 `deterministic_test`；规则候选只允许通过显式
+  `for_deterministic_tests()` 测试构造器注入，不构成生产降级路径。
+- 人工确认：`document.prepare_outline` 在 G2 后返回 `blocked_human` 和冻结
+  `generation_trace`；只有认证用户显式调用 `document.confirm_planning` 才签发 H1。
+- 项目理解：Provider 可输出带来源的项目事实、语义投影和 EvidenceNeed；企业事实只接受
+  当前工作空间中的企业材料，不把外部参考案例升级为企业能力。每个有效 Requirement 和
+  ScorePoint 必须进入带来源的语义结论或明确证据缺口；仅填写 covered ID 的空壳模型被阻断。
+- 自动化验证：Python 全量 `561 passed, 2 skipped, 22 subtests passed`；两个 skip 为显式
+  opt-in 的真实 Provider/真实标书 smoke；前端 Node 测试 `18 passed`；前端生产构建通过；
+  Ruff、compileall 与 `git diff --check` 通过。
+- 尚未宣称完成：真实 Provider smoke、专家 Golden 和当前真实标书盲测未在本次自动测试中
+  执行，仍须按 Gate A/U 由受控凭证、匿名样本和领域专家验收，不能把 Fake Provider 单测
+  当成真实语义准确率证据。
+
+## 2026-07-29：满分条件驱动的分批评分理解主链
+
+- 当前自动主链：
+  `SourceIndex / RequirementLedger → 分批 ScoreSemantic（ScoreCondition / ScoreResponseUnit）→ ChapterBlueprint → G2`。
+  `ScoreModel` 作为确定性评分结构载体进入 ScoreSemantic 输入，不是额外语义模型阶段；
+  G2 后的 H1 是人工授权暂停点，不属于评分理解或目录语义跳转。
+- 旧语义链退出自动路径：正常 `document.prepare_outline` 不调用
+  `ProjectUnderstandingProvider / ProjectModel`、`TopicDutyPlanningProvider`、
+  `ResponseTopicGraph / ResponseTopic / ResponseDuty`，也不再执行 `scope` 归纳文本字符
+  相似度校验。旧对象只保留给显式 legacy/兼容入口，且不得在新链失败时自动回退。
+- 全局结构输入：从完整 `SourceIndex` 构建标题级轻量 `DocumentMap`，只发送标题层级、
+  评分分组与顺序、采购需求/模板目录位置、来源 ID、内容类型和标题边界块；不向任一模型
+  请求发送标题下全部正文或整份来源块。
+- 评分批次：按价格、商务、技术等自然评分大项分批。技术大项超限时优先按内部小标题
+  继续切分，随后只能在完整 `ScorePoint` 边界切分；同一点的全部评分档和最高得分档
+  永不跨批。
+- 上下文预算：模型上下文按 45% 输入、35% 结构化输出、20% 系统提示词与安全余量
+  分配。超限先裁剪低相关检索内容，再按完整评分点切批；单个完整评分点仍超限时
+  fail closed。
+- 定向需求补充：依次采用评分规则明确引用的章节/条款/表格、已绑定
+  `linked_requirement_ids`、同标题要求、关键词命中要求和少量高相关原文块。所有补充
+  都携带真实 `requirement_id`、来源位置和原文；通用合同、保证金噪声不参与普通相似度
+  检索，明确引用或确定性直接绑定除外。无明确章节/条款引用的公式型价格评分点不补充
+  采购需求上下文。
+- 满分语义契约：每个独立得分任务生成 `ScoreResponseUnit`；最高得分档拆成带原文
+  `source_excerpt/source_span` 的 `ScoreCondition`，角色固定为 `content`、
+  `evidence`、`constraint`、`quality`、`document`。`evidence` 条件同步汇总到 Unit 的
+  `required_evidence_types`，Unit 精确绑定自己需要的 Requirement。
+- 独立缓存和修复：每批严格校验通过后立即按 exact 输入、上游依赖、Capability、Prompt、
+  模型、Schema 和 policy fingerprint 持久化。价格、商务、各技术批可独立复用和重跑；
+  技术批失败不重跑价格/商务，目录失败不重跑 ScoreSemantic。损坏或过期缓存作为可观测
+  miss；单批仅允许一次失败规则子集的受控修复，仍不合格即阻断。
+- 目录组织：目录模型只读取全部已校验 Unit/Condition、关联需求摘要与原文、评分分组和
+  可选模板，不再读取整份标书。它负责合并重复响应主题、按评审阅读顺序生成多层
+  `ChapterBlueprint`，并在 `ChapterNode` 保留 primary/supporting Unit、Condition 和
+  Requirement 映射。
+- 全文质量门：`quality` 条件进入章节写作要求，`document` 条件进入
+  `ChapterBlueprint.document_quality_gates`；“完整、合理、可行、针对性强”和“整体
+  评价”不机械生成空洞章节。
+- 确定性覆盖校验：验证每个非否决评分点已理解、每个最高档已有条件、原文区间真实、
+  每个 section Unit 唯一主责、`content/evidence/constraint` 位于主责子树、
+  `quality/document` 分别进入写作要求/全文质量门，以及所有 ID 无未知、重复、悬空或
+  遗漏。校验不以字符相似度裁决模型的归纳文字。
+- 当前 10/25/65 分真实工作空间离线重建结果：20 个评分点保持 4 批，价格 1 点、商务
+  3 点、技术 13+3 点；四批输入字符数分别为 29,890、45,002、64,524、44,168，均未超过
+  64,800 输入上限。公式型价格点上下文为 0，16 个技术点仍各保留 8 条定向需求，扫描到
+  的通用合同/保证金噪声为 0。该检查只重建冻结输入和批次，未调用外部 LLM。

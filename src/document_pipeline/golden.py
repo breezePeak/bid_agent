@@ -137,6 +137,7 @@ class GoldenRegistryManifest(BaseModel):
     suites: list[GoldenSuite] = Field(min_length=1)
     samples: list[str] = Field(min_length=1)  # sample_id list
     policy: dict[str, Any] = Field(default_factory=dict)
+    thresholds: dict[str, Any] = Field(default_factory=dict)
 
 
 class MetricScores(BaseModel):

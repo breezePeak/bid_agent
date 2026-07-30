@@ -135,7 +135,9 @@ class GateSSourceTests(unittest.TestCase):
                 },
             )
             with self.assertRaises(ControlPlaneError):
-                V3StageRunner(context).run("build_requirement_ledger")
+                V3StageRunner.for_deterministic_tests(context).run(
+                    "build_requirement_ledger"
+                )
 
     def test_repeated_normalize_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

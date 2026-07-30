@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .artifact_registry import ARTIFACT_REGISTRY_VERSION
 
-GATE_POLICY_REGISTRY_VERSION = "v3-gate-policy-2"
+GATE_POLICY_REGISTRY_VERSION = "v3-gate-policy-3"
 
 # Fixed service issuers. Agents and free-form reviewer strings are never issuers.
 ISSUER_GATE_SERVICE = "gate_service"

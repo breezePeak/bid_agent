@@ -22,7 +22,7 @@ from .contracts import (
     TemplateStructureContract,
 )
 
-ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-2"
+ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-8"
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class ArtifactKindRegistration:
     dependency_kinds: tuple[str, ...]
     enabled: bool
     promotable: bool
+    optional_dependency_kinds: tuple[str, ...] = ()
     payload_schema_version: str = "v3"
     notes: str = ""
 
@@ -78,18 +79,16 @@ class ArtifactKindRegistry:
                 kind="RequirementLedger",
                 payload_model=RequirementLedger,
                 legal_producers=frozenset({"requirement_agent"}),
-                # StageRunner enforces promoted SourceIndex before extraction.
-                # Fingerprint still binds parser/source via agent-declared claim inputs.
-                dependency_kinds=(),
+                dependency_kinds=("SourceIndex",),
                 enabled=True,
                 promotable=True,
-                notes="Consumers must read promoted SourceIndex; hard dep remains stage-enforced.",
+                notes="Requirement facts are bound to the exact promoted SourceIndex snapshot.",
             ),
             "ScoreModel": ArtifactKindRegistration(
                 kind="ScoreModel",
                 payload_model=ScoreModel,
                 legal_producers=frozenset({"score_agent"}),
-                dependency_kinds=("RequirementLedger",),
+                dependency_kinds=("RequirementLedger", "SourceIndex"),
                 enabled=True,
                 promotable=True,
             ),
@@ -97,23 +96,38 @@ class ArtifactKindRegistry:
                 kind="ProjectModel",
                 payload_model=ProjectModel,
                 legal_producers=frozenset({"planning_agent"}),
-                dependency_kinds=("RequirementLedger", "ScoreModel"),
+                dependency_kinds=("RequirementLedger", "ScoreModel", "SourceIndex"),
                 enabled=True,
                 promotable=True,
+                notes="Legacy manual compatibility; excluded from automatic V3 stage lists.",
             ),
             "ResponseTopicGraph": ArtifactKindRegistration(
                 kind="ResponseTopicGraph",
                 payload_model=ResponseTopicGraph,
                 legal_producers=frozenset({"planning_agent"}),
-                dependency_kinds=("RequirementLedger", "ScoreModel", "ProjectModel"),
+                dependency_kinds=(
+                    "RequirementLedger",
+                    "ScoreModel",
+                    "ProjectModel",
+                    "SourceIndex",
+                ),
                 enabled=True,
                 promotable=True,
+                notes="Legacy manual compatibility; excluded from automatic V3 stage lists.",
             ),
             "ChapterBlueprint": ArtifactKindRegistration(
                 kind="ChapterBlueprint",
                 payload_model=ChapterBlueprint,
                 legal_producers=frozenset({"planning_agent"}),
-                dependency_kinds=("ResponseTopicGraph",),
+                dependency_kinds=(
+                    "RequirementLedger",
+                    "ScoreModel",
+                ),
+                optional_dependency_kinds=(
+                    "ProjectModel",
+                    "ResponseTopicGraph",
+                    "TemplateStructureContract",
+                ),
                 enabled=True,
                 promotable=True,
             ),

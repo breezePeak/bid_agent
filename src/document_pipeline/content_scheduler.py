@@ -26,15 +26,48 @@ class ContentUnitScheduler:
     def initialize(self) -> list[ContentUnit]:
         units = self.units()
         for unit in units:
+            current = self.store.content_unit_state(unit.unit_id) or {}
             self.store.upsert_content_unit_state(
                 {
                     "unit_id": unit.unit_id,
                     "contract_revision": unit.contract_revision,
                     "state": "queued",
+                    "attempt": int(current.get("attempt") or 0),
                     "evidence_snapshot_hash": self._evidence_snapshot_hash(unit),
                 }
             )
         return units
+
+    def mark_running(self, unit: ContentUnit) -> dict:
+        current = self.store.content_unit_state(unit.unit_id) or {}
+        return self.store.upsert_content_unit_state(
+            {
+                "unit_id": unit.unit_id,
+                "contract_revision": unit.contract_revision,
+                "state": "running",
+                "attempt": int(current.get("attempt") or 0) + 1,
+                "evidence_snapshot_hash": str(
+                    current.get("evidence_snapshot_hash")
+                    or self._evidence_snapshot_hash(unit)
+                ),
+            }
+        )
+
+    def mark_failed(self, unit: ContentUnit, exc: Exception) -> dict:
+        current = self.store.content_unit_state(unit.unit_id) or {}
+        return self.store.upsert_content_unit_state(
+            {
+                "unit_id": unit.unit_id,
+                "contract_revision": unit.contract_revision,
+                "state": "failed",
+                "attempt": int(current.get("attempt") or 1),
+                "evidence_snapshot_hash": str(
+                    current.get("evidence_snapshot_hash")
+                    or self._evidence_snapshot_hash(unit)
+                ),
+                "invalidation_reason": str(exc)[:2000],
+            }
+        )
 
     def ready_units(self, completed_unit_ids: set[str]) -> list[ContentUnit]:
         return [unit for unit in self.units() if set(unit.upstream_unit_ids).issubset(completed_unit_ids)]

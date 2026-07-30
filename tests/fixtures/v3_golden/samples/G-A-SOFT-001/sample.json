@@ -1,0 +1,282 @@
+{
+  "sample_id": "G-A-SOFT-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名软件项目采购（无模板）",
+  "tags": [
+    "software",
+    "no_template",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "9cb97df9650a1a1defb8adc4a54539225232925968aa80ce3e565172da1d1ba8",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "be9a5d9508910c1f89ba55ea92634d8574e196afa939bf881a6fc71751ee4831",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "c1144ccc2c3b32967994aaee543f0f934479b134d78551747a5eb8e2d8696db5",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-soft-qual-cert",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须具备软件企业资质证书",
+          "match_key": "投标人须具备软件企业资质证书",
+          "source_anchor": {
+            "location_contains": "资质"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-soft-qual-case",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须提供近三年类似软件项目业绩",
+          "match_key": "投标人须提供近三年类似软件项目业绩",
+          "source_anchor": {
+            "location_contains": "业绩"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-soft-conc",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "系统必须支持不少于200个并发用户",
+          "match_key": "系统必须支持不少于200个并发用户",
+          "source_anchor": {
+            "location_contains": "并发"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-soft-audit",
+          "kind": "mandatory",
+          "severity": "normal",
+          "normalized_requirement": "系统应当提供完整的操作日志与审计功能",
+          "match_key": "系统应当提供完整的操作日志与审计功能",
+          "source_anchor": {
+            "location_contains": "审计"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-soft-deliver",
+          "kind": "deliverable",
+          "severity": "blocking",
+          "normalized_requirement": "中标人须在合同签订后60天内完成系统交付",
+          "match_key": "中标人须在合同签订后60天内完成系统交付",
+          "source_anchor": {
+            "location_contains": "60天"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-soft-accept",
+          "kind": "acceptance",
+          "severity": "blocking",
+          "normalized_requirement": "验收时须提交用户手册、部署文档和测试报告",
+          "match_key": "验收时须提交用户手册、部署文档和测试报告",
+          "source_anchor": {
+            "location_contains": "验收"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-soft-reject",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "未提供软件企业资质证书的，作废标处理",
+          "match_key": "未提供软件企业资质证书的，作废标处理",
+          "source_anchor": {
+            "location_contains": "废标"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-soft-qual-cert",
+        "R-soft-qual-case",
+        "R-soft-conc",
+        "R-soft-deliver",
+        "R-soft-accept",
+        "R-soft-reject"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-soft-arch",
+          "title": "系统架构与功能设计",
+          "criterion": "系统架构与功能设计，满分40分",
+          "max_points": 40,
+          "scoring_levels": [
+            {
+              "label": "优秀",
+              "points": 38,
+              "criterion": "优秀36-40分"
+            },
+            {
+              "label": "良好",
+              "points": 32,
+              "criterion": "良好30-35分"
+            },
+            {
+              "label": "一般",
+              "points": 24,
+              "criterion": "一般20-29分"
+            }
+          ],
+          "required_evidence_types": [
+            "architecture_doc"
+          ],
+          "linked_requirement_match_keys": [
+            "系统必须支持不少于200个并发用户",
+            "系统应当提供完整的操作日志与审计功能"
+          ],
+          "match_key": "系统架构与功能设计，满分40分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-soft-impl",
+          "title": "实施计划与售后服务方案",
+          "criterion": "实施计划与售后服务方案，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "implementation_plan"
+          ],
+          "linked_requirement_match_keys": [
+            "中标人须在合同签订后60天内完成系统交付"
+          ],
+          "match_key": "实施计划与售后服务方案，满分30分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-soft-case",
+          "title": "类似项目业绩与项目团队配置",
+          "criterion": "类似项目业绩与项目团队配置，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "case_proof",
+            "team_resume"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须提供近三年类似软件项目业绩"
+          ],
+          "match_key": "类似项目业绩与项目团队配置，满分30分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-soft-arch",
+        "SP-soft-impl",
+        "SP-soft-case"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-soft-qual",
+          "topic_type": "qualification",
+          "canonical_name": "投标资格与废标",
+          "duty_type": "prove",
+          "requirement_match_keys": [
+            "投标人须具备软件企业资质证书",
+            "未提供软件企业资质证书的，作废标处理"
+          ],
+          "score_match_keys": [],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-soft-arch",
+          "topic_type": "function",
+          "canonical_name": "系统功能与架构",
+          "duty_type": "design",
+          "requirement_match_keys": [
+            "系统必须支持不少于200个并发用户",
+            "系统应当提供完整的操作日志与审计功能"
+          ],
+          "score_match_keys": [
+            "系统架构与功能设计，满分40分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-soft-impl",
+          "topic_type": "implementation",
+          "canonical_name": "实施交付与验收",
+          "duty_type": "implement",
+          "requirement_match_keys": [
+            "中标人须在合同签订后60天内完成系统交付",
+            "验收时须提交用户手册、部署文档和测试报告"
+          ],
+          "score_match_keys": [
+            "实施计划与售后服务方案，满分30分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-soft-case",
+          "topic_type": "qualification",
+          "canonical_name": "业绩与团队",
+          "duty_type": "prove",
+          "requirement_match_keys": [
+            "投标人须提供近三年类似软件项目业绩"
+          ],
+          "score_match_keys": [
+            "类似项目业绩与项目团队配置，满分30分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-soft-qual",
+        "T-soft-arch",
+        "T-soft-impl",
+        "T-soft-case"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=software_project; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

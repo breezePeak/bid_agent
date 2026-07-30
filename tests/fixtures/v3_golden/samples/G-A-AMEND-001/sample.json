@@ -1,0 +1,209 @@
+{
+  "sample_id": "G-A-AMEND-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名补遗冲突样本",
+  "tags": [
+    "amendment",
+    "conflict",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "2cb2e1163d7f7d760cc429e92a9ee2b4418116fbd79be92eebf28abe60f54685",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "cc249eeebc77ca31851bbb099b2335368d65f5ae972405d979f3c9f6612661bb",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "4c6e2b29a40b6a790257892469532cb8464b9ab6703d4e0350dc56ae61c35b30",
+      "external_original_ref": null
+    },
+    {
+      "role": "amendment",
+      "relative_path": "source/amendment.md",
+      "content_sha256": "ae74679c830aef1cc5722cdc537e39e3bfc2a25ab7f02ddbcbef108158f2aad0",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-am-duration-new",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "30天内完成项目交付",
+          "match_key": "30天内完成项目交付",
+          "source_anchor": {
+            "location_contains": "30天"
+          },
+          "allowed_variants": [
+            "中标人须在30天内完成项目交付"
+          ]
+        },
+        {
+          "requirement_id": "R-am-pm",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "项目经理须具备高级项目经理证书",
+          "match_key": "项目经理须具备高级项目经理证书",
+          "source_anchor": {
+            "location_contains": "项目经理"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-am-ops",
+          "kind": "deliverable",
+          "severity": "normal",
+          "normalized_requirement": "须提供一年免费运维服务",
+          "match_key": "须提供一年免费运维服务",
+          "source_anchor": {
+            "location_contains": "运维"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-am-duration-new",
+        "R-am-pm"
+      ],
+      "notes": "{\"waived_keys\": [\"中标人须在45天内完成项目交付\", \"45天内完成项目交付\"]}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-am-schedule",
+          "title": "工期安排合理性",
+          "criterion": "工期安排合理性，满分40分",
+          "max_points": 40,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "schedule"
+          ],
+          "linked_requirement_match_keys": [
+            "30天内完成项目交付"
+          ],
+          "match_key": "工期安排合理性，满分40分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-am-team",
+          "title": "项目经理与核心成员",
+          "criterion": "项目经理与核心成员，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "pm_cert"
+          ],
+          "linked_requirement_match_keys": [
+            "项目经理须具备高级项目经理证书"
+          ],
+          "match_key": "项目经理与核心成员，满分30分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-am-ops",
+          "title": "免费运维服务方案",
+          "criterion": "免费运维服务方案，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "ops_plan"
+          ],
+          "linked_requirement_match_keys": [
+            "须提供一年免费运维服务"
+          ],
+          "match_key": "免费运维服务方案，满分30分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-am-schedule",
+        "SP-am-team",
+        "SP-am-ops"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-am-schedule",
+          "topic_type": "implementation",
+          "canonical_name": "工期与进度",
+          "duty_type": "implement",
+          "requirement_match_keys": [
+            "30天内完成项目交付"
+          ],
+          "score_match_keys": [
+            "工期安排合理性，满分40分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-am-team",
+          "topic_type": "qualification",
+          "canonical_name": "项目团队",
+          "duty_type": "prove",
+          "requirement_match_keys": [
+            "项目经理须具备高级项目经理证书"
+          ],
+          "score_match_keys": [
+            "项目经理与核心成员，满分30分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-am-ops",
+          "topic_type": "service",
+          "canonical_name": "运维服务",
+          "duty_type": "serve",
+          "requirement_match_keys": [
+            "须提供一年免费运维服务"
+          ],
+          "score_match_keys": [
+            "免费运维服务方案，满分30分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-am-schedule",
+        "T-am-team",
+        "T-am-ops"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=amendment_conflict; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

@@ -84,6 +84,117 @@ class TestV3RequirementAgent(unittest.TestCase):
         # At least one statement carries quantitative duration metrics.
         self.assertTrue(any("天" in item.quantitative_metrics for item in items))
 
+    def test_dates_and_table_of_contents_lines_are_not_bidder_requirements(self) -> None:
+        agent = RequirementAgent(self.context)
+        manifest = InputManifest(
+            inputs=[
+                InputItem(
+                    input_id="in-tender",
+                    role=InputRole.TENDER,
+                    filename="tender.docx",
+                    mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    sha256="tenderhash",
+                    version=1,
+                )
+            ]
+        )
+        contents = [
+            "2026年6月",
+            "第二章   投标人须知资料表及投标人须知\t6",
+            "投标人须在合同签订后30日内完成交付。",
+        ]
+        blocks = [
+            SourceBlock(
+                block_id=f"noise-{index}",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=index,
+                content=content,
+                source_anchor=SourceAnchor(
+                    source_input_id="in-tender",
+                    chunk_id=f"noise-{index}",
+                    location=f"paragraph:{index + 1}",
+                ),
+                content_hash=f"hash-{index}",
+            )
+            for index, content in enumerate(contents)
+        ]
+
+        items = agent.extract_requirements(blocks, manifest)
+
+        self.assertEqual(
+            [item.normalized_requirement for item in items],
+            ["投标人须在合同签订后30日内完成交付"],
+        )
+        ledger = RequirementLedger(requirements=items)
+        audit = audit_reverse_coverage(
+            ledger,
+            {"blocks": [block.model_dump(mode="json") for block in blocks]},
+        )
+        self.assertTrue(audit["passed"], audit)
+        self.assertEqual(audit["total_obligation_statements"], 1)
+
+    def test_scoring_sources_do_not_require_obligation_words_or_explicit_points(self) -> None:
+        agent = RequirementAgent(self.context)
+        manifest = InputManifest(
+            inputs=[
+                InputItem(
+                    input_id="in-tender",
+                    role=InputRole.TENDER,
+                    filename="tender.md",
+                    mime_type="text/markdown",
+                    sha256="tenderhash",
+                    version=1,
+                ),
+                InputItem(
+                    input_id="in-score",
+                    role=InputRole.SCORE,
+                    filename="score.md",
+                    mime_type="text/markdown",
+                    sha256="scorehash",
+                    version=1,
+                ),
+            ]
+        )
+        blocks = [
+            SourceBlock(
+                block_id="tender-score",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=0,
+                content="售后服务响应情况。",
+                heading_path=["评标办法", "服务评分"],
+                source_anchor=SourceAnchor(
+                    source_input_id="in-tender",
+                    chunk_id="tender-score",
+                    location="paragraph:1",
+                ),
+                content_hash="tender-score-hash",
+            ),
+            SourceBlock(
+                block_id="score-item",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="paragraph",
+                ordinal=0,
+                content="评分项：项目实施方案完整性。",
+                source_anchor=SourceAnchor(
+                    source_input_id="in-score",
+                    chunk_id="score-item",
+                    location="paragraph:1",
+                ),
+                content_hash="score-item-hash",
+            ),
+        ]
+
+        items = agent.extract_requirements(blocks, manifest)
+
+        self.assertEqual(len(items), 2)
+        self.assertTrue(all(item.kind is RequirementKind.SCORE for item in items))
+        self.assertTrue(all(item.response_type == "score_response" for item in items))
+
 
     def test_amendment_reconciliation(self) -> None:
         agent = RequirementAgent(self.context)
@@ -248,6 +359,42 @@ class TestV3RequirementAgent(unittest.TestCase):
         self.assertFalse(audit["passed"])
         self.assertGreaterEqual(len(audit["missing_obligations"]), 1)
 
+    def test_statement_level_coverage_allows_duplicate_clause_with_canonical_anchor(self) -> None:
+        ledger = RequirementLedger(
+            requirements=[
+                RequirementItem(
+                    requirement_id="R-1",
+                    kind=RequirementKind.MANDATORY,
+                    source_anchor=SourceAnchor(source_input_id="in-tender", chunk_id="b1", location="p:1"),
+                    original_text="投标人须提供技术方案。",
+                    normalized_requirement="投标人须提供技术方案。",
+                    response_type="mandatory_response",
+                    evidence_policy="tender_traceable",
+                )
+            ]
+        )
+        source_index = {
+            "blocks": [
+                {
+                    "block_id": "b1",
+                    "input_role": "tender",
+                    "block_kind": "paragraph",
+                    "content": "投标人须提供技术方案。",
+                    "source_anchor": {"source_input_id": "in-tender", "chunk_id": "b1", "location": "p:1"},
+                },
+                {
+                    "block_id": "b2",
+                    "input_role": "tender",
+                    "block_kind": "paragraph",
+                    "content": "投标人须提供技术方案。",
+                    "source_anchor": {"source_input_id": "in-tender", "chunk_id": "b2", "location": "p:2"},
+                },
+            ]
+        }
+        audit = audit_reverse_coverage(ledger, source_index)
+        self.assertTrue(audit["passed"])
+        self.assertEqual(audit["missing_chunk_ids"], [])
+
     def test_batch_extract_and_stable_clause_ids(self) -> None:
         agent = RequirementAgent(self.context, batch_size=2)
         manifest = InputManifest(
@@ -374,7 +521,7 @@ class TestV3RequirementAgent(unittest.TestCase):
             cited_source_ids=["in-tender"],
         )
 
-        runner = V3StageRunner(self.context)
+        runner = V3StageRunner.for_deterministic_tests(self.context)
         ledger = runner.run("build_requirement_ledger")
 
         self.assertIsNotNone(ledger)
@@ -398,4 +545,3 @@ class TestV3RequirementAgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

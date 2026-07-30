@@ -21,8 +21,10 @@ from document_pipeline.artifact_promotion import (  # noqa: E402
     build_declared_dependency_fingerprint,
     validate_and_record,
 )
+from document_pipeline.contracts import InputItem, InputManifest, InputRole, SourceIndex  # noqa: E402
 from document_pipeline.gate_policy_registry import GATE_POLICY_REGISTRY, ISSUER_GATE_SERVICE  # noqa: E402
-from document_pipeline.proposals import ProposalEnvelope  # noqa: E402
+from document_pipeline.proposals import DependencyRef, ProposalEnvelope  # noqa: E402
+from document_pipeline.source_artifacts import promote_source_artifact  # noqa: E402
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder  # noqa: E402
 
 
@@ -42,13 +44,60 @@ class V3ProposalPromotionTests(unittest.TestCase):
         (runs / "alpha").mkdir(parents=True)
         self.context = WorkspaceContext.resolve(runs, "alpha")
         self.runs = runs
+        manifest = InputManifest(
+            inputs=[
+                InputItem(
+                    input_id="in-tender",
+                    role=InputRole.TENDER,
+                    filename="tender.md",
+                    mime_type="text/markdown",
+                    sha256="tenderhash",
+                    version=1,
+                )
+            ]
+        )
+        promote_source_artifact(
+            self.context,
+            artifact_kind="InputManifest",
+            payload=manifest.model_dump(mode="json"),
+            operation_id="fixture-input-manifest",
+            gate_id="G0_INPUT_MANIFEST_INTEGRITY",
+        )
+        source_index = SourceIndex(
+            revision=1,
+            source_hashes={"in-tender": "tenderhash"},
+            input_manifest_revision=1,
+            blocks=[],
+        )
+        promote_source_artifact(
+            self.context,
+            artifact_kind="SourceIndex",
+            payload=source_index.model_dump(mode="json"),
+            operation_id="fixture-source-index",
+            gate_id="G0_SOURCE_STRUCTURE",
+            cited_source_ids=["in-tender"],
+        )
+        source = ControlStore(self.context).v3_active_artifact("SourceIndex")
+        self.source_snapshot = {
+            "SourceIndex": {
+                "artifact_kind": "SourceIndex",
+                "artifact_id": source["artifact_id"],
+                "revision": source["revision"],
+                "artifact_hash": source["artifact_hash"],
+            }
+        }
 
     def tearDown(self) -> None:
         self.temp.cleanup()
 
     def _fp(self, *, artifact_kind: str = "RequirementLedger", snapshot: dict | None = None) -> str:
+        resolved = (
+            self.source_snapshot
+            if snapshot is None and artifact_kind == "RequirementLedger"
+            else (snapshot or {})
+        )
         return build_declared_dependency_fingerprint(
-            resolved_dependency_snapshot=snapshot or {},
+            resolved_dependency_snapshot=resolved,
             artifact_kind=artifact_kind,
             prompt_version="requirement-v1",
             model_fingerprint="fixture-model",
@@ -77,6 +126,15 @@ class V3ProposalPromotionTests(unittest.TestCase):
             "prompt_version": "requirement-v1",
             "model_fingerprint": "fixture-model",
         }
+        if artifact_kind == "RequirementLedger":
+            source = self.source_snapshot["SourceIndex"]
+            data["declared_dependencies"] = [
+                DependencyRef(
+                    artifact_kind="SourceIndex",
+                    expected_revision=source["revision"],
+                    expected_hash=source["artifact_hash"],
+                ).model_dump(mode="json")
+            ]
         if proposal_id is not None:
             data["proposal_id"] = proposal_id
         return ProposalEnvelope.model_validate(data)
@@ -129,7 +187,10 @@ class V3ProposalPromotionTests(unittest.TestCase):
         gate = self.submit_validate_gate(proposal)
         ArtifactPromotionService(self.context).promote(proposal.proposal_id, [gate.receipt_id])
         snapshot = V3WorkspaceSnapshotBuilder(self.context).build()
-        self.assertEqual([item["artifact_kind"] for item in snapshot["promoted_artifacts"]], ["RequirementLedger"])
+        self.assertEqual(
+            [item["artifact_kind"] for item in snapshot["promoted_artifacts"]],
+            ["InputManifest", "RequirementLedger", "SourceIndex"],
+        )
         self.assertIsNone(snapshot["project_model"])
 
     def test_failed_promotion_leaves_no_half_revision(self) -> None:
@@ -137,7 +198,7 @@ class V3ProposalPromotionTests(unittest.TestCase):
         AgentProposalSandbox(self.context, "requirement_agent").submit(proposal)
         with self.assertRaisesRegex(ControlPlaneError, "GateReceipt|缺少"):
             ArtifactPromotionService(self.context).promote(proposal.proposal_id, ["missing-receipt"])
-        self.assertEqual(ControlStore(self.context).v3_promoted_artifacts(), [])
+        self.assertIsNone(ControlStore(self.context).v3_active_artifact("RequirementLedger"))
 
     def test_bid_master_is_a_thin_proposal_coordinator(self) -> None:
         proposal = self.proposal()
@@ -278,6 +339,60 @@ class V3ProposalPromotionTests(unittest.TestCase):
         report = validate_and_record(self.context, proposal.proposal_id)
         self.assertFalse(report.passed)
         self.assertTrue(any(f.code == "DEPENDENCY_FINGERPRINT_MISMATCH" for f in report.findings))
+
+    def test_required_dependency_must_be_explicitly_declared(self) -> None:
+        proposal = self.proposal(
+            operation_id="missing-required-dependency-declaration"
+        ).model_copy(update={"declared_dependencies": []})
+        AgentProposalSandbox(
+            self.context,
+            "requirement_agent",
+        ).submit(proposal)
+
+        report = validate_and_record(self.context, proposal.proposal_id)
+
+        self.assertFalse(report.passed)
+        self.assertIn(
+            "DEPENDENCY_DECLARATION_MISSING",
+            {finding.code for finding in report.findings},
+        )
+
+    def test_required_dependency_must_pin_both_revision_and_hash(
+        self,
+    ) -> None:
+        source = self.source_snapshot["SourceIndex"]
+        cases = (
+            DependencyRef(
+                artifact_kind="SourceIndex",
+                expected_revision=source["revision"],
+            ),
+            DependencyRef(
+                artifact_kind="SourceIndex",
+                expected_hash=source["artifact_hash"],
+            ),
+        )
+        for index, dependency in enumerate(cases, start=1):
+            with self.subTest(index=index):
+                proposal = self.proposal(
+                    operation_id=f"partially-pinned-dependency-{index}"
+                ).model_copy(
+                    update={"declared_dependencies": [dependency]}
+                )
+                AgentProposalSandbox(
+                    self.context,
+                    "requirement_agent",
+                ).submit(proposal)
+
+                report = validate_and_record(
+                    self.context,
+                    proposal.proposal_id,
+                )
+
+                self.assertFalse(report.passed)
+                self.assertIn(
+                    "DEPENDENCY_REQUIRED_UNPINNED",
+                    {finding.code for finding in report.findings},
+                )
 
     def test_same_operation_different_hash_conflicts(self) -> None:
         first = self.proposal(operation_id="same-op", payload={**LEDGER_PAYLOAD, "coverage_audit": {"a": 1}})

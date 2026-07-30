@@ -164,9 +164,10 @@ def _extract_stream_delta(event_data: dict[str, Any]) -> tuple[str, str]:
     return str(reasoning) if reasoning else "", "" if content is None else str(content)
 
 
-def _read_openai_streaming_response(response: Any) -> tuple[str, str]:
+def _read_openai_streaming_response(response: Any) -> tuple[str, str, str]:
     content_parts: list[str] = []
     reasoning_parts: list[str] = []
+    finish_reason = ""
     for raw_line in response:
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line or line.startswith(":"):
@@ -181,11 +182,14 @@ def _read_openai_streaming_response(response: Any) -> tuple[str, str]:
         except json.JSONDecodeError:
             continue
         reasoning, content = _extract_stream_delta(event_data)
+        choices = event_data.get("choices") or []
+        if choices and choices[0].get("finish_reason"):
+            finish_reason = str(choices[0]["finish_reason"])
         if reasoning:
             reasoning_parts.append(reasoning)
         if content:
             content_parts.append(content)
-    return "".join(content_parts), "".join(reasoning_parts)
+    return "".join(content_parts), "".join(reasoning_parts), finish_reason
 
 
 def _build_http_error_hint(endpoint: str, status_code: int, error_body: str, provider: str) -> str:
@@ -231,7 +235,7 @@ def _retry_delay(attempt: int, initial_delay: float, max_delay: float) -> float:
     return base_delay + jitter
 
 
-def _openai_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str]:
+def _openai_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str, str]:
     endpoint = _openai_chat_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     payload: dict[str, Any] = {
@@ -256,17 +260,29 @@ def _openai_request(settings: Settings, messages: list[dict], temperature: float
     request = urllib.request.Request(endpoint, data=body, headers=headers, method="POST")
     with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
         if settings.stream:
-            content, reasoning = _read_openai_streaming_response(response)
+            content, reasoning, finish_reason = _read_openai_streaming_response(response)
             if not content.strip():
                 raise ValueError("LLM 流式响应为空。")
-            return strip_code_fences(content), str(reasoning or "").strip()
+            return (
+                strip_code_fences(content),
+                str(reasoning or "").strip(),
+                finish_reason,
+            )
         response_body = response.read().decode("utf-8")
         response_data = json.loads(response_body)
         content, reasoning = _extract_openai_message(response_data)
-        return strip_code_fences(content), str(reasoning or "").strip()
+        choices = response_data.get("choices") or []
+        finish_reason = (
+            str(choices[0].get("finish_reason") or "") if choices else ""
+        )
+        return (
+            strip_code_fences(content),
+            str(reasoning or "").strip(),
+            finish_reason,
+        )
 
 
-def _anthropic_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str]:
+def _anthropic_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str, str]:
     endpoint = _anthropic_messages_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     system_text, converted = _split_system_messages(messages)
@@ -300,13 +316,18 @@ def _anthropic_request(settings: Settings, messages: list[dict], temperature: fl
     with urllib.request.urlopen(request, timeout=settings.timeout, context=ssl_context) as response:
         response_body = response.read().decode("utf-8")
         response_data = json.loads(response_body)
-        return strip_code_fences(_extract_anthropic_content(response_data)), ""
+        return (
+            strip_code_fences(_extract_anthropic_content(response_data)),
+            "",
+            str(response_data.get("stop_reason") or ""),
+        )
 
 
 def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, str]:
     """Call LLM and return both answer content and model reasoning (if any)."""
     initial_settings = get_settings(project_root())
     last_error: Exception | None = None
+    last_error_detail = ""
     for attempt in range(1, initial_settings.max_retries + 1):
         settings = get_settings(project_root())
         provider = _normalize_provider(getattr(settings, "provider", "openai"))
@@ -317,15 +338,58 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
         )
         try:
             with llm_slot():
+                from document_pipeline.llm_telemetry import record_llm_request
+
+                request_parameters = {
+                    "provider": provider,
+                    "endpoint": endpoint,
+                    "model": settings.model,
+                    "temperature": temperature,
+                    "timeout": settings.timeout,
+                    "stream": settings.stream if provider == "openai" else False,
+                    "verify_ssl": settings.verify_ssl,
+                    "transport_attempt": attempt,
+                    "transport_max_retries": initial_settings.max_retries,
+                }
                 if provider == "anthropic":
-                    cleaned, reasoning = _anthropic_request(settings, messages, temperature)
-                else:
-                    cleaned, reasoning = _openai_request(settings, messages, temperature)
+                    request_parameters["max_tokens"] = 4096
+                    system_text, converted = _split_system_messages(messages)
+                    request_parameters["messages"] = converted or [
+                        {"role": "user", "content": "hello"}
+                    ]
+                    if system_text:
+                        request_parameters["system"] = system_text
+                with record_llm_request(
+                    messages,
+                    parameters=request_parameters,
+                    ):
+                        if provider == "anthropic":
+                            transport_result = _anthropic_request(
+                                settings,
+                                messages,
+                                temperature,
+                            )
+                        else:
+                            transport_result = _openai_request(
+                                settings,
+                                messages,
+                                temperature,
+                            )
+                        if len(transport_result) == 2:
+                            cleaned, reasoning = transport_result
+                            finish_reason = ""
+                        else:
+                            cleaned, reasoning, finish_reason = transport_result
             record_llm_call(messages, cleaned, settings.model, temperature)
-            return {"content": cleaned, "reasoning": str(reasoning or "").strip()}
+            return {
+                "content": cleaned,
+                "reasoning": str(reasoning or "").strip(),
+                "finish_reason": str(finish_reason or "").strip(),
+            }
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             last_error = exc
+            last_error_detail = f"HTTP {exc.code}: {error_body[:2000].strip()}"
             should_retry = exc.code not in {400, 401, 403}
             if exc.code == 429:
                 note_rate_limit_429()
@@ -342,6 +406,7 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
                 break
         except Exception as exc:
             last_error = exc
+            last_error_detail = str(exc)[:2000]
             hint = _build_connection_error_hint(endpoint, exc, provider)
             print(
                 f"[LLM] 第 {attempt}/{settings.max_retries} 次请求失败: "
@@ -363,6 +428,7 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
         f"LLM 请求失败，已重试 {initial_settings.max_retries} 次。"
         "请检查 API 格式（OpenAI/Anthropic）、Base URL、模型 ID 与 API Key 是否匹配，"
         "或临时增大 OPENAI_MAX_RETRIES 后重试。"
+        + (f" 最后错误：{last_error_detail}" if last_error_detail else "")
     ) from last_error
 
 

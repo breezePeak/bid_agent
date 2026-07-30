@@ -25,18 +25,42 @@ from .contracts import (
     SourceBlock,
 )
 from .proposals import DependencyRef, ProposalEnvelope
+from .scoring_sources import is_scoring_source_block, scoring_table_data_block_ids
 
-PROMPT_EXTRACT_VERSION = "v3_requirement_agent_extract_v1.0"
+PROMPT_EXTRACT_VERSION = "v3_requirement_agent_extract_v1.2"
 PROMPT_RECONCILE_VERSION = "v3_requirement_agent_reconcile_v1.0"
 REQUIREMENT_SCHEMA_VERSION = "v3"
-REQUIREMENT_POLICY_VERSION = "v3-requirement-policy-1"
+REQUIREMENT_POLICY_VERSION = "v3-requirement-policy-3"
 DEFAULT_BATCH_SIZE = 32
 
 _OBLIGATION_MARKERS = (
     "应当", "必须", "须", "应", "不得", "禁止", "需要", "要求", "提供", "具备", "保证", "确保", "提交",
 )
+_DECLARED_REQUIREMENT_MARKERS = (
+    "项目目标",
+    "服务目标",
+    "工作目标",
+    "服务范围",
+    "工作范围",
+    "项目范围",
+    "交付成果",
+    "交付物",
+    "验收条件",
+    "验收标准",
+    "服务期限",
+    "项目工期",
+    "工期",
+)
 _NEGATION_MARKERS = ("不得", "禁止", "不可", "不能", "严禁")
 _EXCEPTION_MARKERS = ("除外", "除", "以外", "不适用于")
+_SCORING_TABLE_HEADER = re.compile(
+    r"^(?:序号|评分因素|评标因素|评审因素|评分项目|评分项|评分标准|评审标准|评分细则|分值)$"
+)
+_STANDALONE_DATE = re.compile(r"^\d{4}\s*年\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?$")
+_TOC_PAGE_LINE = re.compile(r"^.+\t+\s*\d+\s*$")
+_QUANTIFIED_OBLIGATION = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:个?工作日|天|日|个?月|%|分(?!钟)|人(?:次|员)?)"
+)
 
 
 @dataclass
@@ -60,6 +84,7 @@ class RequirementInferenceProvider(Protocol):
         batch_id: str,
         blocks: list[SourceBlock],
         clause_context: list[dict[str, str]],
+        scoring_block_ids: set[str] | None = None,
     ) -> ExtractionBatchResult: ...
 
 
@@ -67,7 +92,7 @@ class DeterministicRequirementExtractor:
     """Rule-based controlled extractor; versioned as a model fingerprint for audit."""
 
     prompt_version = PROMPT_EXTRACT_VERSION
-    model_fingerprint = "deterministic_requirement_extractor_v2"
+    model_fingerprint = "deterministic_requirement_extractor_v4"
 
     def extract_batch(
         self,
@@ -75,6 +100,7 @@ class DeterministicRequirementExtractor:
         batch_id: str,
         blocks: list[SourceBlock],
         clause_context: list[dict[str, str]],
+        scoring_block_ids: set[str] | None = None,
     ) -> ExtractionBatchResult:
         items: list[RequirementItem] = []
         abstained: list[dict[str, Any]] = []
@@ -90,6 +116,7 @@ class DeterministicRequirementExtractor:
             content = block.content.strip()
             if not content:
                 continue
+            scoring_source = block.block_id in (scoring_block_ids or set()) or is_scoring_source_block(block)
 
             if block.block_kind == "heading":
                 depth = len(block.heading_path) if block.heading_path else 1
@@ -97,6 +124,15 @@ class DeterministicRequirementExtractor:
                     clause_stack.pop()
                 clause_id = _stable_clause_id(block.input_id, block.block_id, content, depth)
                 clause_stack.append((depth, clause_id, content))
+                continue
+            if _SCORING_TABLE_HEADER.fullmatch(content):
+                abstained.append(
+                    {
+                        "block_id": block.block_id,
+                        "reason": "scoring_table_header",
+                        "content_preview": content[:80],
+                    }
+                )
                 continue
 
             parent_clause_id = clause_stack[-1][1] if clause_stack else None
@@ -112,7 +148,7 @@ class DeterministicRequirementExtractor:
                 continue
 
             for ordinal, stmt in enumerate(statements):
-                if self._is_non_obligation_prose(stmt):
+                if not scoring_source and self._is_non_obligation_prose(stmt):
                     abstained.append(
                         {
                             "block_id": block.block_id,
@@ -123,7 +159,7 @@ class DeterministicRequirementExtractor:
                     )
                     continue
 
-                kind = RequirementKind.SCORE if block.input_role == InputRole.SCORE else self._classify(stmt)
+                kind = RequirementKind.SCORE if scoring_source else self._classify(stmt)
                 confidence = self._confidence(stmt, kind)
                 review_status = "confirmed"
                 if confidence < 0.45:
@@ -190,9 +226,21 @@ class DeterministicRequirementExtractor:
 
     @staticmethod
     def _is_non_obligation_prose(statement: str) -> bool:
+        text = statement.strip()
+        # Publication dates and table-of-contents/page-number lines are source
+        # structure, not bidder obligations.  Check these before generic marker
+        # matching because words such as “须知” contain the single-character
+        # marker “须”.
+        if _STANDALONE_DATE.fullmatch(text) or _TOC_PAGE_LINE.fullmatch(text):
+            return True
         if any(marker in statement for marker in _OBLIGATION_MARKERS):
             return False
-        if re.search(r"\d", statement) and any(unit in statement for unit in ("天", "日", "月", "%", "分", "人")):
+        if any(
+            marker in statement
+            for marker in _DECLARED_REQUIREMENT_MARKERS
+        ):
+            return False
+        if _QUANTIFIED_OBLIGATION.search(statement):
             return False
         # Pure narrative without obligation markers is abstained rather than guessed.
         return True
@@ -202,6 +250,13 @@ class DeterministicRequirementExtractor:
         score = 0.35
         if any(marker in statement for marker in _OBLIGATION_MARKERS):
             score += 0.25
+        if any(
+            marker in statement
+            for marker in _DECLARED_REQUIREMENT_MARKERS
+        ):
+            score += 0.25
+        if kind is RequirementKind.SCORE:
+            score += 0.15
         if kind is not RequirementKind.MANDATORY:
             score += 0.1
         if re.search(r"\d", statement):
@@ -334,6 +389,7 @@ class RequirementAgent:
         """Process frozen SourceBlocks in batches; headings update shared clause context."""
         results: list[ExtractionBatchResult] = []
         clause_context: list[dict[str, str]] = []
+        scoring_block_ids = scoring_table_data_block_ids(source_blocks)
         batch: list[SourceBlock] = []
         batch_index = 0
 
@@ -346,6 +402,7 @@ class RequirementAgent:
                 batch_id=batch_id,
                 blocks=list(batch),
                 clause_context=list(clause_context),
+                scoring_block_ids=scoring_block_ids,
             )
             results.append(result)
             # Advance clause context using headings inside this batch for next batches.
@@ -526,24 +583,12 @@ class RequirementAgent:
         )
         prompt_version = getattr(self.provider, "prompt_version", PROMPT_EXTRACT_VERSION)
         model_fingerprint = getattr(self.provider, "model_fingerprint", "deterministic_v3_agent")
-        # Registry still treats RequirementLedger deps as empty for Gate K compatibility;
-        # fingerprint still binds SourceIndex snapshot when present.
         dep_fp = build_declared_dependency_fingerprint(
             resolved_dependency_snapshot=resolved,
             artifact_kind="RequirementLedger",
             prompt_version=prompt_version,
             model_fingerprint=model_fingerprint,
         )
-        # When SourceIndex is not in registry dependency_kinds, validator only uses empty snapshot.
-        # Keep producer claim consistent with kernel recomputation (empty deps).
-        if not ARTIFACT_REGISTRY_REQUIRES_SOURCE:
-            dep_fp = build_declared_dependency_fingerprint(
-                resolved_dependency_snapshot={},
-                artifact_kind="RequirementLedger",
-                prompt_version=prompt_version,
-                model_fingerprint=model_fingerprint,
-            )
-            declared = []
 
         return ProposalEnvelope(
             workspace_id=self.context.workspace_id,
@@ -558,7 +603,3 @@ class RequirementAgent:
             prompt_version=prompt_version,
             model_fingerprint=model_fingerprint,
         )
-
-
-# Keep proposal fingerprint aligned with current Artifact registry dependency_kinds=().
-ARTIFACT_REGISTRY_REQUIRES_SOURCE = False

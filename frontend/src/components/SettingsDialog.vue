@@ -177,7 +177,7 @@
         </div>
         <form v-else class="settings-form flow-settings-form" @submit.prevent="saveFlow">
           <div class="settings-form-title">系统参数</div>
-          <p class="settings-hint">修改后仅作用于后续启动的阶段；不会改变正在执行的任务。</p>
+          <p class="settings-hint">修改后只作用于之后启动的任务；流水线启动时会冻结设置快照，运行中修改不会改变当前任务。</p>
           <div class="form-row">
             <div class="form-group"><label for="flow-workers">章节并发数</label><input id="flow-workers" v-model.number="flowForm.workers" type="number" min="1" max="10" /></div>
             <div class="form-group"><label for="flow-llm">模型并发数</label><input id="flow-llm" v-model.number="flowForm.llm_concurrency" type="number" min="1" max="32" /></div>
@@ -191,6 +191,17 @@
             <label class="form-check"><input v-model="flowForm.chapter_review_enabled" type="checkbox" /><span>启用审核</span></label>
           </div>
           <p class="settings-hint">开启时，每章生成后在“生成章节”内部完成自审和按需改稿，并执行全文审核；关闭时直接生成第一版，不执行审核相关阶段。</p>
+          <div class="settings-form-title">失败处理</div>
+          <div class="form-check-group">
+            <label class="form-check">
+              <input v-model="flowForm.validation_failure_blocks_pipeline" type="checkbox" />
+              <span>校验失败时停止主流程</span>
+            </label>
+          </div>
+          <p class="settings-hint">
+            默认关闭。关闭时，资料查询、来源校验、需求或评分点覆盖等可恢复问题会记录为风险并继续生成；
+            文件损坏、权限、安全校验和必需产物缺失仍会停止。设置只影响之后启动的任务。
+          </p>
           <p v-if="flowError" class="form-error" role="alert">{{ flowError }}</p>
           <p v-if="flowSuccess" class="form-success">{{ flowSuccess }}</p>
           <div class="settings-form-footer"><button type="button" class="btn" @click="$emit('close')">关闭</button><button type="submit" class="btn btn-primary" :disabled="flowSaving">{{ flowSaving ? '保存中...' : '保存流程设置' }}</button></div>
@@ -254,7 +265,7 @@ const activeTab = ref('model')
 const flowSaving = ref(false)
 const flowError = ref('')
 const flowSuccess = ref('')
-const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false })
+const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false, validation_failure_blocks_pipeline: false })
 
 async function loadFlow() {
   try {

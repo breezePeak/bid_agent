@@ -10,6 +10,11 @@ from .contracts import RequirementLedger
 _OBLIGATION_MARKERS = (
     "应当", "必须", "须", "应", "不得", "禁止", "需要", "要求", "提供", "具备", "保证", "确保", "提交",
 )
+_STANDALONE_DATE = re.compile(r"^\d{4}\s*年\s*\d{1,2}\s*月(?:\s*\d{1,2}\s*日)?$")
+_TOC_PAGE_LINE = re.compile(r"^.+\t+\s*\d+\s*$")
+_QUANTIFIED_OBLIGATION = re.compile(
+    r"\d+(?:\.\d+)?\s*(?:个?工作日|天|日|个?月|%|分(?!钟)|人(?:次|员)?)"
+)
 
 
 def load_promoted_requirement_ledger(context: WorkspaceContext) -> RequirementLedger:
@@ -35,9 +40,12 @@ def _atomic_statements(content: str) -> list[str]:
 
 
 def _looks_like_obligation(statement: str) -> bool:
+    text = statement.strip()
+    if _STANDALONE_DATE.fullmatch(text) or _TOC_PAGE_LINE.fullmatch(text):
+        return False
     if any(marker in statement for marker in _OBLIGATION_MARKERS):
         return True
-    if re.search(r"\d", statement) and any(unit in statement for unit in ("天", "日", "月", "%", "分", "人")):
+    if _QUANTIFIED_OBLIGATION.search(statement):
         return True
     return False
 
@@ -50,8 +58,6 @@ def audit_reverse_coverage(ledger: RequirementLedger, source_index: dict) -> dic
         if req.status != "waived"
     ]
     req_texts = [re.sub(r"\s+", "", req.normalized_requirement) for req in requirements]
-    covered_chunk_ids = {req.source_anchor.chunk_id for req in requirements}
-
     blocks = source_index.get("blocks") if isinstance(source_index.get("blocks"), list) else []
     candidates = [
         block
@@ -75,9 +81,7 @@ def audit_reverse_coverage(ledger: RequirementLedger, source_index: dict) -> dic
         if not statements:
             continue
 
-        block_has_any_req = chunk_id in covered_chunk_ids or block_id in covered_chunk_ids
-        if not block_has_any_req:
-            missing_chunk_ids.append(chunk_id or block_id)
+        matched_statements = 0
 
         for ordinal, stmt in enumerate(statements):
             total_obligation_statements += 1
@@ -85,6 +89,7 @@ def audit_reverse_coverage(ledger: RequirementLedger, source_index: dict) -> dic
             matched = any(compact in req_text or req_text in compact or _token_overlap(compact, req_text) >= 0.5 for req_text in req_texts)
             if matched:
                 covered_obligation_statements += 1
+                matched_statements += 1
             else:
                 missing_obligations.append(
                     {
@@ -95,12 +100,22 @@ def audit_reverse_coverage(ledger: RequirementLedger, source_index: dict) -> dic
                     }
                 )
 
+        # RequirementAgent merges identical clauses across different locations and
+        # retains one canonical source anchor.  Treating every duplicate location as
+        # uncovered would therefore block an otherwise complete ledger (and the
+        # entire chapter-generation pipeline).  A block is covered when every
+        # obligation it contains is represented in the canonical ledger; unmatched
+        # statements remain hard failures above.
+        if matched_statements != len(statements):
+            missing_chunk_ids.append(chunk_id or block_id)
+
     statement_coverage = (
         1.0
         if total_obligation_statements == 0
         else covered_obligation_statements / total_obligation_statements
     )
-    # Pass requires: every critical block with obligations has >=1 requirement AND no missed obligation statements.
+    # Pass requires every obligation statement to be represented.  Duplicate source
+    # occurrences are allowed to resolve to the same canonical requirement.
     passed = not missing_chunk_ids and not missing_obligations
 
     return {
@@ -112,7 +127,7 @@ def audit_reverse_coverage(ledger: RequirementLedger, source_index: dict) -> dic
         "missing_obligations": missing_obligations,
         "coverage_rate": statement_coverage,
         "passed": passed,
-        "policy": "statement_level_v1",
+        "policy": "statement_level_v2",
     }
 
 

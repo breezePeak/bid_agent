@@ -61,7 +61,7 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_schema_v21_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
+    def test_current_schema_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             database = context.root / "workspace" / "control.db"
@@ -111,7 +111,7 @@ class ControlPlaneTests(unittest.TestCase):
                 migrated.close()
 
             self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, "21")
+            self.assertEqual(schema_version, str(ControlStore.SCHEMA_VERSION))
             self.assertIsNotNone(migration_table)
             self.assertIsNotNone(gate_evaluations)
             self.assertIsNotNone(material_verifications)
@@ -673,20 +673,69 @@ class ControlPlaneTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
             store = ControlStore(context)
-            running = store.record_stage_run("operation-1", "build-md", "running")
+            running = store.record_stage_run(
+                "operation-1",
+                "build-md",
+                "running",
+                output={"phase": "structure", "products": [{"kind": "Draft"}]},
+            )
+            progress = store.record_stage_run(
+                "operation-1",
+                "build-md",
+                "running",
+                output={"phase": "semantic", "products": [{"kind": "Draft"}]},
+            )
             completed = store.record_stage_run(
                 "operation-1", "build-md", "succeeded", disposition="produced"
             )
             runs = store.stage_runs("operation-1")
 
             self.assertEqual(running["stage_run_id"], completed["stage_run_id"])
+            self.assertEqual(progress["stage_run_id"], completed["stage_run_id"])
             self.assertEqual(runs[0]["attempt"], 1)
             self.assertEqual(runs[0]["status"], "succeeded")
             self.assertEqual(runs[0]["disposition"], "produced")
+            self.assertEqual(runs[0]["output"]["phase"], "semantic")
             self.assertEqual(store.snapshot()["stage_runs"][0]["stage_run_id"], running["stage_run_id"])
             self.assertEqual(store.snapshot()["current_stage_runs"], [])
             self.assertEqual(store.latest_stage_run("operation-1", "build-md")["status"], "succeeded")
             self.assertIsNone(store.latest_stage_run("operation-1", "missing-stage"))
+
+    def test_reconcile_expired_operation_closes_stages_llm_requests_and_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {"pipeline.start": lambda ctx, envelope, operation_id: {"accepted": True, "operation_status": "running"}},
+            )
+            receipt = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
+            operation_id = receipt.operation_id or ""
+            store = gateway.store
+            store.record_stage_run(operation_id, "analyze_scores", "running", disposition="started")
+            request = store.start_llm_request(
+                operation_id,
+                "score_semantic_inference",
+                parameters={"model": "test-model"},
+            )
+
+            connection = sqlite3.connect(store.path)
+            try:
+                connection.execute(
+                    "UPDATE workspace_lease SET expires_at = ? WHERE operation_id = ?",
+                    ("2000-01-01T00:00:00+00:00", operation_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            recovered = store.reconcile_expired_operations()
+            self.assertEqual(len(recovered), 1)
+            self.assertEqual(recovered[0]["operation_id"], operation_id)
+            self.assertEqual((store.operation(operation_id) or {})["status"], "failed")
+            self.assertEqual(store.latest_stage_run(operation_id, "analyze_scores")["status"], "failed")
+            self.assertEqual(store.llm_requests(operation_id)[0]["status"], "failed")
+            self.assertIsNone(store.snapshot()["lease"])
+            self.assertEqual(store.reconcile_expired_operations(), [])
 
     def test_stage_run_promotes_queued_attempt_without_creating_a_second_attempt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

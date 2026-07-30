@@ -1,5 +1,5 @@
 {
-  "canonicalization_version": "v3-canon-1",
+  "canonicalization_version": "v3-canon-2",
   "encoding": "utf-8",
   "json_rules": {
     "sort_keys": true,

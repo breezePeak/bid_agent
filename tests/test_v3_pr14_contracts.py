@@ -277,8 +277,8 @@ class RegistryTests(unittest.TestCase):
             ARTIFACT_REGISTRY.get("NotARealKind")
 
     def test_registry_versions_are_frozen(self) -> None:
-        self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-2")
-        self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-2")
+        self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-8")
+        self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-3")
         self.assertEqual(len(GATE_POLICY_REGISTRY.registry_fingerprint()), 64)
 
 
@@ -326,6 +326,7 @@ class AdrAndChecklistPresenceTests(unittest.TestCase):
             "adr/ADR-01-agent-artifact-service-permissions.md",
             "adr/ADR-02-proposal-gate-cas-promotion.md",
             "adr/ADR-11-exact-proposal-receipt-binding.md",
+            "adr/ADR-15-real-bid-usability-gate.md",
             "architecture_review_checklist.md",
             "v3_pr14_0_acceptance.md",
         ):
@@ -364,6 +365,33 @@ class AdrAndChecklistPresenceTests(unittest.TestCase):
             fixture["node_count"],
             profile["generated_heading_count"] + profile["appended_table_heading_count"],
         )
+
+    def test_gate_u_is_a_hard_production_prerequisite(self) -> None:
+        baseline = (ROOT / "agent.md").read_text(encoding="utf-8")
+        for invariant in (
+            "`Gate K/S/A/P/B/U/M` 是仓库发布验收门",
+            "Gate U 未通过时，任何输出只能标记为 `test_draft`",
+            "Gate M 是 PR-27 内生产切换的最后硬门",
+            "Gate M 缺少已通过的 exact Gate U `id/version/hash` 依赖时不得批准生产 CAS",
+            "DOCX 可打开、文件存在、段落非空或运行时 G6 PASS 不能冒充逐页审核覆盖率 100%",
+        ):
+            self.assertIn(invariant, baseline)
+
+        plan = (ROOT / "docs" / "v3_semantic_understanding_and_outline_development_plan.md").read_text(
+            encoding="utf-8"
+        )
+        for invariant in (
+            "| Gate U：Real-Bid Usability |",
+            "Gate M 必须依赖已通过的 exact Gate U `id/version/hash`",
+            "policy.frozen_at < holdout.unsealed_at < first_run_at",
+            "任一单项目 blocking 失败即 Gate U 失败",
+            "Gate U 消费冻结候选、G6、Renderer 和人工盲审证据，但不签发运行时 Receipt",
+        ):
+            self.assertIn(invariant, plan)
+
+        checklist = (ROOT / "docs" / "architecture_review_checklist.md").read_text(encoding="utf-8")
+        self.assertIn("Gate K/S/A/P/B/U/M", checklist)
+        self.assertIn("Gate M 是否绑定已通过的 exact Gate U", checklist)
 
 
 if __name__ == "__main__":

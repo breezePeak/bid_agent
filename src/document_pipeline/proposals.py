@@ -30,6 +30,58 @@ class DependencyRef(BaseModel):
     expected_hash: str | None = None
 
 
+class InferenceReceiptRef(BaseModel):
+    """Content-addressed proof that a controlled inference produced this proposal."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    receipt_id: str = Field(min_length=1)
+    receipt_hash: str = Field(min_length=1)
+
+
+class InferenceReceipt(BaseModel):
+    """Append-only provenance for one model/provider or internal-Skill invocation."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    receipt_id: str = Field(default_factory=lambda: uuid4().hex, min_length=1)
+    workspace_id: str = Field(min_length=1)
+    invocation_id: str = Field(min_length=1)
+    capability_id: str = Field(min_length=1)
+    capability_version: str = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    prompt_hash: str = Field(min_length=1)
+    provider_fingerprint: str = Field(min_length=1)
+    model_fingerprint: str = Field(min_length=1)
+    temperature: float = Field(ge=0, le=2)
+    output_schema_version: str = Field(min_length=1)
+    input_artifact_refs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Persist the exact canonical request sent to the controlled Provider.  The
+    # hash alone cannot be independently rechecked after the invocation.
+    input_snapshot: str = Field(min_length=1)
+    input_snapshot_hash: str = Field(min_length=1)
+    raw_output_hash: str = Field(min_length=1)
+    normalized_candidate_hash: str = Field(min_length=1)
+    compiled_payload_hash: str = Field(min_length=1)
+    issued_at: str = Field(min_length=1)
+
+    def decision_record(self) -> dict[str, Any]:
+        return self.model_dump(mode="json", exclude={"receipt_id"})
+
+    def compute_receipt_hash(self) -> str:
+        return compute_receipt_hash(self.decision_record())
+
+    def input_snapshot_hash_is_valid(self) -> bool:
+        from .canonicalization import canonical_hash
+
+        return self.input_snapshot_hash == canonical_hash(self.input_snapshot)
+
+    def storage_record(self) -> dict[str, Any]:
+        value = self.model_dump(mode="json")
+        value["receipt_hash"] = self.compute_receipt_hash()
+        return value
+
+
 class ProposalEnvelope(BaseModel):
     """A candidate artifact. It is not a runtime fact until promoted."""
 
@@ -48,6 +100,7 @@ class ProposalEnvelope(BaseModel):
     cited_source_ids: list[str] = Field(default_factory=list)
     prompt_version: str = Field(min_length=1)
     model_fingerprint: str = Field(min_length=1)
+    inference_receipt_refs: list[InferenceReceiptRef] = Field(default_factory=list)
     payload_schema_version: str = Field(default="v3", min_length=1)
     canonicalization_version: str = Field(default=CANONICALIZATION_VERSION, min_length=1)
 
@@ -58,6 +111,25 @@ class ProposalEnvelope(BaseModel):
         if any(not item for item in cleaned) or len(cleaned) != len(set(cleaned)):
             raise ValueError("cited_source_ids 必须是唯一的非空 ID")
         return cleaned
+
+    @field_validator("inference_receipt_refs")
+    @classmethod
+    def inference_receipts_are_unique(cls, value: list[InferenceReceiptRef]) -> list[InferenceReceiptRef]:
+        ids = [item.receipt_id for item in value]
+        if len(ids) != len(set(ids)):
+            raise ValueError("inference_receipt_refs 不允许重复 receipt_id")
+        return value
+
+    @field_validator("declared_dependencies")
+    @classmethod
+    def declared_dependencies_are_unique(
+        cls,
+        value: list[DependencyRef],
+    ) -> list[DependencyRef]:
+        kinds = [item.artifact_kind for item in value]
+        if len(kinds) != len(set(kinds)):
+            raise ValueError("declared_dependencies 不允许重复 artifact_kind")
+        return value
 
     def decision_record(self) -> dict[str, Any]:
         return {
@@ -72,6 +144,9 @@ class ProposalEnvelope(BaseModel):
             "cited_source_ids": list(self.cited_source_ids),
             "prompt_version": self.prompt_version,
             "model_fingerprint": self.model_fingerprint,
+            "inference_receipt_refs": [
+                item.model_dump(mode="json") for item in self.inference_receipt_refs
+            ],
             "payload_schema_version": self.payload_schema_version,
             "canonicalization_version": self.canonicalization_version,
         }
@@ -104,6 +179,7 @@ class ProposalEnvelope(BaseModel):
             "cited_source_ids": record.get("cited_source_ids") or [],
             "prompt_version": record["prompt_version"],
             "model_fingerprint": record["model_fingerprint"],
+            "inference_receipt_refs": record.get("inference_receipt_refs") or [],
             "payload_schema_version": record.get("payload_schema_version") or "v3",
             "canonicalization_version": record.get("canonicalization_version") or CANONICALIZATION_VERSION,
         }

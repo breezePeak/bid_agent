@@ -11,8 +11,8 @@ import hashlib
 import json
 from typing import Any
 
-# Bump only with an explicit ADR + Gate K re-run.
-CANONICALIZATION_VERSION = "v3-canon-1"
+# v3-canon-2 binds immutable inference receipts into the Proposal decision.
+CANONICALIZATION_VERSION = "v3-canon-2"
 
 # Decision fields included in proposal_hash. Display-only fields are excluded.
 PROPOSAL_HASH_FIELDS: tuple[str, ...] = (
@@ -27,6 +27,7 @@ PROPOSAL_HASH_FIELDS: tuple[str, ...] = (
     "cited_source_ids",
     "prompt_version",
     "model_fingerprint",
+    "inference_receipt_refs",
     "payload_schema_version",
     "canonicalization_version",
 )
@@ -84,6 +85,9 @@ def proposal_decision_document(record: dict[str, Any]) -> dict[str, Any]:
     doc: dict[str, Any] = {}
     for field in PROPOSAL_HASH_FIELDS:
         if field not in record:
+            if field == "inference_receipt_refs":
+                doc[field] = []
+                continue
             if field == "canonicalization_version":
                 doc[field] = CANONICALIZATION_VERSION
                 continue

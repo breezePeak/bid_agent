@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from docx import Document
 
@@ -58,6 +59,58 @@ class V3SourceStructureTests(unittest.TestCase):
             still = SourceIndex.model_validate(promoted["payload"])
             self.assertGreaterEqual(len(still.blocks), 5)
 
+    def test_docx_merged_cell_aliases_are_deduplicated_per_logical_row(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            path = base / "scoring-table.docx"
+            document = Document()
+            table = document.add_table(rows=3, cols=4)
+            table.cell(0, 0).merge(table.cell(0, 2)).text = "评分内容"
+            table.cell(0, 3).text = "分值"
+            table.cell(1, 0).merge(table.cell(2, 0)).text = "技术部分"
+            table.cell(1, 1).text = "实施方案"
+            table.cell(1, 3).text = "10分"
+            table.cell(2, 1).text = "服务保障"
+            table.cell(2, 3).text = "5分"
+            document.save(path)
+
+            context = self._context(base)
+            InputManifestService(context).register_local_file(path, InputRole.TENDER)
+            index = SourceNormalizer(context).normalize_active_inputs()
+
+            cell_blocks = [
+                block for block in index["blocks"] if block["block_kind"] == "table_cell"
+            ]
+            header_blocks = [block for block in cell_blocks if block["content"] == "评分内容"]
+            self.assertEqual(len(header_blocks), 1)
+            self.assertEqual(header_blocks[0]["column_index"], 0)
+
+            # A vertical merge is intentionally represented once in every
+            # logical row so row-aware score extraction keeps its category.
+            vertical_context = [
+                block for block in cell_blocks if block["content"] == "技术部分"
+            ]
+            self.assertEqual(
+                [(block["row_index"], block["column_index"]) for block in vertical_context],
+                [(1, 0), (2, 0)],
+            )
+
+            coverage = {
+                item["locator"]: item for item in index["coverage"]["items"]
+            }
+            canonical_id = header_blocks[0]["block_id"]
+            for alias_locator in (
+                "table:1:row:1:cell:2",
+                "table:1:row:1:cell:3",
+            ):
+                alias = coverage[alias_locator]
+                self.assertEqual(alias["status"], "exempt")
+                self.assertEqual(alias["block_id"], canonical_id)
+                self.assertEqual(
+                    alias["reason"],
+                    "merged-cell alias of table:1:row:1:cell:1",
+                )
+
     def test_amendment_keeps_issued_at_and_explicit_supersession(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -103,6 +156,33 @@ class V3SourceStructureTests(unittest.TestCase):
             from control_plane import ControlStore
 
             self.assertIsNotNone(ControlStore(context).v3_active_artifact("TemplateStructureContract"))
+
+    def test_unreadable_company_input_is_reported_without_blocking_tender_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            tender = base / "tender.md"
+            company = base / "company.pdf"
+            tender.write_text("# 评标办法\n技术方案满分10分。", encoding="utf-8")
+            company.write_bytes(b"%PDF-scanned-placeholder")
+            context = self._context(base)
+            inputs = InputManifestService(context)
+            inputs.register_local_file(tender, InputRole.TENDER)
+            company_item = inputs.register_local_file(company, InputRole.COMPANY).item
+            normalizer = SourceNormalizer(context)
+            original = normalizer._blocks_for
+
+            def parse_or_simulate_scan(item, source):
+                if item.input_id == company_item.input_id:
+                    raise ValueError("V3_SOURCE_OCR_BLOCKED: PDF 全部页面均无可提取文本（疑似扫描件）。")
+                return original(item, source)
+
+            with mock.patch.object(normalizer, "_blocks_for", side_effect=parse_or_simulate_scan):
+                index = normalizer.normalize_active_inputs()
+
+            status = {item["input_id"]: item for item in index["input_status"]}
+            self.assertEqual(status[company_item.input_id]["status"], "blocked")
+            self.assertTrue(any(block["input_role"] == "tender" for block in index["blocks"]))
+            self.assertFalse(any(block["input_role"] == "company" for block in index["blocks"]))
 
 
 if __name__ == "__main__":

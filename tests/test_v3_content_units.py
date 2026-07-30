@@ -35,7 +35,7 @@ class V3ContentUnitTests(unittest.TestCase):
             inputs.register_local_file(tender, InputRole.TENDER)
             inputs.register_local_file(score, InputRole.SCORE)
             SourceNormalizer(context).normalize_active_inputs()
-            runner = V3StageRunner(context)
+            runner = V3StageRunner.for_deterministic_tests(context)
             runner.run("build_requirement_ledger")
             runner.run("analyze_scores")
             runner.run("plan_response")
@@ -43,9 +43,8 @@ class V3ContentUnitTests(unittest.TestCase):
             _, units = DocumentPlanner(context).build()
             scheduler = ContentUnitScheduler(context)
             self.assertEqual(scheduler.initialize(), units)
-            blocks = ContentWriter(context).write(units[0].unit_id, units[0].node_ids)
-            self.assertTrue(blocks)
-            self.assertTrue({block.target_node_id for block in blocks}.issubset({node.node_id for node in contract.nodes}))
+            with self.assertRaisesRegex(ValueError, "WRITER_BUNDLE_REQUIRED"):
+                ContentWriter(context).write(units[0].unit_id, units[0].node_ids)
             self.assertEqual(scheduler.store.upsert_content_unit_state({"unit_id": units[0].unit_id, "contract_revision": 1, "state": "completed"})["state"], "completed")
 
 

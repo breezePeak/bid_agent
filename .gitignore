@@ -14,6 +14,7 @@ inputs/
 # Runtime workspaces / customer data (keep fixtures only under tests/)
 runs/
 frontend/node_modules/
+/.pnpm-store/
 frontend/dist/
 frontend-3d/node_modules/
 frontend-3d/dist/

@@ -1,0 +1,199 @@
+{
+  "sample_id": "G-A-TABLE-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名表格密集需求样本",
+  "tags": [
+    "table_dense",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "4e292d6e3a3004890c9e53550b9d64be578b1a9768b2b24380972a94f55344f7",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "dd2f771267d5e7a31ffd869e0c3b41d56054598434b4f72f667786e31bc622d1",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "54734d00bf446c6e863a774d783e2853974383e511dccab44c7fc3b0e352aec1",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-tb-role",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "系统须支持角色权限分级管理",
+          "match_key": "系统须支持角色权限分级管理",
+          "source_anchor": {
+            "location_contains": "角色权限"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tb-excel",
+          "kind": "mandatory",
+          "severity": "normal",
+          "normalized_requirement": "系统须支持按条件导出Excel",
+          "match_key": "系统须支持按条件导出Excel",
+          "source_anchor": {
+            "location_contains": "Excel"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tb-msg",
+          "kind": "mandatory",
+          "severity": "normal",
+          "normalized_requirement": "系统须支持站内消息与短信通知",
+          "match_key": "系统须支持站内消息与短信通知",
+          "source_anchor": {
+            "location_contains": "短信"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tb-sla",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "系统可用性不得低于99.9%",
+          "match_key": "系统可用性不得低于99.9%",
+          "source_anchor": {
+            "location_contains": "99.9"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tb-rt",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "关键接口响应时间不得超过3秒",
+          "match_key": "关键接口响应时间不得超过3秒",
+          "source_anchor": {
+            "location_contains": "3秒"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-tb-role",
+        "R-tb-sla",
+        "R-tb-rt"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-tb-func",
+          "title": "功能需求覆盖完整性",
+          "criterion": "功能需求覆盖完整性，满分60分",
+          "max_points": 60,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "func_matrix"
+          ],
+          "linked_requirement_match_keys": [
+            "系统须支持角色权限分级管理",
+            "系统须支持按条件导出Excel",
+            "系统须支持站内消息与短信通知"
+          ],
+          "match_key": "功能需求覆盖完整性，满分60分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-tb-perf",
+          "title": "可用性与响应时间承诺",
+          "criterion": "可用性与响应时间承诺，满分40分",
+          "max_points": 40,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "perf_commitment"
+          ],
+          "linked_requirement_match_keys": [
+            "系统可用性不得低于99.9%",
+            "关键接口响应时间不得超过3秒"
+          ],
+          "match_key": "可用性与响应时间承诺，满分40分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-tb-func",
+        "SP-tb-perf"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-tb-func",
+          "topic_type": "function",
+          "canonical_name": "业务功能",
+          "duty_type": "design",
+          "requirement_match_keys": [
+            "系统须支持角色权限分级管理",
+            "系统须支持按条件导出Excel",
+            "系统须支持站内消息与短信通知"
+          ],
+          "score_match_keys": [
+            "功能需求覆盖完整性，满分60分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-tb-perf",
+          "topic_type": "architecture",
+          "canonical_name": "性能与可用性",
+          "duty_type": "design",
+          "requirement_match_keys": [
+            "系统可用性不得低于99.9%",
+            "关键接口响应时间不得超过3秒"
+          ],
+          "score_match_keys": [
+            "可用性与响应时间承诺，满分40分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-tb-func",
+        "T-tb-perf"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=table_dense; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

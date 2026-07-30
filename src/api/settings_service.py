@@ -43,6 +43,10 @@ FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
     "allow_accept_risk": ("ISSUE_ACCEPT_RISK_ENABLED", False),
     "anti_fabrication_gate": ("BID_AGENT_ANTI_FABRICATION_GATE", True),
     "write_failure_fallback": ("BID_AGENT_WRITE_FAILURE_FALLBACK", True),
+    "validation_failure_blocks_pipeline": (
+        "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
+        False,
+    ),
 }
 RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
     dict.fromkeys(
@@ -55,6 +59,16 @@ RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
 )
 
 _SETTINGS_LOCK = threading.RLock()
+
+
+def _invalidate_inference_runtime_metadata() -> None:
+    """Force H1 to resolve the newly active process-wide model policy."""
+
+    from document_pipeline.inference_runtime import (
+        INFERENCE_RUNTIME_REGISTRY,
+    )
+
+    INFERENCE_RUNTIME_REGISTRY.clear()
 
 
 def _to_int(value: Any, default: int) -> int:
@@ -107,7 +121,7 @@ class SettingsService:
     def auth_credentials(self) -> tuple[str, str]:
         return (
             self._value("BID_AGENT_AUTH_USER", "admin"),
-            self._value("BID_AGENT_AUTH_PASSWORD", ""),
+            self._value("BID_AGENT_AUTH_PASSWORD", "123456"),
         )
 
     def auth_secure_cookie(self) -> bool:
@@ -340,6 +354,7 @@ class SettingsService:
             if applied_live:
                 selected = next(item for item in models if item["id"] == model_id)
                 self._sync_model_to_env_locked(selected)
+                _invalidate_inference_runtime_metadata()
             self._write_models_store_locked(store)
             return {
                 **store,
@@ -361,6 +376,7 @@ class SettingsService:
                 raise LookupError("未找到该模型。")
             store = {"models": models, "active_id": target_id}
             self._sync_model_to_env_locked(target)
+            _invalidate_inference_runtime_metadata()
             self._write_models_store_locked(store)
             return {
                 **store,
@@ -383,6 +399,7 @@ class SettingsService:
                 active_id = str(remaining[0].get("id") or "") if remaining else ""
                 if remaining:
                     self._sync_model_to_env_locked(remaining[0])
+                _invalidate_inference_runtime_metadata()
             next_store = {"models": remaining, "active_id": active_id}
             self._write_models_store_locked(next_store)
             return {
@@ -475,6 +492,7 @@ class SettingsService:
                 for alias, value in runtime_values.items():
                     key = _LLM_ALIAS_TO_KEY[alias]
                     os.environ[key] = str(value)
+                _invalidate_inference_runtime_metadata()
             flow = self.flow_settings()
             os.environ.update(
                 {

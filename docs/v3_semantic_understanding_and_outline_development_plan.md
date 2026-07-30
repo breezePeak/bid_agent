@@ -1,11 +1,81 @@
 # V3 Bid Master Agent 与投标中间语言详细开发计划
 
 > 状态：PR-14～PR-20 已形成工程骨架但尚未通过 M0/M1 收口验收，PR-21 暂停
-> 日期：2026-07-27
+> 日期：2026-07-29
 > 审计基线：`45c7715 feat(v3): require planning confirmation before writing`
 > 历史 PR-0～PR-13 方案：[v3_development_plan.md](./v3_development_plan.md)
 > 当前逻辑：[current_logic_flow_v3.md](./current_logic_flow_v3.md)
 > 实施记录：[v3_implementation_log.md](./v3_implementation_log.md)
+
+## 当前生效架构覆盖说明（2026-07-29）
+
+本节覆盖本文后续章节中关于“当前自动目录生成主链”的旧描述；后续
+`ProjectModel / ResponseTopicGraph / ResponseTopic / ResponseDuty` 内容保留为历史设计、
+研究目标或显式兼容方案，不代表 `document.prepare_outline` 的自动依赖。当前生效主链为：
+
+```text
+promoted SourceIndex / RequirementLedger
+→ 确定性评分结构与轻量 DocumentMap
+→ 分批 ScoreSemantic（ScoreCondition / ScoreResponseUnit）
+→ 汇总全部已校验评分理解
+→ ChapterBlueprint
+→ G2
+→ H1 PlanningConfirm
+```
+
+`ScoreModel` 在这里是确定性评分组、物理评分点、完整评分档次、分值和来源锚点的结构
+载体，不是“项目整体理解”大模型阶段。自动主链明确不调用：
+
+- `ProjectUnderstandingProvider` 或 `ProjectModel`；
+- `TopicDutyPlanningProvider`、`ResponseTopicGraph`、`ResponseTopic` 或
+  `ResponseDuty`；
+- `scope` 归纳文本与来源文本之间的字符相似度校验；
+- 失败后自动切换上述旧链、规则拼装目录或其他 legacy baseline。
+
+legacy 能力只允许由显式兼容入口调用，并使用独立 capability、fingerprint、Receipt 和
+输出命名空间；它不能被普通主链隐式读取，也不能在新链 fail closed 后自动接管。
+
+### 当前 ScoreSemantic 输入与分批策略
+
+1. 程序先从整份标书建立标题级 `DocumentMap`，只包含标题层级、评分分组及顺序、采购
+   需求和模板目录位置、来源 ID、标题边界块及内容类型，不向模型发送标题下全部正文。
+2. 第一层批次边界使用价格、商务、技术等自然评分大项。技术大项超限时，先按技术评分
+   表内部小标题切分；没有小标题或仍超限时，只能在完整 `ScorePoint` 边界切分。同一
+   评分点的高、中、低档和最高得分档绝不跨批。
+3. 每批输入最多占模型上下文预算 45%，至少为结构化输出预留 35%，系统提示词和安全
+   余量占 20%。超限时先裁剪低相关检索内容，再按完整评分点切批；一个完整评分点仍
+   超限时阻断，不能截断评分档次。
+4. 需求原文按以下优先级定向补充：评分规则明确引用的章节/条款或表格、
+   `linked_requirement_ids` 已绑定要求、同标题要求、关键词命中要求、少量高相关检索
+   块。每条必须带真实 `requirement_id`、来源位置和原文；模型不能访问未提供正文。
+5. 通用合同、保证金等噪声不得仅凭相似度进入，评分规则明确引用或已有确定性直接绑定
+   时除外。公式型价格评分点没有明确章节/条款引用时，不补充采购需求上下文。
+6. 每批在严格校验通过后立即按 exact 输入 fingerprint 持久化缓存。价格、商务和各技术
+   批可独立重跑；一个技术批失败不得重跑已通过批次，目录失败不得重新理解评分点。
+
+### 当前语义输出、目录组织和门禁
+
+评分模型先回答“怎样拿满分”，不直接生成目录。每个独立得分任务输出
+`ScoreResponseUnit`，最高得分档拆成带真实原文区间的 `ScoreCondition`；
+`condition_role` 仅允许 `content`、`evidence`、`constraint`、`quality`、`document`。
+其中内容、证据和约束进入主责章节子树，质量条件成为章节写作要求，全文条件进入
+`ChapterBlueprint.document_quality_gates`，不得生成“完整性”“合理性”或“整体评价”
+等空洞章节。
+
+目录模型只接收全部已校验的评分组、Unit、Condition、关联需求原文/摘要和可选模板，
+负责合并重复响应主题、按评审阅读顺序生成二至四级为主的项目专用目录，并在每个
+`ChapterNode` 上保存主责/支撑 Unit、Condition 和 Requirement ID。G2 只检查客观
+关系：
+
+- 每个非否决评分点已完成理解，每个最高得分档已拆出满分条件；
+- 每个原文片段和字符区间真实存在；
+- 每个 section 型 Unit 有且仅有一个主责章节；
+- 每个 `content/evidence/constraint` 条件位于所属 Unit 的主责章节子树；
+- `quality` 条件已成为写作要求，`document` 条件已进入全文质量门；
+- 不存在未知、重复、悬空或遗漏 ID，模板父子树和 Slot 映射合法。
+
+G2 不再判断模型归纳文字与来源文字的字符相似度。模型输出不完整、引用无效、缓存不匹配
+或 G2 失败时一律 fail closed。
 
 ## 1. 计划结论
 
@@ -77,7 +147,7 @@ Phase 5：Usability Holdout + Release
 
 只有第三种状态才能在实施日志中写“已完成”。构造样本单元测试、Golden 或运行时 G6 通过都不能替代 Gate U 的真实标书可用性验收。
 
-当前准确状态为：
+2026-07-27 审计基线的准确状态为：
 
 | PR | 当前状态 | 阻断原因 |
 |---|---|---|
@@ -89,7 +159,7 @@ Phase 5：Usability Holdout + Release
 | PR-19 | Topic/Duty 契约和晋级链已实现，未验收 | 当前仍接近“一 Requirement/Score 一个根 Topic”，领域聚合和多上下文 Duty 未形成 |
 | PR-20 | 进行中，P0 阻断 | H1 可被流水线自动代签；Blueprint 尚未成为下游唯一结构权威 |
 
-当前实际链路是：
+该历史审计基线当时的链路是：
 
 ```text
 文件态 InputManifest / SourceIndex
@@ -101,7 +171,7 @@ Phase 5：Usability Holdout + Release
 ↛ Blueprint 派生 DocumentContract / DocumentPlan / WriterInputBundle
 ```
 
-因此当前不能宣称“已经进入纯领域准确性优化阶段”。架构方向不需要推翻，但必须先完成可信内核、canonical Source、真实 H1 和 Blueprint 下游权威四项工程收口，再以 Golden Set 校准语义质量。
+因此在该审计基线下不能宣称“已经进入纯领域准确性优化阶段”。架构方向不需要推翻，但必须先完成可信内核、canonical Source、真实 H1 和 Blueprint 下游权威四项工程收口，再以 Golden Set 校准语义质量。当前自动目录主链以本文件顶部“当前生效架构覆盖说明”为准。
 
 在本计划第 20 章定义的 Gate K、Gate S、Gate A、Gate P 全部通过前：
 
@@ -552,7 +622,8 @@ TopicChapterAssignment
 
 约束：
 
-- 每个 blocking Requirement、ScorePoint 和核心 Duty 必须能反向追到一个 primary assignment；
+- 每个 blocking Requirement、非全文 `ScoreResponseUnit` 和核心 Duty 必须能反向追到
+  唯一 primary assignment；全文 Unit 必须由唯一 `DocumentQualityGate` 承接；
 - 每个 Duty 恰好一个 primary assignment；
 - supporting/mention 不计为重复主责；
 - Blueprint 中用于 UI 展示的 Requirement/Score 列表必须从 Duty 投影，不能独立编辑；
@@ -1085,6 +1156,8 @@ H1 的签发规则是强制安全边界：
 - Audit 修复超过最大轮次或 no-progress 熔断。
 
 Quality Audit Agent 只提出 Finding；Gate Service 根据确定性规则和 Finding 状态签发最终 Receipt。
+
+G6 PASS 只证明当前工作空间的已知 critical Finding 已关闭，并授权 Renderer 生成候选交付件；它不证明最终 DOCX 页面质量可用，也不证明专家所需改写量可接受。Gate U 消费冻结候选、G6、Renderer 和人工盲审证据，但不签发运行时 Receipt、不增加第二个人工 PlanningConfirm。
 
 ## 10. 前端与人工协作
 
@@ -1637,6 +1710,8 @@ Gate U 不批准“所有标书”，只批准证据包中声明的 `supported_b
 - 最终 DOCX hash、逐页渲染产物 hash、运行时 G6 Receipt 和全部 Finding；
 - 两名专家的独立评分、第三方裁决、人工编辑 taxonomy 版本和逐 ContentUnit 编辑分类。
 
+发布候选、覆盖矩阵、编辑 taxonomy 和阈值 policy 必须在 holdout 揭盲前冻结，满足 `policy.frozen_at < holdout.unsealed_at < first_run_at`。原始机器输出必须先归档；禁止揭盲后修改阈值或 Prompt、挑选最佳重跑，或由开发人员手工修补后冒充原始输出。失败必须形成新候选，已揭盲项目转入回归集，新一轮 PASS 使用尚未消费的 holdout。
+
 每份项目必须分别满足：
 
 - 强制、资格、废标和 critical Score 漏项为 0；
@@ -1753,6 +1828,7 @@ Gate A 只验收 Golden-A1～A3；Golden-A4 属于 PR-20/Gate P 的规划验收�
 5. 不对正在执行的旧工作空间中途切换语义链。
 6. 每阶段至少观察 7 天或 10 个完整项目。
 7. 正式切换后不保留隐藏旧 Planner fallback。
+8. 灰度项目可以用于阈值校准和回归，但不得同时计入 Gate U 独立 holdout；正式 production CAS 必须等待 Gate U 与 Gate M 同时通过。
 
 ### 14.2 暂停条件
 
@@ -1766,6 +1842,9 @@ Gate A 只验收 Golden-A1～A3；Golden-A4 属于 PR-20/Gate P 的规划验收�
 - 模板结构发生未授权变化；
 - supporting 内容被整合误删；
 - critical Audit Finding 未关闭仍交付；
+- 任一 Gate U 盲测项目被专家判定不可用，或人工实质性重写量超过冻结阈值；
+- Gate U 最终 Word 存在未审核页面、P0/P1 页面缺陷或渲染环境/hash 不一致；
+- Golden、开发、调优或已消费样本混入 holdout，或 threshold policy 在揭盲后变化；
 - Artifact 或 ControlStore 损坏；
 - 人工主责修订率超过 10%；
 - 工作流失败率超过 2%；
@@ -1809,6 +1888,8 @@ Gate A 只验收 Golden-A1～A3；Golden-A4 属于 PR-20/Gate P 的规划验收�
 | 外部模型数据风险 | 标书泄露 | 数据策略、逐次附件授权、默认无外部权限 |
 | Skill 复制核心逻辑 | 两套实现 | Skill 只调用 Bid Master，置于最后 |
 | 架构和 Golden 通过但整标不可用 | 重演 V2：结构正确、正文仍需推倒重写 | 独立 Usability Holdout、最终 Word 逐页验收、人工改写量和 Gate U |
+| 人工改写量被格式变化稀释 | 不可用正文被错误判为小改 | 冻结语义编辑 taxonomy、逐 ContentUnit 分类和可复算指标 |
+| 看到盲测结果后调整标准 | Gate U 被调参通过 | 揭盲前冻结 candidate/profile/policy hash，失败后更换新 holdout |
 
 ## 16. 里程碑与工作量
 
@@ -1892,8 +1973,15 @@ prompts/v3_integration_agent.md
 prompts/v3_quality_audit_agent.md
 
 scripts/evaluate_v3_bid_pipeline.py
+scripts/evaluate_v3_usability.py
+scripts/render_v3_delivery_pages.py
 tests/fixtures/v3_bid_pipeline/
 tests/golden/v3_bid_pipeline/
+tests/fixtures/v3_usability_contracts/
+tests/test_v3_gate_u_usability.py
+tests/test_v3_delivery_page_qa.py
+tests/test_v3_human_edit_metrics.py
+tests/test_v3_release_switch.py
 ```
 
 重点修改：

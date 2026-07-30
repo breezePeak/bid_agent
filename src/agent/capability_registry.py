@@ -25,8 +25,22 @@ class CapabilityRegistry:
 
     _CAPABILITIES = {
         "requirement_agent": RoleCapability("requirement_agent", frozenset({"RequirementLedger"})),
-        "score_agent": RoleCapability("score_agent", frozenset({"ScoreModel"})),
-        "planning_agent": RoleCapability("planning_agent", frozenset({"ProjectModel", "ResponseTopicGraph", "ChapterBlueprint"})),
+        "score_agent": RoleCapability(
+            "score_agent",
+            frozenset({"ScoreModel"}),
+            frozenset({"score.semantic_reconcile"}),
+        ),
+        "planning_agent": RoleCapability(
+            "planning_agent",
+            frozenset({"ProjectModel", "ResponseTopicGraph", "ChapterBlueprint"}),
+            frozenset(
+                {
+                    "planning.project_understanding",
+                    "planning.topic_duty_plan",
+                    "planning.chapter_outline_split",
+                }
+            ),
+        ),
         "writer_agent": RoleCapability("writer_agent", frozenset({"ContentBlock"})),
         "integration_agent": RoleCapability("integration_agent", frozenset({"IntegrationProposal", "RepairRequest"})),
         "quality_audit_agent": RoleCapability("quality_audit_agent", frozenset({"AuditReport"})),

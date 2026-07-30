@@ -145,6 +145,7 @@ class CommandReceipt:
     confirmation_id: str | None = None
     error: dict[str, Any] | None = None
     message: str = ""
+    result: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +156,7 @@ class CommandReceipt:
             "confirmation_id": self.confirmation_id,
             "error": self.error,
             "message": self.message,
+            "result": self.result,
         }
 
 
@@ -290,12 +292,27 @@ class ControlStore:
                         status TEXT NOT NULL,
                         disposition TEXT NOT NULL DEFAULT '',
                         error_json TEXT,
+                        output_json TEXT,
                         started_at TEXT NOT NULL,
                         completed_at TEXT,
                         UNIQUE(operation_id, stage_command, attempt)
                     );
                     CREATE INDEX IF NOT EXISTS idx_stage_runs_operation
                         ON stage_runs(operation_id, stage_command, attempt DESC);
+                    CREATE TABLE IF NOT EXISTS llm_requests (
+                        request_id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL,
+                        stage_id TEXT NOT NULL,
+                        request_index INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        parameters_json TEXT NOT NULL,
+                        error TEXT NOT NULL DEFAULT '',
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        UNIQUE(operation_id, stage_id, request_index)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_llm_requests_operation
+                        ON llm_requests(operation_id, stage_id, request_index);
                     CREATE TABLE IF NOT EXISTS workspace_lease (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         lease_id TEXT NOT NULL,
@@ -543,9 +560,20 @@ class ControlStore:
                         cited_source_ids_json TEXT NOT NULL,
                         prompt_version TEXT NOT NULL,
                         model_fingerprint TEXT NOT NULL,
+                        inference_receipt_refs_json TEXT NOT NULL DEFAULT '[]',
                         payload_schema_version TEXT NOT NULL DEFAULT 'v3',
-                        canonicalization_version TEXT NOT NULL DEFAULT 'v3-canon-1',
+                        canonicalization_version TEXT NOT NULL DEFAULT 'v3-canon-2',
                         status TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_inference_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        receipt_hash TEXT NOT NULL UNIQUE,
+                        workspace_id TEXT NOT NULL,
+                        invocation_id TEXT NOT NULL,
+                        capability_id TEXT NOT NULL,
+                        capability_version TEXT NOT NULL,
+                        receipt_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS v3_validation_reports (
@@ -717,6 +745,27 @@ class ControlStore:
             row = connection.execute("SELECT * FROM evidence_needs WHERE need_id = ?", (need_id,)).fetchone()
         return dict(row) if row else None
 
+    def evidence_needs(self) -> list[dict[str, Any]]:
+        """Return the durable research schedule, including autonomous needs."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM evidence_needs
+                ORDER BY
+                    CASE priority
+                        WHEN 'blocking' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'normal' THEN 2
+                        ELSE 3
+                    END,
+                    created_at,
+                    need_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def upsert_content_unit_state(self, item: dict[str, Any]) -> dict[str, Any]:
         required = ("unit_id", "contract_revision", "state")
         missing = [key for key in required if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())]
@@ -745,6 +794,21 @@ class ControlStore:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (item["unit_id"],)).fetchone()
         return dict(row) if row else {}
+
+    def content_unit_state(self, unit_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM content_unit_states WHERE unit_id = ?",
+                (str(unit_id or ""),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def content_unit_states(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM content_unit_states ORDER BY updated_at, unit_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def content_locks(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -2645,14 +2709,41 @@ class ControlStore:
             if column not in columns(table):
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
-        if "v3_proposals" in {
-            str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
-        }:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "stage_runs" in tables:
+            add("stage_runs", "output_json", "output_json TEXT")
+
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS llm_requests (
+                request_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                stage_id TEXT NOT NULL,
+                request_index INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                parameters_json TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                UNIQUE(operation_id, stage_id, request_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_requests_operation
+                ON llm_requests(operation_id, stage_id, request_index);
+            """
+        )
+
+        if "v3_proposals" in tables:
             add("v3_proposals", "workspace_id", "workspace_id TEXT NOT NULL DEFAULT ''")
             add("v3_proposals", "declared_dependencies_json", "declared_dependencies_json TEXT NOT NULL DEFAULT '[]'")
             add("v3_proposals", "canonical_payload_hash", "canonical_payload_hash TEXT NOT NULL DEFAULT ''")
+            add("v3_proposals", "inference_receipt_refs_json", "inference_receipt_refs_json TEXT NOT NULL DEFAULT '[]'")
             add("v3_proposals", "payload_schema_version", "payload_schema_version TEXT NOT NULL DEFAULT 'v3'")
-            add("v3_proposals", "canonicalization_version", "canonicalization_version TEXT NOT NULL DEFAULT 'v3-canon-1'")
+            add("v3_proposals", "canonicalization_version", "canonicalization_version TEXT NOT NULL DEFAULT 'v3-canon-2'")
             add("v3_validation_reports", "proposal_hash", "proposal_hash TEXT NOT NULL DEFAULT ''")
             add("v3_validation_reports", "report_hash", "report_hash TEXT NOT NULL DEFAULT ''")
             for col, ddl in (
@@ -2681,6 +2772,81 @@ class ControlStore:
                 ("policy_version", "policy_version TEXT NOT NULL DEFAULT ''"),
             ):
                 add("v3_promotion_receipts", col, ddl)
+
+    def append_v3_inference_receipt(
+        self,
+        receipt: dict[str, Any],
+        *,
+        kernel_seal: Any = None,
+    ) -> dict[str, Any]:
+        """Append immutable inference provenance through the trusted service path."""
+
+        from document_pipeline.kernel_seal import KERNEL_SEAL
+        from document_pipeline.proposals import InferenceReceipt
+
+        if kernel_seal is not KERNEL_SEAL:
+            raise ControlPlaneError(
+                "V3_INFERENCE_RECEIPT_SEALED",
+                "InferenceReceipt 只能由可信推理凭证服务写入。",
+                status_code=403,
+            )
+        model = InferenceReceipt.model_validate(receipt)
+        stored = model.storage_record()
+        if model.workspace_id != self.context.workspace_id:
+            raise ControlPlaneError(
+                "V3_INFERENCE_WORKSPACE_MISMATCH",
+                "InferenceReceipt workspace 与 Store 不一致。",
+                status_code=409,
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                duplicate = connection.execute(
+                    "SELECT * FROM v3_inference_receipts WHERE receipt_id = ? OR receipt_hash = ?",
+                    (model.receipt_id, stored["receipt_hash"]),
+                ).fetchone()
+                if duplicate is not None:
+                    existing = self._v3_inference_receipt_row(duplicate)
+                    if existing["receipt_hash"] != stored["receipt_hash"]:
+                        raise ControlPlaneError(
+                            "V3_INFERENCE_RECEIPT_CONFLICT",
+                            "InferenceReceipt ID 已绑定其他内容。",
+                            status_code=409,
+                        )
+                    connection.commit()
+                    return existing
+                connection.execute(
+                    """
+                    INSERT INTO v3_inference_receipts(
+                        receipt_id, receipt_hash, workspace_id, invocation_id,
+                        capability_id, capability_version, receipt_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        model.receipt_id,
+                        stored["receipt_hash"],
+                        model.workspace_id,
+                        model.invocation_id,
+                        model.capability_id,
+                        model.capability_version,
+                        _json(stored),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.v3_inference_receipt(model.receipt_id) or {}
+
+    def v3_inference_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM v3_inference_receipts WHERE receipt_id = ?",
+                (str(receipt_id),),
+            ).fetchone()
+        return self._v3_inference_receipt_row(row) if row else None
 
     def append_v3_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
         required = (
@@ -2727,8 +2893,9 @@ class ControlStore:
                         proposal_id, workspace_id, artifact_kind, producer_role, operation_id, base_revision,
                         dependency_fingerprint, declared_dependencies_json, proposal_hash, canonical_payload_hash,
                         payload_json, cited_source_ids_json, prompt_version, model_fingerprint,
-                        payload_schema_version, canonicalization_version, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                        inference_receipt_refs_json, payload_schema_version, canonicalization_version,
+                        status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
                     """,
                     (
                         proposal_id, workspace_id, str(proposal["artifact_kind"]), str(proposal["producer_role"]),
@@ -2737,8 +2904,9 @@ class ControlStore:
                         proposal_hash, str(proposal.get("canonical_payload_hash") or ""),
                         _json(proposal["payload"]), _json(proposal.get("cited_source_ids") or []),
                         str(proposal["prompt_version"]), str(proposal["model_fingerprint"]),
+                        _json(proposal.get("inference_receipt_refs") or []),
                         str(proposal.get("payload_schema_version") or "v3"),
-                        str(proposal.get("canonicalization_version") or "v3-canon-1"), now,
+                        str(proposal.get("canonicalization_version") or "v3-canon-2"), now,
                     ),
                 )
                 self._event(connection, revision, "V3ProposalAppended", "V3Proposal", proposal_id, {
@@ -2915,7 +3083,7 @@ class ControlStore:
 
                 # Recompute ValidationReport hash; never trust a caller-supplied binding alone.
                 from document_pipeline.artifact_registry import ARTIFACT_REGISTRY
-                from document_pipeline.proposals import GateReceipt, ValidationReport
+                from document_pipeline.proposals import GateReceipt, PlanningGateReceipt, ValidationReport
 
                 report_model = ValidationReport.model_validate(report)
                 expected_report_hash = report_model.compute_report_hash()
@@ -2955,7 +3123,8 @@ class ControlStore:
                 receipt_for_hash["workspace_id"] = workspace_id
                 receipt_for_hash["validation_report_hash"] = expected_report_hash
                 receipt_for_hash.pop("receipt_hash", None)
-                gate_model = GateReceipt.model_validate(
+                receipt_model = PlanningGateReceipt if receipt_for_hash.get("receipt_subtype") == "planning" else GateReceipt
+                gate_model = receipt_model.model_validate(
                     {**receipt_for_hash, "receipt_hash": "", "reviewed_revision": reviewed_revision}
                 )
                 recomputed_receipt_hash = gate_model.compute_receipt_content_hash()
@@ -3039,6 +3208,17 @@ class ControlStore:
                 (str(proposal_id), str(gate_id)),
             ).fetchone()
         return row is not None
+
+    def latest_v3_gate_receipt(self, proposal_id: str, gate_id: str) -> dict[str, Any] | None:
+        """Return the latest immutable receipt for one exact Proposal/Gate pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT receipt_json FROM v3_gate_receipts WHERE proposal_id = ? AND gate_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (str(proposal_id), str(gate_id)),
+            ).fetchone()
+        value = _decode(str(row["receipt_json"]), {}) if row is not None else None
+        return value if isinstance(value, dict) else None
 
     def promote_v3_proposal(
         self,
@@ -3230,6 +3410,54 @@ class ControlStore:
                             "revision": int(dep["revision"]),
                             "artifact_hash": str(dep["artifact_hash"]),
                         }
+                    declared_dependencies = {
+                        item.artifact_kind: item
+                        for item in envelope.declared_dependencies
+                    }
+                    for kind in registration.optional_dependency_kinds:
+                        declared_ref = declared_dependencies.get(kind)
+                        if declared_ref is None:
+                            continue
+                        dep = connection.execute(
+                            "SELECT revision.* FROM v3_active_artifacts active "
+                            "JOIN v3_artifact_revisions revision "
+                            "ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision "
+                            "WHERE active.artifact_kind = ?",
+                            (kind,),
+                        ).fetchone()
+                        if dep is None:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时可选依赖 {kind} 已缺失。",
+                                status_code=409,
+                            )
+                        entry = {
+                            "artifact_kind": kind,
+                            "artifact_id": str(dep["artifact_id"]),
+                            "revision": int(dep["revision"]),
+                            "artifact_hash": str(dep["artifact_hash"]),
+                        }
+                        if (
+                            declared_ref.expected_revision is not None
+                            and int(declared_ref.expected_revision)
+                            != entry["revision"]
+                        ):
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时可选依赖 {kind} revision 已变化。",
+                                status_code=409,
+                            )
+                        if (
+                            declared_ref.expected_hash
+                            and declared_ref.expected_hash
+                            != entry["artifact_hash"]
+                        ):
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时可选依赖 {kind} hash 已变化。",
+                                status_code=409,
+                            )
+                        resolved_snapshot[kind] = entry
 
                 from document_pipeline.proposals import trusted_dependency_fingerprint
 
@@ -3482,7 +3710,19 @@ class ControlStore:
         value["payload"] = _decode(value.pop("payload_json"), {})
         value["cited_source_ids"] = _decode(value.pop("cited_source_ids_json"), [])
         value["declared_dependencies"] = _decode(value.pop("declared_dependencies_json", None), [])
+        value["inference_receipt_refs"] = _decode(
+            value.pop("inference_receipt_refs_json", None),
+            [],
+        )
         return value
+
+    @staticmethod
+    def _v3_inference_receipt_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        receipt = _decode(value.pop("receipt_json"), {})
+        receipt["receipt_hash"] = value["receipt_hash"]
+        receipt["created_at"] = value["created_at"]
+        return receipt
 
     @staticmethod
     def _v3_artifact_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -4025,14 +4265,15 @@ class ControlStore:
         *,
         disposition: str = "",
         error: dict[str, Any] | None = None,
+        output: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         operation = str(operation_id or "").strip()
         command = str(stage_command or "").strip()
         state = str(status or "").strip().lower()
-        if not operation or not command or state not in {"queued", "running", "succeeded", "failed", "reused", "cancelled", "paused"}:
+        if not operation or not command or state not in {"queued", "running", "succeeded", "failed", "reused", "cancelled", "paused", "blocked_human"}:
             raise ControlPlaneError("STATE_UNAVAILABLE", "StageRun 状态无效。", status_code=503)
         now = _now()
-        terminal = state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+        terminal = state in {"succeeded", "failed", "reused", "cancelled", "paused", "blocked_human"}
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -4042,7 +4283,7 @@ class ControlStore:
                     (operation, command),
                 ).fetchone()
                 latest_state = str(latest["status"]) if latest else ""
-                latest_terminal = latest_state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+                latest_terminal = latest_state in {"succeeded", "failed", "reused", "cancelled", "paused", "blocked_human"}
                 if latest is not None and terminal and latest_terminal:
                     if latest_state == state:
                         connection.commit()
@@ -4065,20 +4306,50 @@ class ControlStore:
                             "requested_status": state,
                         },
                     )
-                if latest is None or state == "queued" or (state == "running" and str(latest["status"]) != "queued"):
+                if (
+                    latest is None
+                    or state == "queued"
+                    or (
+                        state == "running"
+                        and str(latest["status"]) not in {"queued", "running"}
+                    )
+                ):
                     attempt = int(latest["attempt"] if latest else 0) + 1
                     run_id = str(uuid.uuid4())
                     connection.execute(
-                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, error_json, started_at, completed_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (run_id, operation, command, attempt, state, disposition, _json(error) if error else None, now, now if terminal else None),
+                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, error_json, output_json, started_at, completed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            operation,
+                            command,
+                            attempt,
+                            state,
+                            disposition,
+                            _json(error) if error else None,
+                            _json(output) if output is not None else None,
+                            now,
+                            now if terminal else None,
+                        ),
                     )
                 else:
                     run_id = str(latest["stage_run_id"])
                     attempt = int(latest["attempt"])
+                    output_json = (
+                        _json(output)
+                        if output is not None
+                        else latest["output_json"]
+                    )
                     connection.execute(
-                        "UPDATE stage_runs SET status = ?, disposition = ?, error_json = ?, completed_at = ? WHERE stage_run_id = ?",
-                        (state, disposition, _json(error) if error else None, now if terminal else None, run_id),
+                        "UPDATE stage_runs SET status = ?, disposition = ?, error_json = ?, output_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                        (
+                            state,
+                            disposition,
+                            _json(error) if error else None,
+                            output_json,
+                            now if terminal else None,
+                            run_id,
+                        ),
                     )
                 revision = self._bump_revision(connection)
                 self._event(
@@ -4101,6 +4372,123 @@ class ControlStore:
         for row in rows:
             item = dict(row)
             item["error"] = _decode(item.pop("error_json", None), None)
+            item["output"] = _decode(item.pop("output_json", None), None)
+            result.append(item)
+        return result
+
+    def start_llm_request(
+        self,
+        operation_id: str,
+        stage_id: str,
+        *,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        operation = str(operation_id or "").strip()
+        stage = str(stage_id or "").strip()
+        if not operation or not stage:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "大模型请求必须绑定 Operation 和阶段。",
+                status_code=503,
+            )
+        request_id = str(uuid.uuid4())
+        started_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(request_index), 0) AS latest "
+                    "FROM llm_requests WHERE operation_id = ? AND stage_id = ?",
+                    (operation, stage),
+                ).fetchone()
+                request_index = int(row["latest"] or 0) + 1
+                connection.execute(
+                    "INSERT INTO llm_requests(request_id, operation_id, stage_id, "
+                    "request_index, status, parameters_json, error, started_at, completed_at) "
+                    "VALUES (?, ?, ?, ?, 'running', ?, '', ?, NULL)",
+                    (
+                        request_id,
+                        operation,
+                        stage,
+                        request_index,
+                        _json(parameters),
+                        started_at,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "LLMRequestStarted",
+                    "LLMRequest",
+                    request_id,
+                    {
+                        "operation_id": operation,
+                        "stage_id": stage,
+                        "request_index": request_index,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "request_id": request_id,
+            "operation_id": operation,
+            "stage_id": stage,
+            "request_index": request_index,
+            "status": "running",
+        }
+
+    def finish_llm_request(
+        self,
+        request_id: str,
+        *,
+        status: str,
+        error: str = "",
+    ) -> None:
+        state = str(status or "").strip().lower()
+        if state not in {"succeeded", "failed"}:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "大模型请求终态无效。",
+                status_code=503,
+            )
+        completed_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                updated = connection.execute(
+                    "UPDATE llm_requests SET status = ?, error = ?, completed_at = ? "
+                    "WHERE request_id = ? AND status = 'running'",
+                    (state, str(error or "")[:4000], completed_at, str(request_id)),
+                )
+                if updated.rowcount:
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection,
+                        revision,
+                        "LLMRequestFinished",
+                        "LLMRequest",
+                        str(request_id),
+                        {"status": state},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def llm_requests(self, operation_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM llm_requests WHERE operation_id = ? "
+                "ORDER BY stage_id, request_index",
+                (str(operation_id or ""),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["parameters"] = _decode(item.pop("parameters_json", None), {})
             result.append(item)
         return result
 
@@ -4155,6 +4543,142 @@ class ControlStore:
                 connection.rollback()
                 raise
 
+    def reconcile_expired_operations(self) -> list[dict[str, Any]]:
+        """Fail operations orphaned by a backend restart.
+
+        The workspace lease is the durable liveness signal for the process that
+        owns an operation.  Once it is missing or expired, an operation in a
+        transient state cannot make progress in this process and must not keep
+        being presented as running to the UI.  Reconcile the operation, its
+        in-flight stages, and any open LLM receipts in one transaction so a
+        restart cannot leave a partially active control record behind.
+        """
+        now = _now()
+        now_dt = datetime.now(timezone.utc)
+        interrupted: list[dict[str, Any]] = []
+        transient_states = ("queued", "running", "pausing", "cancelling")
+        placeholders = ",".join("?" for _ in transient_states)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    f"""
+                    SELECT o.operation_id, o.status,
+                           l.operation_id AS lease_operation_id, l.expires_at
+                    FROM operations AS o
+                    LEFT JOIN workspace_lease AS l ON l.operation_id = o.operation_id
+                    WHERE o.status IN ({placeholders})
+                    ORDER BY o.created_at
+                    """,
+                    transient_states,
+                ).fetchall()
+                for row in rows:
+                    expires_at = str(row["expires_at"] or "")
+                    lease_missing = not str(row["lease_operation_id"] or "")
+                    lease_expired = False
+                    if expires_at:
+                        try:
+                            lease_expired = _parse_utc_timestamp(
+                                expires_at,
+                                label="workspace lease 到期时间",
+                            ) <= now_dt
+                        except ControlPlaneError:
+                            # A malformed lease cannot be used as a liveness
+                            # signal, so treat it as orphaned and fail closed.
+                            lease_expired = True
+                    if not lease_missing and not lease_expired:
+                        continue
+
+                    operation_id = str(row["operation_id"])
+                    reason = {
+                        "code": "BACKEND_RESTART_INTERRUPTED",
+                        "message": "后端重启导致任务中断，未完成阶段已关闭；请重新执行。",
+                        "details": {
+                            "operation_id": operation_id,
+                            "previous_status": str(row["status"]),
+                            "lease_missing": lease_missing,
+                            "lease_expired_at": expires_at,
+                        },
+                    }
+                    revision = self._bump_revision(connection)
+                    stage_rows = connection.execute(
+                        "SELECT stage_run_id, stage_command, attempt FROM stage_runs "
+                        "WHERE operation_id = ? AND status IN ('queued', 'running')",
+                        (operation_id,),
+                    ).fetchall()
+                    for stage in stage_rows:
+                        stage_id = str(stage["stage_run_id"])
+                        connection.execute(
+                            "UPDATE stage_runs SET status = 'failed', disposition = ?, "
+                            "error_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                            ("backend_restart", _json(reason), now, stage_id),
+                        )
+                        self._event(
+                            connection,
+                            revision,
+                            "StageRunRecorded",
+                            "StageRun",
+                            stage_id,
+                            {
+                                "operation_id": operation_id,
+                                "command": str(stage["stage_command"]),
+                                "attempt": int(stage["attempt"]),
+                                "status": "failed",
+                                "disposition": "backend_restart",
+                            },
+                        )
+
+                    request_rows = connection.execute(
+                        "SELECT request_id FROM llm_requests WHERE operation_id = ? AND status = 'running'",
+                        (operation_id,),
+                    ).fetchall()
+                    for request in request_rows:
+                        request_id = str(request["request_id"])
+                        connection.execute(
+                            "UPDATE llm_requests SET status = 'failed', error = ?, completed_at = ? "
+                            "WHERE request_id = ? AND status = 'running'",
+                            (reason["message"], now, request_id),
+                        )
+                        self._event(
+                            connection,
+                            revision,
+                            "LLMRequestFinished",
+                            "LLMRequest",
+                            request_id,
+                            {"status": "failed", "error": reason["message"]},
+                        )
+
+                    connection.execute(
+                        "UPDATE operations SET status = 'failed', message = ?, error_json = ?, "
+                        "updated_at = ?, completed_at = ? WHERE operation_id = ?",
+                        (reason["message"], _json(reason), now, now, operation_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM workspace_lease WHERE operation_id = ?",
+                        (operation_id,),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "OperationStatusChanged",
+                        "Operation",
+                        operation_id,
+                        {"status": "failed", "message": reason["message"], "error": reason},
+                    )
+                    interrupted.append(
+                        {
+                            "operation_id": operation_id,
+                            "previous_status": str(row["status"]),
+                            "stage_runs": len(stage_rows),
+                            "llm_requests": len(request_rows),
+                        }
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return interrupted
+
     def latest_stage_run(self, operation_id: str, stage_command: str) -> dict[str, Any] | None:
         """Return the latest attempt for one stage without inferring its state."""
         with self._connection() as connection:
@@ -4167,6 +4691,7 @@ class ControlStore:
             return None
         item = dict(row)
         item["error"] = _decode(item.pop("error_json", None), None)
+        item["output"] = _decode(item.pop("output_json", None), None)
         return item
 
     def latest_stage_run_for_command(self, stage_command: str) -> dict[str, Any] | None:
@@ -4180,6 +4705,7 @@ class ControlStore:
             return None
         item = dict(row)
         item["error"] = _decode(item.pop("error_json", None), None)
+        item["output"] = _decode(item.pop("output_json", None), None)
         return item
 
     def latest_terminal_stage_run_for_command(self, stage_command: str) -> dict[str, Any] | None:
@@ -4195,6 +4721,7 @@ class ControlStore:
             return None
         item = dict(row)
         item["error"] = _decode(item.pop("error_json", None), None)
+        item["output"] = _decode(item.pop("output_json", None), None)
         return item
 
     def document_undo(self) -> dict[str, Any] | None:
@@ -4564,7 +5091,7 @@ class ControlStore:
                     """,
                     (command_status, message, _json(error) if error else None, now, envelope.command_id),
                 )
-                terminal_at = now if operation_status in {"succeeded", "failed", "cancelled"} else None
+                terminal_at = now if operation_status in {"succeeded", "failed", "cancelled", "blocked_human"} else None
                 connection.execute(
                     """
                     UPDATE operations SET status = ?, message = ?, error_json = ?, updated_at = ?,
@@ -4573,7 +5100,7 @@ class ControlStore:
                     """,
                     (operation_status, message, _json(error) if error else None, now, terminal_at, operation_id),
                 )
-                if operation_status in {"succeeded", "failed", "cancelled", "blocked"}:
+                if operation_status in {"succeeded", "failed", "cancelled", "blocked", "blocked_human"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 self._event(
                     connection,
@@ -4858,6 +5385,7 @@ class ControlStore:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         for stage_run in stage_runs:
             stage_run["error"] = _decode(stage_run.pop("error_json", None), None)
+            stage_run["output"] = _decode(stage_run.pop("output_json", None), None)
         current_operation = next(
             (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
             operations[0] if operations else None,
@@ -4953,6 +5481,18 @@ class CommandGateway:
                 message=message,
                 error=error,
             )
+            public_result = {
+                key: result[key]
+                for key in (
+                    "operation_status",
+                    "completed_stages",
+                    "planning_snapshot",
+                    "planning_receipt",
+                )
+                if key in result
+            }
+            if public_result:
+                receipt = replace(receipt, result=public_result)
         except ControlPlaneError as exc:
             blocked = exc.code == "GATE_BLOCKED" or envelope.kind in {
                 "pipeline.pause",

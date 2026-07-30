@@ -55,6 +55,12 @@ class SourceNormalizer:
         coverage_items: list[SourceNormalizationCoverageItem] = []
         input_status: list[SourceInputStatus] = []
         blocked_reasons: list[str] = []
+        hard_blocking_roles = {
+            InputRole.TENDER,
+            InputRole.SCORE,
+            InputRole.AMENDMENT,
+            InputRole.TEMPLATE,
+        }
 
         for item in manifest.inputs:
             if not item.active:
@@ -65,7 +71,8 @@ class SourceNormalizer:
             except ValueError as exc:
                 reason = str(exc)
                 input_status.append(SourceInputStatus(input_id=item.input_id, status="blocked", reason=reason))
-                blocked_reasons.append(reason)
+                if item.role in hard_blocking_roles:
+                    blocked_reasons.append(f"{item.role.value}/{item.filename}: {reason}")
                 coverage_items.append(
                     SourceNormalizationCoverageItem(
                         element_id=f"{item.input_id}:input",
@@ -274,10 +281,36 @@ class SourceNormalizer:
                     )
                 )
                 for row_index, row in enumerate(table.rows):
+                    # ``python-docx`` expands a horizontally merged cell once per
+                    # occupied grid column.  Those entries wrap the same ``w:tc``
+                    # element and would otherwise become duplicate SourceBlocks.
+                    #
+                    # Keep this registry row-local on purpose.  A vertically
+                    # merged cell is also exposed through the same ``w:tc`` in
+                    # every covered row, but retaining one occurrence per row
+                    # preserves the logical row context used by scoring tables.
+                    canonical_cells: dict[int, tuple[str, str | None]] = {}
                     for column_index, cell in enumerate(row.cells):
                         content = cell.text.strip()
                         cell_locator = f"{table_locator}:row:{row_index + 1}:cell:{column_index + 1}"
+                        cell_key = id(cell._tc)
+                        canonical = canonical_cells.get(cell_key)
+                        if canonical is not None:
+                            canonical_locator, canonical_block_id = canonical
+                            coverage.append(
+                                SourceNormalizationCoverageItem(
+                                    element_id=f"{item.input_id}:{cell_locator}",
+                                    input_id=item.input_id,
+                                    element_kind="table_cell",
+                                    status="exempt",
+                                    locator=cell_locator,
+                                    reason=f"merged-cell alias of {canonical_locator}",
+                                    block_id=canonical_block_id,
+                                )
+                            )
+                            continue
                         if not content:
+                            canonical_cells[cell_key] = (cell_locator, None)
                             coverage.append(
                                 SourceNormalizationCoverageItem(
                                     element_id=f"{item.input_id}:{cell_locator}",
@@ -299,6 +332,7 @@ class SourceNormalizer:
                             row_index=row_index,
                             column_index=column_index,
                         )
+                        canonical_cells[cell_key] = (cell_locator, block.block_id)
                         blocks.append(block)
                         coverage.append(
                             SourceNormalizationCoverageItem(
@@ -535,14 +569,19 @@ class SourceNormalizer:
 
     @staticmethod
     def _location(kind: str, ordinal: int, coordinates: dict[str, Any]) -> str:
+        page_prefix = (
+            f"page:{int(coordinates['page'])}:"
+            if coordinates.get("page") is not None
+            else ""
+        )
         if coordinates.get("table_index") is not None and coordinates.get("row_index") is not None:
-            return "table:{table}:row:{row}:cell:{column}".format(
+            return page_prefix + "table:{table}:row:{row}:cell:{column}".format(
                 table=int(coordinates["table_index"]) + 1,
                 row=int(coordinates.get("row_index") or 0) + 1,
                 column=int(coordinates.get("column_index") or 0) + 1,
             )
         if coordinates.get("table_index") is not None:
-            return f"table:{int(coordinates['table_index']) + 1}"
+            return page_prefix + f"table:{int(coordinates['table_index']) + 1}"
         if coordinates.get("page") is not None:
             return f"page:{coordinates['page']}:block:{ordinal + 1}:{kind}"
         return f"paragraph:{int(coordinates.get('paragraph_index') or 0) + 1}:{kind}"
