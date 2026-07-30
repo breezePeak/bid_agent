@@ -168,7 +168,12 @@ defineExpose({ dirty, markClean() {
 </script>
 
 <style scoped>
-.block-editor { display: flex; flex-direction: column; gap: 12px; }
+.block-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 100%;
+}
 .toolbar { display: flex; gap: 8px; align-items: center; }
 .btn, .link { cursor: pointer; }
 .btn { border: 1px solid #cbd5e1; background: #fff; border-radius: 6px; padding: 6px 10px; }

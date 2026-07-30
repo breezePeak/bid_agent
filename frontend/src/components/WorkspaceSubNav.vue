@@ -2,15 +2,14 @@
   <nav class="workspace-subnav" aria-label="工作空间导航">
     <router-link
       class="nav-item"
-      :class="{ active: mode === 'home' }"
+      :class="{ active: mode === 'home' || mode === 'chapter' }"
       :to="`/business/${workspaceId}`"
-    >项目主页</router-link>
+    >写作工作台</router-link>
     <router-link
       class="nav-item"
       :class="{ active: mode === 'pipeline' }"
       :to="`/business/${workspaceId}/pipeline`"
     >流水线</router-link>
-    <span v-if="mode === 'chapter'" class="nav-item active muted">章节编辑</span>
     <div class="spacer" />
     <span v-if="chapterHint" class="hint">{{ chapterHint }}</span>
   </nav>

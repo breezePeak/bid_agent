@@ -32,16 +32,12 @@
             :chapter-hint="chapterNavHint"
           />
           <div class="workspace-body">
-            <ChapterWorkspaceView
-              v-if="viewMode === 'chapter'"
-              :key="`${activeRunId}:${chapterId}`"
+            <!-- 默认三栏全高工作台：左目录 / 中生成 / 右聊天上下文 -->
+            <ChapterWorkbenchView
+              v-if="viewMode === 'home' || viewMode === 'chapter'"
+              :key="`workbench-${activeRunId}`"
               :workspace-id="activeRunId"
-              :chapter-id="chapterId"
-            />
-            <ProjectHomeView
-              v-else-if="viewMode === 'home'"
-              :key="`home-${activeRunId}`"
-              :workspace-id="activeRunId"
+              :initial-chapter-id="chapterId"
             />
             <V3WorkspaceView
               v-else
@@ -74,8 +70,7 @@ import TopBar from '../components/TopBar.vue'
 import CreateWorkspaceDialog from '../components/CreateWorkspaceDialog.vue'
 import SettingsDialog from '../components/SettingsDialog.vue'
 import V3WorkspaceView from '../components/V3WorkspaceView.vue'
-import ProjectHomeView from '../components/ProjectHomeView.vue'
-import ChapterWorkspaceView from '../components/ChapterWorkspaceView.vue'
+import ChapterWorkbenchView from '../components/ChapterWorkbenchView.vue'
 import { fetchRuns } from '../api'
 
 const route = useRoute()
@@ -89,16 +84,17 @@ const sidebarCollapsed = ref(false)
 
 const chapterId = computed(() => String(route.params.chapterId || ''))
 const viewMode = computed(() => {
-  if (route.name === 'ChapterWorkspace' && chapterId.value) return 'chapter'
+  if (route.name === 'ChapterWorkspace') return 'chapter'
   if (route.name === 'WorkspacePipeline') return 'pipeline'
-  // Project home is default for workspace deep links and bare /business selection.
-  if (route.name === 'ProjectHome' || route.name === 'Business') return activeRunId.value ? 'home' : 'empty'
+  if (route.name === 'ProjectHome' || route.name === 'Business') {
+    return activeRunId.value ? 'home' : 'empty'
+  }
   return activeRunId.value ? 'home' : 'empty'
 })
 
 const chapterNavHint = computed(() => {
-  if (viewMode.value !== 'chapter') return ''
-  return chapterId.value ? `当前章节：${chapterId.value}` : ''
+  if (viewMode.value !== 'chapter' && viewMode.value !== 'home') return ''
+  return chapterId.value ? `当前章节：${chapterId.value}` : '左目录 · 中正文 · 右对话'
 })
 
 const activeRun = computed(() => {
@@ -111,7 +107,6 @@ function syncActiveFromRoute() {
     activeRunId.value = fromRoute
     return
   }
-  // Bare /business keeps current selection if still present.
   if (activeRunId.value && runs.value.some(item => item.id === activeRunId.value)) {
     return
   }
@@ -140,8 +135,9 @@ async function loadRuns() {
 
 function handleSelectRun(runId) {
   activeRunId.value = runId
-  // Selecting a workspace opens the project home (chapters / formal status).
-  if (route.params.workspaceId === runId && route.name === 'ProjectHome') return
+  if (route.params.workspaceId === runId && (route.name === 'ProjectHome' || route.name === 'ChapterWorkspace')) {
+    return
+  }
   router.push(`/business/${runId}`)
 }
 
@@ -152,12 +148,9 @@ function onWorkspaceCreated(runId) {
   router.push(`/business/${runId}`)
 }
 
-function onSettingsSaved() {
-  // 配置已写入 .env / 流程设置；章节 H2 开关对新 revision 生效
-}
+function onSettingsSaved() {}
 
 watch(() => route.fullPath, syncActiveFromRoute)
-
 onMounted(loadRuns)
 </script>
 
@@ -165,6 +158,7 @@ onMounted(loadRuns)
 .workspace-body {
   flex: 1;
   min-height: 0;
+  height: 100%;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -173,5 +167,8 @@ onMounted(loadRuns)
   display: flex;
   flex-direction: column;
   min-height: 0;
+  flex: 1;
+  /* 工作台三栏需要占满剩余高度，禁止整页滚动 */
+  overflow: hidden !important;
 }
 </style>

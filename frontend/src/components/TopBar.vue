@@ -12,7 +12,7 @@
         / {{ extractName(activeRun.id) }}
       </span>
       <template v-if="activeRun">
-        <router-link class="topbar-link" :to="`/business/${activeRun.id}`">主页</router-link>
+        <router-link class="topbar-link" :to="`/business/${activeRun.id}`">工作台</router-link>
         <router-link class="topbar-link" :to="`/business/${activeRun.id}/pipeline`">流水线</router-link>
       </template>
     </div>
