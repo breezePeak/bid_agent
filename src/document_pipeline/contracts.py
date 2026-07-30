@@ -558,6 +558,69 @@ class EvidenceNeed(BaseModel):
     status: Literal["open", "researching", "satisfied", "gap", "cancelled"] = "open"
 
 
+class ResearchQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    query_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    target_node_ids: list[str] = Field(min_length=1)
+    applicability: str = Field(min_length=1)
+    status: Literal[
+        "planned",
+        "researching",
+        "published",
+        "blocked_human",
+        "skipped",
+    ] = "planned"
+    attempts: list[dict[str, Any]] = Field(default_factory=list)
+    batch_id: str = ""
+    evidence_count: int = Field(default=0, ge=0)
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+
+    @model_validator(mode="after")
+    def target_ids_are_unique(self) -> "ResearchQuery":
+        if len(self.target_node_ids) != len(set(self.target_node_ids)):
+            raise ValueError("ResearchQuery 不允许重复 target_node_ids")
+        return self
+
+
+class ResearchDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    decision_id: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    applicable_chapter_ids: list[str] = Field(default_factory=list)
+    applicable_chapter_titles: list[str] = Field(default_factory=list)
+    needs_research: bool
+    reason: str = Field(min_length=1)
+    queries: list[ResearchQuery] = Field(default_factory=list, max_length=3)
+    prohibited_research_scopes: list[str] = Field(default_factory=list)
+    decision_status: Literal[
+        "planned",
+        "skipped",
+        "researching",
+        "published",
+        "blocked_human",
+    ]
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    used_evidence_by_chapter: dict[str, list[str]] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def decision_is_consistent(self) -> "ResearchDecision":
+        if self.needs_research and not self.queries:
+            raise ValueError("需要检索的 ResearchDecision 至少包含一个查询")
+        if not self.needs_research and self.queries:
+            raise ValueError("不需要检索的 ResearchDecision 不应包含查询")
+        if len(self.applicable_chapter_ids) != len(
+            set(self.applicable_chapter_ids)
+        ):
+            raise ValueError("ResearchDecision 不允许重复适用章节")
+        return self
+
+
 class EvidenceSourceType(str, Enum):
     TENDER = "tender"
     COMPANY = "company"
@@ -918,6 +981,52 @@ class ChapterBlueprint(ContractModel):
                 "response unit 不能同时绑定章节与全文质量门: "
                 f"{sorted(overlap)}"
             )
+        return self
+
+
+class ChapterWorkspaceRecord(BaseModel):
+    """Logical chapter workspace inside a bid project Workspace.
+
+    Phase 1 control-plane aggregate. Not a promoted canonical Artifact and not a
+    separate project/control.db. Bound to one ChapterBlueprint ``chapter_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    blueprint_revision: int = Field(ge=1)
+    blueprint_hash: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    parent_chapter_id: str | None = None
+    order: int = Field(ge=0)
+    status: Literal["active", "archived"] = "active"
+    approval_status: Literal[
+        "not_started",
+        "draft",
+        "pending_approval",
+        "approved",
+    ] = "not_started"
+    # Independent CAS counter for chapter-scoped mutations.
+    chapter_revision: int = Field(default=0, ge=0)
+    head_content_revision: int = Field(default=0, ge=0)
+    formal_content_revision: int = Field(default=0, ge=0)
+    head_context_revision: int = Field(default=0, ge=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    state_hash: str = Field(default="")
+    created_at: str = Field(min_length=1)
+    updated_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def chapter_id_is_safe(self) -> "ChapterWorkspaceRecord":
+        value = self.chapter_id
+        if (
+            not value
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or value != value.strip()
+        ):
+            raise ValueError("chapter_id 非法")
         return self
 
 

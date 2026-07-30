@@ -270,16 +270,6 @@ def _issue_session(username: str) -> JSONResponse:
 
 @app.middleware("http")
 async def auth(request: Request, call_next):
-    if re.match(r"^/api/v[12](?:/|$)", request.url.path):
-        message = "V1/V2 API 已退役，请使用 /api/v3/workspaces/。"
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": {"code": "LEGACY_API_RETIRED", "message": message},
-                "message": message,
-            },
-            status_code=410,
-        )
     if request.url.path == "/api/auth/login":
         return await call_next(request)
     # The Vue shell and its static assets must stay reachable before login so
@@ -517,7 +507,33 @@ def list_workspaces(request: Request) -> JSONResponse:
     for root in sorted((p for p in RUNS_DIR.glob("*") if (p / "workspace" / "v3").is_dir()), key=lambda p: p.stat().st_mtime, reverse=True):
         try: _acl(_context(root.name), _principal(request), write=False)
         except ControlPlaneError: continue
-        snapshot = V3WorkspaceSnapshotBuilder(_context(root.name)).build(); document = snapshot.get("document") or {}; items.append({"id": root.name, "name": root.name, "mode": document.get("mode"), "delivery_status": (document.get("delivery") or {}).get("status", "new")})
+        snapshot = V3WorkspaceSnapshotBuilder(_context(root.name)).build()
+        document = snapshot.get("document") or {}
+        chapters = snapshot.get("chapters") if isinstance(snapshot.get("chapters"), dict) else {}
+        chapter_items = chapters.get("items") if isinstance(chapters.get("items"), list) else []
+        latest_chapter_update = max(
+            (
+                str(item.get("updated_at") or "")
+                for item in chapter_items
+                if isinstance(item, dict) and str(item.get("updated_at") or "")
+            ),
+            default="",
+        )
+        items.append(
+            {
+                "id": root.name,
+                "name": root.name,
+                "mode": document.get("mode"),
+                "delivery_status": (document.get("delivery") or {}).get("status", "new"),
+                "chapters": {
+                    "total": int(chapters.get("total") or 0),
+                    "materialized": int(chapters.get("materialized") or 0),
+                    "active": int(chapters.get("active") or 0),
+                    "archived": int(chapters.get("archived") or 0),
+                    "updated_at": latest_chapter_update,
+                },
+            }
+        )
     return JSONResponse({"ok": True, "workspaces": items})
 
 
@@ -628,6 +644,34 @@ async def chat_turn(workspace_id: str, request: Request) -> JSONResponse:
 
 @app.get("/api/v3/workspaces/{workspace_id}/snapshot")
 def snapshot(workspace_id: str) -> JSONResponse: return JSONResponse({"ok": True, "snapshot": V3WorkspaceSnapshotBuilder(_context(workspace_id)).build()})
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters")
+def list_chapters(
+    workspace_id: str,
+    include_archived: bool = Query(True),
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        chapters = ChapterWorkspaceService(_context(workspace_id)).list_chapters(
+            include_archived=include_archived
+        )
+        return JSONResponse({"ok": True, "chapters": chapters})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}")
+def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        chapter = ChapterWorkspaceService(_context(workspace_id)).get_chapter(chapter_id)
+        return JSONResponse({"ok": True, "chapter": chapter})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
 
 @app.get("/api/v3/workspaces/{workspace_id}/content-units/{unit_id}")
 def content_unit_detail(workspace_id: str, unit_id: str) -> JSONResponse:

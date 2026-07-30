@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-import tempfile
 import threading
 import uuid
 from contextlib import contextmanager
@@ -175,13 +174,13 @@ def _store_init_lock(path: Path) -> threading.Lock:
 
 
 class ControlStore:
-    """Per-workspace authoritative V2 control state.
+    """Per-workspace authoritative V3 control state.
 
     Artifact content remains on disk. This store only owns command/control state and
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 22
+    SCHEMA_VERSION = 25
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -221,6 +220,10 @@ class ControlStore:
         "workspace.run_utility",
         "workspace.archive",
         "workspace.clean",
+    }
+    BLOCKED_SUPERSEDING_KINDS = {
+        "document.prepare_outline",
+        "document.run_pipeline",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:
@@ -476,18 +479,6 @@ class ControlStore:
                         payload_json TEXT NOT NULL,
                         occurred_at TEXT NOT NULL
                     );
-                    CREATE TABLE IF NOT EXISTS migration_conflicts (
-                        conflict_id TEXT PRIMARY KEY,
-                        domain TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        legacy_json TEXT NOT NULL,
-                        authoritative_json TEXT NOT NULL,
-                        resolution_json TEXT,
-                        actor_json TEXT,
-                        reason TEXT NOT NULL DEFAULT '',
-                        created_at TEXT NOT NULL,
-                        resolved_at TEXT
-                    );
                     CREATE TABLE IF NOT EXISTS document_state (
                         workspace_id TEXT PRIMARY KEY,
                         document_mode TEXT NOT NULL DEFAULT '',
@@ -517,8 +508,14 @@ class ControlStore:
                         state TEXT NOT NULL,
                         attempt INTEGER NOT NULL DEFAULT 0,
                         evidence_snapshot_hash TEXT NOT NULL DEFAULT '',
+                        writer_fingerprint TEXT NOT NULL DEFAULT '',
                         output_artifact_id TEXT,
                         invalidation_reason TEXT NOT NULL DEFAULT '',
+                        stale_reason TEXT NOT NULL DEFAULT '',
+                        current_chapter_id TEXT NOT NULL DEFAULT '',
+                        current_chapter_title TEXT NOT NULL DEFAULT '',
+                        progress_phase TEXT NOT NULL DEFAULT '',
+                        draft_preview TEXT NOT NULL DEFAULT '',
                         updated_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS dependency_edges (
@@ -650,8 +647,6 @@ class ControlStore:
                     CREATE INDEX IF NOT EXISTS idx_issue_states_status ON issue_states(status, severity);
                     CREATE INDEX IF NOT EXISTS idx_policy_decisions_issue ON policy_decisions(issue_id, created_at);
                     CREATE INDEX IF NOT EXISTS idx_artifact_states_status ON artifact_states(status, producer);
-                    CREATE INDEX IF NOT EXISTS idx_migration_conflicts_status
-                        ON migration_conflicts(status, domain, created_at);
                     CREATE INDEX IF NOT EXISTS idx_evidence_needs_status
                         ON evidence_needs(status, deadline_stage, priority);
                     CREATE INDEX IF NOT EXISTS idx_content_unit_states_state
@@ -662,6 +657,26 @@ class ControlStore:
                         ON v3_proposals(artifact_kind, status, created_at);
                     CREATE INDEX IF NOT EXISTS idx_v3_gate_receipts_proposal
                         ON v3_gate_receipts(proposal_id, created_at);
+                    CREATE TABLE IF NOT EXISTS chapter_workspaces (
+                        chapter_id TEXT PRIMARY KEY,
+                        blueprint_revision INTEGER NOT NULL,
+                        blueprint_hash TEXT NOT NULL DEFAULT '',
+                        title TEXT NOT NULL,
+                        parent_chapter_id TEXT,
+                        order_index INTEGER NOT NULL DEFAULT 0,
+                        status TEXT NOT NULL,
+                        approval_status TEXT NOT NULL DEFAULT 'not_started',
+                        chapter_revision INTEGER NOT NULL DEFAULT 0,
+                        head_content_revision INTEGER NOT NULL DEFAULT 0,
+                        formal_content_revision INTEGER NOT NULL DEFAULT 0,
+                        head_context_revision INTEGER NOT NULL DEFAULT 0,
+                        metadata_json TEXT NOT NULL DEFAULT '{}',
+                        state_hash TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_workspaces_status
+                        ON chapter_workspaces(status, order_index, chapter_id);
                     """
                 )
                 operation_columns = {
@@ -671,6 +686,18 @@ class ControlStore:
                 if "parent_operation_id" not in operation_columns:
                     connection.execute("ALTER TABLE operations ADD COLUMN parent_operation_id TEXT")
                 self._migrate_v3_kernel_columns(connection)
+                self._migrate_chapter_workspace_tables(connection)
+                connection.execute("DROP TABLE IF EXISTS migration_conflicts")
+                connection.execute(
+                    """
+                    DELETE FROM control_meta
+                    WHERE key IN (
+                        'compatibility_usage', 'migration_last_scan', 'migration_cutover',
+                        'goal_v1_imported', 'materials_v1_imported', 'issue_v1_imported',
+                        'repair_job_v1_imported', 'agent_activity_v1_imported'
+                    )
+                    """
+                )
                 connection.execute(
                     """
                     INSERT INTO control_meta(key, value) VALUES ('schema_version', ?)
@@ -680,64 +707,32 @@ class ControlStore:
                 )
                 connection.execute("INSERT OR IGNORE INTO control_meta(key, value) VALUES ('revision', '0')")
 
-    @staticmethod
-    def _migration_conflict_row(row: sqlite3.Row) -> dict[str, Any]:
-        value = dict(row)
-        value["legacy"] = _decode(value.pop("legacy_json", None), {})
-        value["authoritative"] = _decode(value.pop("authoritative_json", None), {})
-        value["resolution"] = _decode(value.pop("resolution_json", None), None)
-        value["actor"] = _decode(value.pop("actor_json", None), None)
-        return value
-
-    def migration_conflicts(self, *, status: str | None = None) -> list[dict[str, Any]]:
-        with self._connection() as connection:
-            if status:
-                rows = connection.execute(
-                    "SELECT * FROM migration_conflicts WHERE status = ? ORDER BY created_at, conflict_id",
-                    (status,),
-                ).fetchall()
-            else:
-                rows = connection.execute(
-                    "SELECT * FROM migration_conflicts ORDER BY created_at, conflict_id"
-                ).fetchall()
-        return [self._migration_conflict_row(row) for row in rows]
-
     def upsert_evidence_need(self, item: dict[str, Any]) -> dict[str, Any]:
-        """Persist scheduling state only; immutable evidence lives in V3 artifacts."""
+        """Persist V3 research scheduling state; evidence itself is immutable."""
         required = ("need_id", "question", "topic_id", "priority", "blocking_scope", "deadline_stage", "query_budget", "status")
-        missing = [
-            key
-            for key in required
-            if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())
-        ]
+        missing = [key for key in required if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())]
         if missing:
             raise ControlPlaneError("INVALID_EVIDENCE_NEED", f"EvidenceNeed 缺少字段: {', '.join(missing)}", status_code=400)
         now = _now()
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO evidence_needs(
-                        need_id, question, topic_id, priority, blocking_scope, deadline_stage,
-                        query_budget, status, active_batch_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(need_id) DO UPDATE SET
-                        question=excluded.question, topic_id=excluded.topic_id, priority=excluded.priority,
-                        blocking_scope=excluded.blocking_scope, deadline_stage=excluded.deadline_stage,
-                        query_budget=excluded.query_budget, status=excluded.status,
-                        active_batch_id=excluded.active_batch_id, updated_at=excluded.updated_at
-                    """,
-                    (
-                        item["need_id"], item["question"], item["topic_id"], item["priority"],
-                        item["blocking_scope"], item["deadline_stage"], int(item["query_budget"]),
-                        item["status"], item.get("active_batch_id"), now, now,
-                    ),
-                )
-                connection.execute("COMMIT")
-            except Exception:
-                connection.execute("ROLLBACK")
-                raise
+            connection.execute(
+                """
+                INSERT INTO evidence_needs(
+                    need_id, question, topic_id, priority, blocking_scope, deadline_stage,
+                    query_budget, status, active_batch_id, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(need_id) DO UPDATE SET
+                    question=excluded.question, topic_id=excluded.topic_id, priority=excluded.priority,
+                    blocking_scope=excluded.blocking_scope, deadline_stage=excluded.deadline_stage,
+                    query_budget=excluded.query_budget, status=excluded.status,
+                    active_batch_id=excluded.active_batch_id, updated_at=excluded.updated_at
+                """,
+                (
+                    item["need_id"], item["question"], item["topic_id"], item["priority"],
+                    item["blocking_scope"], item["deadline_stage"], int(item["query_budget"]),
+                    item["status"], item.get("active_batch_id"), now, now,
+                ),
+            )
         return self.evidence_need(str(item["need_id"])) or {}
 
     def evidence_need(self, need_id: str) -> dict[str, Any] | None:
@@ -746,22 +741,12 @@ class ControlStore:
         return dict(row) if row else None
 
     def evidence_needs(self) -> list[dict[str, Any]]:
-        """Return the durable research schedule, including autonomous needs."""
-
         with self._connection() as connection:
             rows = connection.execute(
                 """
-                SELECT *
-                FROM evidence_needs
-                ORDER BY
-                    CASE priority
-                        WHEN 'blocking' THEN 0
-                        WHEN 'high' THEN 1
-                        WHEN 'normal' THEN 2
-                        ELSE 3
-                    END,
-                    created_at,
-                    need_id
+                SELECT * FROM evidence_needs
+                ORDER BY CASE priority WHEN 'blocking' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 ELSE 3 END,
+                    created_at, need_id
                 """
             ).fetchall()
         return [dict(row) for row in rows]
@@ -777,37 +762,86 @@ class ControlStore:
                 """
                 INSERT INTO content_unit_states(
                     unit_id, contract_revision, state, attempt, evidence_snapshot_hash,
-                    output_artifact_id, invalidation_reason, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    writer_fingerprint, output_artifact_id, invalidation_reason, stale_reason,
+                    current_chapter_id, current_chapter_title, progress_phase, draft_preview, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(unit_id) DO UPDATE SET
                     contract_revision=excluded.contract_revision, state=excluded.state,
                     attempt=excluded.attempt, evidence_snapshot_hash=excluded.evidence_snapshot_hash,
+                    writer_fingerprint=excluded.writer_fingerprint,
                     output_artifact_id=excluded.output_artifact_id,
-                    invalidation_reason=excluded.invalidation_reason, updated_at=excluded.updated_at
+                    invalidation_reason=excluded.invalidation_reason,
+                    stale_reason=excluded.stale_reason,
+                    current_chapter_id=excluded.current_chapter_id,
+                    current_chapter_title=excluded.current_chapter_title,
+                    progress_phase=excluded.progress_phase,
+                    draft_preview=excluded.draft_preview,
+                    updated_at=excluded.updated_at
                 """,
                 (
                     item["unit_id"], int(item["contract_revision"]), item["state"], int(item.get("attempt", 0)),
-                    str(item.get("evidence_snapshot_hash") or ""), item.get("output_artifact_id"),
-                    str(item.get("invalidation_reason") or ""), now,
+                    str(item.get("evidence_snapshot_hash") or ""), str(item.get("writer_fingerprint") or ""),
+                    item.get("output_artifact_id"), str(item.get("invalidation_reason") or ""),
+                    str(item.get("stale_reason") or ""),
+                    str(item.get("current_chapter_id") or ""),
+                    str(item.get("current_chapter_title") or ""),
+                    str(item.get("progress_phase") or ""),
+                    str(item.get("draft_preview") or ""), now,
                 ),
             )
+        return self.content_unit_state(str(item["unit_id"])) or {}
+
+    def update_content_unit_progress(
+        self,
+        unit_id: str,
+        *,
+        chapter_id: str,
+        chapter_title: str,
+        phase: str,
+        draft_preview: str | None = None,
+    ) -> dict[str, Any]:
+        """Record the current target of a running writer without changing its plan."""
+        normalized_unit_id = str(unit_id or "").strip()
+        if not normalized_unit_id:
+            raise ControlPlaneError(
+                "INVALID_CONTENT_UNIT",
+                "ContentUnit 缺少 unit_id。",
+                status_code=400,
+            )
+        now = _now()
         with self._connection() as connection:
-            row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (item["unit_id"],)).fetchone()
-        return dict(row) if row else {}
+            cursor = connection.execute(
+                """
+                UPDATE content_unit_states
+                SET current_chapter_id = ?,
+                    current_chapter_title = ?,
+                    progress_phase = ?,
+                    draft_preview = CASE WHEN ? IS NULL THEN draft_preview ELSE ? END,
+                    updated_at = ?
+                WHERE unit_id = ? AND state = 'running'
+                """,
+                (
+                    str(chapter_id or ""),
+                    str(chapter_title or ""),
+                    str(phase or ""),
+                    draft_preview,
+                    str(draft_preview or "")[:24000],
+                    now,
+                    normalized_unit_id,
+                ),
+            )
+        if cursor.rowcount == 0:
+            return self.content_unit_state(normalized_unit_id) or {}
+        return self.content_unit_state(normalized_unit_id) or {}
 
     def content_unit_state(self, unit_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:
-            row = connection.execute(
-                "SELECT * FROM content_unit_states WHERE unit_id = ?",
-                (str(unit_id or ""),),
-            ).fetchone()
+            row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (str(unit_id or ""),)).fetchone()
         return dict(row) if row else None
 
     def content_unit_states(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
-            rows = connection.execute(
-                "SELECT * FROM content_unit_states ORDER BY updated_at, unit_id"
-            ).fetchall()
+            rows = connection.execute("SELECT * FROM content_unit_states ORDER BY updated_at, unit_id").fetchall()
         return [dict(row) for row in rows]
 
     def content_locks(self) -> list[dict[str, Any]]:
@@ -815,688 +849,589 @@ class ControlStore:
             rows = connection.execute("SELECT * FROM content_locks ORDER BY created_at, block_id").fetchall()
         return [dict(row) for row in rows]
 
-    def migration_state(self) -> dict[str, Any]:
-        conflicts = self.migration_conflicts()
-        open_conflicts = [item for item in conflicts if item.get("status") == "open"]
-        with self._connection() as connection:
-            scan = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
-            ).fetchone()
-            cutover = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
-            ).fetchone()
+    def _migrate_chapter_workspace_tables(self, connection: sqlite3.Connection) -> None:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS chapter_workspaces (
+                chapter_id TEXT PRIMARY KEY,
+                blueprint_revision INTEGER NOT NULL,
+                blueprint_hash TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL,
+                parent_chapter_id TEXT,
+                order_index INTEGER NOT NULL DEFAULT 0,
+                status TEXT NOT NULL,
+                approval_status TEXT NOT NULL DEFAULT 'not_started',
+                chapter_revision INTEGER NOT NULL DEFAULT 0,
+                head_content_revision INTEGER NOT NULL DEFAULT 0,
+                formal_content_revision INTEGER NOT NULL DEFAULT 0,
+                head_context_revision INTEGER NOT NULL DEFAULT 0,
+                metadata_json TEXT NOT NULL DEFAULT '{}',
+                state_hash TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_workspaces_status
+                ON chapter_workspaces(status, order_index, chapter_id);
+            """
+        )
+
+    @staticmethod
+    def _normalize_chapter_id(chapter_id: str) -> str:
+        value = str(chapter_id or "").strip()
+        if (
+            not value
+            or value in {".", ".."}
+            or Path(value).name != value
+            or "/" in value
+            or "\\" in value
+        ):
+            raise ControlPlaneError(
+                "CHAPTER_ID_INVALID",
+                "无效 chapter_id。",
+                status_code=400,
+            )
+        return value
+
+    @staticmethod
+    def _chapter_workspace_state_hash(
+        *,
+        chapter_id: str,
+        blueprint_revision: int,
+        blueprint_hash: str,
+        title: str,
+        parent_chapter_id: str | None,
+        order_index: int,
+        status: str,
+        approval_status: str,
+        chapter_revision: int,
+        head_content_revision: int,
+        formal_content_revision: int,
+        head_context_revision: int,
+        metadata: dict[str, Any],
+    ) -> str:
+        payload = {
+            "chapter_id": chapter_id,
+            "blueprint_revision": int(blueprint_revision),
+            "blueprint_hash": str(blueprint_hash or ""),
+            "title": title,
+            "parent_chapter_id": parent_chapter_id,
+            "order": int(order_index),
+            "status": status,
+            "approval_status": approval_status,
+            "chapter_revision": int(chapter_revision),
+            "head_content_revision": int(head_content_revision),
+            "formal_content_revision": int(formal_content_revision),
+            "head_context_revision": int(head_context_revision),
+            "metadata": metadata,
+        }
+        return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _chapter_workspace_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        metadata = _decode(item.pop("metadata_json", "{}"), {})
+        if not isinstance(metadata, dict):
+            metadata = {}
         return {
-            "status": "needs_reconciliation" if open_conflicts else "ready",
-            "open_count": len(open_conflicts),
-            "conflicts": conflicts,
-            "last_scan": _decode(str(scan["value"]), None) if scan is not None else None,
-            "cutover": _decode(str(cutover["value"]), None) if cutover is not None else None,
+            "chapter_id": str(item.get("chapter_id") or ""),
+            "blueprint_revision": int(item.get("blueprint_revision") or 0),
+            "blueprint_hash": str(item.get("blueprint_hash") or ""),
+            "title": str(item.get("title") or ""),
+            "parent_chapter_id": (
+                str(item["parent_chapter_id"])
+                if item.get("parent_chapter_id") is not None
+                else None
+            ),
+            "order": int(item.get("order_index") if item.get("order_index") is not None else item.get("order") or 0),
+            "status": str(item.get("status") or "active"),
+            "approval_status": str(item.get("approval_status") or "not_started"),
+            "chapter_revision": int(item.get("chapter_revision") or 0),
+            "head_content_revision": int(item.get("head_content_revision") or 0),
+            "formal_content_revision": int(item.get("formal_content_revision") or 0),
+            "head_context_revision": int(item.get("head_context_revision") or 0),
+            "metadata": metadata,
+            "state_hash": str(item.get("state_hash") or ""),
+            "created_at": str(item.get("created_at") or ""),
+            "updated_at": str(item.get("updated_at") or ""),
         }
 
-    def record_compatibility_usage(self, route: str, actor: dict[str, Any]) -> None:
-        """Track V1 adapter usage without changing control revision or domain state."""
-        route_name = str(route or "").strip()[:256]
-        if not route_name:
-            return
-        now = _now()
+    def chapter_workspaces(self, *, include_archived: bool = True) -> list[dict[str, Any]]:
         with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'compatibility_usage'"
-                ).fetchone()
-                usage = _decode(str(row["value"]), {}) if row is not None else {}
-                usage = usage if isinstance(usage, dict) else {}
-                routes = usage.get("routes") if isinstance(usage.get("routes"), dict) else {}
-                current = routes.get(route_name) if isinstance(routes.get(route_name), dict) else {}
-                routes[route_name] = {
-                    "calls": int(current.get("calls") or 0) + 1,
-                    "last_called_at": now,
-                    "last_actor": {
-                        "id": str(actor.get("id") or "")[:128],
-                        "type": str(actor.get("type") or "")[:64],
-                    },
-                }
-                usage["routes"] = routes
-                usage["updated_at"] = now
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('compatibility_usage', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (_json(usage),),
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
+            if include_archived:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM chapter_workspaces
+                    ORDER BY order_index, chapter_id
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT * FROM chapter_workspaces
+                    WHERE status != 'archived'
+                    ORDER BY order_index, chapter_id
+                    """
+                ).fetchall()
+        return [self._chapter_workspace_row(row) for row in rows]
 
-    def compatibility_usage(self) -> dict[str, Any]:
+    def chapter_workspace(self, chapter_id: str) -> dict[str, Any] | None:
+        normalized = self._normalize_chapter_id(chapter_id)
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'compatibility_usage'"
+                "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                (normalized,),
             ).fetchone()
-        usage = _decode(str(row["value"]), {}) if row is not None else {}
-        return usage if isinstance(usage, dict) else {}
+        return self._chapter_workspace_row(row) if row else None
 
-    def migration_backups(self) -> list[dict[str, Any]]:
-        backup_dir = (self.path.parent / "migration_backups").resolve()
-        if not backup_dir.exists():
-            return []
-        result: list[dict[str, Any]] = []
-        for path in sorted(backup_dir.glob("control-before-*.db")):
-            resolved = path.resolve()
-            if not resolved.is_relative_to(backup_dir) or not resolved.is_file():
-                continue
-            item: dict[str, Any] = {
-                "path": resolved.relative_to(self.context.root).as_posix(),
-                "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
-                "size_bytes": resolved.stat().st_size,
-                "verified": False,
-            }
-            try:
-                connection = sqlite3.connect(f"file:{resolved.as_posix()}?mode=ro", uri=True)
-                try:
-                    integrity = connection.execute("PRAGMA integrity_check").fetchone()
-                    tables = {
-                        str(row[0])
-                        for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-                    }
-                    version = connection.execute(
-                        "SELECT value FROM control_meta WHERE key = 'schema_version'"
-                    ).fetchone() if "control_meta" in tables else None
-                    item.update(
-                        {
-                            "verified": bool(integrity and str(integrity[0]).lower() == "ok")
-                            and {"control_meta", "operations", "workspace_events"}.issubset(tables),
-                            "integrity": str(integrity[0]) if integrity else "missing",
-                            "schema_version": str(version[0]) if version else "",
-                        }
-                    )
-                finally:
-                    connection.close()
-            except (OSError, sqlite3.Error) as exc:
-                item["error"] = str(exc)
-            result.append(item)
-        return result
-
-    def drill_migration_backup(self, relative_path: str) -> dict[str, Any]:
-        backup_dir = (self.path.parent / "migration_backups").resolve()
-        candidate = (self.context.root / str(relative_path or "")).resolve()
-        if (
-            not candidate.is_relative_to(backup_dir)
-            or candidate.name != Path(relative_path).name
-            or candidate.suffix.lower() != ".db"
-            or not candidate.exists()
-            or not candidate.is_file()
-        ):
-            raise ControlPlaneError("MIGRATION_BACKUP_NOT_FOUND", "迁移备份不存在或路径无效。", status_code=404)
-        verified = next((item for item in self.migration_backups() if item["path"] == candidate.relative_to(self.context.root).as_posix()), None)
-        if not verified or not verified.get("verified"):
-            raise ControlPlaneError("MIGRATION_BACKUP_INVALID", "迁移备份未通过完整性校验。", status_code=409)
-        with tempfile.TemporaryDirectory(prefix="bid-agent-migration-drill-") as tmp:
-            restored_path = Path(tmp) / "restored-control.db"
-            source = sqlite3.connect(f"file:{candidate.as_posix()}?mode=ro", uri=True)
-            destination = sqlite3.connect(str(restored_path))
-            try:
-                source.backup(destination)
-            finally:
-                destination.close()
-                source.close()
-            restored = sqlite3.connect(f"file:{restored_path.as_posix()}?mode=ro", uri=True)
-            try:
-                integrity = restored.execute("PRAGMA integrity_check").fetchone()
-                tables = {
-                    str(row[0])
-                    for row in restored.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
-                }
-            finally:
-                restored.close()
-        ok = bool(integrity and str(integrity[0]).lower() == "ok") and {
-            "control_meta", "operations", "workspace_events"
-        }.issubset(tables)
-        if not ok:
-            raise ControlPlaneError("MIGRATION_RECOVERY_DRILL_FAILED", "迁移备份恢复演练失败。", status_code=503)
-        return {**verified, "recovery_drill": "passed", "restored_tables": sorted(tables)}
-
-    def record_migration_scan(self, *, fingerprint: str, manifest: list[dict[str, Any]], actor: dict[str, Any]) -> None:
-        if not fingerprint:
-            raise ControlPlaneError("COMMAND_INVALID", "迁移扫描缺少 source fingerprint。", status_code=400)
-        value = {"fingerprint": fingerprint, "manifest": manifest, "actor": actor, "scanned_at": _now()}
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                prior = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
-                ).fetchone()
-                prior_value = _decode(str(prior["value"]), {}) if prior is not None else {}
-                if isinstance(prior_value, dict) and prior_value.get("fingerprint") == fingerprint:
-                    connection.commit()
-                    return
-                revision = self._bump_revision(connection)
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('migration_last_scan', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (_json(value),),
-                )
-                self._event(
-                    connection, revision, "MigrationScanned", "Migration", self.context.workspace_id,
-                    {"fingerprint": fingerprint, "source_count": len(manifest), "actor": actor},
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-
-    def activate_migration_cutover(self, *, fingerprint: str, actor: dict[str, Any]) -> dict[str, Any]:
-        state = self.migration_state()
-        if state["open_count"]:
-            raise ControlPlaneError(
-                "MIGRATION_RECONCILIATION_REQUIRED",
-                "存在未处理迁移冲突，不能切换工作区控制面。",
-                details={"open_count": state["open_count"]},
-            )
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                scan_row = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'migration_last_scan'"
-                ).fetchone()
-                scan = _decode(str(scan_row["value"]), {}) if scan_row is not None else {}
-                if not isinstance(scan, dict) or str(scan.get("fingerprint") or "") != fingerprint:
-                    raise ControlPlaneError(
-                        "MIGRATION_SCAN_REQUIRED",
-                        "迁移扫描不存在或源文件已变化，请重新扫描后切换。",
-                        details={"scan_fingerprint": scan.get("fingerprint") if isinstance(scan, dict) else ""},
-                    )
-                existing = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'migration_cutover'"
-                ).fetchone()
-                prior = _decode(str(existing["value"]), {}) if existing is not None else {}
-                if isinstance(prior, dict) and prior.get("fingerprint") == fingerprint:
-                    connection.commit()
-                    return prior
-                value = {"status": "active", "fingerprint": fingerprint, "actor": actor, "activated_at": _now()}
-                revision = self._bump_revision(connection)
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('migration_cutover', ?) "
-                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                    (_json(value),),
-                )
-                self._event(
-                    connection, revision, "MigrationCutoverActivated", "Migration", self.context.workspace_id,
-                    {"fingerprint": fingerprint, "actor": actor},
-                )
-                connection.commit()
-                return value
-            except Exception:
-                connection.rollback()
-                raise
-
-    def v1_import_pending(self, domain: str) -> bool:
-        markers = {
-            "goal": "goal_v1_imported",
-            "materials": "materials_v1_imported",
-            "issues": "issue_v1_imported",
-            "repair_job": "repair_job_v1_imported",
-            "agent_activity": "agent_activity_v1_imported",
-        }
-        marker = markers.get(str(domain or ""))
-        if not marker:
-            raise ControlPlaneError("COMMAND_INVALID", "未知 V1 导入领域。", status_code=400)
-        with self._connection() as connection:
-            return connection.execute(
-                "SELECT 1 FROM control_meta WHERE key = ?", (marker,)
-            ).fetchone() is None
-
-    def migration_dry_run(
+    def materialize_chapter_workspace(
         self,
-        legacy_domains: dict[str, Any],
         *,
-        orphans: list[dict[str, Any]] | None = None,
-        unrecognized: list[dict[str, Any]] | None = None,
+        chapter_id: str,
+        blueprint_revision: int,
+        blueprint_hash: str,
+        title: str,
+        parent_chapter_id: str | None,
+        order_index: int,
+        expected_chapter_revision: int,
+        metadata: dict[str, Any] | None = None,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Compare V1 candidates with SQLite without importing or changing revision."""
-        authoritative = {
-            "goal": self.goal_state(),
-            "materials": self.material_states(),
-            "issues": self.issue_states(),
-            "repair_job": self.repair_job_state(),
-            "agent_activity": self.agent_activity_state(),
-        }
-
-        def projection(domain: str, value: Any) -> Any:
-            if domain == "goal":
-                item = value if isinstance(value, dict) else {}
-                return (str(item.get("goal_id") or item.get("id") or ""), str(item.get("status") or "pending"))
-            if domain == "repair_job":
-                item = value if isinstance(value, dict) else {}
-                return (
-                    str(item.get("job_id") or ""), str(item.get("status") or "awaiting_confirmation"),
-                    str(item.get("phase") or "awaiting_confirmation"),
-                )
-            if domain == "agent_activity":
-                item = value if isinstance(value, dict) else {}
-                return (str(item.get("status") or "idle"), str(item.get("phase") or ""))
-            rows = value if isinstance(value, list) else []
-            if domain == "materials":
-                return sorted(
-                    (
-                        str(item.get("item_id") or ""),
-                        str(item.get("response_status") or "deferred"),
-                        str(item.get("lifecycle_status") or "missing"),
-                        str(item.get("evidence_status") or "missing"),
-                    )
-                    for item in rows if isinstance(item, dict)
-                )
-            return sorted(
-                (
-                    str(item.get("id") or ""),
-                    str(item.get("status") or "open"),
-                    str(item.get("severity") or "warn"),
-                )
-                for item in rows if isinstance(item, dict)
-            )
-
-        resolved_evidence = {
-            (str(item.get("domain") or ""), _json(item.get("legacy")))
-            for item in self.migration_conflicts(status="resolved")
-        }
-
-        def is_acknowledged(domain: str, legacy: Any) -> bool:
-            return (domain, _json(legacy)) in resolved_evidence
-
-        inventory: dict[str, list[dict[str, Any]]] = {
-            "importable": [],
-            "aligned": [],
-            "conflicts": [],
-            "orphans": [],
-            "unrecognized": [],
-            "acknowledged": [],
-        }
-        for item in orphans or []:
-            if is_acknowledged("orphan", item):
-                inventory["acknowledged"].append({"domain": "orphan", "legacy": item})
-            else:
-                inventory["orphans"].append(item)
-        for item in unrecognized or []:
-            if is_acknowledged("unrecognized", item):
-                inventory["acknowledged"].append({"domain": "unrecognized", "legacy": item})
-            else:
-                inventory["unrecognized"].append(item)
-        for domain, candidate in legacy_domains.items():
-            if domain not in authoritative:
-                item = {"domain": domain, "value": candidate}
-                if is_acknowledged("unrecognized", item):
-                    inventory["acknowledged"].append({"domain": "unrecognized", "legacy": item})
-                else:
-                    inventory["unrecognized"].append(item)
-                continue
-            current = authoritative[domain]
-            current_empty = current is None if domain in {"goal", "agent_activity"} else not current
-            item = {"domain": domain, "legacy": candidate, "authoritative": current}
-            if current_empty:
-                inventory["importable"].append(item)
-            elif projection(domain, candidate) == projection(domain, current):
-                inventory["aligned"].append(item)
-            elif is_acknowledged(domain, candidate):
-                inventory["acknowledged"].append(item)
-            else:
-                inventory["conflicts"].append(item)
-        return {
-            "status": (
-                "needs_reconciliation"
-                if inventory["conflicts"] or inventory["orphans"] or inventory["unrecognized"]
-                else "ready"
-            ),
-            "dry_run": True,
-            "inventory": inventory,
-            "counts": {key: len(value) for key, value in inventory.items()},
-            "workspace_revision": self.revision(),
-        }
-
-    def assert_migration_ready(self) -> None:
-        state = self.migration_state()
-        if state["open_count"]:
+        """Idempotently materialize or refresh a chapter workspace from Blueprint."""
+        normalized = self._normalize_chapter_id(chapter_id)
+        title_value = str(title or "").strip()
+        if not title_value:
+            raise ControlPlaneError("CHAPTER_TITLE_REQUIRED", "章节标题不能为空。", status_code=400)
+        try:
+            expected = int(expected_chapter_revision)
+            bp_revision = int(blueprint_revision)
+        except (TypeError, ValueError) as exc:
             raise ControlPlaneError(
-                "MIGRATION_RECONCILIATION_REQUIRED",
-                "工作区存在未解决的 V1/V2 状态冲突，已拒绝变更操作。",
+                "CHAPTER_REVISION_INVALID",
+                "expected_chapter_revision / blueprint_revision 必须是整数。",
+                status_code=400,
+            ) from exc
+        if bp_revision < 1:
+            raise ControlPlaneError(
+                "CHAPTER_BLUEPRINT_REQUIRED",
+                "缺少有效 Blueprint revision。",
                 status_code=409,
-                details={"open_count": state["open_count"]},
             )
-
-    def record_migration_conflict(
-        self,
-        *,
-        domain: str,
-        legacy: Any,
-        authoritative: Any,
-        reason: str,
-        exclude_operation_id: str = "",
-    ) -> dict[str, Any]:
-        domain_name = str(domain or "").strip()
-        if not domain_name:
-            raise ControlPlaneError("COMMAND_INVALID", "迁移冲突缺少 domain。", status_code=400)
-        identity = _json(
-            {"workspace_id": self.context.workspace_id, "domain": domain_name,
-             "legacy": legacy, "authoritative": authoritative}
+        bp_hash = str(blueprint_hash or "").strip()
+        if not bp_hash:
+            raise ControlPlaneError(
+                "CHAPTER_BLUEPRINT_REQUIRED",
+                "缺少有效 Blueprint hash。",
+                status_code=409,
+            )
+        parent = (
+            str(parent_chapter_id).strip()
+            if parent_chapter_id is not None and str(parent_chapter_id).strip()
+            else None
         )
-        conflict_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"migration-conflict:{identity}"))
+        if parent is not None:
+            parent = self._normalize_chapter_id(parent)
+        meta = dict(metadata or {})
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                cursor = connection.execute(
-                    """
-                    INSERT OR IGNORE INTO migration_conflicts(
-                        conflict_id, domain, status, legacy_json, authoritative_json,
-                        reason, created_at
-                    ) VALUES (?, ?, 'open', ?, ?, ?, ?)
-                    """,
-                    (conflict_id, domain_name, _json(legacy), _json(authoritative), str(reason), now),
-                )
-                if int(cursor.rowcount or 0):
-                    placeholders = ",".join("?" for _ in self.ACTIVE_OPERATION_STATES)
-                    blocked_sql = (
-                        f"UPDATE operations SET status = 'blocked', updated_at = ?, message = ? "
-                        "WHERE status IN (" + placeholders + ")"
+                existing = connection.execute(
+                    "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                if existing is None:
+                    if expected != 0:
+                        raise ControlPlaneError(
+                            "CHAPTER_REVISION_CONFLICT",
+                            "章节尚未物化，expected_chapter_revision 必须为 0。",
+                            status_code=409,
+                            details={
+                                "chapter_id": normalized,
+                                "expected_chapter_revision": expected,
+                                "current_chapter_revision": 0,
+                            },
+                        )
+                    chapter_revision = 1
+                    approval_status = "not_started"
+                    status = "active"
+                    head_content_revision = 0
+                    formal_content_revision = 0
+                    head_context_revision = 0
+                    created_at = now
+                    state_hash = self._chapter_workspace_state_hash(
+                        chapter_id=normalized,
+                        blueprint_revision=bp_revision,
+                        blueprint_hash=bp_hash,
+                        title=title_value,
+                        parent_chapter_id=parent,
+                        order_index=int(order_index),
+                        status=status,
+                        approval_status=approval_status,
+                        chapter_revision=chapter_revision,
+                        head_content_revision=head_content_revision,
+                        formal_content_revision=formal_content_revision,
+                        head_context_revision=head_context_revision,
+                        metadata=meta,
                     )
-                    blocked_args: tuple[Any, ...] = (
-                        now,
-                        "检测到 V1/V2 状态迁移冲突，等待管理员协调。",
-                        *self.ACTIVE_OPERATION_STATES,
+                    connection.execute(
+                        """
+                        INSERT INTO chapter_workspaces(
+                            chapter_id, blueprint_revision, blueprint_hash, title,
+                            parent_chapter_id, order_index, status, approval_status,
+                            chapter_revision, head_content_revision, formal_content_revision,
+                            head_context_revision, metadata_json, state_hash,
+                            created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            normalized,
+                            bp_revision,
+                            bp_hash,
+                            title_value,
+                            parent,
+                            int(order_index),
+                            status,
+                            approval_status,
+                            chapter_revision,
+                            head_content_revision,
+                            formal_content_revision,
+                            head_context_revision,
+                            _json(meta),
+                            state_hash,
+                            created_at,
+                            now,
+                        ),
                     )
-                    if exclude_operation_id:
-                        blocked_sql += " AND operation_id <> ?"
-                        blocked_args += (exclude_operation_id,)
-                    blocked = connection.execute(blocked_sql, blocked_args)
                     revision = self._bump_revision(connection)
                     self._event(
-                        connection, revision, "MigrationConflictDetected", "MigrationConflict",
-                        conflict_id,
-                        {"domain": domain_name, "reason": str(reason), "blocked_operations": int(blocked.rowcount or 0)},
+                        connection,
+                        revision,
+                        "ChapterWorkspaceMaterialized",
+                        "ChapterWorkspace",
+                        normalized,
+                        {
+                            "chapter_id": normalized,
+                            "chapter_revision": chapter_revision,
+                            "blueprint_revision": bp_revision,
+                            "state_hash": state_hash,
+                            "actor": actor or {},
+                        },
                     )
+                    connection.commit()
+                    return self.chapter_workspace(normalized) or {}
+
+                current = self._chapter_workspace_row(existing)
+                current_revision = int(current["chapter_revision"])
+                # Pure re-materialize: same structural seed, no metadata change → idempotent.
+                same_structure = (
+                    int(current["blueprint_revision"]) == bp_revision
+                    and str(current["blueprint_hash"]) == bp_hash
+                    and str(current["title"]) == title_value
+                    and current.get("parent_chapter_id") == parent
+                    and int(current["order"]) == int(order_index)
+                    and str(current["status"]) == "active"
+                )
+                if same_structure and not meta and expected in {0, current_revision}:
+                    connection.commit()
+                    return current
+                if expected != current_revision:
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                merged_meta = dict(current.get("metadata") or {})
+                if meta:
+                    merged_meta.update(meta)
+                chapter_revision = current_revision + 1
+                status = "active"
+                approval_status = str(current.get("approval_status") or "not_started")
+                head_content_revision = int(current.get("head_content_revision") or 0)
+                formal_content_revision = int(current.get("formal_content_revision") or 0)
+                head_context_revision = int(current.get("head_context_revision") or 0)
+                created_at = str(current.get("created_at") or now)
+                state_hash = self._chapter_workspace_state_hash(
+                    chapter_id=normalized,
+                    blueprint_revision=bp_revision,
+                    blueprint_hash=bp_hash,
+                    title=title_value,
+                    parent_chapter_id=parent,
+                    order_index=int(order_index),
+                    status=status,
+                    approval_status=approval_status,
+                    chapter_revision=chapter_revision,
+                    head_content_revision=head_content_revision,
+                    formal_content_revision=formal_content_revision,
+                    head_context_revision=head_context_revision,
+                    metadata=merged_meta,
+                )
+                connection.execute(
+                    """
+                    UPDATE chapter_workspaces SET
+                        blueprint_revision = ?,
+                        blueprint_hash = ?,
+                        title = ?,
+                        parent_chapter_id = ?,
+                        order_index = ?,
+                        status = ?,
+                        approval_status = ?,
+                        chapter_revision = ?,
+                        metadata_json = ?,
+                        state_hash = ?,
+                        updated_at = ?
+                    WHERE chapter_id = ?
+                    """,
+                    (
+                        bp_revision,
+                        bp_hash,
+                        title_value,
+                        parent,
+                        int(order_index),
+                        status,
+                        approval_status,
+                        chapter_revision,
+                        _json(merged_meta),
+                        state_hash,
+                        now,
+                        normalized,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "ChapterWorkspaceUpdated",
+                    "ChapterWorkspace",
+                    normalized,
+                    {
+                        "chapter_id": normalized,
+                        "chapter_revision": chapter_revision,
+                        "state_hash": state_hash,
+                        "actor": actor or {},
+                    },
+                )
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
-        return next(item for item in self.migration_conflicts() if item["conflict_id"] == conflict_id)
+        return self.chapter_workspace(normalized) or {}
 
-    def resolve_migration_conflict(
+    def archive_chapter_workspace(
         self,
-        conflict_id: str,
         *,
-        resolution: str,
-        actor: dict[str, Any],
-        reason: str,
+        chapter_id: str,
+        expected_chapter_revision: int,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        resolution_name = str(resolution or "").strip()
-        if resolution_name not in {"bind_legacy", "mark_failed", "keep_orphan"}:
-            raise ControlPlaneError("COMMAND_INVALID", "无效的迁移冲突处理方式。", status_code=400)
-        if not str(reason or "").strip():
-            raise ControlPlaneError("COMMAND_INVALID", "迁移冲突处理必须填写原因。", status_code=400)
-        with self._connection() as connection:
-            preview_row = connection.execute(
-                "SELECT * FROM migration_conflicts WHERE conflict_id = ?", (conflict_id,)
-            ).fetchone()
-        if preview_row is None:
-            raise ControlPlaneError("MIGRATION_CONFLICT_NOT_FOUND", "迁移冲突不存在。", status_code=404)
-        backup_dir = self.path.parent / "migration_backups"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        backup_path = backup_dir / f"control-before-{conflict_id}.db"
-        if not backup_path.exists():
-            with self._connection() as source:
-                destination = sqlite3.connect(str(backup_path))
-                try:
-                    source.backup(destination)
-                finally:
-                    destination.close()
-        backup_sha256 = hashlib.sha256(backup_path.read_bytes()).hexdigest()
+        """Soft-delete a chapter workspace (tombstone). Does not alter Blueprint."""
+        normalized = self._normalize_chapter_id(chapter_id)
+        try:
+            expected = int(expected_chapter_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_REVISION_INVALID",
+                "expected_chapter_revision 必须是整数。",
+                status_code=400,
+            ) from exc
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                row = connection.execute(
-                    "SELECT * FROM migration_conflicts WHERE conflict_id = ?", (conflict_id,)
+                existing = connection.execute(
+                    "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                    (normalized,),
                 ).fetchone()
-                if row is None:
-                    raise ControlPlaneError("MIGRATION_CONFLICT_NOT_FOUND", "迁移冲突不存在。", status_code=404)
-                if str(row["status"]) != "open":
-                    raise ControlPlaneError("MIGRATION_CONFLICT_RESOLVED", "迁移冲突已处理。", status_code=409)
-                domain = str(row["domain"])
-                legacy = _decode(str(row["legacy_json"]), None)
-                state_effect = "authority_preserved"
-                if resolution_name == "bind_legacy":
-                    if domain == "goal":
-                        if not isinstance(legacy, dict):
-                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Goal 证据无效。", status_code=503)
-                        goal_id = str(legacy.get("goal_id") or legacy.get("id") or "").strip()
-                        if not goal_id:
-                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Goal 缺少 goal_id。", status_code=503)
-                        legacy_status = str(legacy.get("status") or "pending")
-                        status = "blocked_human" if legacy_status in {"succeeded", "completed"} else legacy_status
-                        normalized = {**legacy, "goal_id": goal_id, "status": status}
-                        existing_goal = connection.execute(
-                            "SELECT created_at FROM goal_state WHERE singleton = 1"
-                        ).fetchone()
-                        connection.execute(
-                            """
-                            INSERT INTO goal_state(
-                                singleton, goal_id, status, goal_json, source, created_at, updated_at
-                            ) VALUES (1, ?, ?, ?, 'migration_reconciliation', ?, ?)
-                            ON CONFLICT(singleton) DO UPDATE SET
-                                goal_id = excluded.goal_id, status = excluded.status,
-                                goal_json = excluded.goal_json, source = excluded.source,
-                                updated_at = excluded.updated_at
-                            """,
-                            (
-                                goal_id, status, _json(normalized),
-                                str(existing_goal["created_at"]) if existing_goal else now, now,
-                            ),
-                        )
-                        connection.execute(
-                            "INSERT INTO control_meta(key, value) VALUES ('goal_v1_imported', '1') "
-                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                        )
-                        state_effect = "legacy_bound_goal_success_normalized" if status != legacy_status else "legacy_bound"
-                    elif domain == "repair_job":
-                        if not isinstance(legacy, dict) or not str(legacy.get("job_id") or "").strip():
-                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 RepairJob 证据无效。", status_code=503)
-                        connection.execute(
-                            """
-                            INSERT INTO repair_job_state(
-                                singleton, job_id, status, phase, job_json, source, created_at, updated_at
-                            ) VALUES (1, ?, ?, ?, ?, 'migration_reconciliation', ?, ?)
-                            ON CONFLICT(singleton) DO UPDATE SET
-                                job_id = excluded.job_id, status = excluded.status, phase = excluded.phase,
-                                job_json = excluded.job_json, source = excluded.source, updated_at = excluded.updated_at
-                            """,
-                            (
-                                str(legacy["job_id"]), str(legacy.get("status") or "awaiting_confirmation"),
-                                str(legacy.get("phase") or "awaiting_confirmation"), _json(legacy), now, now,
-                            ),
-                        )
-                        connection.execute(
-                            "INSERT INTO control_meta(key, value) VALUES ('repair_job_v1_imported', '1') "
-                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                        )
-                        state_effect = "legacy_bound"
-                    elif domain == "agent_activity":
-                        if not isinstance(legacy, dict):
-                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 AgentActivity 证据无效。", status_code=503)
-                        connection.execute(
-                            """
-                            INSERT INTO agent_activity_state(
-                                singleton, status, phase, activity_json, source, created_at, updated_at
-                            ) VALUES (1, ?, ?, ?, 'migration_reconciliation', ?, ?)
-                            ON CONFLICT(singleton) DO UPDATE SET
-                                status = excluded.status, phase = excluded.phase, activity_json = excluded.activity_json,
-                                source = excluded.source, updated_at = excluded.updated_at
-                            """,
-                            (str(legacy.get("status") or "idle"), str(legacy.get("phase") or ""), _json(legacy), now, now),
-                        )
-                        connection.execute(
-                            "INSERT INTO control_meta(key, value) VALUES ('agent_activity_v1_imported', '1') "
-                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                        )
-                        state_effect = "legacy_bound"
-                    elif domain == "materials":
-                        if not isinstance(legacy, list):
-                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移材料证据无效。", status_code=503)
-                        connection.execute("DELETE FROM material_states")
-                        for item in legacy:
-                            if not isinstance(item, dict) or not str(item.get("item_id") or "").strip():
-                                raise ControlPlaneError("STATE_UNAVAILABLE", "迁移材料项缺少 item_id。", status_code=503)
-                            connection.execute(
-                                """
-                                INSERT INTO material_states(
-                                    item_id, response_status, lifecycle_status, evidence_status,
-                                    item_json, source, created_at, updated_at
-                                ) VALUES (?, ?, ?, ?, ?, 'migration_reconciliation', ?, ?)
-                                """,
-                                (
-                                    str(item["item_id"]), str(item.get("response_status") or "deferred"),
-                                    str(item.get("lifecycle_status") or "missing"),
-                                    str(item.get("evidence_status") or "missing"), _json(item), now, now,
-                                ),
-                            )
-                        connection.execute(
-                            "INSERT INTO control_meta(key, value) VALUES ('materials_v1_imported', '1') "
-                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                        )
-                        state_effect = "legacy_bound"
-                    elif domain == "issues":
-                        if not isinstance(legacy, list):
-                            raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Issue 证据无效。", status_code=503)
-                        connection.execute("DELETE FROM issue_states")
-                        for item in legacy:
-                            issue_id = str(item.get("id") or "").strip() if isinstance(item, dict) else ""
-                            if not issue_id:
-                                raise ControlPlaneError("STATE_UNAVAILABLE", "迁移 Issue 缺少 id。", status_code=503)
-                            connection.execute(
-                                """
-                                INSERT INTO issue_states(
-                                    issue_id, status, severity, issue_json, source, created_at, updated_at
-                                ) VALUES (?, ?, ?, ?, 'migration_reconciliation', ?, ?)
-                                """,
-                                (
-                                    issue_id, str(item.get("status") or "open"),
-                                    str(item.get("severity") or "warn"), _json(item), now, now,
-                                ),
-                            )
-                            if str(item.get("status") or "") == "accepted":
-                                decision_id = str(uuid.uuid5(
-                                    uuid.NAMESPACE_URL,
-                                    f"{self.context.workspace_id}:migration-accepted-risk:{issue_id}",
-                                ))
-                                connection.execute(
-                                    """
-                                    INSERT OR IGNORE INTO policy_decisions(
-                                        decision_id, issue_id, decision_type, decision_json,
-                                        actor_json, created_at
-                                    ) VALUES (?, ?, 'accept_risk', ?, ?, ?)
-                                    """,
-                                    (
-                                        decision_id, issue_id,
-                                        _json({
-                                            "risk_class": item.get("risk_class"),
-                                            "reason": item.get("accept_reason"),
-                                            "source": "migration_reconciliation",
-                                        }),
-                                        _json(actor), now,
-                                    ),
-                                )
-                        connection.execute(
-                            "INSERT INTO control_meta(key, value) VALUES ('issue_v1_imported', '1') "
-                            "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                        )
-                        state_effect = "legacy_bound"
-                    elif domain == "orphan" and isinstance(legacy, dict) and str(legacy.get("kind") or "") == "legacy_pipeline_checkpoint":
-                        checkpoint = legacy.get("state")
-                        if not isinstance(checkpoint, dict):
-                            raise ControlPlaneError(
-                                "STATE_UNAVAILABLE",
-                                "旧 Pipeline checkpoint 缺少可审计状态，不能导入。",
-                                status_code=503,
-                            )
-                        legacy_status = str(checkpoint.get("status") or "").strip().lower()
-                        terminal_status = {
-                            "complete": "succeeded",
-                            "completed": "succeeded",
-                            "failed": "failed",
-                            "cancelled": "cancelled",
-                            "paused": "paused",
-                        }.get(legacy_status)
-                        if terminal_status is None:
-                            raise ControlPlaneError(
-                                "COMMAND_INVALID",
-                                "仅能导入已结束的旧 Pipeline checkpoint；运行中状态必须保留 orphan 并由显式 V2 Command 恢复。",
-                                status_code=409,
-                            )
-                        imported_operation_id = str(uuid.uuid5(
-                            uuid.NAMESPACE_URL,
-                            f"{self.context.workspace_id}:legacy-pipeline-checkpoint:{conflict_id}",
-                        ))
-                        connection.execute(
-                            """
-                            INSERT OR IGNORE INTO operations(
-                                operation_id, parent_operation_id, kind, status, start_command,
-                                fencing_token, created_at, updated_at, completed_at, message, error_json
-                            ) VALUES (?, NULL, 'pipeline.legacy_checkpoint', ?, ?, 0, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                imported_operation_id,
-                                terminal_status,
-                                str(checkpoint.get("current_stage") or ""),
-                                now,
-                                now,
-                                now,
-                                "由已确认的 V1 Pipeline checkpoint 导入；仅供历史审计，不可恢复执行。",
-                                _json({"source": "migration_reconciliation", "legacy_status": legacy_status}),
-                            ),
-                        )
-                        state_effect = "legacy_terminal_pipeline_imported"
-                    else:
-                        raise ControlPlaneError("COMMAND_INVALID", f"不支持绑定迁移领域: {domain}", status_code=400)
-                elif resolution_name == "mark_failed" and domain == "goal":
-                    connection.execute(
-                        "UPDATE goal_state SET status = 'failed', source = 'migration_reconciliation', updated_at = ? "
-                        "WHERE singleton = 1",
-                        (now,),
+                if existing is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_NOT_FOUND",
+                        f"章节 Workspace 不存在: {normalized}",
+                        status_code=404,
                     )
-                    state_effect = "goal_marked_failed"
-                resolution_value = {
-                    "choice": resolution_name,
-                    "state_effect": state_effect,
-                    "original_evidence_preserved": True,
-                    "backup_path": backup_path.relative_to(self.context.root).as_posix(),
-                    "backup_sha256": backup_sha256,
-                }
-                connection.execute(
-                    """
-                    UPDATE migration_conflicts
-                    SET status = 'resolved', resolution_json = ?, actor_json = ?, reason = ?, resolved_at = ?
-                    WHERE conflict_id = ? AND status = 'open'
-                    """,
-                    (_json(resolution_value), _json(actor), str(reason).strip(), now, conflict_id),
+                current = self._chapter_workspace_row(existing)
+                current_revision = int(current["chapter_revision"])
+                if str(current.get("status") or "") == "archived":
+                    if expected in {0, current_revision}:
+                        connection.commit()
+                        return current
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                if expected != current_revision:
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                chapter_revision = current_revision + 1
+                meta = dict(current.get("metadata") or {})
+                state_hash = self._chapter_workspace_state_hash(
+                    chapter_id=normalized,
+                    blueprint_revision=int(current["blueprint_revision"]),
+                    blueprint_hash=str(current["blueprint_hash"]),
+                    title=str(current["title"]),
+                    parent_chapter_id=current.get("parent_chapter_id"),
+                    order_index=int(current["order"]),
+                    status="archived",
+                    approval_status=str(current.get("approval_status") or "not_started"),
+                    chapter_revision=chapter_revision,
+                    head_content_revision=int(current.get("head_content_revision") or 0),
+                    formal_content_revision=int(current.get("formal_content_revision") or 0),
+                    head_context_revision=int(current.get("head_context_revision") or 0),
+                    metadata=meta,
                 )
-                decision_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"migration-resolution:{conflict_id}"))
                 connection.execute(
                     """
-                    INSERT INTO policy_decisions(
-                        decision_id, issue_id, decision_type, decision_json, actor_json, created_at
-                    ) VALUES (?, ?, 'migration_reconciliation', ?, ?, ?)
+                    UPDATE chapter_workspaces SET
+                        status = 'archived',
+                        chapter_revision = ?,
+                        state_hash = ?,
+                        updated_at = ?
+                    WHERE chapter_id = ?
                     """,
-                    (decision_id, f"migration:{conflict_id}", _json(resolution_value), _json(actor), now),
+                    (chapter_revision, state_hash, now, normalized),
                 )
                 revision = self._bump_revision(connection)
                 self._event(
-                    connection, revision, "MigrationConflictResolved", "MigrationConflict", conflict_id,
-                    {"resolution": resolution_name, "reason": str(reason).strip(), "actor": actor},
+                    connection,
+                    revision,
+                    "ChapterWorkspaceArchived",
+                    "ChapterWorkspace",
+                    normalized,
+                    {
+                        "chapter_id": normalized,
+                        "chapter_revision": chapter_revision,
+                        "state_hash": state_hash,
+                        "actor": actor or {},
+                    },
                 )
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
-        return next(item for item in self.migration_conflicts() if item["conflict_id"] == conflict_id)
+        return self.chapter_workspace(normalized) or {}
+
+    def update_chapter_workspace_metadata(
+        self,
+        *,
+        chapter_id: str,
+        expected_chapter_revision: int,
+        metadata: dict[str, Any],
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Update user metadata only; does not rewrite Blueprint-derived seed fields."""
+        normalized = self._normalize_chapter_id(chapter_id)
+        if not isinstance(metadata, dict):
+            raise ControlPlaneError(
+                "CHAPTER_METADATA_INVALID",
+                "metadata 必须是对象。",
+                status_code=400,
+            )
+        try:
+            expected = int(expected_chapter_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_REVISION_INVALID",
+                "expected_chapter_revision 必须是整数。",
+                status_code=400,
+            ) from exc
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                if existing is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_NOT_FOUND",
+                        f"章节 Workspace 不存在: {normalized}",
+                        status_code=404,
+                    )
+                current = self._chapter_workspace_row(existing)
+                if str(current.get("status") or "") == "archived":
+                    raise ControlPlaneError(
+                        "CHAPTER_ARCHIVED",
+                        "已归档章节不能修改元数据。",
+                        status_code=409,
+                    )
+                current_revision = int(current["chapter_revision"])
+                if expected != current_revision:
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                merged = dict(current.get("metadata") or {})
+                merged.update(metadata)
+                chapter_revision = current_revision + 1
+                state_hash = self._chapter_workspace_state_hash(
+                    chapter_id=normalized,
+                    blueprint_revision=int(current["blueprint_revision"]),
+                    blueprint_hash=str(current["blueprint_hash"]),
+                    title=str(current["title"]),
+                    parent_chapter_id=current.get("parent_chapter_id"),
+                    order_index=int(current["order"]),
+                    status=str(current.get("status") or "active"),
+                    approval_status=str(current.get("approval_status") or "not_started"),
+                    chapter_revision=chapter_revision,
+                    head_content_revision=int(current.get("head_content_revision") or 0),
+                    formal_content_revision=int(current.get("formal_content_revision") or 0),
+                    head_context_revision=int(current.get("head_context_revision") or 0),
+                    metadata=merged,
+                )
+                connection.execute(
+                    """
+                    UPDATE chapter_workspaces SET
+                        chapter_revision = ?,
+                        metadata_json = ?,
+                        state_hash = ?,
+                        updated_at = ?
+                    WHERE chapter_id = ?
+                    """,
+                    (chapter_revision, _json(merged), state_hash, now, normalized),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "ChapterWorkspaceMetadataSaved",
+                    "ChapterWorkspace",
+                    normalized,
+                    {
+                        "chapter_id": normalized,
+                        "chapter_revision": chapter_revision,
+                        "state_hash": state_hash,
+                        "actor": actor or {},
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.chapter_workspace(normalized) or {}
 
     def record_gate_evaluation(
         self,
@@ -1528,7 +1463,7 @@ class ControlStore:
                     """,
                     (
                         evaluation_id, command_name, verdict_name, fingerprint,
-                        _json(normalized), str(source or "v2_quality_revalidate"),
+                        _json(normalized), str(source or "v3_quality_revalidate"),
                         source_revision, created_at,
                     ),
                 )
@@ -1547,7 +1482,7 @@ class ControlStore:
             "verdict": verdict_name,
             "input_fingerprint": fingerprint,
             "findings": normalized,
-            "source": str(source or "v2_quality_revalidate"),
+            "source": str(source or "v3_quality_revalidate"),
             "source_revision": source_revision,
             "created_at": created_at,
         }
@@ -1906,83 +1841,6 @@ class ControlStore:
             result.append(item)
         return result
 
-    def ensure_material_states(self, items: list[dict[str, Any]]) -> int:
-        rows = [dict(item) for item in items if isinstance(item, dict) and str(item.get("item_id") or "").strip()]
-        now = _now()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                imported = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'materials_v1_imported'"
-                ).fetchone()
-                if imported is not None:
-                    connection.commit()
-                    return 0
-                existing_rows = connection.execute(
-                    "SELECT item_id, response_status, lifecycle_status, evidence_status FROM material_states "
-                    "ORDER BY item_id"
-                ).fetchall()
-                legacy_projection = sorted(
-                    (
-                        str(item.get("item_id") or ""),
-                        str(item.get("response_status") or "deferred"),
-                        str(item.get("lifecycle_status") or "missing"),
-                        str(item.get("evidence_status") or "missing"),
-                    )
-                    for item in rows
-                )
-                authoritative_projection = [tuple(str(value) for value in row) for row in existing_rows]
-                if existing_rows and legacy_projection != authoritative_projection:
-                    authoritative = [dict(row) for row in existing_rows]
-                    connection.rollback()
-                    conflict = self.record_migration_conflict(
-                        domain="materials",
-                        legacy=rows,
-                        authoritative=authoritative,
-                        reason="V1 材料状态与 control.db 权威状态不一致。",
-                    )
-                    raise ControlPlaneError(
-                        "MIGRATION_RECONCILIATION_REQUIRED",
-                        "检测到 V1/V2 材料状态冲突，需管理员处理。",
-                        details={"conflict_id": conflict["conflict_id"]},
-                    )
-                inserted = 0
-                for item in rows:
-                    item_id = str(item.get("item_id") or "").strip()
-                    cursor = connection.execute(
-                        """
-                        INSERT OR IGNORE INTO material_states(
-                            item_id, response_status, lifecycle_status, evidence_status,
-                            item_json, source, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, ?, 'v1_import', ?, ?)
-                        """,
-                        (
-                            item_id,
-                            str(item.get("response_status") or "deferred"),
-                            str(item.get("lifecycle_status") or "missing"),
-                            str(item.get("evidence_status") or "missing"),
-                            _json(item),
-                            now,
-                            now,
-                        ),
-                    )
-                    inserted += max(0, int(cursor.rowcount or 0))
-                connection.execute("INSERT INTO control_meta(key, value) VALUES ('materials_v1_imported', '1')")
-                revision = self._bump_revision(connection)
-                self._event(
-                    connection,
-                    revision,
-                    "MaterialStateImported",
-                    "Materials",
-                    self.context.workspace_id,
-                    {"count": inserted, "source": "v1_import"},
-                )
-                connection.commit()
-                return inserted
-            except Exception:
-                connection.rollback()
-                raise
-
     def material_states(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute("SELECT * FROM material_states ORDER BY item_id").fetchall()
@@ -2060,7 +1918,7 @@ class ControlStore:
                             str(state_payload.get("response_status") or "deferred"),
                             str(state_payload.get("lifecycle_status") or "missing"),
                             str(state_payload.get("evidence_status") or "missing"),
-                            _json(state_payload), str(source or "v2_command"), state_created_at, created_at,
+                            _json(state_payload), str(source or "v3_command"), state_created_at, created_at,
                         ),
                     )
                 connection.execute(
@@ -2072,7 +1930,7 @@ class ControlStore:
                     """,
                     (
                         verification_id, material_id, kind, decision,
-                        _json(payload), _json(actor_value), str(source or "v2_command"), created_at,
+                        _json(payload), _json(actor_value), str(source or "v3_command"), created_at,
                     ),
                 )
                 revision = self._bump_revision(connection)
@@ -2096,7 +1954,7 @@ class ControlStore:
             "verdict": decision,
             "verification": payload,
             "actor": actor_value,
-            "source": str(source or "v2_command"),
+            "source": str(source or "v3_command"),
             "created_at": created_at,
         }
 
@@ -2158,7 +2016,7 @@ class ControlStore:
         wanted = str(item_id or "").strip()
         return next((item for item in self.material_states() if item.get("item_id") == wanted), None)
 
-    def upsert_material_state(self, item: dict[str, Any], *, source: str = "v2_command") -> dict[str, Any]:
+    def upsert_material_state(self, item: dict[str, Any], *, source: str = "v3_command") -> dict[str, Any]:
         item_id = str(item.get("item_id") or "").strip()
         if not item_id:
             raise ControlPlaneError("COMMAND_INVALID", "材料状态缺少 item_id。", status_code=400)
@@ -2196,10 +2054,6 @@ class ControlStore:
                         now,
                     ),
                 )
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('materials_v1_imported', '1') "
-                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                )
                 revision = self._bump_revision(connection)
                 self._event(
                     connection,
@@ -2218,115 +2072,6 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.material_state(item_id) or {}
-
-    def ensure_issue_states(self, issues: list[dict[str, Any]]) -> int:
-        """One-time V1 import; later file projections can never overwrite V2 state implicitly."""
-        rows = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
-        now = _now()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                imported = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'issue_v1_imported'"
-                ).fetchone()
-                if imported is not None:
-                    connection.commit()
-                    return 0
-                existing_rows = connection.execute(
-                    "SELECT issue_id, status, severity FROM issue_states ORDER BY issue_id"
-                ).fetchall()
-                legacy_projection = sorted(
-                    (
-                        str(item.get("id") or ""),
-                        str(item.get("status") or "open"),
-                        str(item.get("severity") or "warn"),
-                    )
-                    for item in rows
-                )
-                authoritative_projection = [tuple(str(value) for value in row) for row in existing_rows]
-                if existing_rows and legacy_projection != authoritative_projection:
-                    authoritative = [dict(row) for row in existing_rows]
-                    connection.rollback()
-                    conflict = self.record_migration_conflict(
-                        domain="issues",
-                        legacy=rows,
-                        authoritative=authoritative,
-                        reason="V1 Issue 状态与 control.db 权威状态不一致。",
-                    )
-                    raise ControlPlaneError(
-                        "MIGRATION_RECONCILIATION_REQUIRED",
-                        "检测到 V1/V2 Issue 状态冲突，需管理员处理。",
-                        details={"conflict_id": conflict["conflict_id"]},
-                    )
-                for item in rows:
-                    issue_id = str(item.get("id") or "").strip()
-                    connection.execute(
-                        """
-                        INSERT OR IGNORE INTO issue_states(
-                            issue_id, status, severity, issue_json, source, created_at, updated_at
-                        ) VALUES (?, ?, ?, ?, 'v1_import', ?, ?)
-                        """,
-                        (
-                            issue_id,
-                            str(item.get("status") or "open"),
-                            str(item.get("severity") or "warn"),
-                            _json(item),
-                            str(item.get("created_at") or now),
-                            str(item.get("updated_at") or now),
-                        ),
-                    )
-                    if str(item.get("status") or "") == "accepted":
-                        decision_id = str(
-                            uuid.uuid5(
-                                uuid.NAMESPACE_URL,
-                                f"{self.context.workspace_id}:v1-accepted-risk:{issue_id}",
-                            )
-                        )
-                        connection.execute(
-                            """
-                            INSERT OR IGNORE INTO policy_decisions(
-                                decision_id, issue_id, decision_type, decision_json, actor_json, created_at
-                            ) VALUES (?, ?, 'accept_risk', ?, ?, ?)
-                            """,
-                            (
-                                decision_id,
-                                issue_id,
-                                _json(
-                                    {
-                                        "risk_class": item.get("risk_class"),
-                                        "reason": item.get("accept_reason"),
-                                        "accepted_at": item.get("accepted_at"),
-                                        "source": "v1_import",
-                                    }
-                                ),
-                                _json({"type": "legacy", "id": item.get("accepted_by") or "unknown"}),
-                                str(item.get("accepted_at") or item.get("updated_at") or now),
-                            ),
-                        )
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('issue_v1_imported', '1')"
-                )
-                revision = self._bump_revision(connection)
-                self._event(
-                    connection,
-                    revision,
-                    "IssueStateImported",
-                    "Issues",
-                    self.context.workspace_id,
-                    {"count": len(rows), "source": "v1_import"},
-                )
-                connection.commit()
-                return len(rows)
-            except Exception:
-                connection.rollback()
-                raise
-
-    def issue_v1_import_pending(self) -> bool:
-        with self._connection() as connection:
-            row = connection.execute(
-                "SELECT value FROM control_meta WHERE key = 'issue_v1_imported'"
-            ).fetchone()
-        return row is None
 
     def issue_states(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -2349,7 +2094,7 @@ class ControlStore:
             result.append(item)
         return result
 
-    def replace_issue_states(self, issues: list[dict[str, Any]], *, source: str = "v2_projection") -> int:
+    def replace_issue_states(self, issues: list[dict[str, Any]], *, source: str = "v3_control") -> int:
         rows = [dict(item) for item in issues if isinstance(item, dict) and str(item.get("id") or "").strip()]
         now = _now()
         with self._connection() as connection:
@@ -2374,10 +2119,6 @@ class ControlStore:
                             str(item.get("updated_at") or now),
                         ),
                     )
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('issue_v1_imported', '1') "
-                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                )
                 revision = self._bump_revision(connection)
                 self._event(
                     connection,
@@ -2400,7 +2141,7 @@ class ControlStore:
         decision_type: str,
         decision: dict[str, Any],
         actor: dict[str, Any],
-        source: str = "v2_command",
+        source: str = "v3_command",
     ) -> dict[str, Any]:
         """Atomically update one authoritative Issue and append its PolicyDecision."""
         item = dict(issue) if isinstance(issue, dict) else {}
@@ -2717,6 +2458,54 @@ class ControlStore:
         }
         if "stage_runs" in tables:
             add("stage_runs", "output_json", "output_json TEXT")
+        if "content_unit_states" in tables:
+            add(
+                "content_unit_states",
+                "writer_fingerprint",
+                "writer_fingerprint TEXT NOT NULL DEFAULT ''",
+            )
+            add(
+                "content_unit_states",
+                "stale_reason",
+                "stale_reason TEXT NOT NULL DEFAULT ''",
+            )
+            add(
+                "content_unit_states",
+                "current_chapter_id",
+                "current_chapter_id TEXT NOT NULL DEFAULT ''",
+            )
+            add(
+                "content_unit_states",
+                "current_chapter_title",
+                "current_chapter_title TEXT NOT NULL DEFAULT ''",
+            )
+            add(
+                "content_unit_states",
+                "progress_phase",
+                "progress_phase TEXT NOT NULL DEFAULT ''",
+            )
+            add(
+                "content_unit_states",
+                "draft_preview",
+                "draft_preview TEXT NOT NULL DEFAULT ''",
+            )
+            connection.execute(
+                """
+                UPDATE content_unit_states
+                SET state = 'stale',
+                    stale_reason = CASE
+                        WHEN stale_reason = '' THEN
+                            '旧正文缺少当前写作器指纹，必须重新生成。'
+                        ELSE stale_reason
+                    END,
+                    invalidation_reason = CASE
+                        WHEN invalidation_reason = '' THEN
+                            '旧正文由过期写作器生成，禁止继续预览、整合或下载。'
+                        ELSE invalidation_reason
+                    END
+                WHERE state = 'completed' AND writer_fingerprint = ''
+                """
+            )
 
         connection.executescript(
             """
@@ -3739,78 +3528,6 @@ class ControlStore:
         return value
 
 
-    def ensure_goal_state(self, goal: dict[str, Any] | None) -> int:
-        """Import the V1 Goal once; absence is also recorded to prevent later stale-file takeover."""
-        value = dict(goal) if isinstance(goal, dict) else None
-        now = _now()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                imported = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'goal_v1_imported'"
-                ).fetchone()
-                if imported is not None:
-                    connection.commit()
-                    return 0
-                existing = connection.execute(
-                    "SELECT goal_id, status, goal_json FROM goal_state WHERE singleton = 1"
-                ).fetchone()
-                if existing is not None and value is not None:
-                    legacy_projection = (
-                        str(value.get("goal_id") or value.get("id") or ""),
-                        str(value.get("status") or "pending"),
-                    )
-                    authoritative_projection = (str(existing["goal_id"]), str(existing["status"]))
-                    if legacy_projection != authoritative_projection:
-                        authoritative = _decode(str(existing["goal_json"]), {})
-                        connection.rollback()
-                        conflict = self.record_migration_conflict(
-                            domain="goal",
-                            legacy=value,
-                            authoritative=authoritative,
-                            reason="V1 Goal 与 control.db 权威 Goal 不一致。",
-                        )
-                        raise ControlPlaneError(
-                            "MIGRATION_RECONCILIATION_REQUIRED",
-                            "检测到 V1/V2 Goal 状态冲突，需管理员处理。",
-                            details={"conflict_id": conflict["conflict_id"]},
-                        )
-                inserted = 0
-                if value is not None and existing is None:
-                    goal_id = str(value.get("goal_id") or value.get("id") or "").strip()
-                    if not goal_id:
-                        raise ControlPlaneError("STATE_UNAVAILABLE", "V1 Goal 缺少 goal_id，拒绝导入。", status_code=503)
-                    connection.execute(
-                        """
-                        INSERT INTO goal_state(
-                            singleton, goal_id, status, goal_json, source, created_at, updated_at
-                        ) VALUES (1, ?, ?, ?, 'v1_import', ?, ?)
-                        """,
-                        (
-                            goal_id,
-                            str(value.get("status") or "pending"),
-                            _json(value),
-                            str(value.get("created_at") or now),
-                            str(value.get("updated_at") or now),
-                        ),
-                    )
-                    inserted = 1
-                connection.execute("INSERT INTO control_meta(key, value) VALUES ('goal_v1_imported', '1')")
-                revision = self._bump_revision(connection)
-                self._event(
-                    connection,
-                    revision,
-                    "GoalStateImported",
-                    "Goal",
-                    str((value or {}).get("goal_id") or self.context.workspace_id),
-                    {"count": inserted, "source": "v1_import"},
-                )
-                connection.commit()
-                return inserted
-            except Exception:
-                connection.rollback()
-                raise
-
     def goal_state(self) -> dict[str, Any] | None:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM goal_state WHERE singleton = 1").fetchone()
@@ -3830,7 +3547,7 @@ class ControlStore:
         )
         return goal
 
-    def upsert_goal_state(self, goal: dict[str, Any], *, source: str = "v2_projection") -> dict[str, Any]:
+    def upsert_goal_state(self, goal: dict[str, Any], *, source: str = "v3_control") -> dict[str, Any]:
         value = dict(goal)
         goal_id = str(value.get("goal_id") or value.get("id") or "").strip()
         if not goal_id:
@@ -3862,10 +3579,6 @@ class ControlStore:
                         str(value.get("updated_at") or now),
                     ),
                 )
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('goal_v1_imported', '1') "
-                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                )
                 revision = self._bump_revision(connection)
                 self._event(
                     connection,
@@ -3880,76 +3593,6 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.goal_state() or {}
-
-    def ensure_repair_job_state(self, job: dict[str, Any] | None) -> int:
-        value = dict(job) if isinstance(job, dict) and job else None
-        now = _now()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                imported = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'repair_job_v1_imported'"
-                ).fetchone()
-                if imported is not None:
-                    connection.commit()
-                    return 0
-                existing = connection.execute(
-                    "SELECT job_id, status, phase, job_json FROM repair_job_state WHERE singleton = 1"
-                ).fetchone()
-                if existing is not None and value is not None:
-                    legacy_projection = (
-                        str(value.get("job_id") or ""), str(value.get("status") or "awaiting_confirmation"),
-                        str(value.get("phase") or "awaiting_confirmation"),
-                    )
-                    authoritative_projection = (str(existing["job_id"]), str(existing["status"]), str(existing["phase"]))
-                    if legacy_projection != authoritative_projection:
-                        connection.rollback()
-                        conflict = self.record_migration_conflict(
-                            domain="repair_job", legacy=value,
-                            authoritative=_decode(str(existing["job_json"]), {}),
-                            reason="V1 RepairJob 与 control.db 权威状态不一致。",
-                        )
-                        raise ControlPlaneError(
-                            "MIGRATION_RECONCILIATION_REQUIRED",
-                            "检测到 V1/V2 RepairJob 状态冲突，需管理员处理。",
-                            details={"conflict_id": conflict["conflict_id"]},
-                        )
-                inserted = 0
-                if value is not None and existing is None:
-                    job_id = str(value.get("job_id") or "").strip()
-                    if not job_id:
-                        raise ControlPlaneError("STATE_UNAVAILABLE", "V1 RepairJob 缺少 job_id。", status_code=503)
-                    connection.execute(
-                        """
-                        INSERT INTO repair_job_state(
-                            singleton, job_id, status, phase, job_json, source, created_at, updated_at
-                        ) VALUES (1, ?, ?, ?, ?, 'v1_import', ?, ?)
-                        """,
-                        (
-                            job_id,
-                            str(value.get("status") or "awaiting_confirmation"),
-                            str(value.get("phase") or "awaiting_confirmation"),
-                            _json(value),
-                            str(value.get("created_at") or now),
-                            str(value.get("updated_at") or now),
-                        ),
-                    )
-                    inserted = 1
-                connection.execute("INSERT INTO control_meta(key, value) VALUES ('repair_job_v1_imported', '1')")
-                revision = self._bump_revision(connection)
-                self._event(
-                    connection,
-                    revision,
-                    "RepairJobImported",
-                    "RepairJob",
-                    str((value or {}).get("job_id") or self.context.workspace_id),
-                    {"count": inserted, "source": "v1_import"},
-                )
-                connection.commit()
-                return inserted
-            except Exception:
-                connection.rollback()
-                raise
 
     def repair_job_state(self) -> dict[str, Any]:
         with self._connection() as connection:
@@ -3971,7 +3614,7 @@ class ControlStore:
         )
         return job
 
-    def upsert_repair_job_state(self, job: dict[str, Any], *, source: str = "v2_projection") -> dict[str, Any]:
+    def upsert_repair_job_state(self, job: dict[str, Any], *, source: str = "v3_control") -> dict[str, Any]:
         value = dict(job)
         job_id = str(value.get("job_id") or "").strip()
         if not job_id:
@@ -4005,10 +3648,6 @@ class ControlStore:
                         str(value.get("updated_at") or now),
                     ),
                 )
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('repair_job_v1_imported', '1') "
-                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
-                )
                 revision = self._bump_revision(connection)
                 self._event(
                     connection,
@@ -4027,69 +3666,6 @@ class ControlStore:
                 connection.rollback()
                 raise
         return self.repair_job_state()
-
-    def ensure_agent_activity_state(self, activity: dict[str, Any] | None) -> int:
-        value = dict(activity) if isinstance(activity, dict) and activity else None
-        now = _now()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                imported = connection.execute(
-                    "SELECT value FROM control_meta WHERE key = 'agent_activity_v1_imported'"
-                ).fetchone()
-                if imported is not None:
-                    connection.commit()
-                    return 0
-                existing = connection.execute(
-                    "SELECT status, phase, activity_json FROM agent_activity_state WHERE singleton = 1"
-                ).fetchone()
-                if existing is not None and value is not None:
-                    legacy_projection = (str(value.get("status") or "idle"), str(value.get("phase") or ""))
-                    authoritative_projection = (str(existing["status"]), str(existing["phase"]))
-                    if legacy_projection != authoritative_projection:
-                        connection.rollback()
-                        conflict = self.record_migration_conflict(
-                            domain="agent_activity", legacy=value,
-                            authoritative=_decode(str(existing["activity_json"]), {}),
-                            reason="V1 AgentActivity 与 control.db 权威状态不一致。",
-                        )
-                        raise ControlPlaneError(
-                            "MIGRATION_RECONCILIATION_REQUIRED",
-                            "检测到 V1/V2 AgentActivity 状态冲突，需管理员处理。",
-                            details={"conflict_id": conflict["conflict_id"]},
-                        )
-                inserted = 0
-                if value is not None and existing is None:
-                    connection.execute(
-                        """
-                        INSERT INTO agent_activity_state(
-                            singleton, status, phase, activity_json, source, created_at, updated_at
-                        ) VALUES (1, ?, ?, ?, 'v1_import', ?, ?)
-                        """,
-                        (
-                            str(value.get("status") or "idle"),
-                            str(value.get("phase") or ""),
-                            _json(value),
-                            str(value.get("created_at") or value.get("updated_at") or now),
-                            str(value.get("updated_at") or now),
-                        ),
-                    )
-                    inserted = 1
-                connection.execute("INSERT INTO control_meta(key, value) VALUES ('agent_activity_v1_imported', '1')")
-                revision = self._bump_revision(connection)
-                self._event(
-                    connection,
-                    revision,
-                    "AgentActivityImported",
-                    "AgentActivity",
-                    self.context.workspace_id,
-                    {"count": inserted, "source": "v1_import"},
-                )
-                connection.commit()
-                return inserted
-            except Exception:
-                connection.rollback()
-                raise
 
     def agent_activity_state(self) -> dict[str, Any] | None:
         with self._connection() as connection:
@@ -4114,7 +3690,7 @@ class ControlStore:
         self,
         activity: dict[str, Any],
         *,
-        source: str = "v2_projection",
+        source: str = "v3_control",
     ) -> dict[str, Any]:
         value = dict(activity)
         now = _now()
@@ -4145,10 +3721,6 @@ class ControlStore:
                         created_at,
                         str(value.get("updated_at") or now),
                     ),
-                )
-                connection.execute(
-                    "INSERT INTO control_meta(key, value) VALUES ('agent_activity_v1_imported', '1') "
-                    "ON CONFLICT(key) DO UPDATE SET value = '1'"
                 )
                 revision = self._bump_revision(connection)
                 self._event(
@@ -4855,6 +4427,29 @@ class ControlStore:
                     )
 
                 active = self._current_operation(connection)
+                # A fresh planning/generation request explicitly supersedes a
+                # blocked run. Keeping the blocked operation active makes the
+                # primary UI actions fail forever with LEASE_CONFLICT.
+                if (
+                    active is not None
+                    and str(active["status"] or "") == "blocked"
+                    and envelope.kind in self.BLOCKED_SUPERSEDING_KINDS
+                ):
+                    connection.execute(
+                        "UPDATE operations SET status = 'cancelled', message = ?, "
+                        "updated_at = ?, completed_at = ? WHERE operation_id = ?",
+                        (
+                            "已由用户重新规划或生成替代。",
+                            now,
+                            now,
+                            str(active["operation_id"]),
+                        ),
+                    )
+                    connection.execute(
+                        "DELETE FROM workspace_lease WHERE operation_id = ?",
+                        (str(active["operation_id"]),),
+                    )
+                    active = None
                 blocked_mutation_retry = (
                     envelope.kind in self.BLOCKED_REMEDIATION_KINDS
                     and active is not None
@@ -5282,7 +4877,7 @@ class ControlStore:
                     "requires_confirmation": True,
                     "expected_revision": revision,
                     "expires_at": expires_at,
-                    "type": "confirm_v2_command",
+                    "type": "confirm_command",
                 }
             except Exception:
                 connection.rollback()
@@ -5488,6 +5083,7 @@ class CommandGateway:
                     "completed_stages",
                     "planning_snapshot",
                     "planning_receipt",
+                    "chapter",
                 )
                 if key in result
             }

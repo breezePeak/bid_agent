@@ -225,12 +225,45 @@ class V3WorkspaceSnapshotBuilder:
             "generation": generation,
             "materials": payload("EvidenceRepository"),
             "content_units": (content_blocks or {}).get("units", []),
+            "chapters": self._chapters_snapshot(control, plan or {}),
             "quality": {
                 "coverage": (quality or {}).get("coverage"),
                 "report": quality,
                 "gates": control.latest_gate_evaluations(),
             },
         }
+
+    def _chapters_snapshot(
+        self,
+        control: ControlStore,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        from .chapter_workspace import ChapterWorkspaceService
+
+        try:
+            return ChapterWorkspaceService(self.context).list_chapters(
+                include_archived=True
+            )
+        except ControlPlaneError:
+            materializations = control.chapter_workspaces(include_archived=True)
+            nodes = [
+                item
+                for item in (plan.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("chapter_id") or "").strip()
+            ]
+            return {
+                "blueprint_revision": int(plan.get("revision") or 0),
+                "blueprint_hash": "",
+                "total": len(nodes) or len(materializations),
+                "materialized": len(materializations),
+                "active": sum(
+                    1 for item in materializations if item.get("status") == "active"
+                ),
+                "archived": sum(
+                    1 for item in materializations if item.get("status") == "archived"
+                ),
+                "items": materializations,
+            }
 
     def _generation_snapshot(
         self,
