@@ -22,22 +22,32 @@ from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
 from .artifact_promotion import HumanGateService
-from .autonomous_research import AUTO_RESEARCH_REPORT_PATH, published_batch_payload
 from .project_model import load_promoted_project_model
+from .research_service import load_published_batch
+from .writer_policy import (
+    WRITER_PROMPT_VERSION,
+    writer_model_identity,
+)
 
 
 BUNDLE_DIR = V3_ROOT / "writer_bundles"
-PROMPT_VERSION = "v3_writer_bundle_v2_score_direct"
-MODEL_CONFIG_HASH = "deterministic_writer_v2_score_direct"
+PROMPT_VERSION = WRITER_PROMPT_VERSION
+MODEL_CONFIG_HASH = "runtime_writer_model"
 
 
 class WriterInputBundleAssembler:
     """Service-only compiler; writers receive its returned Bundle, never workspace state."""
 
-    def __init__(self, context: WorkspaceContext) -> None:
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        *,
+        deterministic_test: bool = False,
+    ) -> None:
         self.context = context
         self.root = context.root
         self.store = ControlStore(context)
+        self.deterministic_test = bool(deterministic_test)
 
     def _evidence_snapshot(
         self,
@@ -58,7 +68,7 @@ class WriterInputBundleAssembler:
             if str(need.get("topic_id") or "") not in allowed_topics:
                 continue
             batch_id = str(need.get("active_batch_id") or "")
-            batch = published_batch_payload(self.context, batch_id)
+            batch = load_published_batch(self.context, batch_id)
             if batch is None or not batch.items:
                 continue
             contents: list[str] = []
@@ -232,18 +242,6 @@ class WriterInputBundleAssembler:
             project_context = {}
             project_constraints = []
             terminology = {}
-        research_report_path = self.root / AUTO_RESEARCH_REPORT_PATH
-        research_report = (
-            read_json(research_report_path)
-            if research_report_path.is_file()
-            else {}
-        )
-        research_decisions = [
-            item
-            for item in (research_report.get("decisions") or [])
-            if isinstance(item, dict)
-            and str(item.get("chapter_id") or "") in node_id_set
-        ]
         targets = [item for item in contract.nodes if item.node_id in node_id_set]
         writable_targets: list[tuple[ContractNode, str]] = []
         if isinstance(contract, TemplateContract):
@@ -282,15 +280,25 @@ class WriterInputBundleAssembler:
         for score_id in sorted(score_ids):
             point = score_points[score_id]
             payload = point.model_dump(mode="json")
-            selected_units = [
-                unit
-                for unit in point.response_units
-                if unit.unit_id in response_unit_ids
-            ]
             selected_conditions = [
                 condition
                 for condition in point.score_conditions
                 if condition.condition_id in condition_ids
+            ]
+            selected_condition_ids = {
+                condition.condition_id for condition in selected_conditions
+            }
+            # Condition-only Blueprint slices (evidence/content child chapters)
+            # often omit primary/supporting unit ids on purpose. Still freeze the
+            # owning response unit so G4 can map evidence conditions to units.
+            selected_units = [
+                unit
+                for unit in point.response_units
+                if unit.unit_id in response_unit_ids
+                or any(
+                    condition_id in selected_condition_ids
+                    for condition_id in unit.condition_ids
+                )
             ]
             payload["response_units"] = [
                 unit.model_dump(mode="json") for unit in selected_units
@@ -328,7 +336,7 @@ class WriterInputBundleAssembler:
             "requirement_excerpts": [requirements[item].model_dump(mode="json") for item in requirement_ids],
             "score_obligations": score_obligations,
             "evidence_snapshot": evidence_snapshot,
-            "research_decisions": research_decisions,
+            "research_decisions": [],
             "project_context": project_context,
             "project_constraints": project_constraints,
             "terminology": terminology,
@@ -370,7 +378,12 @@ class WriterInputBundleAssembler:
                 if blueprint_by_node[item.node_id].content_policy == "full"
             ],
             "prompt_version": PROMPT_VERSION,
-            "model_config_hash": MODEL_CONFIG_HASH,
+            "model_config_hash": canonical_hash(
+                writer_model_identity(
+                    self.root,
+                    deterministic_test=self.deterministic_test,
+                )
+            ),
         }
         source_hashes = dict(blueprint.source_hashes)
         for item in evidence_snapshot:

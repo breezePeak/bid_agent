@@ -1,39 +1,70 @@
 from __future__ import annotations
 
-from pathlib import Path
-import os
 import json
 import re
 
-from control_plane import ControlStore, WorkspaceContext
-from utils import read_json, write_json
+from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
+from utils import write_json
 
-from .contracts import ContentBlock, DOCUMENT_CONTRACT_ADAPTER, DocumentPlan, TemplateContract
-from .document_contract import DOCUMENT_CONTRACT_PATH
-from .document_planner import DOCUMENT_PLAN_PATH
-from .requirement_ledger import load_promoted_requirement_ledger
-from .contracts import RequirementLedger
-from .input_manifest import V3_ROOT
-from .contracts import WriterInputBundle
+from .contracts import ContentBlock, WriterInputBundle
 from .content_gate import WriterBundleContentGate
+from .canonicalization import canonical_hash
+from .input_manifest import V3_ROOT
+from .writer_policy import (
+    WRITER_IMPLEMENTATION_VERSION,
+    WRITER_PROMPT_VERSION,
+    evidence_bindings,
+    require_content_quality,
+    require_writer_model,
+    writer_base_fingerprint,
+    writer_fingerprint,
+)
+from .writer_research import WriterResearchCoordinator
 
 
 CONTENT_OUTPUT_DIR = V3_ROOT / "content_units"
+_DETERMINISTIC_TEST_AUTHORITY = object()
 
 
 class ContentWriter:
     """A constrained V3 writer that can only populate existing contract targets."""
 
-    def __init__(self, context: WorkspaceContext) -> None:
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        *,
+        _deterministic_test_authority: object | None = None,
+    ) -> None:
         self.context = context
         self.root = context.root
         self.store = ControlStore(context)
+        self.deterministic_test = (
+            _deterministic_test_authority is _DETERMINISTIC_TEST_AUTHORITY
+        )
+
+    @classmethod
+    def for_deterministic_tests(
+        cls,
+        context: WorkspaceContext,
+    ) -> "ContentWriter":
+        return cls(
+            context,
+            _deterministic_test_authority=_DETERMINISTIC_TEST_AUTHORITY,
+        )
 
     def write(self, unit_id: str, node_ids: list[str]) -> list[ContentBlock]:
         raise ValueError("WRITER_BUNDLE_REQUIRED: Writer 只能接收由确认 Blueprint 编译的 WriterInputBundle")
 
-    def write_bundle(self, bundle: WriterInputBundle) -> list[ContentBlock]:
+    def write_bundle(
+        self,
+        bundle: WriterInputBundle,
+        *,
+        operation_id: str = "",
+        enable_writer_research: bool = False,
+    ) -> list[ContentBlock]:
         """Generate only from a frozen Bundle; this method never reads workspace facts."""
+        if not self.deterministic_test:
+            require_writer_model(self.root)
         requirements = {
             str(item["requirement_id"]): item
             for item in bundle.requirement_excerpts
@@ -65,16 +96,54 @@ class ContentWriter:
                 ):
                     condition_units[str(condition_id_value)] = unit
         blocks: list[ContentBlock] = []
+        writable_targets = [
+            target
+            for target in bundle.document_target_constraints
+            if str(target.get("content_policy") or "full") == "full"
+        ]
+        if writable_targets:
+            first_target = writable_targets[0]
+            self.store.update_content_unit_progress(
+                bundle.unit_id,
+                chapter_id=str(first_target.get("output_target") or ""),
+                chapter_title=str(first_target.get("title") or ""),
+                phase="preparing_research",
+            )
+        researcher = WriterResearchCoordinator(
+            self.context,
+            operation_id=operation_id,
+            deterministic_test=self.deterministic_test,
+        )
+        research_decision: dict[str, object] = {}
+        if enable_writer_research:
+            research_decision, dynamic_evidence = researcher.resolve_for_bundle(
+                bundle
+            )
+            if dynamic_evidence:
+                bundle = self._bundle_with_research(
+                    bundle,
+                    evidence=[*bundle.evidence_snapshot, *dynamic_evidence],
+                    decisions=[
+                        *bundle.research_decisions,
+                        research_decision,
+                    ],
+                )
         for target in bundle.document_target_constraints:
             if str(target.get("content_policy") or "full") != "full":
                 continue
             target_id = str(target["output_target"])
             title = str(target["title"])
+            self.store.update_content_unit_progress(
+                bundle.unit_id,
+                chapter_id=target_id,
+                chapter_title=title,
+                phase="drafting",
+            )
             research_evidence = self._research_evidence_for_target(
                 bundle,
                 target,
             )
-            used_evidence_ids = sorted(
+            available_evidence_ids = sorted(
                 {
                     str(evidence_id)
                     for item in research_evidence
@@ -133,7 +202,7 @@ class ContentWriter:
                 for score_id, score in scores.items():
                     if requirement_id in score.get("linked_requirement_ids", []):
                         score_ids.add(score_id)
-            content = self._draft_chapter_content(
+            content, used_evidence_ids = self._draft_chapter_content(
                 bundle=bundle,
                 target=target,
                 requirements=[
@@ -156,12 +225,37 @@ class ContentWriter:
             self._validate_generated_chapter(
                 content,
                 target=target,
+                requirements=[
+                    requirements[requirement_id]
+                    for requirement_id in all_requirement_ids
+                    if requirement_id in requirements
+                ],
                 conditions=[
                     conditions[condition_id]
                     for condition_id in target_condition_ids
                     if condition_id in conditions
                 ],
             )
+            if not set(used_evidence_ids).issubset(
+                set(available_evidence_ids)
+            ):
+                raise ControlPlaneError(
+                    "CONTENT_EVIDENCE_BINDING_INVALID",
+                    "写作模型声明使用了当前章节未授权的公开证据。",
+                    details={
+                        "unit_id": bundle.unit_id,
+                        "chapter_id": str(target.get("node_id") or ""),
+                    },
+                )
+            if research_evidence and not used_evidence_ids:
+                raise ControlPlaneError(
+                    "CONTENT_EVIDENCE_USE_REQUIRED",
+                    "当前章节的必要公开检索已发布，但写作模型未声明使用任何证据。",
+                    details={
+                        "unit_id": bundle.unit_id,
+                        "chapter_id": str(target.get("node_id") or ""),
+                    },
+                )
             blocks.append(
                 ContentBlock(
                     block_id=f"{bundle.bundle_id}-{target['node_id']}-chapter",
@@ -178,27 +272,120 @@ class ContentWriter:
                     source_bundle_hash=bundle.bundle_hash,
                 )
             )
+            # This is an execution checkpoint only.  It lets the workspace show
+            # the durable part of a running draft without promoting it to the
+            # final Word artifact before the unit-level quality gate passes.
+            self.store.update_content_unit_progress(
+                bundle.unit_id,
+                chapter_id=target_id,
+                chapter_title=title,
+                phase="drafted_checkpoint",
+                draft_preview="\n\n".join(block.content for block in blocks),
+            )
+            researcher.mark_used(
+                research_decision,
+                str(target.get("node_id") or ""),
+                used_evidence_ids,
+            )
         if not blocks:
             raise ValueError("CONTENT_BLOCKED: WriterBundle 不包含可生成的章节目标")
         proposal = WriterBundleContentGate().validate(bundle, blocks)
-        output = self.root / CONTENT_OUTPUT_DIR / f"{bundle.unit_id}.json"
-        write_json(output, {"schema_version": "v3", "unit_id": bundle.unit_id, "bundle_id": bundle.bundle_id, "content_proposal": proposal.model_dump(mode="json"), "blocks": [block.model_dump(mode="json") for block in blocks]})
+        base_fingerprint = writer_base_fingerprint(
+            self.context,
+            unit_id=bundle.unit_id,
+            contract_revision=bundle.revision,
+            node_ids=[
+                str(item.get("chapter_id") or item.get("node_id") or "")
+                for item in bundle.blueprint_slice
+                if str(item.get("chapter_id") or item.get("node_id") or "")
+            ],
+            deterministic_test=self.deterministic_test,
+        )
+        bindings = evidence_bindings(bundle.evidence_snapshot)
+        final_fingerprint = writer_fingerprint(base_fingerprint, bindings)
+        content_hash = canonical_hash(
+            [block.model_dump(mode="json") for block in blocks]
+        )
+        output = (
+            self.root
+            / CONTENT_OUTPUT_DIR
+            / (
+                f"{bundle.unit_id}--{final_fingerprint[:12]}"
+                f"--{content_hash[:12]}.json"
+            )
+        )
+        write_json(
+            output,
+            {
+                "schema_version": "v3",
+                "writer_version": WRITER_IMPLEMENTATION_VERSION,
+                "writer_prompt_version": WRITER_PROMPT_VERSION,
+                "writer_mode": (
+                    "deterministic_test"
+                    if self.deterministic_test
+                    else "production"
+                ),
+                "writer_base_fingerprint": base_fingerprint,
+                "writer_fingerprint": final_fingerprint,
+                "evidence_batches": bindings,
+                "research_decision_id": str(
+                    research_decision.get("decision_id") or ""
+                ),
+                "research_operation_id": operation_id,
+                "unit_id": bundle.unit_id,
+                "bundle_id": bundle.bundle_id,
+                "content_proposal": proposal.model_dump(mode="json"),
+                "blocks": [
+                    block.model_dump(mode="json")
+                    for block in blocks
+                ],
+            },
+        )
         self.store.upsert_content_unit_state(
             {
                 "unit_id": bundle.unit_id,
                 "contract_revision": bundle.revision,
                 "state": "completed",
                 "evidence_snapshot_hash": bundle.bundle_hash,
+                "writer_fingerprint": final_fingerprint,
+                "stale_reason": "",
                 "output_artifact_id": output.relative_to(self.root).as_posix(),
+                "current_chapter_id": "",
+                "current_chapter_title": "",
+                "progress_phase": "",
             }
         )
         return blocks
 
-    @staticmethod
-    def _writer_llm_enabled() -> bool:
-        return str(
-            os.environ.get("V3_WRITER_LLM_ENABLED", "0")
-        ).strip().lower() in {"1", "true", "yes", "on"}
+    def _bundle_with_research(
+        self,
+        bundle: WriterInputBundle,
+        *,
+        evidence: list[dict],
+        decisions: list[dict],
+    ) -> WriterInputBundle:
+        """Freeze writer-time evidence into a new immutable Bundle revision."""
+        body = bundle.model_dump(
+            mode="json",
+            exclude={"revision", "source_hashes", "bundle_id", "bundle_hash"},
+        )
+        body["evidence_snapshot"] = evidence
+        body["research_decisions"] = decisions
+        source_hashes = dict(bundle.source_hashes)
+        for item in evidence:
+            if isinstance(item, dict) and item.get("batch_id"):
+                source_hashes[f"evidence:{item['batch_id']}"] = canonical_hash(item)
+        bundle_hash = canonical_hash(body)
+        frozen = WriterInputBundle(
+            revision=bundle.revision,
+            source_hashes=source_hashes,
+            bundle_id=f"{bundle.bundle_id}-r{bundle_hash[:8]}",
+            bundle_hash=bundle_hash,
+            **body,
+        )
+        path = self.root / V3_ROOT / "writer_bundles" / f"{frozen.bundle_id}.json"
+        write_json(path, frozen.model_dump(mode="json"))
+        return frozen
 
     @staticmethod
     def _research_evidence_for_target(
@@ -220,7 +407,14 @@ class ContentWriter:
             item
             for item in bundle.evidence_snapshot
             if isinstance(item, dict)
-            and str(item.get("topic_id") or "") in topics
+            and (
+                str(target.get("node_id") or "")
+                in {
+                    str(target_id)
+                    for target_id in (item.get("target_ids") or [])
+                }
+                or str(item.get("topic_id") or "") in topics
+            )
         ]
 
     @staticmethod
@@ -272,8 +466,8 @@ class ContentWriter:
                 break
         return result
 
-    @staticmethod
     def _draft_chapter_content(
+        self,
         *,
         bundle: WriterInputBundle,
         target: dict,
@@ -281,7 +475,7 @@ class ContentWriter:
         conditions: list[dict],
         response_units: list[dict],
         research_evidence: list[dict] | None = None,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         title = str(target.get("title") or "本章")
         target_size = int(target.get("target_size") or 900)
         objectives = []
@@ -293,6 +487,21 @@ class ContentWriter:
             ):
                 objectives.extend(ContentWriter._short_items([item.get("purpose")], 1))
                 objectives.extend(ContentWriter._short_items(item.get("writing_objectives") or [], 3))
+        # Internal planning vocabulary must not leak into body text.
+        rubric_trace = re.compile(
+            r"满分条件|得分任务|得分点|评分要求|评分标准|本节用于|"
+            r"按已确认的章节边界|章节边界组织响应内容|展开具体响应内容"
+        )
+
+        def _without_rubric_trace(values: list[str]) -> list[str]:
+            cleaned: list[str] = []
+            for item in values:
+                text = rubric_trace.sub("", item).strip(" ：:；;，,。")
+                if text and text not in cleaned:
+                    cleaned.append(text)
+            return cleaned
+
+        objectives = _without_rubric_trace(objectives)
         requirement_points = ContentWriter._short_items(
             [item.get("normalized_requirement") or item.get("statement") for item in requirements],
             5,
@@ -306,16 +515,29 @@ class ContentWriter:
             ]
             if cleaned
         ]
-        intents = ContentWriter._short_items(
+        intents = _without_rubric_trace(
+            ContentWriter._short_items(
+                [
+                    item.get("response_intent")
+                    for item in conditions
+                ],
+                5,
+            )
+        )
+        scoring_obligations = ContentWriter._short_items(
             [
                 item.get("response_intent")
+                or item.get("normalized_condition")
+                or item.get("text")
                 for item in conditions
             ],
-            5,
+            6,
         )
-        expectations = ContentWriter._short_items(
-            [item.get("response_expectation") for item in response_units],
-            4,
+        expectations = _without_rubric_trace(
+            ContentWriter._short_items(
+                [item.get("response_expectation") for item in response_units],
+                4,
+            )
         )
         evidence_types = ContentWriter._short_items(
             [
@@ -335,9 +557,15 @@ class ContentWriter:
         scope = ContentWriter._short_items(project.get("scope") or [], 3)
         background = ContentWriter._short_items(project.get("background") or [], 2)
         research_clause = ContentWriter._research_clause(research_evidence)
-        if ContentWriter._writer_llm_enabled():
-            from llm_client import chat
-
+        available_evidence_ids = sorted(
+            {
+                str(evidence_id)
+                for item in (research_evidence or [])
+                for evidence_id in (item.get("evidence_ids") or [])
+                if str(evidence_id)
+            }
+        )
+        if not self.deterministic_test:
             prompt_bundle = {
                 "chapter_title": title,
                 "target_size": target_size,
@@ -345,40 +573,93 @@ class ContentWriter:
                 "chapter_objectives": objectives,
                 "tender_requirement_excerpts": requirement_points,
                 "internal_coverage_intents": intents,
+                "scoring_obligations": scoring_obligations,
                 "response_expectations": expectations,
                 "required_evidence_types": evidence_types,
                 "allowed_research_evidence": research_evidence or [],
+                "writing_rule": (
+                    "以章节标题和评分义务为主线，只覆盖与本章相关的内容；"
+                    "不要求每个章节机械包含背景、步骤、质量、成果、验收或风险等全部维度。"
+                ),
                 "prohibited_visible_text": [
                     "满分条件",
+                    "得分任务",
+                    "本节用于",
+                    "按已确认的章节边界",
+                    "展开具体响应内容",
                     "评分要求",
                     "评分标准",
                     "得分点",
-                    "full_score",
                 ],
+                "output_schema": {
+                    "content": "完整正文，不含 Markdown 标题",
+                    "used_evidence_ids": "正文实际使用的 allowed evidence id 列表",
+                },
             }
-            content = chat(
-                [
+            try:
+                from llm_client import chat
+
+                raw = chat(
+                    [
+                        {
+                            "role": "system",
+                            "content": (
+                                "你是技术标书正文写作器。以章节标题和评分义务为主线输出项目化正文，"
+                                "不得复述评分条件、招标写作指令或生成占位话术。"
+                                "需求与评分信息只用于内部覆盖检查，不能写成“本节用于、"
+                                "围绕要求、满分条件、得分任务”等正文。"
+                                "公开研究只可支持背景、现行依据、专业方法和风险控制；"
+                                "禁止用公开资料虚构企业资质、业绩、人员、报价或承诺。"
+                                "只展开与本章相关、能够支撑评分义务的内容；不要为了凑模板"
+                                "强行补写不相关的方法、步骤、质量控制、成果、验收或风险。"
+                                "并严格输出 JSON 对象，不要 Markdown。"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": json.dumps(
+                                prompt_bundle,
+                                ensure_ascii=False,
+                            ),
+                        },
+                    ],
+                    temperature=0.25,
+                ).strip()
+                try:
+                    decoded = json.loads(raw)
+                except json.JSONDecodeError:
+                    start = raw.find("{")
+                    end = raw.rfind("}")
+                    if start < 0 or end <= start:
+                        raise
+                    decoded = json.loads(raw[start : end + 1])
+                if not isinstance(decoded, dict):
+                    raise ValueError("Writer 输出必须是 JSON 对象")
+                content = str(decoded.get("content") or "").strip()
+                used_evidence_ids = sorted(
                     {
-                        "role": "system",
-                        "content": (
-                            "你是技术标书正文写作器。按用户给定的章节目标、项目上下文、"
-                            "招标摘录和内部覆盖意图，输出完整项目化正文。"
-                            "评分条件只能作为内部验收规则，不得直接或改写后写入正文；"
-                            "不得出现“满分条件”“评分要求”“评分标准”等表述。"
-                            "公开研究资料只用于项目背景、标准、方法和风险控制，不在正文展示 URL。"
-                            "禁止虚构企业资质、人员、业绩、财务、报价或承诺。"
-                            "正文应包含项目理解、设计依据、总体思路、实施方法、关键流程、"
-                            "保障措施、风险控制和验收方法中与本章语义相符的内容。"
-                            "仅输出正文，不要 Markdown 标题。"
-                        ),
+                        str(item)
+                        for item in (
+                            decoded.get("used_evidence_ids") or []
+                        )
+                        if str(item)
+                    }
+                )
+                if not content:
+                    raise ValueError("Writer 输出正文为空")
+                return content, used_evidence_ids
+            except ControlPlaneError:
+                raise
+            except Exception as exc:
+                raise ControlPlaneError(
+                    "WRITER_MODEL_ACTION_REQUIRED",
+                    "写作模型未返回有效的项目化正文，生成已暂停；不会使用模板回退。",
+                    details={
+                        "unit_id": bundle.unit_id,
+                        "chapter_id": str(target.get("node_id") or ""),
+                        "error": f"{type(exc).__name__}: {exc}"[:2000],
                     },
-                    {"role": "user", "content": json.dumps(prompt_bundle, ensure_ascii=False)},
-                ],
-                temperature=0.25,
-            ).strip()
-            if not content:
-                raise ValueError("CONTENT_WRITER_EMPTY_RESPONSE")
-            return content
+                ) from exc
 
         sections = [
             (
@@ -410,202 +691,33 @@ class ContentWriter:
             ),
         ]
         desired = max(5, min(9, target_size // 260))
-        return "\n\n".join(sections[:desired])
+        return (
+            "\n\n".join(sections[:desired]),
+            available_evidence_ids,
+        )
 
     @staticmethod
     def _validate_generated_chapter(
         content: str,
         *,
         target: dict,
+        requirements: list[dict],
         conditions: list[dict],
     ) -> None:
-        compact = re.sub(r"\s+", "", content)
-        if len(compact) < 180:
-            raise ValueError("CONTENT_BLOCKED: Writer 正文异常短，未形成完整章节")
-        forbidden = [
-            "满分条件",
-            "评分要求",
-            "评分标准规定",
-            "得分点",
-        ]
-        if any(token in content for token in forbidden):
-            raise ValueError("CONTENT_BLOCKED: Writer 正文复述了评分条件")
-        paragraphs = [
-            re.sub(r"\s+", "", item)
-            for item in re.split(r"\n{2,}", content)
-            if item.strip()
-        ]
-        if len(paragraphs) != len(set(paragraphs)):
-            raise ValueError("CONTENT_BLOCKED: Writer 正文存在重复段落")
-        generic_tokens = ("本节用于", "章节边界组织响应内容", "待补充", "根据实际情况")
-        if any(token in content for token in generic_tokens):
-            raise ValueError("CONTENT_BLOCKED: Writer 正文仍为空洞占位")
-        for condition in conditions:
-            source = str(
-                condition.get("normalized_condition")
-                or condition.get("text")
+        source_texts = [
+            str(
+                item.get("normalized_requirement")
+                or item.get("statement")
                 or ""
-            ).strip()
-            if source and re.sub(r"\s+", "", source) in compact:
-                raise ValueError("CONTENT_BLOCKED: Writer 正文机械抄写评分条件")
-
-    @staticmethod
-    def _draft_requirement_content(
-        bundle: WriterInputBundle,
-        title: str,
-        requirement: dict,
-        *,
-        research_evidence: list[dict] | None = None,
-    ) -> str:
-        """Use an optional model only with the frozen Bundle; otherwise emit a traceable draft."""
-        statement = str(requirement["normalized_requirement"])
-        if not ContentWriter._writer_llm_enabled():
-            return (
-                f"{title}：围绕“{statement}”，本节按招标文件明确的响应范围、实施动作与验收要求组织方案，"
-                "并在执行过程中保留可核验的过程记录和交付依据。"
-                + ContentWriter._research_clause(research_evidence)
             )
-        from llm_client import chat
-
-        prompt_bundle = {
-            "chapter_title": title,
-            "requirement": requirement,
-            "allowed_constraints": bundle.project_constraints,
-            "terminology": bundle.terminology,
-            "allowed_score_obligations": bundle.score_obligations,
-            "allowed_targets": bundle.document_target_constraints,
-            "allowed_research_evidence": research_evidence or [],
-        }
-        content = chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是投标章节写作器。只能使用用户消息提供的 WriterInputBundle 内容；"
-                        "不得新增标题、项目事实、企业资质、人员、案例、金额、工期或未给出的承诺。"
-                        "公开研究资料只能用于方案方法、标准和风险控制，并应保留来源 URL；"
-                        "不得用其证明本企业能力。"
-                        "缺少事实时写成待补证据的条件性表述。仅输出一个完整正文段落，不要 Markdown 标题或解释。"
-                    ),
-                },
-                {"role": "user", "content": json.dumps(prompt_bundle, ensure_ascii=False)},
-            ],
-            temperature=0.2,
-        ).strip()
-        if not content:
-            raise ValueError("CONTENT_WRITER_EMPTY_RESPONSE")
-        return content
-
-    @staticmethod
-    def _draft_condition_content(
-        *,
-        bundle: WriterInputBundle,
-        title: str,
-        condition: dict,
-        response_unit: dict,
-        related_requirements: list[dict],
-        research_evidence: list[dict] | None = None,
-    ) -> str:
-        """Draft one source-bound full-score condition, never an overview."""
-
-        normalized = str(
-            condition.get("normalized_condition")
-            or condition.get("text")
-            or ""
-        ).strip()
-        if not normalized:
-            raise ValueError(
-                "CONTENT_BLOCKED: ScoreCondition 缺少可写条件内容"
-            )
-        role = str(condition.get("condition_role") or "content")
-        intent = str(
-            condition.get("response_intent") or normalized
-        ).strip()
-        expectation = str(
-            response_unit.get("response_expectation") or ""
-        ).strip()
-        evidence_types = [
-            str(item)
-            for item in response_unit.get(
-                "required_evidence_types",
-                [],
-            )
-            if str(item).strip()
+            for item in requirements
         ]
-        if not ContentWriter._writer_llm_enabled():
-            role_instruction = {
-                "content": (
-                    f"围绕“{intent}”展开具体响应内容、实施动作与交付结果"
-                ),
-                "evidence": (
-                    "列明证明材料的名称、对应事项和核验位置"
-                ),
-                "constraint": (
-                    "将该条件作为本节方案范围、参数和适用对象的边界"
-                ),
-                "quality": (
-                    "将该条件作为本节完整性、可行性和针对性的写作目标"
-                ),
-            }.get(
-                role,
-                f"围绕“{intent}”组织可检查的响应内容",
+        source_texts.extend(
+            str(
+                item.get("normalized_condition")
+                or item.get("text")
+                or ""
             )
-            evidence_clause = (
-                f"，所需证明材料包括：{'、'.join(evidence_types)}"
-                if evidence_types
-                else ""
-            )
-            expectation_clause = (
-                f"，并落实得分任务“{expectation}”"
-                if expectation
-                else ""
-            )
-            return (
-                f"{title}：满分条件为“{normalized}”。本节将"
-                f"{role_instruction}{expectation_clause}"
-                f"{evidence_clause}。"
-                + ContentWriter._research_clause(research_evidence)
-            )
-
-        from llm_client import chat
-
-        prompt_bundle = {
-            "chapter_title": title,
-            "score_condition": condition,
-            "response_unit": response_unit,
-            "related_requirement_excerpts": related_requirements,
-            "allowed_constraints": bundle.project_constraints,
-            "terminology": bundle.terminology,
-            "allowed_research_evidence": research_evidence or [],
-        }
-        content = chat(
-            [
-                {
-                    "role": "system",
-                    "content": (
-                        "你是投标章节写作器。只能使用用户消息提供的"
-                        "满分条件、得分任务和需求原文；必须实质响应"
-                        "score_condition.normalized_condition，并落实"
-                        "required_evidence_types。不得新增项目事实、企业"
-                        "资质、人员、案例、金额、工期或未给出的承诺。"
-                        "公开研究资料只能用于方案方法、标准和风险控制，"
-                        "不得用其证明本企业能力。"
-                        "缺少企业事实时写成待补证据的条件性表述。仅输出"
-                        "一个完整正文段落，不要 Markdown 标题或解释。"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": json.dumps(
-                        prompt_bundle,
-                        ensure_ascii=False,
-                    ),
-                },
-            ],
-            temperature=0.2,
-        ).strip()
-        if not content:
-            raise ValueError("CONTENT_WRITER_EMPTY_RESPONSE")
-        # Keep the exact, source-bound condition visible without relying on
-        # character-similarity checks against free-form model prose.
-        return f"满分条件“{normalized}”。{content}"
+            for item in conditions
+        )
+        require_content_quality(content, source_texts=source_texts)

@@ -130,7 +130,7 @@ def build_deterministic_outline_candidate(
                         else "保持严格模板既有章节结构"
                     ),
                     writing_objectives=(
-                        ["完整覆盖需求、评分点及满分条件"]
+                        ["完整覆盖需求、评分点及响应义务"]
                         if node.node_id == first_node_id
                         else []
                     ),
@@ -298,7 +298,11 @@ def build_deterministic_outline_candidate(
                     title=title,
                     purpose=condition.response_intent,
                     writing_objectives=[condition.response_intent],
+                    # Keep the unit as supporting only: primary ownership stays
+                    # on the unit chapter; child condition slices still need the
+                    # unit frozen for evidence-need resolution.
                     primary_response_unit_ids=[],
+                    supporting_response_unit_ids=[unit.unit_id],
                     score_condition_ids=[condition_id],
                     requirement_ids=[],
                     planned_tables=(
