@@ -152,11 +152,20 @@
           <section
             v-if="stageDetail?.current_writing"
             class="current-writing-card"
+            :class="{
+              'current-writing-paused': ['blocked_human', 'failed', 'paused'].includes(
+                stageDetail.current_writing.unit_status
+                  || selectedDrawerStage.status
+                  || ''
+              ) || ['model_output_invalid', 'research_blocked', 'paused', 'failed'].includes(
+                stageDetail.current_writing.phase || ''
+              )
+            }"
             aria-live="polite"
           >
             <p class="section-kicker">实时写作位置</p>
             <strong>
-              {{ writingPhaseLabel(stageDetail.current_writing.phase) }}：
+              {{ writingPhaseLabel(stageDetail.current_writing.phase, stageDetail.current_writing.unit_status || selectedDrawerStage.status) }}：
               {{
                 stageDetail.current_writing.chapter_title
                   || stageDetail.current_writing.unit_title
@@ -168,6 +177,12 @@
               <template v-if="stageDetail.current_writing.chapter_id">
                 · 章节 {{ stageDetail.current_writing.chapter_id }}
               </template>
+            </p>
+            <p
+              v-if="stageDetail.current_writing.error"
+              class="current-writing-error"
+            >
+              {{ stageDetail.current_writing.error }}
             </p>
             <small v-if="stageDetail.current_writing.updated_at">
               最近更新：{{ formatTimestamp(stageDetail.current_writing.updated_at) }}
@@ -823,7 +838,8 @@
             <div class="agent-trace-feed">
               <article v-if="writerUnit?.current_chapter_title" class="agent-trace-item">
                 <strong>当前任务</strong>
-                <p>{{ writingPhaseLabel(writerUnit.progress_phase) }}：{{ writerUnit.current_chapter_title }}</p>
+                <p>{{ writingPhaseLabel(writerUnit.progress_phase, writerUnit.status) }}：{{ writerUnit.current_chapter_title }}</p>
+                <small v-if="writerUnit.error">{{ writerUnit.error }}</small>
               </article>
               <article v-for="call in writerResearchCalls" :key="call.decision_id" class="agent-trace-item">
                 <strong>{{ call.needs_research ? '联网检索判断' : '无需联网' }}</strong>
@@ -1893,9 +1909,16 @@ const writerPreviewText = computed(() => {
   return String(writerUnit.value?.draft_preview || writerUnit.value?.preview || '')
 })
 const writerPreviewParagraphs = computed(() => writerPreviewText.value.split(/\n{2,}/).filter(Boolean))
-const writerPhaseText = computed(() => writerUnit.value?.status === 'running'
-  ? writingPhaseLabel(writerUnit.value.progress_phase)
-  : contentUnitStatusLabel(writerUnit.value?.status || 'queued'))
+const writerPhaseText = computed(() => {
+  const status = String(writerUnit.value?.status || 'queued')
+  if (status === 'running') {
+    return writingPhaseLabel(writerUnit.value.progress_phase, status)
+  }
+  if (['blocked_human', 'failed', 'paused'].includes(status)) {
+    return writingPhaseLabel(writerUnit.value?.progress_phase, status)
+  }
+  return contentUnitStatusLabel(status)
+})
 const writerResearchCalls = computed(() => {
   const unitId = writerUnit.value?.unit_id
   const calls = generationResearch.value.calls || []
@@ -2807,10 +2830,29 @@ function researchUsageLabel(status) {
   }[status] || '采用情况待确认'
 }
 
-function writingPhaseLabel(phase) {
+function writingPhaseLabel(phase, unitStatus = '') {
+  const status = String(unitStatus || '')
+  if (
+    status === 'blocked_human'
+    || status === 'failed'
+    || status === 'paused'
+  ) {
+    return {
+      model_output_invalid: '模型输出无效，已暂停',
+      research_blocked: '联网检索受阻，已暂停',
+      paused: '写作已暂停',
+      failed: '写作失败',
+      drafting: '写作已暂停',
+      preparing_research: '写作已暂停',
+    }[phase] || '写作已暂停'
+  }
   return {
     preparing_research: '正在检查人工材料',
     drafting: '正在撰写',
+    model_output_invalid: '模型输出无效，已暂停',
+    research_blocked: '联网检索受阻，已暂停',
+    paused: '写作已暂停',
+    failed: '写作失败',
   }[phase] || '正在处理'
 }
 
@@ -3643,6 +3685,17 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 .current-writing-pending { border-style: dashed; }
+.current-writing-paused {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+.current-writing-error {
+  margin: 8px 0 0;
+  color: #b45309;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 
 .drawer-error-alert {
   padding: 14px;

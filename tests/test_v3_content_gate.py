@@ -116,6 +116,29 @@ class ContentWriterJsonParseTests(unittest.TestCase):
         self.assertEqual(decoded["content"], "第一段\n第二段")
         self.assertEqual(decoded["used_evidence_ids"], ["ev-1"])
 
+    def test_repairs_trailing_commas_and_smart_quotes(self) -> None:
+        raw = (
+            "{\n"
+            '  “content”: “意见建议正文”,\n'
+            '  “used_evidence_ids”: [],\n'
+            "}\n"
+        )
+        decoded = ContentWriter._parse_writer_json(raw)
+        self.assertEqual(decoded["content"], "意见建议正文")
+
+    def test_salvages_content_when_json_is_severely_broken(self) -> None:
+        raw = (
+            '说明文字\n'
+            '{\n'
+            '  "content": "第一段\n第二段仍应保留",\n'
+            '  "used_evidence_ids": ["ev-9",]\n'
+            # Missing closing brace on purpose.
+        )
+        decoded = ContentWriter._parse_writer_json(raw)
+        self.assertIn("第一段", decoded["content"])
+        self.assertIn("第二段仍应保留", decoded["content"])
+        self.assertEqual(decoded["used_evidence_ids"], ["ev-9"])
+
 
 class WriterBundleContentGateTests(unittest.TestCase):
     def test_quality_gate_does_not_require_every_generic_writing_dimension(self) -> None:

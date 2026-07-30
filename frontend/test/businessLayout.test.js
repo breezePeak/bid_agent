@@ -91,7 +91,7 @@ test('clicking a workflow node opens a live right-side audit trace', () => {
   assert.match(workspaceView, /stageDetail\.research_trace/)
   assert.match(workspaceView, /stageDetail\.trace_disclosure/)
   assert.match(workspaceView, /stageDetail\?\.current_writing/)
-  assert.match(workspaceView, /writingPhaseLabel\(stageDetail\.current_writing\.phase\)/)
+  assert.match(workspaceView, /writingPhaseLabel\(stageDetail\.current_writing\.phase/)
   assert.match(workspaceView, /trace\.decision_summary/)
   assert.match(workspaceView, /query\.question/)
   assert.match(workspaceView, /result\.answer_excerpt/)
