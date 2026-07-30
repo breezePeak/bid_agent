@@ -253,6 +253,11 @@ class WriterBundleContentGate:
                     [],
                 ):
                     condition_id = str(condition_id_value)
+                    # Units may historically list sibling conditions owned by
+                    # other chapter slices. Only map conditions frozen in this
+                    # Bundle; foreign ids are ignored rather than fail closed.
+                    if condition_id not in conditions:
+                        continue
                     if (
                         condition_id in condition_unit_ids
                         and condition_unit_ids[condition_id] != unit_id
@@ -261,14 +266,6 @@ class WriterBundleContentGate:
                             "G4_CONTENT_CONDITION_MULTIPLE_RESPONSE_UNITS"
                         )
                     condition_unit_ids[condition_id] = unit_id
-        unknown_unit_conditions = (
-            set(condition_unit_ids) - set(conditions)
-        )
-        if unknown_unit_conditions:
-            raise ValueError(
-                "G4_CONTENT_CONDITION_OUT_OF_BUNDLE: "
-                f"{sorted(unknown_unit_conditions)}"
-            )
         return {
             "scores": scores,
             "conditions": conditions,

@@ -300,9 +300,18 @@ class WriterInputBundleAssembler:
                     for condition_id in unit.condition_ids
                 )
             ]
-            payload["response_units"] = [
-                unit.model_dump(mode="json") for unit in selected_units
-            ]
+            # Project each unit to this ContentUnit's condition slice. A unit may
+            # own sibling conditions bound to other chapters; freezing the full
+            # condition_ids list would make G4 report CONDITION_OUT_OF_BUNDLE.
+            payload["response_units"] = []
+            for unit in selected_units:
+                unit_payload = unit.model_dump(mode="json")
+                unit_payload["condition_ids"] = [
+                    condition_id
+                    for condition_id in unit.condition_ids
+                    if condition_id in selected_condition_ids
+                ]
+                payload["response_units"].append(unit_payload)
             payload["score_conditions"] = [
                 condition.model_dump(mode="json")
                 for condition in selected_conditions

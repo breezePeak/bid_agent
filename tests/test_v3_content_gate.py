@@ -432,6 +432,75 @@ class WriterBundleContentGateTests(unittest.TestCase):
             ],
         )
 
+    def test_ignores_sibling_unit_conditions_outside_chapter_slice(
+        self,
+    ) -> None:
+        """A unit frozen for one condition must not require sibling conditions."""
+        bundle = _condition_bundle().model_copy(
+            update={
+                "score_obligations": [
+                    {
+                        "score_point_id": "SP-1",
+                        "review_status": "confirmed",
+                        "score_conditions": [
+                            {
+                                "condition_id": "SP-1-C-evidence",
+                                "condition_role": "evidence",
+                                "normalized_condition": "提供项目案例证明",
+                                "review_status": "confirmed",
+                            }
+                        ],
+                        "response_units": [
+                            {
+                                "unit_id": "RU-1",
+                                # Full unit ownership includes siblings bound
+                                # to other chapters; only the local condition
+                                # is frozen into score_conditions.
+                                "condition_ids": [
+                                    "SP-1-C-content",
+                                    "SP-1-C-evidence",
+                                    "SP-1-C-other",
+                                ],
+                                "required_evidence_types": ["案例合同"],
+                                "linked_requirement_ids": ["R-condition"],
+                                "review_status": "confirmed",
+                            }
+                        ],
+                    }
+                ],
+                "document_target_constraints": [
+                    {
+                        "node_id": "chapter-evidence",
+                        "output_target": "slot-evidence",
+                        "title": "案例证明",
+                        "primary_requirement_ids": [],
+                        "primary_response_unit_ids": [],
+                        "supporting_response_unit_ids": ["RU-1"],
+                        "score_condition_ids": ["SP-1-C-evidence"],
+                    }
+                ],
+            }
+        )
+        proposal = WriterBundleContentGate().validate(
+            bundle,
+            [
+                ContentBlock(
+                    block_id="b-evidence",
+                    target_node_id="slot-evidence",
+                    type="paragraph",
+                    content="本节列明案例合同。",
+                    confidence=1,
+                    score_point_ids=["SP-1"],
+                    claim_ids=["SP-1-C-evidence"],
+                    source_bundle_hash="bundle-hash",
+                )
+            ],
+        )
+        self.assertEqual(
+            [item["condition_id"] for item in proposal.evidence_need_proposals],
+            ["SP-1-C-evidence"],
+        )
+
     def test_writer_uses_each_target_condition_instead_of_overview(
         self,
     ) -> None:
