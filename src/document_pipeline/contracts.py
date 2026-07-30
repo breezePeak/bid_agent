@@ -102,6 +102,22 @@ class NormalizedChunk(BaseModel):
     source_anchor: SourceAnchor
 
 
+SOURCE_PARSER_VERSION = "v3-source-parser-2"
+
+SourceBlockKind = Literal[
+    "heading",
+    "paragraph",
+    "list_item",
+    "table",
+    "table_cell",
+    "image",
+    "ocr_gap",
+    # Legacy PDF labels retained for deterministic identity continuity.
+    "pdf_text",
+    "pdf_table_cell",
+]
+
+
 class SourceBlock(BaseModel):
     """Loss-minimising structure recovered from a single frozen input."""
 
@@ -110,7 +126,7 @@ class SourceBlock(BaseModel):
     block_id: str = Field(min_length=1)
     input_id: str = Field(min_length=1)
     input_role: InputRole
-    block_kind: Literal["heading", "paragraph", "list_item", "table_cell", "pdf_text", "pdf_table_cell"]
+    block_kind: SourceBlockKind
     ordinal: int = Field(ge=0)
     content: str = Field(min_length=1)
     heading_path: list[str] = Field(default_factory=list)
@@ -120,8 +136,80 @@ class SourceBlock(BaseModel):
     row_index: int | None = Field(default=None, ge=0)
     column_index: int | None = Field(default=None, ge=0)
     bbox: list[float] | None = None
+    reading_order: int | None = Field(default=None, ge=0)
+    parser_version: str = Field(default=SOURCE_PARSER_VERSION, min_length=1)
     source_anchor: SourceAnchor
     content_hash: str = Field(min_length=1)
+
+    @field_validator("bbox")
+    @classmethod
+    def bbox_has_four_numbers(cls, value: list[float] | None) -> list[float] | None:
+        if value is None:
+            return value
+        if len(value) != 4:
+            raise ValueError("bbox 必须是 [x0, y0, x1, y1]")
+        return value
+
+
+class SourceNormalizationCoverageItem(BaseModel):
+    """Per physical element coverage record that promotes with SourceIndex."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    element_id: str = Field(min_length=1)
+    input_id: str = Field(min_length=1)
+    element_kind: str = Field(min_length=1)
+    status: Literal["normalized", "exempt", "structure_gap"]
+    locator: str = Field(min_length=1)
+    reason: str | None = None
+    block_id: str | None = None
+
+
+class SourceNormalizationCoverage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    items: list[SourceNormalizationCoverageItem] = Field(default_factory=list)
+
+    @property
+    def structure_gap_count(self) -> int:
+        return sum(1 for item in self.items if item.status == "structure_gap")
+
+
+class AmendmentRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    input_id: str = Field(min_length=1)
+    issued_at: str = Field(min_length=1)
+    supersedes_input_ids: list[str] = Field(default_factory=list)
+    replaces_input_id: str | None = None
+
+
+class SourceInputStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    input_id: str = Field(min_length=1)
+    status: Literal["processed", "blocked", "partial"]
+    block_count: int = Field(default=0, ge=0)
+    reason: str | None = None
+
+
+class SourceIndex(ContractModel):
+    """Canonical structured recovery of frozen inputs. Disk JSON is only a projection."""
+
+    parser_version: str = Field(default=SOURCE_PARSER_VERSION, min_length=1)
+    input_manifest_revision: int = Field(ge=1)
+    input_manifest_artifact_hash: str = Field(default="", min_length=0)
+    blocks: list[SourceBlock] = Field(default_factory=list)
+    coverage: SourceNormalizationCoverage = Field(default_factory=SourceNormalizationCoverage)
+    amendments: list[AmendmentRelation] = Field(default_factory=list)
+    input_status: list[SourceInputStatus] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def blocks_have_unique_ids(self) -> "SourceIndex":
+        ids = [block.block_id for block in self.blocks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("SourceIndex 不允许重复 block_id")
+        return self
 
 
 class RequirementKind(str, Enum):
@@ -186,6 +274,92 @@ class ScoringLevel(BaseModel):
     criterion: str = Field(min_length=1)
 
 
+class ScoreCondition(BaseModel):
+    """One source-bound semantic condition required by the highest scoring band."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    condition_id: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    normalized_condition: str = Field(min_length=1)
+    condition_role: Literal[
+        "content",
+        "evidence",
+        "constraint",
+        "quality",
+        "document",
+    ] = "content"
+    source_excerpt: str = Field(min_length=1)
+    source_level_id: str | None = None
+    subject: str = Field(min_length=1)
+    response_intent: str = Field(min_length=1)
+    source_anchor: SourceAnchor | None = None
+    source_span_start: int | None = Field(default=None, ge=0)
+    source_span_end: int | None = Field(default=None, gt=0)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+    @model_validator(mode="before")
+    @classmethod
+    def legacy_condition_defaults(cls, value: Any) -> Any:
+        """Keep historical ScoreModel artifacts readable after semantic enrichment."""
+
+        if not isinstance(value, dict):
+            return value
+        hydrated = dict(value)
+        if not str(hydrated.get("normalized_condition") or "").strip():
+            hydrated["normalized_condition"] = hydrated.get("text")
+        hydrated.setdefault("condition_role", "content")
+        return hydrated
+
+    @model_validator(mode="after")
+    def source_span_is_complete(self) -> "ScoreCondition":
+        if (self.source_span_start is None) != (self.source_span_end is None):
+            raise ValueError("ScoreCondition source span 必须同时提供起止位置")
+        if (
+            self.source_span_start is not None
+            and self.source_span_end is not None
+            and self.source_span_end <= self.source_span_start
+        ):
+            raise ValueError("ScoreCondition source_span_end 必须大于 source_span_start")
+        return self
+
+
+class ScoreResponseUnit(BaseModel):
+    """One semantically independent response task inside a physical scoring rule."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    unit_id: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    outline_path: list[str] = Field(default_factory=list)
+    source_level_ids: list[str] = Field(default_factory=list)
+    condition_ids: list[str] = Field(default_factory=list)
+    condition_join: Literal[
+        "all",
+        "any",
+        "ordered",
+        "threshold",
+        "mixed",
+    ] = "all"
+    linked_requirement_ids: list[str] = Field(default_factory=list)
+    response_scope: Literal["section", "document"] = "section"
+    response_expectation: str = Field(min_length=1)
+    required_evidence_types: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0, ge=0, le=1)
+    review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
+
+    @model_validator(mode="after")
+    def references_are_unique(self) -> "ScoreResponseUnit":
+        if len(self.source_level_ids) != len(set(self.source_level_ids)):
+            raise ValueError("ScoreResponseUnit 不允许重复 source_level_ids")
+        if len(self.condition_ids) != len(set(self.condition_ids)):
+            raise ValueError("ScoreResponseUnit 不允许重复 condition_ids")
+        if len(self.linked_requirement_ids) != len(set(self.linked_requirement_ids)):
+            raise ValueError("ScoreResponseUnit 不允许重复 linked_requirement_ids")
+        return self
+
+
 class ScorePoint(BaseModel):
     """One source-traceable scoring rule, linked to rather than copied from requirements."""
 
@@ -198,10 +372,16 @@ class ScorePoint(BaseModel):
     max_points: float | None = Field(default=None, ge=0)
     scoring_levels: list[ScoringLevel] = Field(default_factory=list)
     disqualifying: bool = False
+    response_scope: Literal["section", "document"] = "section"
+    outline_path: list[str] = Field(default_factory=list)
+    full_score_conditions: list[str] = Field(default_factory=list)
+    score_conditions: list[ScoreCondition] = Field(default_factory=list)
+    response_units: list[ScoreResponseUnit] = Field(default_factory=list)
     response_expectation: str = Field(min_length=1)
     response_depth: Literal["basic", "substantive", "detailed"] = "basic"
     required_evidence_types: list[str] = Field(default_factory=list)
     linked_requirement_ids: list[str] = Field(default_factory=list)
+    context_requirement_ids: list[str] = Field(default_factory=list)
     source_anchors: list[SourceAnchor] = Field(min_length=1)
     confidence: float = Field(ge=0, le=1)
     review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
@@ -210,9 +390,83 @@ class ScorePoint(BaseModel):
     def score_point_references_are_unique(self) -> "ScorePoint":
         if len(self.linked_requirement_ids) != len(set(self.linked_requirement_ids)):
             raise ValueError("ScorePoint 不允许重复 linked_requirement_ids")
+        if len(self.context_requirement_ids) != len(
+            set(self.context_requirement_ids)
+        ):
+            raise ValueError("ScorePoint 不允许重复 context_requirement_ids")
         anchor_ids = [(anchor.source_input_id, anchor.chunk_id) for anchor in self.source_anchors]
         if len(anchor_ids) != len(set(anchor_ids)):
             raise ValueError("ScorePoint 不允许重复 source_anchors")
+        condition_ids = [condition.condition_id for condition in self.score_conditions]
+        if len(condition_ids) != len(set(condition_ids)):
+            raise ValueError("ScorePoint 不允许重复 condition_id")
+        if self.score_conditions:
+            condition_texts = [condition.text for condition in self.score_conditions]
+            if self.full_score_conditions and self.full_score_conditions != condition_texts:
+                raise ValueError("full_score_conditions 必须是 score_conditions.text 的兼容投影")
+            self.full_score_conditions = condition_texts
+        elif self.full_score_conditions:
+            anchor = self.source_anchors[0] if self.source_anchors else None
+            self.score_conditions = [
+                ScoreCondition(
+                    condition_id=f"{self.score_point_id}-C{index:02d}",
+                    text=text,
+                    source_excerpt=text,
+                    subject=text,
+                    response_intent="完整响应该满分条件",
+                    source_anchor=anchor,
+                )
+                for index, text in enumerate(self.full_score_conditions, start=1)
+            ]
+        known_condition_ids = {condition.condition_id for condition in self.score_conditions}
+        known_level_ids = {
+            f"{self.score_point_id}-L{index:02d}"
+            for index, _ in enumerate(self.scoring_levels, start=1)
+        }
+        conditions_by_id = {
+            condition.condition_id: condition for condition in self.score_conditions
+        }
+        unit_ids = [unit.unit_id for unit in self.response_units]
+        if len(unit_ids) != len(set(unit_ids)):
+            raise ValueError("ScorePoint 不允许重复 response unit ID")
+        assigned_level_ids: list[str] = []
+        for unit in self.response_units:
+            unknown = set(unit.condition_ids) - known_condition_ids
+            if unknown:
+                raise ValueError(
+                    f"ScoreResponseUnit {unit.unit_id} 引用未知 condition_id: {sorted(unknown)}"
+                )
+            unknown_levels = set(unit.source_level_ids) - known_level_ids
+            if unknown_levels:
+                raise ValueError(
+                    f"ScoreResponseUnit {unit.unit_id} 引用未知 source_level_id: "
+                    f"{sorted(unknown_levels)}"
+                )
+            unknown_requirements = (
+                set(unit.linked_requirement_ids)
+                - {
+                    *self.linked_requirement_ids,
+                    *self.context_requirement_ids,
+                }
+            )
+            if unknown_requirements:
+                raise ValueError(
+                    f"ScoreResponseUnit {unit.unit_id} 引用评分点未关联的 requirement_id: "
+                    f"{sorted(unknown_requirements)}"
+                )
+            assigned_level_ids.extend(unit.source_level_ids)
+            for condition_id in unit.condition_ids:
+                condition_level_id = conditions_by_id[condition_id].source_level_id
+                if (
+                    condition_level_id is not None
+                    and condition_level_id not in unit.source_level_ids
+                ):
+                    raise ValueError(
+                        f"ScoreResponseUnit {unit.unit_id} 未绑定条件 "
+                        f"{condition_id} 的 source_level_id"
+                    )
+        if len(assigned_level_ids) != len(set(assigned_level_ids)):
+            raise ValueError("ScorePoint 的评分档次不能被多个 ScoreResponseUnit 重复绑定")
         return self
 
 
@@ -277,6 +531,18 @@ class ProjectFact(BaseModel):
     statement: str = Field(min_length=1)
     source_anchor: SourceAnchor | None = None
     requirement_ids: list[str] = Field(default_factory=list)
+    upstream_refs: list[str] = Field(
+        default_factory=list,
+        exclude_if=lambda value: not value,
+    )
+
+    @model_validator(mode="after")
+    def references_are_unique(self) -> "ProjectFact":
+        if len(self.requirement_ids) != len(set(self.requirement_ids)):
+            raise ValueError("ProjectFact 不允许重复 requirement_ids")
+        if len(self.upstream_refs) != len(set(self.upstream_refs)):
+            raise ValueError("ProjectFact 不允许重复 upstream_refs")
+        return self
 
 
 class EvidenceNeed(BaseModel):
@@ -356,6 +622,7 @@ class ProjectModel(ContractModel):
     unknowns: list[str] = Field(default_factory=list)
     requirement_ids: list[str] = Field(default_factory=list)
     score_point_ids: list[str] = Field(default_factory=list)
+    semantic_upstream_refs: list[str] = Field(default_factory=list)
     evidence_needs: list[EvidenceNeed] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -364,6 +631,10 @@ class ProjectModel(ContractModel):
         need_ids = [need.need_id for need in self.evidence_needs]
         if len(fact_ids) != len(set(fact_ids)) or len(need_ids) != len(set(need_ids)):
             raise ValueError("ProjectModel 不允许重复事实或 EvidenceNeed ID")
+        if len(self.semantic_upstream_refs) != len(
+            set(self.semantic_upstream_refs)
+        ):
+            raise ValueError("ProjectModel 不允许重复 semantic_upstream_refs")
         return self
 
 
@@ -400,6 +671,7 @@ class ResponseDuty(BaseModel):
     duty_type: DutyType
     requirement_ids: list[str] = Field(default_factory=list)
     score_point_ids: list[str] = Field(default_factory=list)
+    score_response_unit_ids: list[str] = Field(default_factory=list)
     response_expectations: list[str] = Field(default_factory=list)
     evidence_need_ids: list[str] = Field(default_factory=list)
     priority: Literal["blocking", "high", "normal", "low"] = "normal"
@@ -470,6 +742,185 @@ class ResponseTopicGraph(ContractModel):
         return self
 
 
+class BlueprintNode(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    chapter_id: str = Field(min_length=1)
+    parent_chapter_id: str | None = None
+    order: int = Field(ge=0)
+    title: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    writing_objectives: list[str] = Field(default_factory=list)
+    primary_response_unit_ids: list[str] = Field(default_factory=list)
+    supporting_response_unit_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
+    score_condition_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    forbidden_topic_ids: list[str] = Field(default_factory=list)
+    required_mentions: list[str] = Field(default_factory=list)
+    cross_references: list[str] = Field(default_factory=list)
+    planned_tables: list[str] = Field(default_factory=list)
+    planned_figures: list[str] = Field(default_factory=list)
+    target_size: int = Field(default=800, ge=1)
+    section_domain: Literal["technical", "price", "commercial"] = "technical"
+    content_policy: Literal["full", "structural_only", "deferred_title_only"] = "full"
+    deferred_reason: str | None = None
+    template_node_id: str | None = None
+    template_level: int | None = Field(default=None, ge=1, le=9)
+    template_numbering: str | None = None
+    template_slot_ids: list[str] = Field(default_factory=list)
+    template_target: str | None = None
+
+    @model_validator(mode="after")
+    def direct_bindings_are_unique(self) -> "BlueprintNode":
+        binding_groups = {
+            "primary_response_unit_ids": self.primary_response_unit_ids,
+            "supporting_response_unit_ids": self.supporting_response_unit_ids,
+            "score_point_ids": self.score_point_ids,
+            "score_condition_ids": self.score_condition_ids,
+            "requirement_ids": self.requirement_ids,
+        }
+        for field_name, values in binding_groups.items():
+            if len(values) != len(set(values)):
+                raise ValueError(f"BlueprintNode 不允许重复 {field_name}")
+        overlap = set(self.primary_response_unit_ids) & set(
+            self.supporting_response_unit_ids
+        )
+        if overlap:
+            raise ValueError(
+                "同一章节的 response unit 不能同时是 primary 与 supporting: "
+                f"{sorted(overlap)}"
+            )
+        return self
+
+
+class TopicChapterAssignment(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    assignment_id: str = Field(min_length=1)
+    duty_id: str = Field(min_length=1)
+    chapter_id: str = Field(min_length=1)
+    role: Literal["primary", "supporting", "mention", "cross_reference"]
+    response_scope: str = Field(min_length=1)
+    rationale: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    needs_human: bool = False
+
+
+class DocumentQualityGate(BaseModel):
+    """A scored whole-document criterion that must not become a visible chapter."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    gate_id: str = Field(min_length=1)
+    duty_id: str | None = Field(default=None, min_length=1)
+    response_unit_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(min_length=1)
+    score_condition_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+    criteria: list[str] = Field(min_length=1)
+    check_items: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def quality_bindings_are_unique(self) -> "DocumentQualityGate":
+        if not self.duty_id and not self.response_unit_ids:
+            raise ValueError(
+                "DocumentQualityGate 必须绑定 legacy duty_id 或 response_unit_ids"
+            )
+        if len(self.response_unit_ids) != len(set(self.response_unit_ids)):
+            raise ValueError(
+                "DocumentQualityGate 不允许重复 response_unit_id"
+            )
+        if len(self.score_point_ids) != len(set(self.score_point_ids)):
+            raise ValueError(
+                "DocumentQualityGate 不允许重复 score_point_id"
+            )
+        if len(self.score_condition_ids) != len(
+            set(self.score_condition_ids)
+        ):
+            raise ValueError(
+                "DocumentQualityGate 不允许重复 score_condition_id"
+            )
+        if len(self.requirement_ids) != len(set(self.requirement_ids)):
+            raise ValueError(
+                "DocumentQualityGate 不允许重复 requirement_id"
+            )
+        return self
+
+
+class ChapterBlueprint(ContractModel):
+    blueprint_id: str = Field(min_length=1)
+    mode: DocumentMode
+    planning_model: Literal["topic_graph", "score_direct"] = "topic_graph"
+    requirement_ledger_revision: int | None = Field(default=None, ge=1)
+    score_model_revision: int | None = Field(default=None, ge=1)
+    topic_graph_revision: int | None = Field(default=None, ge=1)
+    template_structure_revision: int | None = Field(default=None, ge=1)
+    nodes: list[BlueprintNode] = Field(min_length=1)
+    assignments: list[TopicChapterAssignment] = Field(default_factory=list)
+    document_quality_gates: list[DocumentQualityGate] = Field(default_factory=list)
+    coverage_summary: dict[str, Any] = Field(default_factory=dict)
+    review_status: Literal["draft", "confirmed", "blocked"] = "draft"
+
+    @model_validator(mode="after")
+    def primary_duties_are_complete(self) -> "ChapterBlueprint":
+        if self.planning_model == "topic_graph" and self.topic_graph_revision is None:
+            raise ValueError(
+                "topic_graph 规划模型必须声明 topic_graph_revision"
+            )
+        if self.planning_model == "score_direct" and (
+            self.requirement_ledger_revision is None
+            or self.score_model_revision is None
+        ):
+            raise ValueError(
+                "score_direct 规划模型必须声明 requirement_ledger_revision "
+                "与 score_model_revision"
+            )
+        if (self.requirement_ledger_revision is None) != (
+            self.score_model_revision is None
+        ):
+            raise ValueError(
+                "requirement_ledger_revision 与 score_model_revision 必须同时声明"
+            )
+        node_ids = [node.chapter_id for node in self.nodes]
+        if len(node_ids) != len(set(node_ids)):
+            raise ValueError("ChapterBlueprint 不允许重复 chapter_id")
+        if unknown := {assignment.chapter_id for assignment in self.assignments} - set(node_ids):
+            raise ValueError(f"TopicChapterAssignment 指向未知章节: {sorted(unknown)}")
+        primaries = [assignment.duty_id for assignment in self.assignments if assignment.role == "primary"]
+        if len(primaries) != len(set(primaries)):
+            raise ValueError("每个 Duty 只能有一个 primary chapter")
+        gate_ids = [gate.gate_id for gate in self.document_quality_gates]
+        gate_duty_ids = [
+            gate.duty_id
+            for gate in self.document_quality_gates
+            if gate.duty_id is not None
+        ]
+        if len(gate_ids) != len(set(gate_ids)) or len(gate_duty_ids) != len(
+            set(gate_duty_ids)
+        ):
+            raise ValueError("ChapterBlueprint 不允许重复全文质量门或重复质量门 Duty")
+        primary_response_unit_ids = [
+            response_unit_id
+            for node in self.nodes
+            for response_unit_id in node.primary_response_unit_ids
+        ]
+        if len(primary_response_unit_ids) != len(set(primary_response_unit_ids)):
+            raise ValueError("每个 response unit 只能有一个 primary chapter")
+        gate_response_unit_ids = [
+            response_unit_id
+            for gate in self.document_quality_gates
+            for response_unit_id in gate.response_unit_ids
+        ]
+        if len(gate_response_unit_ids) != len(set(gate_response_unit_ids)):
+            raise ValueError("每个全文级 response unit 只能绑定一个质量门")
+        overlap = set(primary_response_unit_ids) & set(gate_response_unit_ids)
+        if overlap:
+            raise ValueError(
+                "response unit 不能同时绑定章节与全文质量门: "
+                f"{sorted(overlap)}"
+            )
+        return self
+
+
 class DocumentMode(str, Enum):
     TEMPLATE_STRICT = "template_strict"
     AUTO_OUTLINE = "auto_outline"
@@ -481,9 +932,14 @@ class ContractNode(BaseModel):
     node_id: str = Field(min_length=1)
     parent_node_id: str | None = None
     order: int = Field(ge=0)
+    level: int = Field(default=1, ge=1, le=9)
+    numbering: str | None = None
     writable_target: str = Field(min_length=1)
     title: str = Field(min_length=1)
     requirement_ids: list[str] = Field(default_factory=list)
+    section_domain: Literal["technical", "price", "commercial"] = "technical"
+    content_policy: Literal["full", "structural_only", "deferred_title_only"] = "full"
+    deferred_reason: str | None = None
 
 
 class TemplateSlot(BaseModel):
@@ -496,6 +952,10 @@ class TemplateSlot(BaseModel):
 
 
 class _DocumentContractBase(ContractModel):
+    # PR-23: contracts are read-only derivatives of one confirmed Blueprint.
+    source_blueprint_artifact_id: str | None = None
+    source_blueprint_revision: int | None = Field(default=None, ge=1)
+    source_blueprint_hash: str | None = None
     nodes: list[ContractNode] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -563,10 +1023,16 @@ class DocumentNodePlan(BaseModel):
     owned_topic_ids: list[str] = Field(default_factory=list)
     required_mentions: list[str] = Field(default_factory=list)
     forbidden_topic_ids: list[str] = Field(default_factory=list)
+    section_domain: Literal["technical", "price", "commercial"] = "technical"
+    content_policy: Literal["full", "structural_only", "deferred_title_only"] = "full"
+    deferred_reason: str | None = None
 
 
 class DocumentPlan(ContractModel):
     contract_revision: int = Field(ge=1)
+    source_blueprint_artifact_id: str | None = None
+    source_blueprint_revision: int | None = Field(default=None, ge=1)
+    source_blueprint_hash: str | None = None
     nodes: list[DocumentNodePlan] = Field(min_length=1)
 
     @model_validator(mode="after")
@@ -591,6 +1057,31 @@ class ContentUnit(ContractModel):
     upstream_unit_ids: list[str] = Field(default_factory=list)
 
 
+class WriterInputBundle(ContractModel):
+    """Frozen, least-privilege input for exactly one semantic content unit."""
+
+    bundle_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    source_blueprint_artifact_id: str = Field(min_length=1)
+    source_blueprint_revision: int = Field(ge=1)
+    source_blueprint_hash: str = Field(min_length=1)
+    h1_receipt_id: str = Field(min_length=1)
+    dependency_refs: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    blueprint_slice: list[dict[str, Any]] = Field(min_length=1)
+    topic_and_duty_slice: list[dict[str, Any]] = Field(default_factory=list)
+    requirement_excerpts: list[dict[str, Any]] = Field(default_factory=list)
+    score_obligations: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_snapshot: list[dict[str, Any]] = Field(default_factory=list)
+    research_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    project_context: dict[str, Any] = Field(default_factory=dict)
+    project_constraints: list[str] = Field(default_factory=list)
+    terminology: dict[str, str] = Field(default_factory=dict)
+    document_target_constraints: list[dict[str, Any]] = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    model_config_hash: str = Field(min_length=1)
+    bundle_hash: str = Field(min_length=1)
+
+
 class ContentBlock(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -599,6 +1090,7 @@ class ContentBlock(BaseModel):
     type: Literal["paragraph", "list", "table", "figure_ref", "cross_reference"]
     content: str = Field(min_length=1)
     topic_ids: list[str] = Field(default_factory=list)
+    duty_ids: list[str] = Field(default_factory=list)
     requirement_ids: list[str] = Field(default_factory=list)
     score_point_ids: list[str] = Field(default_factory=list)
     evidence_ids: list[str] = Field(default_factory=list)
@@ -606,12 +1098,28 @@ class ContentBlock(BaseModel):
     confidence: float = Field(ge=0, le=1)
     human_locked: bool = False
     critical_claims: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    source_bundle_hash: str | None = None
 
     @model_validator(mode="after")
     def critical_claims_need_sources(self) -> "ContentBlock":
         if self.critical_claims and not (self.evidence_ids or self.fact_ids):
             raise ValueError("关键 Claim 必须关联 evidence_ids 或 fact_ids")
         return self
+
+
+class ContentProposal(BaseModel):
+    """Writer output before G4 admits ContentBlocks into a content-unit artifact."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    proposal_id: str = Field(min_length=1)
+    bundle_id: str = Field(min_length=1)
+    bundle_hash: str = Field(min_length=1)
+    blocks: list[ContentBlock] = Field(min_length=1)
+    claims: list[dict[str, Any]] = Field(default_factory=list)
+    evidence_need_proposals: list[dict[str, Any]] = Field(default_factory=list)
+    plan_issue_proposals: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class IntegratedDocument(ContractModel):

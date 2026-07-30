@@ -4,8 +4,8 @@ from collections import defaultdict
 
 from control_plane import WorkspaceContext
 from .contracts import ContractNode, OutlineContract, RequirementKind
-from .project_model import load_promoted_project_model
 from .requirement_ledger import load_promoted_requirement_ledger
+from .score_model import load_promoted_score_model
 
 
 class OutlineContractCompiler:
@@ -17,7 +17,7 @@ class OutlineContractCompiler:
 
     def compile(self) -> OutlineContract:
         ledger = load_promoted_requirement_ledger(self.context)
-        project = load_promoted_project_model(self.context)
+        scores = load_promoted_score_model(self.context)
         groups: dict[RequirementKind, list[str]] = defaultdict(list)
         for item in ledger.requirements:
             groups[item.kind].append(item.requirement_id)
@@ -37,8 +37,8 @@ class OutlineContractCompiler:
         if not nodes:
             raise ValueError("OUTLINE_BLOCKED: 要求台账为空，禁止生成通用目录")
         return OutlineContract(
-            revision=max(ledger.revision, project.revision),
-            source_hashes={**ledger.source_hashes, **project.source_hashes},
+            revision=max(ledger.revision, scores.revision),
+            source_hashes={**ledger.source_hashes, **scores.source_hashes},
             nodes=nodes,
         )
 

@@ -1,0 +1,78 @@
+{
+  "canonicalization_version": "v3-canon-2",
+  "encoding": "utf-8",
+  "json_rules": {
+    "sort_keys": true,
+    "separators": [
+      ",",
+      ":"
+    ],
+    "ensure_ascii": false
+  },
+  "vectors": [
+    {
+      "name": "empty_object",
+      "input": {},
+      "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    },
+    {
+      "name": "sorted_keys",
+      "input": {
+        "b": 1,
+        "a": 2
+      },
+      "sha256": "d3626ac30a87e6f7a6428233b3c68299976865fa5508e4267c5415c76af7a772"
+    },
+    {
+      "name": "nested",
+      "input": {
+        "x": {
+          "y": [
+            1,
+            2
+          ],
+          "z": true
+        }
+      },
+      "sha256": "f7584beb63f21f50fdb1fd233cd42c82d92af8c7a5642f1eba5dff3f1d768339"
+    },
+    {
+      "name": "unicode",
+      "input": {
+        "msg": "投标文件"
+      },
+      "sha256": "8c7c273c6a8d40e8254d210e92e7184425c6cf3168464cffd9607ba6ef6b4317"
+    },
+    {
+      "name": "list_order_sensitive",
+      "input": {
+        "items": [
+          1,
+          2,
+          3
+        ]
+      },
+      "sha256": "7aff5dcbe562761bfd9d8569cdd3226d3944acad6539db5d62ad3f67d9a45d0a"
+    },
+    {
+      "name": "list_order_sensitive_alt",
+      "input": {
+        "items": [
+          3,
+          2,
+          1
+        ]
+      },
+      "sha256": "27d87096a02d69dbce3514d6528cf8384ded1e55bd4dac03e5daf2f40b72586d"
+    },
+    {
+      "name": "null_and_bool",
+      "input": {
+        "a": null,
+        "b": false,
+        "c": true
+      },
+      "sha256": "af49ac354972dd0ae0ff9bee0f7202af84988a395ae72d14873ad5dfa2e27b29"
+    }
+  ]
+}

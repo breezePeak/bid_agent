@@ -1,0 +1,1407 @@
+{
+  "fixture_kind": "synthetic_deep_template_structure_stress",
+  "profile": {
+    "generated_heading_count": 198,
+    "appended_table_heading_count": 1,
+    "business_threshold": false,
+    "purpose": "structural fidelity and non-linear Writer fan-out regression"
+  },
+  "node_count": 199,
+  "slot_count": 9,
+  "structural_fingerprint": "db3ae77029ec5f653cebabeb29fb2e4ae6d212dcdc9ac903528fc2504b595e72",
+  "nodes": [
+    {
+      "order": 0,
+      "level": 1,
+      "title": "第1章 主题1",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 1,
+      "level": 2,
+      "title": "1.1 小节1",
+      "parent_node_id": "p-1",
+      "numbering": "1.1"
+    },
+    {
+      "order": 2,
+      "level": 2,
+      "title": "1.2 小节2",
+      "parent_node_id": "p-1",
+      "numbering": "1.2"
+    },
+    {
+      "order": 3,
+      "level": 2,
+      "title": "1.3 小节3",
+      "parent_node_id": "p-1",
+      "numbering": "1.3"
+    },
+    {
+      "order": 4,
+      "level": 2,
+      "title": "1.4 小节4",
+      "parent_node_id": "p-1",
+      "numbering": "1.4"
+    },
+    {
+      "order": 5,
+      "level": 2,
+      "title": "1.5 小节5",
+      "parent_node_id": "p-1",
+      "numbering": "1.5"
+    },
+    {
+      "order": 6,
+      "level": 2,
+      "title": "1.6 小节6",
+      "parent_node_id": "p-1",
+      "numbering": "1.6"
+    },
+    {
+      "order": 7,
+      "level": 2,
+      "title": "1.7 小节7",
+      "parent_node_id": "p-1",
+      "numbering": "1.7"
+    },
+    {
+      "order": 8,
+      "level": 2,
+      "title": "1.8 小节8",
+      "parent_node_id": "p-1",
+      "numbering": "1.8"
+    },
+    {
+      "order": 9,
+      "level": 2,
+      "title": "1.9 小节9",
+      "parent_node_id": "p-1",
+      "numbering": "1.9"
+    },
+    {
+      "order": 10,
+      "level": 2,
+      "title": "1.10 小节10",
+      "parent_node_id": "p-1",
+      "numbering": "1.10"
+    },
+    {
+      "order": 11,
+      "level": 2,
+      "title": "1.11 小节11",
+      "parent_node_id": "p-1",
+      "numbering": "1.11"
+    },
+    {
+      "order": 12,
+      "level": 2,
+      "title": "1.12 小节12",
+      "parent_node_id": "p-1",
+      "numbering": "1.12"
+    },
+    {
+      "order": 13,
+      "level": 2,
+      "title": "1.13 小节13",
+      "parent_node_id": "p-1",
+      "numbering": "1.13"
+    },
+    {
+      "order": 14,
+      "level": 2,
+      "title": "1.14 小节14",
+      "parent_node_id": "p-1",
+      "numbering": "1.14"
+    },
+    {
+      "order": 15,
+      "level": 2,
+      "title": "1.15 小节15",
+      "parent_node_id": "p-1",
+      "numbering": "1.15"
+    },
+    {
+      "order": 16,
+      "level": 2,
+      "title": "1.16 小节16",
+      "parent_node_id": "p-1",
+      "numbering": "1.16"
+    },
+    {
+      "order": 17,
+      "level": 2,
+      "title": "1.17 小节17",
+      "parent_node_id": "p-1",
+      "numbering": "1.17"
+    },
+    {
+      "order": 18,
+      "level": 2,
+      "title": "1.18 小节18",
+      "parent_node_id": "p-1",
+      "numbering": "1.18"
+    },
+    {
+      "order": 19,
+      "level": 2,
+      "title": "1.19 小节19",
+      "parent_node_id": "p-1",
+      "numbering": "1.19"
+    },
+    {
+      "order": 20,
+      "level": 2,
+      "title": "1.20 小节20",
+      "parent_node_id": "p-1",
+      "numbering": "1.20"
+    },
+    {
+      "order": 21,
+      "level": 2,
+      "title": "1.21 小节21",
+      "parent_node_id": "p-1",
+      "numbering": "1.21"
+    },
+    {
+      "order": 22,
+      "level": 2,
+      "title": "1.22 小节22",
+      "parent_node_id": "p-1",
+      "numbering": "1.22"
+    },
+    {
+      "order": 23,
+      "level": 2,
+      "title": "1.23 小节23",
+      "parent_node_id": "p-1",
+      "numbering": "1.23"
+    },
+    {
+      "order": 24,
+      "level": 2,
+      "title": "1.24 小节24",
+      "parent_node_id": "p-1",
+      "numbering": "1.24"
+    },
+    {
+      "order": 25,
+      "level": 2,
+      "title": "1.25 小节25",
+      "parent_node_id": "p-1",
+      "numbering": "1.25"
+    },
+    {
+      "order": 26,
+      "level": 2,
+      "title": "1.26 小节26",
+      "parent_node_id": "p-1",
+      "numbering": "1.26"
+    },
+    {
+      "order": 27,
+      "level": 2,
+      "title": "1.27 小节27",
+      "parent_node_id": "p-1",
+      "numbering": "1.27"
+    },
+    {
+      "order": 28,
+      "level": 1,
+      "title": "第2章 主题2",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 29,
+      "level": 2,
+      "title": "2.1 小节1",
+      "parent_node_id": "p-30",
+      "numbering": "2.1"
+    },
+    {
+      "order": 30,
+      "level": 2,
+      "title": "2.2 小节2",
+      "parent_node_id": "p-30",
+      "numbering": "2.2"
+    },
+    {
+      "order": 31,
+      "level": 2,
+      "title": "2.3 小节3",
+      "parent_node_id": "p-30",
+      "numbering": "2.3"
+    },
+    {
+      "order": 32,
+      "level": 2,
+      "title": "2.4 小节4",
+      "parent_node_id": "p-30",
+      "numbering": "2.4"
+    },
+    {
+      "order": 33,
+      "level": 2,
+      "title": "2.5 小节5",
+      "parent_node_id": "p-30",
+      "numbering": "2.5"
+    },
+    {
+      "order": 34,
+      "level": 2,
+      "title": "2.6 小节6",
+      "parent_node_id": "p-30",
+      "numbering": "2.6"
+    },
+    {
+      "order": 35,
+      "level": 2,
+      "title": "2.7 小节7",
+      "parent_node_id": "p-30",
+      "numbering": "2.7"
+    },
+    {
+      "order": 36,
+      "level": 2,
+      "title": "2.8 小节8",
+      "parent_node_id": "p-30",
+      "numbering": "2.8"
+    },
+    {
+      "order": 37,
+      "level": 2,
+      "title": "2.9 小节9",
+      "parent_node_id": "p-30",
+      "numbering": "2.9"
+    },
+    {
+      "order": 38,
+      "level": 2,
+      "title": "2.10 小节10",
+      "parent_node_id": "p-30",
+      "numbering": "2.10"
+    },
+    {
+      "order": 39,
+      "level": 2,
+      "title": "2.11 小节11",
+      "parent_node_id": "p-30",
+      "numbering": "2.11"
+    },
+    {
+      "order": 40,
+      "level": 2,
+      "title": "2.12 小节12",
+      "parent_node_id": "p-30",
+      "numbering": "2.12"
+    },
+    {
+      "order": 41,
+      "level": 2,
+      "title": "2.13 小节13",
+      "parent_node_id": "p-30",
+      "numbering": "2.13"
+    },
+    {
+      "order": 42,
+      "level": 2,
+      "title": "2.14 小节14",
+      "parent_node_id": "p-30",
+      "numbering": "2.14"
+    },
+    {
+      "order": 43,
+      "level": 2,
+      "title": "2.15 小节15",
+      "parent_node_id": "p-30",
+      "numbering": "2.15"
+    },
+    {
+      "order": 44,
+      "level": 2,
+      "title": "2.16 小节16",
+      "parent_node_id": "p-30",
+      "numbering": "2.16"
+    },
+    {
+      "order": 45,
+      "level": 2,
+      "title": "2.17 小节17",
+      "parent_node_id": "p-30",
+      "numbering": "2.17"
+    },
+    {
+      "order": 46,
+      "level": 2,
+      "title": "2.18 小节18",
+      "parent_node_id": "p-30",
+      "numbering": "2.18"
+    },
+    {
+      "order": 47,
+      "level": 2,
+      "title": "2.19 小节19",
+      "parent_node_id": "p-30",
+      "numbering": "2.19"
+    },
+    {
+      "order": 48,
+      "level": 2,
+      "title": "2.20 小节20",
+      "parent_node_id": "p-30",
+      "numbering": "2.20"
+    },
+    {
+      "order": 49,
+      "level": 2,
+      "title": "2.21 小节21",
+      "parent_node_id": "p-30",
+      "numbering": "2.21"
+    },
+    {
+      "order": 50,
+      "level": 2,
+      "title": "2.22 小节22",
+      "parent_node_id": "p-30",
+      "numbering": "2.22"
+    },
+    {
+      "order": 51,
+      "level": 2,
+      "title": "2.23 小节23",
+      "parent_node_id": "p-30",
+      "numbering": "2.23"
+    },
+    {
+      "order": 52,
+      "level": 2,
+      "title": "2.24 小节24",
+      "parent_node_id": "p-30",
+      "numbering": "2.24"
+    },
+    {
+      "order": 53,
+      "level": 2,
+      "title": "2.25 小节25",
+      "parent_node_id": "p-30",
+      "numbering": "2.25"
+    },
+    {
+      "order": 54,
+      "level": 2,
+      "title": "2.26 小节26",
+      "parent_node_id": "p-30",
+      "numbering": "2.26"
+    },
+    {
+      "order": 55,
+      "level": 2,
+      "title": "2.27 小节27",
+      "parent_node_id": "p-30",
+      "numbering": "2.27"
+    },
+    {
+      "order": 56,
+      "level": 1,
+      "title": "第3章 主题3",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 57,
+      "level": 2,
+      "title": "3.1 小节1",
+      "parent_node_id": "p-59",
+      "numbering": "3.1"
+    },
+    {
+      "order": 58,
+      "level": 2,
+      "title": "3.2 小节2",
+      "parent_node_id": "p-59",
+      "numbering": "3.2"
+    },
+    {
+      "order": 59,
+      "level": 2,
+      "title": "3.3 小节3",
+      "parent_node_id": "p-59",
+      "numbering": "3.3"
+    },
+    {
+      "order": 60,
+      "level": 2,
+      "title": "3.4 小节4",
+      "parent_node_id": "p-59",
+      "numbering": "3.4"
+    },
+    {
+      "order": 61,
+      "level": 2,
+      "title": "3.5 小节5",
+      "parent_node_id": "p-59",
+      "numbering": "3.5"
+    },
+    {
+      "order": 62,
+      "level": 2,
+      "title": "3.6 小节6",
+      "parent_node_id": "p-59",
+      "numbering": "3.6"
+    },
+    {
+      "order": 63,
+      "level": 2,
+      "title": "3.7 小节7",
+      "parent_node_id": "p-59",
+      "numbering": "3.7"
+    },
+    {
+      "order": 64,
+      "level": 2,
+      "title": "3.8 小节8",
+      "parent_node_id": "p-59",
+      "numbering": "3.8"
+    },
+    {
+      "order": 65,
+      "level": 2,
+      "title": "3.9 小节9",
+      "parent_node_id": "p-59",
+      "numbering": "3.9"
+    },
+    {
+      "order": 66,
+      "level": 2,
+      "title": "3.10 小节10",
+      "parent_node_id": "p-59",
+      "numbering": "3.10"
+    },
+    {
+      "order": 67,
+      "level": 2,
+      "title": "3.11 小节11",
+      "parent_node_id": "p-59",
+      "numbering": "3.11"
+    },
+    {
+      "order": 68,
+      "level": 2,
+      "title": "3.12 小节12",
+      "parent_node_id": "p-59",
+      "numbering": "3.12"
+    },
+    {
+      "order": 69,
+      "level": 2,
+      "title": "3.13 小节13",
+      "parent_node_id": "p-59",
+      "numbering": "3.13"
+    },
+    {
+      "order": 70,
+      "level": 2,
+      "title": "3.14 小节14",
+      "parent_node_id": "p-59",
+      "numbering": "3.14"
+    },
+    {
+      "order": 71,
+      "level": 2,
+      "title": "3.15 小节15",
+      "parent_node_id": "p-59",
+      "numbering": "3.15"
+    },
+    {
+      "order": 72,
+      "level": 2,
+      "title": "3.16 小节16",
+      "parent_node_id": "p-59",
+      "numbering": "3.16"
+    },
+    {
+      "order": 73,
+      "level": 2,
+      "title": "3.17 小节17",
+      "parent_node_id": "p-59",
+      "numbering": "3.17"
+    },
+    {
+      "order": 74,
+      "level": 2,
+      "title": "3.18 小节18",
+      "parent_node_id": "p-59",
+      "numbering": "3.18"
+    },
+    {
+      "order": 75,
+      "level": 2,
+      "title": "3.19 小节19",
+      "parent_node_id": "p-59",
+      "numbering": "3.19"
+    },
+    {
+      "order": 76,
+      "level": 2,
+      "title": "3.20 小节20",
+      "parent_node_id": "p-59",
+      "numbering": "3.20"
+    },
+    {
+      "order": 77,
+      "level": 2,
+      "title": "3.21 小节21",
+      "parent_node_id": "p-59",
+      "numbering": "3.21"
+    },
+    {
+      "order": 78,
+      "level": 2,
+      "title": "3.22 小节22",
+      "parent_node_id": "p-59",
+      "numbering": "3.22"
+    },
+    {
+      "order": 79,
+      "level": 2,
+      "title": "3.23 小节23",
+      "parent_node_id": "p-59",
+      "numbering": "3.23"
+    },
+    {
+      "order": 80,
+      "level": 2,
+      "title": "3.24 小节24",
+      "parent_node_id": "p-59",
+      "numbering": "3.24"
+    },
+    {
+      "order": 81,
+      "level": 2,
+      "title": "3.25 小节25",
+      "parent_node_id": "p-59",
+      "numbering": "3.25"
+    },
+    {
+      "order": 82,
+      "level": 2,
+      "title": "3.26 小节26",
+      "parent_node_id": "p-59",
+      "numbering": "3.26"
+    },
+    {
+      "order": 83,
+      "level": 2,
+      "title": "3.27 小节27",
+      "parent_node_id": "p-59",
+      "numbering": "3.27"
+    },
+    {
+      "order": 84,
+      "level": 1,
+      "title": "第4章 主题4",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 85,
+      "level": 2,
+      "title": "4.1 小节1",
+      "parent_node_id": "p-88",
+      "numbering": "4.1"
+    },
+    {
+      "order": 86,
+      "level": 2,
+      "title": "4.2 小节2",
+      "parent_node_id": "p-88",
+      "numbering": "4.2"
+    },
+    {
+      "order": 87,
+      "level": 2,
+      "title": "4.3 小节3",
+      "parent_node_id": "p-88",
+      "numbering": "4.3"
+    },
+    {
+      "order": 88,
+      "level": 2,
+      "title": "4.4 小节4",
+      "parent_node_id": "p-88",
+      "numbering": "4.4"
+    },
+    {
+      "order": 89,
+      "level": 2,
+      "title": "4.5 小节5",
+      "parent_node_id": "p-88",
+      "numbering": "4.5"
+    },
+    {
+      "order": 90,
+      "level": 2,
+      "title": "4.6 小节6",
+      "parent_node_id": "p-88",
+      "numbering": "4.6"
+    },
+    {
+      "order": 91,
+      "level": 2,
+      "title": "4.7 小节7",
+      "parent_node_id": "p-88",
+      "numbering": "4.7"
+    },
+    {
+      "order": 92,
+      "level": 2,
+      "title": "4.8 小节8",
+      "parent_node_id": "p-88",
+      "numbering": "4.8"
+    },
+    {
+      "order": 93,
+      "level": 2,
+      "title": "4.9 小节9",
+      "parent_node_id": "p-88",
+      "numbering": "4.9"
+    },
+    {
+      "order": 94,
+      "level": 2,
+      "title": "4.10 小节10",
+      "parent_node_id": "p-88",
+      "numbering": "4.10"
+    },
+    {
+      "order": 95,
+      "level": 2,
+      "title": "4.11 小节11",
+      "parent_node_id": "p-88",
+      "numbering": "4.11"
+    },
+    {
+      "order": 96,
+      "level": 2,
+      "title": "4.12 小节12",
+      "parent_node_id": "p-88",
+      "numbering": "4.12"
+    },
+    {
+      "order": 97,
+      "level": 2,
+      "title": "4.13 小节13",
+      "parent_node_id": "p-88",
+      "numbering": "4.13"
+    },
+    {
+      "order": 98,
+      "level": 2,
+      "title": "4.14 小节14",
+      "parent_node_id": "p-88",
+      "numbering": "4.14"
+    },
+    {
+      "order": 99,
+      "level": 2,
+      "title": "4.15 小节15",
+      "parent_node_id": "p-88",
+      "numbering": "4.15"
+    },
+    {
+      "order": 100,
+      "level": 2,
+      "title": "4.16 小节16",
+      "parent_node_id": "p-88",
+      "numbering": "4.16"
+    },
+    {
+      "order": 101,
+      "level": 2,
+      "title": "4.17 小节17",
+      "parent_node_id": "p-88",
+      "numbering": "4.17"
+    },
+    {
+      "order": 102,
+      "level": 2,
+      "title": "4.18 小节18",
+      "parent_node_id": "p-88",
+      "numbering": "4.18"
+    },
+    {
+      "order": 103,
+      "level": 2,
+      "title": "4.19 小节19",
+      "parent_node_id": "p-88",
+      "numbering": "4.19"
+    },
+    {
+      "order": 104,
+      "level": 2,
+      "title": "4.20 小节20",
+      "parent_node_id": "p-88",
+      "numbering": "4.20"
+    },
+    {
+      "order": 105,
+      "level": 2,
+      "title": "4.21 小节21",
+      "parent_node_id": "p-88",
+      "numbering": "4.21"
+    },
+    {
+      "order": 106,
+      "level": 2,
+      "title": "4.22 小节22",
+      "parent_node_id": "p-88",
+      "numbering": "4.22"
+    },
+    {
+      "order": 107,
+      "level": 2,
+      "title": "4.23 小节23",
+      "parent_node_id": "p-88",
+      "numbering": "4.23"
+    },
+    {
+      "order": 108,
+      "level": 2,
+      "title": "4.24 小节24",
+      "parent_node_id": "p-88",
+      "numbering": "4.24"
+    },
+    {
+      "order": 109,
+      "level": 2,
+      "title": "4.25 小节25",
+      "parent_node_id": "p-88",
+      "numbering": "4.25"
+    },
+    {
+      "order": 110,
+      "level": 2,
+      "title": "4.26 小节26",
+      "parent_node_id": "p-88",
+      "numbering": "4.26"
+    },
+    {
+      "order": 111,
+      "level": 2,
+      "title": "4.27 小节27",
+      "parent_node_id": "p-88",
+      "numbering": "4.27"
+    },
+    {
+      "order": 112,
+      "level": 1,
+      "title": "第5章 主题5",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 113,
+      "level": 2,
+      "title": "5.1 小节1",
+      "parent_node_id": "p-117",
+      "numbering": "5.1"
+    },
+    {
+      "order": 114,
+      "level": 2,
+      "title": "5.2 小节2",
+      "parent_node_id": "p-117",
+      "numbering": "5.2"
+    },
+    {
+      "order": 115,
+      "level": 2,
+      "title": "5.3 小节3",
+      "parent_node_id": "p-117",
+      "numbering": "5.3"
+    },
+    {
+      "order": 116,
+      "level": 2,
+      "title": "5.4 小节4",
+      "parent_node_id": "p-117",
+      "numbering": "5.4"
+    },
+    {
+      "order": 117,
+      "level": 2,
+      "title": "5.5 小节5",
+      "parent_node_id": "p-117",
+      "numbering": "5.5"
+    },
+    {
+      "order": 118,
+      "level": 2,
+      "title": "5.6 小节6",
+      "parent_node_id": "p-117",
+      "numbering": "5.6"
+    },
+    {
+      "order": 119,
+      "level": 2,
+      "title": "5.7 小节7",
+      "parent_node_id": "p-117",
+      "numbering": "5.7"
+    },
+    {
+      "order": 120,
+      "level": 2,
+      "title": "5.8 小节8",
+      "parent_node_id": "p-117",
+      "numbering": "5.8"
+    },
+    {
+      "order": 121,
+      "level": 2,
+      "title": "5.9 小节9",
+      "parent_node_id": "p-117",
+      "numbering": "5.9"
+    },
+    {
+      "order": 122,
+      "level": 2,
+      "title": "5.10 小节10",
+      "parent_node_id": "p-117",
+      "numbering": "5.10"
+    },
+    {
+      "order": 123,
+      "level": 2,
+      "title": "5.11 小节11",
+      "parent_node_id": "p-117",
+      "numbering": "5.11"
+    },
+    {
+      "order": 124,
+      "level": 2,
+      "title": "5.12 小节12",
+      "parent_node_id": "p-117",
+      "numbering": "5.12"
+    },
+    {
+      "order": 125,
+      "level": 2,
+      "title": "5.13 小节13",
+      "parent_node_id": "p-117",
+      "numbering": "5.13"
+    },
+    {
+      "order": 126,
+      "level": 2,
+      "title": "5.14 小节14",
+      "parent_node_id": "p-117",
+      "numbering": "5.14"
+    },
+    {
+      "order": 127,
+      "level": 2,
+      "title": "5.15 小节15",
+      "parent_node_id": "p-117",
+      "numbering": "5.15"
+    },
+    {
+      "order": 128,
+      "level": 2,
+      "title": "5.16 小节16",
+      "parent_node_id": "p-117",
+      "numbering": "5.16"
+    },
+    {
+      "order": 129,
+      "level": 2,
+      "title": "5.17 小节17",
+      "parent_node_id": "p-117",
+      "numbering": "5.17"
+    },
+    {
+      "order": 130,
+      "level": 2,
+      "title": "5.18 小节18",
+      "parent_node_id": "p-117",
+      "numbering": "5.18"
+    },
+    {
+      "order": 131,
+      "level": 2,
+      "title": "5.19 小节19",
+      "parent_node_id": "p-117",
+      "numbering": "5.19"
+    },
+    {
+      "order": 132,
+      "level": 2,
+      "title": "5.20 小节20",
+      "parent_node_id": "p-117",
+      "numbering": "5.20"
+    },
+    {
+      "order": 133,
+      "level": 2,
+      "title": "5.21 小节21",
+      "parent_node_id": "p-117",
+      "numbering": "5.21"
+    },
+    {
+      "order": 134,
+      "level": 2,
+      "title": "5.22 小节22",
+      "parent_node_id": "p-117",
+      "numbering": "5.22"
+    },
+    {
+      "order": 135,
+      "level": 2,
+      "title": "5.23 小节23",
+      "parent_node_id": "p-117",
+      "numbering": "5.23"
+    },
+    {
+      "order": 136,
+      "level": 2,
+      "title": "5.24 小节24",
+      "parent_node_id": "p-117",
+      "numbering": "5.24"
+    },
+    {
+      "order": 137,
+      "level": 2,
+      "title": "5.25 小节25",
+      "parent_node_id": "p-117",
+      "numbering": "5.25"
+    },
+    {
+      "order": 138,
+      "level": 2,
+      "title": "5.26 小节26",
+      "parent_node_id": "p-117",
+      "numbering": "5.26"
+    },
+    {
+      "order": 139,
+      "level": 2,
+      "title": "5.27 小节27",
+      "parent_node_id": "p-117",
+      "numbering": "5.27"
+    },
+    {
+      "order": 140,
+      "level": 1,
+      "title": "第6章 主题6",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 141,
+      "level": 2,
+      "title": "6.1 小节1",
+      "parent_node_id": "p-146",
+      "numbering": "6.1"
+    },
+    {
+      "order": 142,
+      "level": 2,
+      "title": "6.2 小节2",
+      "parent_node_id": "p-146",
+      "numbering": "6.2"
+    },
+    {
+      "order": 143,
+      "level": 2,
+      "title": "6.3 小节3",
+      "parent_node_id": "p-146",
+      "numbering": "6.3"
+    },
+    {
+      "order": 144,
+      "level": 2,
+      "title": "6.4 小节4",
+      "parent_node_id": "p-146",
+      "numbering": "6.4"
+    },
+    {
+      "order": 145,
+      "level": 2,
+      "title": "6.5 小节5",
+      "parent_node_id": "p-146",
+      "numbering": "6.5"
+    },
+    {
+      "order": 146,
+      "level": 2,
+      "title": "6.6 小节6",
+      "parent_node_id": "p-146",
+      "numbering": "6.6"
+    },
+    {
+      "order": 147,
+      "level": 2,
+      "title": "6.7 小节7",
+      "parent_node_id": "p-146",
+      "numbering": "6.7"
+    },
+    {
+      "order": 148,
+      "level": 2,
+      "title": "6.8 小节8",
+      "parent_node_id": "p-146",
+      "numbering": "6.8"
+    },
+    {
+      "order": 149,
+      "level": 2,
+      "title": "6.9 小节9",
+      "parent_node_id": "p-146",
+      "numbering": "6.9"
+    },
+    {
+      "order": 150,
+      "level": 2,
+      "title": "6.10 小节10",
+      "parent_node_id": "p-146",
+      "numbering": "6.10"
+    },
+    {
+      "order": 151,
+      "level": 2,
+      "title": "6.11 小节11",
+      "parent_node_id": "p-146",
+      "numbering": "6.11"
+    },
+    {
+      "order": 152,
+      "level": 2,
+      "title": "6.12 小节12",
+      "parent_node_id": "p-146",
+      "numbering": "6.12"
+    },
+    {
+      "order": 153,
+      "level": 2,
+      "title": "6.13 小节13",
+      "parent_node_id": "p-146",
+      "numbering": "6.13"
+    },
+    {
+      "order": 154,
+      "level": 2,
+      "title": "6.14 小节14",
+      "parent_node_id": "p-146",
+      "numbering": "6.14"
+    },
+    {
+      "order": 155,
+      "level": 2,
+      "title": "6.15 小节15",
+      "parent_node_id": "p-146",
+      "numbering": "6.15"
+    },
+    {
+      "order": 156,
+      "level": 2,
+      "title": "6.16 小节16",
+      "parent_node_id": "p-146",
+      "numbering": "6.16"
+    },
+    {
+      "order": 157,
+      "level": 2,
+      "title": "6.17 小节17",
+      "parent_node_id": "p-146",
+      "numbering": "6.17"
+    },
+    {
+      "order": 158,
+      "level": 2,
+      "title": "6.18 小节18",
+      "parent_node_id": "p-146",
+      "numbering": "6.18"
+    },
+    {
+      "order": 159,
+      "level": 2,
+      "title": "6.19 小节19",
+      "parent_node_id": "p-146",
+      "numbering": "6.19"
+    },
+    {
+      "order": 160,
+      "level": 2,
+      "title": "6.20 小节20",
+      "parent_node_id": "p-146",
+      "numbering": "6.20"
+    },
+    {
+      "order": 161,
+      "level": 2,
+      "title": "6.21 小节21",
+      "parent_node_id": "p-146",
+      "numbering": "6.21"
+    },
+    {
+      "order": 162,
+      "level": 2,
+      "title": "6.22 小节22",
+      "parent_node_id": "p-146",
+      "numbering": "6.22"
+    },
+    {
+      "order": 163,
+      "level": 2,
+      "title": "6.23 小节23",
+      "parent_node_id": "p-146",
+      "numbering": "6.23"
+    },
+    {
+      "order": 164,
+      "level": 2,
+      "title": "6.24 小节24",
+      "parent_node_id": "p-146",
+      "numbering": "6.24"
+    },
+    {
+      "order": 165,
+      "level": 2,
+      "title": "6.25 小节25",
+      "parent_node_id": "p-146",
+      "numbering": "6.25"
+    },
+    {
+      "order": 166,
+      "level": 2,
+      "title": "6.26 小节26",
+      "parent_node_id": "p-146",
+      "numbering": "6.26"
+    },
+    {
+      "order": 167,
+      "level": 2,
+      "title": "6.27 小节27",
+      "parent_node_id": "p-146",
+      "numbering": "6.27"
+    },
+    {
+      "order": 168,
+      "level": 1,
+      "title": "第7章 主题7",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 169,
+      "level": 2,
+      "title": "7.1 小节1",
+      "parent_node_id": "p-175",
+      "numbering": "7.1"
+    },
+    {
+      "order": 170,
+      "level": 2,
+      "title": "7.2 小节2",
+      "parent_node_id": "p-175",
+      "numbering": "7.2"
+    },
+    {
+      "order": 171,
+      "level": 2,
+      "title": "7.3 小节3",
+      "parent_node_id": "p-175",
+      "numbering": "7.3"
+    },
+    {
+      "order": 172,
+      "level": 2,
+      "title": "7.4 小节4",
+      "parent_node_id": "p-175",
+      "numbering": "7.4"
+    },
+    {
+      "order": 173,
+      "level": 2,
+      "title": "7.5 小节5",
+      "parent_node_id": "p-175",
+      "numbering": "7.5"
+    },
+    {
+      "order": 174,
+      "level": 2,
+      "title": "7.6 小节6",
+      "parent_node_id": "p-175",
+      "numbering": "7.6"
+    },
+    {
+      "order": 175,
+      "level": 2,
+      "title": "7.7 小节7",
+      "parent_node_id": "p-175",
+      "numbering": "7.7"
+    },
+    {
+      "order": 176,
+      "level": 2,
+      "title": "7.8 小节8",
+      "parent_node_id": "p-175",
+      "numbering": "7.8"
+    },
+    {
+      "order": 177,
+      "level": 2,
+      "title": "7.9 小节9",
+      "parent_node_id": "p-175",
+      "numbering": "7.9"
+    },
+    {
+      "order": 178,
+      "level": 2,
+      "title": "7.10 小节10",
+      "parent_node_id": "p-175",
+      "numbering": "7.10"
+    },
+    {
+      "order": 179,
+      "level": 2,
+      "title": "7.11 小节11",
+      "parent_node_id": "p-175",
+      "numbering": "7.11"
+    },
+    {
+      "order": 180,
+      "level": 2,
+      "title": "7.12 小节12",
+      "parent_node_id": "p-175",
+      "numbering": "7.12"
+    },
+    {
+      "order": 181,
+      "level": 2,
+      "title": "7.13 小节13",
+      "parent_node_id": "p-175",
+      "numbering": "7.13"
+    },
+    {
+      "order": 182,
+      "level": 2,
+      "title": "7.14 小节14",
+      "parent_node_id": "p-175",
+      "numbering": "7.14"
+    },
+    {
+      "order": 183,
+      "level": 2,
+      "title": "7.15 小节15",
+      "parent_node_id": "p-175",
+      "numbering": "7.15"
+    },
+    {
+      "order": 184,
+      "level": 2,
+      "title": "7.16 小节16",
+      "parent_node_id": "p-175",
+      "numbering": "7.16"
+    },
+    {
+      "order": 185,
+      "level": 2,
+      "title": "7.17 小节17",
+      "parent_node_id": "p-175",
+      "numbering": "7.17"
+    },
+    {
+      "order": 186,
+      "level": 2,
+      "title": "7.18 小节18",
+      "parent_node_id": "p-175",
+      "numbering": "7.18"
+    },
+    {
+      "order": 187,
+      "level": 2,
+      "title": "7.19 小节19",
+      "parent_node_id": "p-175",
+      "numbering": "7.19"
+    },
+    {
+      "order": 188,
+      "level": 2,
+      "title": "7.20 小节20",
+      "parent_node_id": "p-175",
+      "numbering": "7.20"
+    },
+    {
+      "order": 189,
+      "level": 2,
+      "title": "7.21 小节21",
+      "parent_node_id": "p-175",
+      "numbering": "7.21"
+    },
+    {
+      "order": 190,
+      "level": 2,
+      "title": "7.22 小节22",
+      "parent_node_id": "p-175",
+      "numbering": "7.22"
+    },
+    {
+      "order": 191,
+      "level": 2,
+      "title": "7.23 小节23",
+      "parent_node_id": "p-175",
+      "numbering": "7.23"
+    },
+    {
+      "order": 192,
+      "level": 2,
+      "title": "7.24 小节24",
+      "parent_node_id": "p-175",
+      "numbering": "7.24"
+    },
+    {
+      "order": 193,
+      "level": 2,
+      "title": "7.25 小节25",
+      "parent_node_id": "p-175",
+      "numbering": "7.25"
+    },
+    {
+      "order": 194,
+      "level": 2,
+      "title": "7.26 小节26",
+      "parent_node_id": "p-175",
+      "numbering": "7.26"
+    },
+    {
+      "order": 195,
+      "level": 2,
+      "title": "7.27 小节27",
+      "parent_node_id": "p-175",
+      "numbering": "7.27"
+    },
+    {
+      "order": 196,
+      "level": 1,
+      "title": "第8章 主题8",
+      "parent_node_id": null,
+      "numbering": null
+    },
+    {
+      "order": 197,
+      "level": 2,
+      "title": "8.1 小节1",
+      "parent_node_id": "p-204",
+      "numbering": "8.1"
+    },
+    {
+      "order": 198,
+      "level": 1,
+      "title": "附录表格章",
+      "parent_node_id": null,
+      "numbering": null
+    }
+  ]
+}

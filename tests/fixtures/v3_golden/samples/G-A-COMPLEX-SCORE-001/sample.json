@@ -1,0 +1,231 @@
+{
+  "sample_id": "G-A-COMPLEX-SCORE-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名复杂评分绑定样本",
+  "tags": [
+    "complex_score",
+    "binding",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "2957658f2cbee5e07b284a8d0fe7e3375217fcec9a815d9d39e5c5dd95edb74d",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "18475c408466924dcf12fbeb8ed5e8c780194ae2a87fd5f512fde90221f032ef",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "baefe69fd6e2b99996414afca1abb6a236a4302b9775e02e0369a10cacf4576b",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-cx-platform",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须建设数据汇聚与共享交换平台",
+          "match_key": "投标人须建设数据汇聚与共享交换平台",
+          "source_anchor": {
+            "location_contains": "汇聚"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-cx-connect",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须实现不少于10个业务系统的数据接入",
+          "match_key": "投标人须实现不少于10个业务系统的数据接入",
+          "source_anchor": {
+            "location_contains": "10个"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-cx-mask",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须提供数据分级分类与脱敏方案",
+          "match_key": "投标人须提供数据分级分类与脱敏方案",
+          "source_anchor": {
+            "location_contains": "脱敏"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-cx-warranty",
+          "kind": "contract",
+          "severity": "normal",
+          "normalized_requirement": "投标人须提供不少于2年原厂质保",
+          "match_key": "投标人须提供不少于2年原厂质保",
+          "source_anchor": {
+            "location_contains": "2年"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-cx-platform",
+        "R-cx-connect",
+        "R-cx-mask"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-cx-arch",
+          "title": "汇聚共享架构设计",
+          "criterion": "汇聚共享架构设计，满分35分",
+          "max_points": 35,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "platform_arch"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须建设数据汇聚与共享交换平台"
+          ],
+          "match_key": "汇聚共享架构设计，满分35分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-cx-connect",
+          "title": "业务系统接入数量与方案",
+          "criterion": "业务系统接入数量与方案，满分25分",
+          "max_points": 25,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "connect_plan"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须实现不少于10个业务系统的数据接入"
+          ],
+          "match_key": "业务系统接入数量与方案，满分25分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-cx-sec",
+          "title": "分级分类与脱敏措施",
+          "criterion": "分级分类与脱敏措施，满分20分",
+          "max_points": 20,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "data_security"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须提供数据分级分类与脱敏方案"
+          ],
+          "match_key": "分级分类与脱敏措施，满分20分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-cx-warranty",
+          "title": "质保年限与服务内容",
+          "criterion": "质保年限与服务内容，满分20分",
+          "max_points": 20,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "warranty"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须提供不少于2年原厂质保"
+          ],
+          "match_key": "质保年限与服务内容，满分20分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-cx-arch",
+        "SP-cx-connect",
+        "SP-cx-sec",
+        "SP-cx-warranty"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-cx-platform",
+          "topic_type": "data",
+          "canonical_name": "数据汇聚共享",
+          "duty_type": "design",
+          "requirement_match_keys": [
+            "投标人须建设数据汇聚与共享交换平台",
+            "投标人须实现不少于10个业务系统的数据接入"
+          ],
+          "score_match_keys": [
+            "汇聚共享架构设计，满分35分",
+            "业务系统接入数量与方案，满分25分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-cx-sec",
+          "topic_type": "security",
+          "canonical_name": "数据安全",
+          "duty_type": "secure",
+          "requirement_match_keys": [
+            "投标人须提供数据分级分类与脱敏方案"
+          ],
+          "score_match_keys": [
+            "分级分类与脱敏措施，满分20分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-cx-svc",
+          "topic_type": "service",
+          "canonical_name": "质保服务",
+          "duty_type": "serve",
+          "requirement_match_keys": [
+            "投标人须提供不少于2年原厂质保"
+          ],
+          "score_match_keys": [
+            "质保年限与服务内容，满分20分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-cx-platform",
+        "T-cx-sec",
+        "T-cx-svc"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=complex_score_binding; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

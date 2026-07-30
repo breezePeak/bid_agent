@@ -1,0 +1,85 @@
+{
+  "sample_id": "G-A1-SYN-001",
+  "suite": "A",
+  "layers": [
+    "A1"
+  ],
+  "status": "synthetic",
+  "title": "Synthetic tender obligations for A1 loader smoke",
+  "tags": [
+    "synthetic",
+    "docx-like-md",
+    "A1",
+    "not_expert_golden"
+  ],
+  "input_manifest_hash": "02929d8d63d9c7b308c87f216185430809f8696a471a00ee7cb49434ea5d9635",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "e2f06460ffe477059965d7063f8478f1f92529a6b199586f27460dbbb924edfa",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "EXP-R-credit",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须具备良好信誉",
+          "source_anchor": {
+            "location_contains": "信誉"
+          },
+          "allowed_variants": [
+            "具备良好信誉",
+            "具有良好信誉"
+          ]
+        },
+        {
+          "requirement_id": "EXP-R-duration",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "项目工期为30日",
+          "source_anchor": {
+            "location_contains": "工期"
+          },
+          "allowed_variants": [
+            "工期30日",
+            "工期为30日"
+          ]
+        },
+        {
+          "requirement_id": "EXP-R-acceptance",
+          "kind": "acceptance",
+          "severity": "normal",
+          "normalized_requirement": "交付验收报告",
+          "source_anchor": {
+            "location_contains": "验收"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "EXP-R-credit",
+        "EXP-R-duration"
+      ],
+      "notes": "Synthetic expectation for infrastructure smoke only; not dual-annotated."
+    }
+  ],
+  "annotation": {
+    "annotator": "synthetic_generator",
+    "reviewer": null,
+    "adjudicator": null,
+    "guideline_version": "v3-golden-guideline-draft",
+    "annotated_at": "2026-07-27T00:00:00+00:00",
+    "agreement_rate": null,
+    "dispute_rate": null
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "PR-14.1 scaffold sample. Expert dual annotation still required for Gate A."
+}

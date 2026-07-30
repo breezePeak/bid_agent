@@ -1,0 +1,213 @@
+{
+  "sample_id": "G-A-TEMPLATE-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名严格模板场景语义样本",
+  "tags": [
+    "template_strict",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "2123a415129de0d86b30c8a832d06a39c82127d8fab21a98e054a8f8b56df162",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "34acc238203fba19024985a5b167ad4522a3ddeb31a952c51325aeb27d23936c",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "33774a4c1b77ce6fe46eea920886b9a5bcfda52073002f6f9b9f1cbe4f302613",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-tp-point",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须逐条响应技术规格书全部条款",
+          "match_key": "投标人须逐条响应技术规格书全部条款",
+          "source_anchor": {
+            "location_contains": "逐条响应"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tp-structure",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人不得擅自增加或删除模板章节",
+          "match_key": "投标人不得擅自增加或删除模板章节",
+          "source_anchor": {
+            "location_contains": "模板章节"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tp-dev",
+          "kind": "mandatory",
+          "severity": "normal",
+          "normalized_requirement": "投标人须对偏离项逐条说明并提供证明材料",
+          "match_key": "投标人须对偏离项逐条说明并提供证明材料",
+          "source_anchor": {
+            "location_contains": "偏离"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-tp-auth",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须提供产品原厂授权书",
+          "match_key": "投标人须提供产品原厂授权书",
+          "source_anchor": {
+            "location_contains": "授权书"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-tp-point",
+        "R-tp-structure",
+        "R-tp-auth"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-tp-resp",
+          "title": "技术规格响应完整性",
+          "criterion": "技术规格响应完整性，满分50分",
+          "max_points": 50,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "point_matrix"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须逐条响应技术规格书全部条款"
+          ],
+          "match_key": "技术规格响应完整性，满分50分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-tp-dev",
+          "title": "偏离项说明充分性",
+          "criterion": "偏离项说明充分性，满分20分",
+          "max_points": 20,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "deviation_table"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须对偏离项逐条说明并提供证明材料"
+          ],
+          "match_key": "偏离项说明充分性，满分20分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-tp-auth",
+          "title": "原厂授权与证明材料",
+          "criterion": "原厂授权与证明材料，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "oem_auth"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须提供产品原厂授权书"
+          ],
+          "match_key": "原厂授权与证明材料，满分30分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-tp-resp",
+        "SP-tp-dev",
+        "SP-tp-auth"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-tp-resp",
+          "topic_type": "compliance",
+          "canonical_name": "点对点响应",
+          "duty_type": "comply",
+          "requirement_match_keys": [
+            "投标人须逐条响应技术规格书全部条款",
+            "投标人不得擅自增加或删除模板章节"
+          ],
+          "score_match_keys": [
+            "技术规格响应完整性，满分50分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-tp-dev",
+          "topic_type": "compliance",
+          "canonical_name": "偏离说明",
+          "duty_type": "explain",
+          "requirement_match_keys": [
+            "投标人须对偏离项逐条说明并提供证明材料"
+          ],
+          "score_match_keys": [
+            "偏离项说明充分性，满分20分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-tp-auth",
+          "topic_type": "qualification",
+          "canonical_name": "原厂授权",
+          "duty_type": "prove",
+          "requirement_match_keys": [
+            "投标人须提供产品原厂授权书"
+          ],
+          "score_match_keys": [
+            "原厂授权与证明材料，满分30分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-tp-resp",
+        "T-tp-dev",
+        "T-tp-auth"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=template_strict; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

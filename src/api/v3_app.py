@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import hashlib
 import json
 import os
 import re
@@ -22,6 +23,7 @@ from starlette.concurrency import run_in_threadpool
 from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext
 from document_pipeline.contracts import InputRole
 from document_pipeline.execution_controller import V3ExecutionController
+from document_pipeline.document_preview import DocumentPreviewService
 from document_pipeline.input_manifest import InputManifestService, V3_ROOT
 from document_pipeline.renderers.render_verifier import RENDER_OUTPUT_PATH, RENDER_QUALITY_PATH
 from document_pipeline.source_normalizer import NORMALIZABLE_EXTENSIONS
@@ -36,8 +38,32 @@ VUE_DIST_DIR = ROOT / "frontend" / "dist"
 _SESSIONS: dict[str, dict[str, Any]] = {}
 _COOKIE, _CSRF = "bid_agent_session", "bid_agent_csrf"
 _AUTH_SESSION_SECONDS = 12 * 60 * 60
+_SESSION_STORE_VERSION = 1
 _SESSION_LOCK = threading.Lock()
 SETTINGS = SettingsService(ROOT)
+
+
+def _reconcile_interrupted_workspaces() -> list[dict[str, Any]]:
+    """Close durable operations whose worker lease died before this boot."""
+    recovered: list[dict[str, Any]] = []
+    if not RUNS_DIR.is_dir():
+        return recovered
+    for workspace_root in RUNS_DIR.iterdir():
+        if not workspace_root.is_dir() or workspace_root.name.startswith("."):
+            continue
+        if not (workspace_root / "workspace" / "control.db").is_file():
+            continue
+        try:
+            context = WorkspaceContext.resolve(RUNS_DIR, workspace_root.name)
+            store = ControlStore(context)
+            for item in store.reconcile_expired_operations():
+                recovered.append({"workspace_id": workspace_root.name, **item})
+        except Exception:
+            # A damaged or concurrently migrated workspace must not prevent the
+            # HTTP service from starting; its own health diagnostics can expose
+            # the issue and the next boot will retry reconciliation.
+            continue
+    return recovered
 
 
 @asynccontextmanager
@@ -46,6 +72,7 @@ async def _runtime_settings_lifespan(_app: FastAPI):
     previous = SETTINGS.capture_runtime_environment("BID_AGENT_CONFIG_ROOT")
     os.environ["BID_AGENT_CONFIG_ROOT"] = str(ROOT)
     SETTINGS.apply_runtime_settings()
+    _reconcile_interrupted_workspaces()
     try:
         yield
     finally:
@@ -82,16 +109,123 @@ def _acl(context: WorkspaceContext, principal: dict[str, Any], *, write: bool) -
     store.require_workspace_access(user_id, write=write)
 
 
+def _session_store_path() -> Path:
+    return RUNS_DIR / ".auth" / "sessions.json"
+
+
+def _session_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _read_session_store() -> tuple[dict[str, dict[str, Any]], bool]:
+    path = _session_store_path()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, UnicodeError, json.JSONDecodeError):
+        return {}, False
+    if (
+        not isinstance(payload, dict)
+        or payload.get("version") != _SESSION_STORE_VERSION
+        or not isinstance(payload.get("sessions"), dict)
+    ):
+        return {}, False
+    sessions: dict[str, dict[str, Any]] = {}
+    dirty = False
+    now = time.time()
+    for key, raw in payload["sessions"].items():
+        if (
+            not isinstance(key, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", key)
+            or not isinstance(raw, dict)
+            or not isinstance(raw.get("principal"), dict)
+            or not isinstance(raw.get("csrf"), str)
+        ):
+            dirty = True
+            continue
+        try:
+            expires = float(raw.get("expires") or 0)
+        except (TypeError, ValueError):
+            dirty = True
+            continue
+        principal = raw["principal"]
+        if (
+            expires <= now
+            or not raw["csrf"]
+            or not isinstance(principal.get("id"), str)
+            or not principal["id"]
+        ):
+            dirty = True
+            continue
+        sessions[key] = {
+            "principal": dict(principal),
+            "csrf": raw["csrf"],
+            "expires": expires,
+        }
+    return sessions, dirty
+
+
+def _write_session_store(sessions: dict[str, dict[str, Any]]) -> None:
+    path = _session_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as stream:
+            json.dump(
+                {"version": _SESSION_STORE_VERSION, "sessions": sessions},
+                stream,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _load_sessions() -> dict[str, dict[str, Any]]:
+    sessions, dirty = _read_session_store()
+    if dirty:
+        _write_session_store(sessions)
+    _SESSIONS.clear()
+    _SESSIONS.update(sessions)
+    return sessions
+
+
 def _session_record(token: str) -> dict[str, Any] | None:
     value = str(token or "").strip()
     if not value:
         return None
+    key = _session_key(value)
     with _SESSION_LOCK:
-        session = _SESSIONS.get(value)
+        session = _SESSIONS.get(key)
         if not session:
-            return None
+            session = _load_sessions().get(key)
+            if not session:
+                return None
         if float(session.get("expires") or 0) <= time.time():
-            _SESSIONS.pop(value, None)
+            sessions = _load_sessions()
+            sessions.pop(key, None)
+            _SESSIONS.pop(key, None)
+            _write_session_store(sessions)
             return None
         return dict(session)
 
@@ -100,11 +234,15 @@ def _issue_session(username: str) -> JSONResponse:
     token, csrf = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
     principal = {"type": "user", "id": username[:128], "role": "admin"}
     with _SESSION_LOCK:
-        _SESSIONS[token] = {
+        sessions = _load_sessions()
+        sessions[_session_key(token)] = {
             "principal": principal,
             "csrf": csrf,
             "expires": time.time() + _AUTH_SESSION_SECONDS,
         }
+        _SESSIONS.clear()
+        _SESSIONS.update(sessions)
+        _write_session_store(sessions)
     response = JSONResponse(
         {"ok": True, "principal": principal, "csrf_token": csrf}
     )
@@ -143,6 +281,11 @@ async def auth(request: Request, call_next):
             status_code=410,
         )
     if request.url.path == "/api/auth/login":
+        return await call_next(request)
+    # The Vue shell and its static assets must stay reachable before login so
+    # the client-side router can render /login.  Authentication remains
+    # fail-closed for every API route.
+    if not request.url.path.startswith("/api/"):
         return await call_next(request)
     session = _session_record(request.cookies.get(_COOKIE, ""))
     if not session:
@@ -193,8 +336,14 @@ async def login(request: Request) -> JSONResponse:
 
 @app.post("/api/auth/logout")
 def logout(request: Request) -> JSONResponse:
+    token = str(request.cookies.get(_COOKIE, "") or "").strip()
     with _SESSION_LOCK:
-        _SESSIONS.pop(request.cookies.get(_COOKIE, ""), None)
+        sessions = _load_sessions()
+        if token:
+            sessions.pop(_session_key(token), None)
+        _SESSIONS.clear()
+        _SESSIONS.update(sessions)
+        _write_session_store(sessions)
     response = JSONResponse({"ok": True})
     response.delete_cookie(_COOKIE, path="/")
     response.delete_cookie(_CSRF, path="/")
@@ -426,8 +575,30 @@ def _gateway(context: WorkspaceContext) -> CommandGateway: return CommandGateway
 @app.post("/api/v3/workspaces/{workspace_id}/commands")
 async def command(workspace_id: str, request: Request) -> JSONResponse:
     try:
-        context = _context(workspace_id); payload = await request.json(); payload["actor"] = {"type": "v3_api", "id": str(_principal(request).get("id") or "anonymous")}
-        receipt = _gateway(context).submit(CommandEnvelope.from_mapping(payload, workspace_id=workspace_id)); return JSONResponse({"ok": receipt.status != "rejected", "receipt": receipt.as_dict(), "message": receipt.message}, status_code=202)
+        context = _context(workspace_id)
+        payload = await request.json()
+        payload["actor"] = {"type": "user", "id": str(_principal(request).get("id") or "")}
+        envelope = CommandEnvelope.from_mapping(payload, workspace_id=workspace_id)
+        # Stage handlers may wait several minutes for a model response. Keep
+        # the event loop free so the UI can poll the snapshot and observe real
+        # progress while the command is being finalized.
+        receipt = await run_in_threadpool(_gateway(context).submit, envelope)
+        return JSONResponse(
+            {
+                "ok": receipt.status != "rejected",
+                "receipt": receipt.as_dict(),
+                "message": receipt.message,
+            },
+            status_code=202,
+        )
+    except ControlPlaneError as exc: return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/planning/confirmation")
+def planning_confirmation(workspace_id: str) -> JSONResponse:
+    try:
+        from document_pipeline.artifact_promotion import HumanGateService
+        return JSONResponse({"ok": True, "planning_snapshot": HumanGateService(_context(workspace_id)).planning_snapshot()})
     except ControlPlaneError as exc: return _error(exc)
 
 
@@ -458,6 +629,39 @@ async def chat_turn(workspace_id: str, request: Request) -> JSONResponse:
 @app.get("/api/v3/workspaces/{workspace_id}/snapshot")
 def snapshot(workspace_id: str) -> JSONResponse: return JSONResponse({"ok": True, "snapshot": V3WorkspaceSnapshotBuilder(_context(workspace_id)).build()})
 
+@app.get("/api/v3/workspaces/{workspace_id}/content-units/{unit_id}")
+def content_unit_detail(workspace_id: str, unit_id: str) -> JSONResponse:
+    try:
+        detail = V3WorkspaceSnapshotBuilder(
+            _context(workspace_id)
+        ).content_unit_detail(unit_id)
+        return JSONResponse({"ok": True, "content_unit": detail})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/generation-stages/{stage_id}")
+def generation_stage_detail(
+    workspace_id: str,
+    stage_id: str,
+) -> JSONResponse:
+    try:
+        detail = V3WorkspaceSnapshotBuilder(
+            _context(workspace_id)
+        ).generation_stage_detail(stage_id)
+        return JSONResponse({"ok": True, "stage": detail})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/document-preview")
+def document_preview(workspace_id: str) -> JSONResponse:
+    try:
+        preview = DocumentPreviewService(_context(workspace_id)).build()
+        return JSONResponse({"ok": True, "preview": preview})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
 @app.get("/api/v3/workspaces/{workspace_id}/events")
 def events(workspace_id: str, after_seq: int = Query(0), limit: int = Query(200)) -> JSONResponse: return JSONResponse({"ok": True, "events": ControlStore(_context(workspace_id)).events(after_seq, limit=min(limit, 2000))})
 
@@ -473,9 +677,14 @@ def latest_gate(workspace_id: str) -> JSONResponse:
 
 @app.get("/api/v3/workspaces/{workspace_id}/exports/final")
 def export(workspace_id: str):
-    context = _context(workspace_id); report = read_json(context.root / RENDER_QUALITY_PATH) if (context.root / RENDER_QUALITY_PATH).is_file() else {}
+    context = _context(workspace_id)
+    try:
+        DocumentPreviewService(context).build()
+    except ControlPlaneError as exc:
+        return _error(exc)
+    report = read_json(context.root / RENDER_QUALITY_PATH) if (context.root / RENDER_QUALITY_PATH).is_file() else {}
     artifact = context.root / RENDER_OUTPUT_PATH
-    if report.get("status") != "ready" or not artifact.is_file(): return JSONResponse({"ok": False, "message": "V3 交付门禁未通过。"}, status_code=409)
+    if report.get("status") not in {"ready", "ready_with_warnings"} or not artifact.is_file(): return JSONResponse({"ok": False, "message": "V3 交付门禁未通过。"}, status_code=409)
     return FileResponse(artifact, filename="final.docx")
 
 

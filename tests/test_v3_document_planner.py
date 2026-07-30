@@ -19,6 +19,25 @@ from document_pipeline.source_normalizer import SourceNormalizer  # noqa: E402
 
 
 class V3DocumentPlannerTests(unittest.TestCase):
+    def test_shared_blueprint_requirement_keeps_one_execution_owner(self) -> None:
+        owners = DocumentPlanner._unique_primary_requirement_owners(
+            ["CH-1", "CH-2", "CH-3"],
+            {
+                "CH-1": ["R-shared", "R-1"],
+                "CH-2": ["R-shared", "R-2"],
+                "CH-3": ["R-2", "R-3"],
+            },
+        )
+
+        self.assertEqual(
+            owners,
+            {
+                "CH-1": ["R-shared", "R-1"],
+                "CH-2": ["R-2"],
+                "CH-3": ["R-3"],
+            },
+        )
+
     def test_each_requirement_has_exactly_one_primary_owner_and_units_are_not_leaf_jobs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -33,8 +52,10 @@ class V3DocumentPlannerTests(unittest.TestCase):
             inputs.register_local_file(tender, InputRole.TENDER)
             inputs.register_local_file(score, InputRole.SCORE)
             SourceNormalizer(context).normalize_active_inputs()
-            ledger = V3StageRunner(context).run("build_requirement_ledger")
-            runner = V3StageRunner(context)
+            ledger = V3StageRunner.for_deterministic_tests(context).run(
+                "build_requirement_ledger"
+            )
+            runner = V3StageRunner.for_deterministic_tests(context)
             runner.run("analyze_scores")
             runner.run("plan_response")
             contract = DocumentContractCompiler(context).compile()

@@ -1,0 +1,96 @@
+{
+  "description": "Illegal receipt/proposal fixtures for PR-14.0 schema fail-closed tests",
+  "cases": [
+    {
+      "name": "gate_receipt_missing_validation_hash",
+      "kind": "GateReceipt",
+      "payload": {
+        "workspace_id": "ws",
+        "proposal_id": "p",
+        "proposal_hash": "h",
+        "validation_report_id": "r",
+        "validation_report_hash": "",
+        "artifact_kind": "RequirementLedger",
+        "base_revision": 0,
+        "dependency_fingerprint": "d",
+        "gate_id": "G1",
+        "gate_policy_version": "v",
+        "verdict": "pass",
+        "issuer": "gate_service",
+        "reviewer": "system"
+      },
+      "expect": "error"
+    },
+    {
+      "name": "planning_carry_forward_without_source_h1",
+      "kind": "PlanningGateReceipt",
+      "payload": {
+        "workspace_id": "ws",
+        "proposal_id": "p",
+        "proposal_hash": "h",
+        "validation_report_id": "r",
+        "validation_report_hash": "rh",
+        "artifact_kind": "ChapterBlueprint",
+        "base_revision": 1,
+        "dependency_fingerprint": "d",
+        "gate_id": "H1_PLANNING_CONFIRM",
+        "gate_policy_version": "v",
+        "verdict": "pass",
+        "issuer": "human_gate_service",
+        "reviewer": "svc",
+        "planning_decision": "deterministic_carry_forward",
+        "principal_id": "u1",
+        "planning_confirmation_scope_hash": "s",
+        "planning_audit_snapshot_hash": "a",
+        "g2_receipt_id": "g2",
+        "g2_receipt_hash": "g2h",
+        "planning_dag_root_hash": "dag",
+        "policy_nonce": "n"
+      },
+      "expect": "error"
+    },
+    {
+      "name": "promotion_without_gate_bindings",
+      "kind": "PromotionReceipt",
+      "payload": {
+        "receipt_id": "pr",
+        "workspace_id": "ws",
+        "proposal_id": "p",
+        "proposal_hash": "h",
+        "artifact_kind": "RequirementLedger",
+        "operation_id": "op",
+        "artifact_id": "RequirementLedger@1",
+        "base_revision": 0,
+        "promoted_revision": 1,
+        "artifact_hash": "ah",
+        "dependency_fingerprint": "d",
+        "gate_receipts": [],
+        "policy_version": "v",
+        "created_at": "2026-01-01T00:00:00+00:00"
+      },
+      "expect": "error"
+    },
+    {
+      "name": "proposal_duplicate_citations",
+      "kind": "ProposalEnvelope",
+      "payload": {
+        "workspace_id": "ws",
+        "artifact_kind": "RequirementLedger",
+        "producer_role": "requirement_agent",
+        "operation_id": "op",
+        "base_revision": 0,
+        "dependency_fingerprint": "d",
+        "payload": {
+          "requirements": []
+        },
+        "cited_source_ids": [
+          "a",
+          "a"
+        ],
+        "prompt_version": "p",
+        "model_fingerprint": "m"
+      },
+      "expect": "error"
+    }
+  ]
+}

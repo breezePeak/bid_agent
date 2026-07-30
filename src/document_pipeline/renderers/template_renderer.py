@@ -12,9 +12,11 @@ from ..document_contract import DOCUMENT_CONTRACT_PATH
 from ..input_manifest import InputManifestService, V3_ROOT
 from ..integrator import INTEGRATED_DOCUMENT_PATH
 from ..template_contract import TemplateContractCompiler
+from .markdown_projection import project_docx_to_markdown
 
 
 TEMPLATE_OUTPUT_PATH = Path("outputs/v3/final.docx")
+TEMPLATE_MARKDOWN_PATH = Path("outputs/v3/final.md")
 TEMPLATE_RENDER_REPORT_PATH = V3_ROOT / "reports" / "template_render.json"
 
 
@@ -61,6 +63,11 @@ class StrictTemplateRenderer:
         if current_fingerprint != contract.structural_fingerprint:
             raise ValueError("TEMPLATE_RENDER_BLOCKED: 模板结构指纹发生未授权变化")
         write_json(self.root / TEMPLATE_RENDER_REPORT_PATH, {"schema_version": "v3", "filled_slots": filled, "structural_fingerprint": current_fingerprint, "ok": True})
+        project_docx_to_markdown(
+            output,
+            self.root / TEMPLATE_MARKDOWN_PATH,
+            contract_nodes=contract.nodes,
+        )
         return output
 
     @staticmethod

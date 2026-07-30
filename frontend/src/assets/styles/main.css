@@ -495,7 +495,10 @@ body {
 }
 .main-content { 
   flex: 1; 
-  overflow: hidden; 
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
   display: flex; 
   flex-direction: column; 
   min-height: 0; 

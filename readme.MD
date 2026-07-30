@@ -56,6 +56,8 @@ Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会
 
 V3 会在已声明的 `EvidenceNeed` 需要外部资料时调用 `deepseek_web`。首次使用运行 `python scripts/deepseek_login.py`，它会打开 Playwright 自带的可见 Chromium；请在其中登录 DeepSeek。登录会话只保存在本机 `.runtime/deepseek-playwright`，不会保存账号或密码。检索必须启用“联网搜索”并取得可核验的公开来源 URL，否则不会写入证据库。配置项见 `.env.example`。
 
+生成完整标书时，V3 默认会在正文写作前，根据当前已确认章节、对应招标要求和评分响应目标，自动选择最多 3 个高价值技术主题调用 DeepSeek。结果经来源校验后冻结进对应章节的 `WriterInputBundle.evidence_snapshot`，只能用于方案方法、公开标准和风险控制，不能证明企业资质、业绩、人员或产品实绩。自动流程不会上传任何附件；附件仍只能由用户逐次显式勾选。可通过 `BID_AGENT_AUTO_RESEARCH_ENABLED`、`BID_AGENT_AUTO_RESEARCH_MAX_QUERIES`、`BID_AGENT_AUTO_RESEARCH_SOURCES_PER_QUERY` 和 `BID_AGENT_AUTO_RESEARCH_REQUIRED` 调整。
+
 研究命令可通过 `attachment_input_ids` 显式选择已经上传到 V3 输入清单的招标文件、评分文件、参考资料等。只有列出的活动输入会发送给 DeepSeek；服务会在上传前校验清单状态、文件路径与 SHA-256，不会默认把工作区文件上传到外部服务。示例 payload：
 
 ```json

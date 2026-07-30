@@ -44,7 +44,7 @@ class V3DocumentContractTests(unittest.TestCase):
             document.save(docx)
             inputs.register_local_file(docx, InputRole.TEMPLATE)
         SourceNormalizer(context).normalize_active_inputs()
-        runner = V3StageRunner(context)
+        runner = V3StageRunner.for_deterministic_tests(context)
         runner.run("build_requirement_ledger")
         runner.run("analyze_scores")
         runner.run("plan_response")

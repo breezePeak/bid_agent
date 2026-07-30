@@ -1,0 +1,43 @@
+test_required_docs_exist (tests.test_v3_pr14_contracts.AdrAndChecklistPresenceTests.test_required_docs_exist) ... ok
+test_canonical_json_is_stable (tests.test_v3_pr14_contracts.CanonicalizationVectorsTests.test_canonical_json_is_stable) ... ok
+test_fixture_vectors_file (tests.test_v3_pr14_contracts.CanonicalizationVectorsTests.test_fixture_vectors_file) ... ok
+test_payload_hash_vector (tests.test_v3_pr14_contracts.CanonicalizationVectorsTests.test_payload_hash_vector) ... ok
+test_proposal_hash_excludes_identity_fields (tests.test_v3_pr14_contracts.CanonicalizationVectorsTests.test_proposal_hash_excludes_identity_fields) ... ok
+test_canonicalization_version_is_decision_sensitive (tests.test_v3_pr14_contracts.IllegalFixtureTests.test_canonicalization_version_is_decision_sensitive) ... ok
+test_illegal_receipt_and_proposal_fixtures_fail (tests.test_v3_pr14_contracts.IllegalFixtureTests.test_illegal_receipt_and_proposal_fixtures_fail) ... ok
+test_empty_payload_and_unknown_kind_fail (tests.test_v3_pr14_contracts.RegistryTests.test_empty_payload_and_unknown_kind_fail) ... ok
+test_enabled_promotable_kinds_have_payload_schema_and_policy (tests.test_v3_pr14_contracts.RegistryTests.test_enabled_promotable_kinds_have_payload_schema_and_policy) ... ok
+test_registry_versions_are_frozen (tests.test_v3_pr14_contracts.RegistryTests.test_registry_versions_are_frozen) ... ok
+test_gate_and_planning_receipts (tests.test_v3_pr14_contracts.SchemaFixtureTests.test_gate_and_planning_receipts) ... ok
+test_planning_carry_forward_requires_source_h1_and_dag (tests.test_v3_pr14_contracts.SchemaFixtureTests.test_planning_carry_forward_requires_source_h1_and_dag) ... ok
+test_promotion_receipt_requires_gate_bindings (tests.test_v3_pr14_contracts.SchemaFixtureTests.test_promotion_receipt_requires_gate_bindings) ... ok
+test_proposal_envelope_legal (tests.test_v3_pr14_contracts.SchemaFixtureTests.test_proposal_envelope_legal) ... ok
+test_proposal_envelope_rejects_duplicate_citations (tests.test_v3_pr14_contracts.SchemaFixtureTests.test_proposal_envelope_rejects_duplicate_citations) ... ok
+test_validation_report_binds_hashes (tests.test_v3_pr14_contracts.SchemaFixtureTests.test_validation_report_binds_hashes) ... ok
+test_bid_master_is_a_thin_proposal_coordinator (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_bid_master_is_a_thin_proposal_coordinator) ... ok
+test_cross_workspace_submit_denied (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_cross_workspace_submit_denied) ... ok
+test_empty_payload_and_unknown_kind_rejected (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_empty_payload_and_unknown_kind_rejected) ... ok
+test_failed_promotion_leaves_no_half_revision (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_failed_promotion_leaves_no_half_revision) ... ok
+test_forged_all_pass_validation_report_cannot_launder_invalid_payload (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_forged_all_pass_validation_report_cannot_launder_invalid_payload)
+P0: direct write of a forged all-pass ValidationReport must not promote illegal payload. ... ok
+test_forged_issuer_receipt_cannot_promote (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_forged_issuer_receipt_cannot_promote) ... ok
+test_gate_receipt_is_required (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_gate_receipt_is_required) ... ok
+test_human_gate_rejects_system_reviewer (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_human_gate_rejects_system_reviewer) ... ok
+test_missing_required_gate_set_fails (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_missing_required_gate_set_fails) ... ok
+test_only_promotion_service_can_create_canonical_artifact (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_only_promotion_service_can_create_canonical_artifact) ... ok
+test_operation_is_idempotent_and_creates_one_revision (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_operation_is_idempotent_and_creates_one_revision) ... ok
+test_producer_self_proved_dependency_fingerprint_fails (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_producer_self_proved_dependency_fingerprint_fails) ... ok
+test_promotion_receipt_binds_gate_hashes_and_proposal_hash (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_promotion_receipt_binds_gate_hashes_and_proposal_hash) ... ok
+test_proposal_a_cannot_reuse_proposal_b_receipts (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_proposal_a_cannot_reuse_proposal_b_receipts) ... ok
+test_same_operation_different_hash_conflicts (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_same_operation_different_hash_conflicts) ... ok
+test_stale_base_revision_cannot_promote (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_stale_base_revision_cannot_promote) ... ok
+test_unknown_cited_source_id_fails_reference_check (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_unknown_cited_source_id_fails_reference_check) ... ok
+test_validate_a_promote_b_is_blocked (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_validate_a_promote_b_is_blocked)
+Store invalid content under id; validating a different body with same id must not launder it. ... ok
+test_workspace_snapshot_projects_only_promoted_artifacts (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_workspace_snapshot_projects_only_promoted_artifacts) ... ok
+test_wrong_gate_id_cannot_promote (tests.test_v3_proposal_promotion.V3ProposalPromotionTests.test_wrong_gate_id_cannot_promote) ... ok
+
+----------------------------------------------------------------------
+Ran 36 tests in 3.471s
+
+OK

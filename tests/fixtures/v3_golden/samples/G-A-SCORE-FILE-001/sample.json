@@ -1,0 +1,217 @@
+{
+  "sample_id": "G-A-SCORE-FILE-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名独立复杂评分文件样本",
+  "tags": [
+    "score_file",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "2adeebe69a39ea1f2ffb0d20a22e941d3c36cce79c6d4b3566d51998041511ec",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "cb4b5ee19b9fac7d85e1d0f65e42738abb5e84272613a9769de49927a30512f3",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "2bf931710a8d1eddaf9989950559dfe647a4147e9f6f0f079fbd445c84b56919",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-sf-plan",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须提供完整的实施方案",
+          "match_key": "投标人须提供完整的实施方案",
+          "source_anchor": {
+            "location_contains": "实施方案"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-sf-warranty",
+          "kind": "contract",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须承诺质保期不少于3年",
+          "match_key": "投标人须承诺质保期不少于3年",
+          "source_anchor": {
+            "location_contains": "质保"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-sf-cert",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须具备信息系统集成资质",
+          "match_key": "投标人须具备信息系统集成资质",
+          "source_anchor": {
+            "location_contains": "集成资质"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-sf-plan",
+        "R-sf-warranty",
+        "R-sf-cert"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-sf-tech",
+          "title": "方案完整性与针对性",
+          "criterion": "方案完整性与针对性，满分45分",
+          "max_points": 45,
+          "scoring_levels": [
+            {
+              "label": "优秀",
+              "points": 42,
+              "criterion": "优秀40-45分"
+            },
+            {
+              "label": "良好",
+              "points": 35,
+              "criterion": "良好32-39分"
+            },
+            {
+              "label": "一般",
+              "points": 25,
+              "criterion": "一般20-31分"
+            }
+          ],
+          "required_evidence_types": [
+            "tech_plan"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须提供完整的实施方案"
+          ],
+          "match_key": "方案完整性与针对性，满分45分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-sf-svc",
+          "title": "质保与响应承诺合理性",
+          "criterion": "质保与响应承诺合理性，满分25分",
+          "max_points": 25,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "warranty_letter"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须承诺质保期不少于3年"
+          ],
+          "match_key": "质保与响应承诺合理性，满分25分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-sf-qual",
+          "title": "集成资质与业绩证明",
+          "criterion": "集成资质与业绩证明，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "integration_cert"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须具备信息系统集成资质"
+          ],
+          "match_key": "集成资质与业绩证明，满分30分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-sf-tech",
+        "SP-sf-svc",
+        "SP-sf-qual"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-sf-plan",
+          "topic_type": "function",
+          "canonical_name": "实施方案",
+          "duty_type": "explain",
+          "requirement_match_keys": [
+            "投标人须提供完整的实施方案"
+          ],
+          "score_match_keys": [
+            "方案完整性与针对性，满分45分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-sf-svc",
+          "topic_type": "service",
+          "canonical_name": "质保服务",
+          "duty_type": "commit",
+          "requirement_match_keys": [
+            "投标人须承诺质保期不少于3年"
+          ],
+          "score_match_keys": [
+            "质保与响应承诺合理性，满分25分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-sf-qual",
+          "topic_type": "qualification",
+          "canonical_name": "集成资质",
+          "duty_type": "prove",
+          "requirement_match_keys": [
+            "投标人须具备信息系统集成资质"
+          ],
+          "score_match_keys": [
+            "集成资质与业绩证明，满分30分"
+          ],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-sf-plan",
+        "T-sf-svc",
+        "T-sf-qual"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=independent_score_file; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

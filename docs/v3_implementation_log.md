@@ -1,8 +1,13 @@
 # V3 开发实施记录
 
-本记录与 [v3_development_plan.md](./v3_development_plan.md) 同步。每个完成的 PR 都必须包含验证证据和独立 Git 提交。
+PR-0～PR-13 与历史基线 [v3_development_plan.md](./v3_development_plan.md) 对应；PR-14 起与当前权威计划 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md) 对应。每个 Accepted PR 都必须包含验收证据和独立 Git 提交。
 
 Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文审计的后续建设见 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)。
+
+> 当前生效架构：以本文“2026-07-29：满分条件驱动的分批评分理解主链”为准。
+> PR-19、PR-20 及 2026-07-28 记录中的
+> `ProjectModel → ResponseTopicGraph/ResponseDuty` 是保留的历史实现记录，不再是
+> `document.prepare_outline` 自动主链；legacy 只允许显式兼容调用。
 
 ## PR-0：冻结基线与消除半接入状态
 
@@ -108,7 +113,7 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-13：删除 V1/V2 废弃逻辑
 
-- 状态：进行中
+- 状态：公开切换已完成，物理清理仍在进行
 - 已删除：V2 前端工作区视图、聊天、终稿编辑、问题单、材料清单、文件浏览、旧状态适配及相关前端测试；`frontend/src/api/index.js` 不再保留 V2 工作区 API 封装。
 - 安全修正：认证中间件现在从 `/api/v3/workspaces/{id}` 正确提取工作区 ID，并在所有 V3 工作区读写接口上执行同一 ACL 校验。
 - 公开服务面：所有 V1/V2 HTTP 路由已从 FastAPI 路由表移除，旧路径统一返回 `410 LEGACY_API_RETIRED` 并指向 `/api/v3/workspaces/`；物理实现和 Legacy Pipeline 正在继续收缩。
@@ -118,69 +123,217 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - 数据清理：两个旧 V2 项目目录及其残留的 `workspace/chat.db` 已彻底删除。
 - 运行入口：已移除 `graph-run` 与 `agent-graph-run` 两个 LangGraph CLI 公共命令，主图、Supervisor 图、节点和路由实现均已物理删除，章节循环已改为直接函数流；项目不再依赖 LangGraph/LangChain Core。V3 工作区仅通过 CommandGateway 执行阶段或全流程。
 
-## PR-14：冻结 Bid Master 与投标中间语言架构
+## PR-14：冻结 Bid Master、投标中间语言与 Golden
 
-- 状态：已完成
-- 提交：`2d775a7 docs(v3): freeze trusted Bid Master architecture`
-- 内容：冻结唯一中间语言、Agent/Service/Artifact/Gate 权限边界、分阶段顺序和 Golden Set 验收指标；仓库级 `agent.md` 将 Proposal → Validation → Gate → Promotion 以及“新增 Agent 不得获得额外权威写入路径”设为强制架构约束。
+- 工程状态：PR-14.0 已随 Gate K 收口；PR-14.1 评测基础设施已建立。
+- 验收状态：**PR-14.0 完成；PR-14.1 基础设施完成；专家标注 Golden 资产未完成（Gate A 未通过）。**
+- 历史提交：`2d775a7`、`8d4e45d`、`290571c`；PR-14.1 见后续 commit。
+- PR-14.0 验收报告：[v3_pr14_0_acceptance.md](./v3_pr14_0_acceptance.md)
+- PR-14.1 验收记录：[v3_pr14_1_acceptance.md](./v3_pr14_1_acceptance.md)
+- PR-14.0 已完成：ADR-01/02/11、canonicalization、Receipt Schema、Registry、审查清单。
+- PR-14.1 已完成：`GoldenRegistry`/loader/报告、`evaluate_v3_bid_pipeline.py`、8 样本槽位、合成 A1 烟雾样本、错误分类、ADR-03/12。
+- 未完成（Gate A 前置）：至少 8 份匿名真实双人标注样本、A1～A4/B/C/D 专家期望、当前规则 baseline 报告、ADR-04～10/13/14 全文。
+- 结论：不得使用“Golden 已冻结/只需加强”；准确表述是“评测基础设施已可用，专家 Golden 资产尚未建立”。
 
 ## PR-15：Proposal / Validation / Gate / Promotion 可信运行内核
 
-- 状态：已完成
-- 输入与输出：Agent 只可通过 `AgentProposalSandbox` 读取其冻结任务输入并追加 `ProposalEnvelope`；唯一输出是候选 Proposal。`BidMaster` 仅协调既有 `ControlStore` 上的校验、Gate 和 Promotion，不新增状态机。
-- Artifact 与晋级：新增 append-only Proposal、ValidationReport、GateReceipt、ArtifactRevision、active pointer 与 PromotionReceipt 表。`ArtifactPromotionService` 在单个 SQLite 事务中写入 revision、CAS active pointer 和 Receipt；同一 `(artifact_kind, operation_id)` 返回原 Receipt，避免重复发布。
-- Validator / Gate：`ProposalValidator` 校验角色、引用、dependency fingerprint 与 base revision；`GateService` 仅对通过验证且绑定同一 Proposal hash/revision 的候选签发 Receipt。无 pass Receipt、陈旧 base revision 或非法角色均不能晋级。
-- 权限与 stale：角色能力表只允许各 Agent 提议其声明的 Artifact kind，未登记工具一律拒绝；Promotion 与 `control.db` 只由 Service 持有。上游 active revision 或 dependency fingerprint 改变会使候选在 Gate/Promotion 时拒绝，不会覆盖当前事实。
-- Snapshot：`V3WorkspaceSnapshotBuilder` 仅投影 promoted Artifact；旧磁盘文件及 draft Proposal 不再被投影为运行时事实。
-- H1 / 模板：本次不改变 H1 PlanningConfirm，也不修改严格模板结构；后续 PR-16—PR-20 将消费该可信内核。
-- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr15`（437 passed, 9 subtests）。新增负向测试覆盖 Agent 越权、无 GateReceipt、陈旧 revision、幂等 operation、失败无半 revision 与 Snapshot 隔离。
+- 工程状态：PR-15.1 exact binding + Store 封死路径已实现。
+- 验收状态：**PR-15.1 已完成；Gate K PASS。**
+- 历史提交：`f94f8a6`、`adc08b4`、`290571c fix(v3): seal store writes and recompute receipts for Gate K`
+- 已完成（PR-15.1）：
+  - Validator 仅按 `proposal_id` 从 append-only Store 重载 Proposal；
+  - ValidationReport / GateReceipt / PromotionReceipt 绑定 exact `proposal_hash` 与依赖快照；
+  - `record_v3_validation_report` / `issue_v3_gate_receipt` 必须持有 `KERNEL_SEAL`，禁止 Store 直写伪造全通过报告或 Receipt；
+  - 写入与 Promotion 均重算 payload Schema / report_hash / receipt_hash，伪造 hash 与非法 payload 无法晋级；
+  - GatePolicyRegistry 强制完整必需 Gate 集合与合法 issuer；
+  - 可信内核重算 dependency fingerprint；cited_source_ids 对 InputManifest 解析，未知 Source 失败；
+  - PlanningGateReceipt carry-forward 缺少原 H1 / DAG / scope 时 Schema 失败；
+  - `receipt_hash` 字段与 `compute_receipt_content_hash()` 分离，避免方法被字段遮蔽。
+- 验证：`python -m unittest tests.test_v3_pr14_contracts tests.test_v3_proposal_promotion`（36 passed）；Agent/Stage 相关回归通过。
+- Gate K 证据：`artifacts/release_gates/v3/K/v1/`（`result=PASS`，双角色 approvals 已记录，哈希按 LF 规范化）
+- 遗留：旧 Receipt inventory / `legacy_untrusted`（Gate M / PR-27）；H1 认证 principal（PR-20.1 / Gate P）。
 
-## PR-16：结构化 SourceIndex 与 TemplateStructureContract
+## Gate K：Kernel Safe
 
-- 状态：已完成
-- SourceIndex：`SourceNormalizer` 现将 Markdown、DOCX 和 PDF 恢复为稳定的 `SourceBlock` 序列，保留输入角色、块类型、原始顺序、标题路径、页码、段落/表格坐标、来源锚点和内容 hash；原兼容 `by_role` 视图仅供尚未迁移的确定性台账读取。
-- 可靠性：PDF 没有可提取文本时以 `V3_SOURCE_OCR_BLOCKED` 阻断，无法支持的格式在 Agent 调用前阻断；每个活动输入均写入 processed/blocked 状态。
-- 补遗：新增 `amendment` 输入角色、`issued_at` 与显式 `supersedes_input_ids`，SourceIndex 按签发时间保留补遗关系，不将其静默混入原招标文件。
-- 模板：新增独立、只读的 `TemplateStructureContract`，在 Requirement/Score 前由 `compile_template_structure` 阶段冻结 DOCX 的标题、层级、顺序、表格/文本 slot 和结构指纹；语义覆盖缺口仍由后续规划阶段计算。
-- H1 / 权限：本次不改变 H1 PlanningConfirm；所有来源与模板工作由确定性 Service 完成，不新增 Agent 或 Artifact 写权限。
-- 验证：`python -m ruff check src tests`；PR-16 定向回归 17 passed。
+- 状态：**PASS**
+- 证据：`artifacts/release_gates/v3/K/v1/manifest.json`、`approvals.json`
+- 覆盖：PR-14.0 最小契约冻结 + PR-15.1 exact binding / seal / 负向矩阵
+- 解锁：可启动 PR-16.1 canonical Source；正式语义 baseline 仍需 Gate S 后的可信 Source Artifact
+
+## PR-16：canonical InputManifest、SourceIndex 与 TemplateStructureContract
+
+- 工程状态：PR-16.1 可信 Source 主链已实现。
+- 验收状态：**PR-16.1 完成；Gate S PASS。**
+- 历史提交：`fab7e9a`、`3591f15`、`c435539`
+- 验收记录：[v3_pr16_1_acceptance.md](./v3_pr16_1_acceptance.md)
+- 已完成（PR-16.1）：
+  - `SourceIndex` / Coverage / 扩展 SourceBlock Schema；
+  - InputManifest、SourceIndex、TemplateStructureContract 经 Proposal→G0→CAS 晋级；
+  - 磁盘 JSON 降为 projection；`by_role` 只读派生；
+  - 下游 Stage 强制 promoted SourceIndex；
+  - PDF 位置排序 + OCR StructureGap；模板表格 Slot 最近上游章节；
+  - block identity 含 parser version；
+  - Gate S 自动化矩阵与证据包（合成深层模板冻结结构校验、JSON 非权威、PDF gap）。
+- 遗留：生产扫描 PDF 现场样本可后续补强；旧工作空间迁移 inventory 归 Gate M。
+
+## Gate S：Source Trusted
+
+- 状态：**PASS**
+- 证据：`artifacts/release_gates/v3/S/v1/manifest.json`、`approvals.json`
+- 测试：`tests/test_v3_gate_s_source.py`
+- 依赖：Gate K PASS
+- 解锁：正式 Golden baseline 与 PR-17～20 可消费 promoted Source Artifact
 
 ## PR-17：Requirement Agent 与 RequirementLedger
 
-- 状态：已完成
-- 内容：新增 `RequirementAgent` 及其 Prompt 契约，支持从只读 `SourceIndex` 分批抽取带结构化语义属性（主体、动作、对象、条件、例外、量化指标）的条款，并完整继承保留父子条款关联（`clause_id`, `parent_clause_id`）。
-- 契约对齐：Proposal `artifact_kind` 已统一对齐为 `RequirementLedger`（与 `CapabilityRegistry` 授权规范一致）。
-- 补遗与消解：按 `amendment` 输入的 `issued_at` 签发时间与 `version` 正序演进，精准判定补遗覆盖并记录 `superseded_by_input_id`。
-- 完整受控链路：重构 `stage_runner.py` 的 `analyze_requirements` / `build_requirement_ledger` 阶段，贯通 **RequirementAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**；运行时下游只读取 active promoted revision，已删除旧 Ledger 直写路径。
-- 门禁与幂等：反向覆盖审计在 G0 前阻断遗漏的 tender/amendment SourceBlock；相同冻结依赖重跑复用 active revision，不重复晋级。
-- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_v3_pr17_fix`（445 passed, 9 subtests）。
+- 工程状态：PR-17.1 语义校准工程增强已合入。
+- 验收状态：**工程增强完成；Golden-A1 未达标，正式语义发布未完成。**
+- 历史提交：`027640e`；PR-17.1 见后续 commit。
+- 验收记录：[v3_pr17_1_acceptance.md](./v3_pr17_1_acceptance.md)
+- 已完成（PR-17.1）：
+  - 分批抽取 + 跨批去重/冲突；
+  - 稳定 clause/parent clause ID；
+  - 补遗作用域覆盖（非整文件 waive）；
+  - 语句级反向漏检；
+  - abstain/needs_human；
+  - Proposal 绑定 SourceIndex hash 与 prompt/model/policy 指纹。
+- 未完成：真实 LLM 路径、专家 Golden-A1 阈值、跨页/表格 critical 召回证明。
+- 收口要求：未达 Golden-A1 不得作为 PR-18 正式输入；Score 结构/算术可并行 shadow。
 
 ## PR-18：Score Agent 与 ScoreModel
 
-- 状态：已完成
-- 内容：新增 `ScoreAgent`、`ScoreModel`、`ScoreGroup`、`ScorePoint`、评分档位、评分响应深度和证明需求候选契约；评分点只引用已晋级 `RequirementLedger` 的 ID，不复制为另一份采购义务。
-- 解析与门禁：从冻结评分 SourceBlock 提取评分组、分值、档位、资格/废标条件和证明类型；模型契约复核分组小计与总分。G0 现在对 `RequirementLedger` 与 `ScoreModel` payload 执行 Pydantic schema 校验；Score 审计进一步阻断虚构来源、未知或跨锚点 Requirement 引用、未绑定评分点和异常批量绑定。
-- 完整受控链路：新增 `analyze_scores` Stage，贯通 **ScoreAgent → AgentProposalSandbox → ProposalValidator (G0) → GateService (G1) → ArtifactPromotionService (CAS Promotion)**。相同冻结输入、Requirement revision 和依赖 fingerprint 重跑会复用 active promoted revision，不产生新 revision。
-- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr18_final`（449 passed, 9 subtests）。
+- 工程状态：Score 契约、算术校验和受控晋级骨架已实现。
+- 验收状态：**工程骨架完成，Golden 发布验收未完成。**
+- 提交：`cd9881a feat(v3): add promoted score model agent`
+- 已完成：ScoreGroup/Point/Level、EvidenceNeed 候选、基本分值/档位解析、引用审计和 CAS Promotion。
+- 未完成：复杂评分表、区间/累加/扣分/封顶、多档、跨文件同义绑定和真实人工 Golden 的评分语义准确率未验证；历史 92 点统计不是 Golden，不能代替准确率评测；当前同 anchor/字符重合规则可能通过复制 `RequirementKind.SCORE` 形成自证。
+- 收口要求：按开发计划 20.6 完成 PR-18.1，并达到 Golden-A2 冻结阈值。
 
 ## PR-19：Planning Agent、ProjectModel 与 ResponseTopicGraph
 
-- 状态：已完成
-- 受控投影：ProjectModel 不再写入 `workspace/v3/project_model.json`；它只能由 Planning Agent 从已晋级的 RequirementLedger、ScoreModel 与冻结 SourceIndex 生成 Proposal，并通过 G0/G1/CAS 晋级。材料、目录和 ResearchService 均改为读取 active promoted revision。
-- 响应语义层：新增 ResponseTopicGraph、ResponseTopic、ResponseDuty 和 TopicEdge 契约；confirmed Topic 强制携带来源 Anchor 或上游引用，所有 Topic/Duty/Edge 引用均做完整性校验，`depends_on` 执行边循环会在 Schema 校验时阻断。
-- 映射边界：每个 Requirement 和 ScorePoint 先映射到 Duty；blocking Requirement、废标型 ScorePoint 均有可追溯的响应 Duty。评分证明候选由 ScoreModel 投影为 EvidenceNeed，Feature/BusinessFlow 未被引入为并列权威模型。
-- 执行链：新增 `plan_response`（兼容旧 `build_project_model` Runner 别名），同一 Planning Agent 连续晋级 ProjectModel 与 ResponseTopicGraph；相同冻结依赖重跑复用两个 active revision。
-- 验证：`python -m ruff check src tests`；`python -m pytest -q --basetemp C:\tmp\bid_agent_pytest_pr19_final`（451 passed, 9 subtests）。
+- 工程状态：ProjectModel、Topic/Duty/Edge 契约和受控晋级骨架已实现。
+- 验收状态：**工程骨架完成，领域 TopicGraph 未验收。**
+- 提交：`fc882fb feat(v3): add promoted planning topic graph`
+- 已完成：promoted ProjectModel/ResponseTopicGraph、引用完整性、执行依赖无环和 Requirement/Score → Duty 基础链。
+- 未完成：当前近似每个 Requirement/Score 各生成一个根 Topic，缺少语义聚合、层级、业务流程、真实 depends_on 和多上下文 Duty；企业块可能未经证据验证直接成为 confirmed fact。
+- 收口要求：按开发计划 20.7 完成 PR-19.1、达到 Golden-A3 冻结阈值并通过 Gate A。
 
+## PR-20：ChapterBlueprint、规划门与统一确认页
 
+- 工程状态：基础 Blueprint/G2/CAS 片段已实现。
+- 验收状态：**进行中，P0 阻断。**
+- 提交：`c6f16de`、`2d6f755`、`45c7715`
+- 已完成：平铺 Blueprint、每 Duty 一个 primary assignment、基本引用检查和写作前 H1 Receipt 存在性检查。
+- P0 缺陷：`run_pipeline` 会自动调用 `confirm_planning`，StageRunner 直接以 `reviewer="user"` 签发 H1，并无认证用户显式确认。
+- 未完成：项目专用多层树、严格模板映射、supporting/mention/cross-reference、标题语义审计、统一规划确认页、H1 exact snapshot/scope hash/身份绑定，以及 Blueprint → DocumentContract/DocumentPlan/WriterInputBundle 单向派生契约和旧链硬阻断；实际编译器归 PR-23/Gate B。
+- 收口要求：按开发计划 20.8 完成 PR-20.1、达到 Golden-A4 冻结阈值并通过 Gate P。
 
-## 后续架构基线：Bid Master 与投标中间语言
+## PR-14～PR-20 架构收口门
 
-- 状态：PR-14 至 PR-17 已完成；后续按 PR-18 继续。
-- 核心分工：Agent 只产生 Proposal，Artifact 承载权威事实，Service 执行确定性动作，Gate 与 CAS Promotion 决定 Artifact 晋级。
-- 中间语言：`RequirementLedger → ScoreModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → EvidenceSnapshot → WriterInputBundle → ContentBlock`。
-- Agent：Bid Master 复用现有 CommandGateway/StageRunner；Requirement、Score、Planning、Writer、Integration 和 Quality Audit 均读取冻结快照，不直接修改 `control.db` 或 canonical Artifact。
-- Evidence：新增统一 EvidenceRepository；DeepSeek 继续只是显式 EvidenceNeed 的 Research Provider，附件上传仍需逐次选择和授权。
-- 规划门：正文前只增加一个 `PlanningConfirm`，统一确认项目摘要、异常要求、Topic/Duty、章节树和主责映射。
-- Writer 边界：ChapterBlueprint 是唯一结构和响应责任来源，Writer 的唯一调用参数是冻结的 `WriterInputBundle`。
-- 已知待修：现有 Integrator 不能再以共享 Requirement ID 作为删除 supporting 内容的依据；现有 QualityGate 需升级为独立只读 Audit 与最终语义门。
+- 当前结论：PR-14～PR-20 已形成中间语言和受控晋级骨架，但 M0/M1 均未通过。
+- 实施顺序：首批 PR-14.0 + PR-15.1 → Gate K → PR-16.1 → Gate S → PR-14.1 正式 baseline → PR-17.1～PR-19.1 → Gate A → PR-20.1 → Gate P；通过 Gate P 后解锁 PR-21，PR-23 后通过 Gate B，PR-24～PR-27 staging 完整链通过独立真实项目盲测后通过 Gate U，最后以依赖 exact Gate U 的 Gate M 执行生产切换。
+- PR-14.1 的匿名化、专家标注和评测基础设施可与首批并行，但正式语义 baseline/report 只能消费 Gate K + Gate S 后的可信 Artifact。
+- Gate K/S/A/P/B/U/M 是仓库发布验收门，不是运行时 GateReceipt。Gate P 通过前不进入 PR-21 及后续生产实现；不消费未验收 Artifact 的接口、Schema 和测试设计可并行准备。PR-23 的实际编译器通过 Gate B 后，PR-24 才可生成正式 ContentBlock；Gate U 未通过时所有整标输出只能标记为 `test_draft`，Gate M 必须绑定已通过的 exact Gate U。
+- Gate U 当前未开始：尚无独立 Usability Holdout、supported profile 覆盖矩阵、最终 Word 逐页验收、专家盲审和人工改写量证据，因此任何现有版本均不得宣称能生成正式可投标书。
+- 核心分工保持不变：Agent 只产生 Proposal，Artifact 承载版本化事实，Service 执行确定性动作，Gate/Promotion 决定权威晋级。
+- 历史设计链记录（不再是当前自动目录主链）：`InputManifest / SourceIndex / 可选 TemplateStructureContract → RequirementLedger → ScoreModel → ProjectModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → H1 PlanningGateReceipt → EvidenceSnapshot → Blueprint 派生的 DocumentContract/DocumentPlan → WriterInputBundle → ContentBlock`；当前替代关系见 2026-07-29 记录，H1 仍是授权 Receipt，DocumentContract/DocumentPlan 不是独立可编辑规划。
+- DeepSeek 仍只是显式 EvidenceNeed 的 Research Provider，不获得招标解析或 Artifact 写权限。
+
+## Gate U：Real-Bid Usability
+
+- 状态：**NOT_STARTED**
+- 依赖：Gate K/S/A/P/B PASS，PR-21～PR-26 Accepted，PR-27 staging 候选冻结
+- 当前缺口：无独立 Usability Holdout、无预冻结 supported profile/threshold policy、无最终 Word 逐页 QA、无专家独立盲审、无人工改写量证据
+- 证据：尚未建立；不得创建空壳或虚假 PASS manifest
+- 解锁：Gate U 由投标领域负责人、质量负责人和产品负责人批准后，Gate M 才可进入最终审批；Gate U 与 Gate M 必须绑定同一发布候选并共同通过，Release Service 才可执行 production CAS
+
+## 2026-07-28：V3 受控大模型语义规划改造（历史链路记录）
+
+- 工程状态：已实现；真实模型 smoke、专家 Golden 和真实标书盲测仍按 Gate A/U 单独验收。
+- 当时的正式链路（现已由 2026-07-29 主链替代）：确定性评分结构解析 → `ScoreSemanticProvider` → `ProjectUnderstandingProvider`
+  → `TopicDutyPlanningProvider` → BidAgent 内部
+  `planning.chapter_outline_split` → G1/G2 → H1。
+- 评分语义：新增稳定 `condition_id` 和 `ScoreResponseUnit`；一个物理评分规则可包含多个
+  独立响应任务，评分档次不再误拆成任务。G2 按
+  `condition → ScoreResponseUnit → Duty → primary subtree` 校验。
+- 评分完整性：Provider 与 G1 均按最高档原文做无损覆盖复核；每个条件绑定精确
+  `SourceBlock`、字符区间和档次。遗漏实质要求、伪造区间或引用错块均在唯一一次受控
+  修复后 fail closed。
+- 评分语义修复：首次 Candidate 逐个物理 `rule_id` 独立校验；仅把失败规则、必要评分组
+  和精简失败片段送入唯一修复调用，再与已通过的规则合并并重做全局校验。避免一个局部
+  引用错误触发整张评分表的重复生成或因修复只返回局部而丢失其余规则。`Unit.source_excerpt`
+  明确为语义说明，权威逐字取证仅来自满分 `condition` 的 `SourceBlock`/span；Capability、
+  Prompt 与 Schema 已升至 `1.2.0` / `v1.2` / `candidate-3`，旧规划自动失效。
+- 目录编译：只分配稳定 ID、顺序和元数据，保留模型标题与父子结构；不再调用规则目录
+  生成器，不追加兜底章节。全文质量 Unit 进入 `DocumentQualityGate`，不生成空洞章节。
+- 严格模板：Blueprint 冻结 template node、level、numbering、Slot 和 writable target；
+  G2 独立复核标题、层级、顺序、父子与 Slot，H1 后可单向编译为可写
+  `TemplateContract`，不再固定抛出模板映射异常。
+- 推理凭证：Score、Project、Topic 和 Outline Proposal 均绑定 append-only
+  `InferenceReceipt`，覆盖 exact 输入快照、Capability/Skill、Prompt、模型、温度、Schema、
+  Provider 指纹、原始输出、规范化 Candidate 和编译 payload hash。Validator 按 Capability
+  从 Store 的当前 active dependencies 独立重建 exact Provider 输入，不能只相信调用方 hash。
+- 失效策略：Capability/Skill、Prompt、模型、温度、Schema、上游 Artifact 或模板变化均
+  阻止复用；活动模型设置变化会清空运行时 Provider 元数据；模型非法输出只有一次受控
+  修复机会，失败后 fail closed。
+- 测试隔离：部署环境变量不能开启 `deterministic_test`；规则候选只允许通过显式
+  `for_deterministic_tests()` 测试构造器注入，不构成生产降级路径。
+- 人工确认：`document.prepare_outline` 在 G2 后返回 `blocked_human` 和冻结
+  `generation_trace`；只有认证用户显式调用 `document.confirm_planning` 才签发 H1。
+- 项目理解：Provider 可输出带来源的项目事实、语义投影和 EvidenceNeed；企业事实只接受
+  当前工作空间中的企业材料，不把外部参考案例升级为企业能力。每个有效 Requirement 和
+  ScorePoint 必须进入带来源的语义结论或明确证据缺口；仅填写 covered ID 的空壳模型被阻断。
+- 自动化验证：Python 全量 `561 passed, 2 skipped, 22 subtests passed`；两个 skip 为显式
+  opt-in 的真实 Provider/真实标书 smoke；前端 Node 测试 `18 passed`；前端生产构建通过；
+  Ruff、compileall 与 `git diff --check` 通过。
+- 尚未宣称完成：真实 Provider smoke、专家 Golden 和当前真实标书盲测未在本次自动测试中
+  执行，仍须按 Gate A/U 由受控凭证、匿名样本和领域专家验收，不能把 Fake Provider 单测
+  当成真实语义准确率证据。
+
+## 2026-07-29：满分条件驱动的分批评分理解主链
+
+- 当前自动主链：
+  `SourceIndex / RequirementLedger → 分批 ScoreSemantic（ScoreCondition / ScoreResponseUnit）→ ChapterBlueprint → G2`。
+  `ScoreModel` 作为确定性评分结构载体进入 ScoreSemantic 输入，不是额外语义模型阶段；
+  G2 后的 H1 是人工授权暂停点，不属于评分理解或目录语义跳转。
+- 旧语义链退出自动路径：正常 `document.prepare_outline` 不调用
+  `ProjectUnderstandingProvider / ProjectModel`、`TopicDutyPlanningProvider`、
+  `ResponseTopicGraph / ResponseTopic / ResponseDuty`，也不再执行 `scope` 归纳文本字符
+  相似度校验。旧对象只保留给显式 legacy/兼容入口，且不得在新链失败时自动回退。
+- 全局结构输入：从完整 `SourceIndex` 构建标题级轻量 `DocumentMap`，只发送标题层级、
+  评分分组与顺序、采购需求/模板目录位置、来源 ID、内容类型和标题边界块；不向任一模型
+  请求发送标题下全部正文或整份来源块。
+- 评分批次：按价格、商务、技术等自然评分大项分批。技术大项超限时优先按内部小标题
+  继续切分，随后只能在完整 `ScorePoint` 边界切分；同一点的全部评分档和最高得分档
+  永不跨批。
+- 上下文预算：模型上下文按 45% 输入、35% 结构化输出、20% 系统提示词与安全余量
+  分配。超限先裁剪低相关检索内容，再按完整评分点切批；单个完整评分点仍超限时
+  fail closed。
+- 定向需求补充：依次采用评分规则明确引用的章节/条款/表格、已绑定
+  `linked_requirement_ids`、同标题要求、关键词命中要求和少量高相关原文块。所有补充
+  都携带真实 `requirement_id`、来源位置和原文；通用合同、保证金噪声不参与普通相似度
+  检索，明确引用或确定性直接绑定除外。无明确章节/条款引用的公式型价格评分点不补充
+  采购需求上下文。
+- 满分语义契约：每个独立得分任务生成 `ScoreResponseUnit`；最高得分档拆成带原文
+  `source_excerpt/source_span` 的 `ScoreCondition`，角色固定为 `content`、
+  `evidence`、`constraint`、`quality`、`document`。`evidence` 条件同步汇总到 Unit 的
+  `required_evidence_types`，Unit 精确绑定自己需要的 Requirement。
+- 独立缓存和修复：每批严格校验通过后立即按 exact 输入、上游依赖、Capability、Prompt、
+  模型、Schema 和 policy fingerprint 持久化。价格、商务、各技术批可独立复用和重跑；
+  技术批失败不重跑价格/商务，目录失败不重跑 ScoreSemantic。损坏或过期缓存作为可观测
+  miss；单批仅允许一次失败规则子集的受控修复，仍不合格即阻断。
+- 目录组织：目录模型只读取全部已校验 Unit/Condition、关联需求摘要与原文、评分分组和
+  可选模板，不再读取整份标书。它负责合并重复响应主题、按评审阅读顺序生成多层
+  `ChapterBlueprint`，并在 `ChapterNode` 保留 primary/supporting Unit、Condition 和
+  Requirement 映射。
+- 全文质量门：`quality` 条件进入章节写作要求，`document` 条件进入
+  `ChapterBlueprint.document_quality_gates`；“完整、合理、可行、针对性强”和“整体
+  评价”不机械生成空洞章节。
+- 确定性覆盖校验：验证每个非否决评分点已理解、每个最高档已有条件、原文区间真实、
+  每个 section Unit 唯一主责、`content/evidence/constraint` 位于主责子树、
+  `quality/document` 分别进入写作要求/全文质量门，以及所有 ID 无未知、重复、悬空或
+  遗漏。校验不以字符相似度裁决模型的归纳文字。
+- 当前 10/25/65 分真实工作空间离线重建结果：20 个评分点保持 4 批，价格 1 点、商务
+  3 点、技术 13+3 点；四批输入字符数分别为 29,890、45,002、64,524、44,168，均未超过
+  64,800 输入上限。公式型价格点上下文为 0，16 个技术点仍各保留 8 条定向需求，扫描到
+  的通用合同/保证金噪声为 0。该检查只重建冻结输入和批次，未调用外部 LLM。

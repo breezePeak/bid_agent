@@ -1,0 +1,84 @@
+{
+  "gate": "S",
+  "name": "Source Trusted",
+  "version": "v1",
+  "date": "2026-07-27",
+  "scope": [
+    "PR-16.1"
+  ],
+  "depends_on": [
+    {
+      "gate": "K",
+      "version": "v1",
+      "result": "PASS"
+    }
+  ],
+  "commands": [
+    "-m unittest tests.test_v3_gate_s_source tests.test_v3_source_structure tests.test_v3_input_manifest tests.test_v3_pr14_contracts tests.test_v3_stage_runner -v"
+  ],
+  "hash_normalization": {
+    "newline": "LF",
+    "encoding": "utf-8",
+    "note": "Evidence file hashes are computed after converting CRLF/CR to LF."
+  },
+  "evidence_files": {
+    "unittest_gate_s.txt": {
+      "sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5",
+      "newline": "LF",
+      "encoding": "utf-8"
+    },
+    "template_deep_structure_freeze.json": {
+      "sha256": "e846353f7b99a6d977d035146d19457c3100c2d09a9a115daf5ea5a93064d962",
+      "newline": "LF",
+      "encoding": "utf-8",
+      "path": "tests/fixtures/v3_source/template_deep_structure_freeze.json",
+      "fixture_kind": "synthetic_deep_template_structure_stress",
+      "business_threshold": false
+    }
+  },
+  "checks": [
+    "InputManifest/SourceIndex/TemplateStructureContract promoted via trusted kernel",
+    "Disk JSON mutation does not change promoted authority",
+    "Downstream stage rejects unpromoted source_index.json",
+    "Repeated normalize deterministic block ids/order",
+    "PDF mixed pages: text + ocr_gap StructureGap; all-blank blocked",
+    "SourceNormalizationCoverage has normalized/exempt/structure_gap",
+    "Synthetic deep-template stress profile matches committed freeze snapshot (not a business threshold)",
+    "Real template sample stable fingerprint and promotion"
+  ],
+  "automated_result": "PASS",
+  "result": "PASS",
+  "approvers_required": [
+    "source_parser_owner",
+    "architecture_owner"
+  ],
+  "approvals": [
+    {
+      "role": "source_parser_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T09:12:56+00:00",
+      "basis": "User explicit approval of Gate S after PR-16.1 canonical Source and automated matrix PASS",
+      "evidence_commit": "c435539",
+      "evidence_sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5"
+    },
+    {
+      "role": "architecture_owner",
+      "decision": "approve",
+      "decided_at": "2026-07-27T09:12:56+00:00",
+      "basis": "User explicit architecture approval of promoted Source authority and synthetic stress fixture policy",
+      "evidence_commit": "c435539",
+      "evidence_sha256": "f013af54685ea233c8ad5ad4b6e2f73831da4312eabc04973a24ed2503ed76f5"
+    }
+  ],
+  "policy": {
+    "historical_92_198": "legacy anomaly statistics only; not Golden size, business scale, or release threshold",
+    "synthetic_deep_template": "independent structure stress fixture with business_threshold=false"
+  },
+  "known_risks": [
+    "Historical 198 only records old independent task fan-out and is not a real template-node count, business scale, Golden size, or release threshold.",
+    "PDF matrix uses synthetic pdfplumber-parseable fixtures; production scan OCR quality still needs field samples.",
+    "Pre-PR-16.1 workspaces still need migration inventory under Gate M."
+  ],
+  "conclusion": "Gate S PASS. InputManifest/SourceIndex/TemplateStructureContract are promoted canonical Artifacts; disk JSON is projection only. Formal Golden baseline and PR-17~20 may consume trusted Source Artifacts. Historical 92/198 remain legacy anomaly stats only.",
+  "approved_at": "2026-07-27T09:12:56+00:00"
+}

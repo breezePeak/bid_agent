@@ -1,0 +1,30 @@
+{
+  "sample_id": "G-A-PLACEHOLDER-003",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3",
+    "A4"
+  ],
+  "status": "scaffold",
+  "title": "Placeholder Golden slot 3",
+  "tags": [
+    "scaffold",
+    "pending_real_intake"
+  ],
+  "input_manifest_hash": "74f75a4783271d044740d513e3eb8217d7bda92df1fc7dc06ebe552f53877e8f",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/README.pending.txt",
+      "content_sha256": "74f75a4783271d044740d513e3eb8217d7bda92df1fc7dc06ebe552f53877e8f",
+      "external_original_ref": "access-controlled://pending/sample-3"
+    }
+  ],
+  "expectations": [],
+  "annotation": {},
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "Slot reserved for 8-sample DoD coverage. Not expert-annotated."
+}

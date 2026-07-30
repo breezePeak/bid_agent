@@ -145,6 +145,7 @@ class CommandReceipt:
     confirmation_id: str | None = None
     error: dict[str, Any] | None = None
     message: str = ""
+    result: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -155,6 +156,7 @@ class CommandReceipt:
             "confirmation_id": self.confirmation_id,
             "error": self.error,
             "message": self.message,
+            "result": self.result,
         }
 
 
@@ -179,7 +181,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 21
+    SCHEMA_VERSION = 22
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -290,12 +292,27 @@ class ControlStore:
                         status TEXT NOT NULL,
                         disposition TEXT NOT NULL DEFAULT '',
                         error_json TEXT,
+                        output_json TEXT,
                         started_at TEXT NOT NULL,
                         completed_at TEXT,
                         UNIQUE(operation_id, stage_command, attempt)
                     );
                     CREATE INDEX IF NOT EXISTS idx_stage_runs_operation
                         ON stage_runs(operation_id, stage_command, attempt DESC);
+                    CREATE TABLE IF NOT EXISTS llm_requests (
+                        request_id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL,
+                        stage_id TEXT NOT NULL,
+                        request_index INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        parameters_json TEXT NOT NULL,
+                        error TEXT NOT NULL DEFAULT '',
+                        started_at TEXT NOT NULL,
+                        completed_at TEXT,
+                        UNIQUE(operation_id, stage_id, request_index)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_llm_requests_operation
+                        ON llm_requests(operation_id, stage_id, request_index);
                     CREATE TABLE IF NOT EXISTS workspace_lease (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         lease_id TEXT NOT NULL,
@@ -530,33 +547,63 @@ class ControlStore:
                     );
                     CREATE TABLE IF NOT EXISTS v3_proposals (
                         proposal_id TEXT PRIMARY KEY,
+                        workspace_id TEXT NOT NULL,
                         artifact_kind TEXT NOT NULL,
                         producer_role TEXT NOT NULL,
                         operation_id TEXT NOT NULL,
                         base_revision INTEGER NOT NULL,
                         dependency_fingerprint TEXT NOT NULL,
+                        declared_dependencies_json TEXT NOT NULL DEFAULT '[]',
                         proposal_hash TEXT NOT NULL UNIQUE,
+                        canonical_payload_hash TEXT NOT NULL DEFAULT '',
                         payload_json TEXT NOT NULL,
                         cited_source_ids_json TEXT NOT NULL,
                         prompt_version TEXT NOT NULL,
                         model_fingerprint TEXT NOT NULL,
+                        inference_receipt_refs_json TEXT NOT NULL DEFAULT '[]',
+                        payload_schema_version TEXT NOT NULL DEFAULT 'v3',
+                        canonicalization_version TEXT NOT NULL DEFAULT 'v3-canon-2',
                         status TEXT NOT NULL,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS v3_inference_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        receipt_hash TEXT NOT NULL UNIQUE,
+                        workspace_id TEXT NOT NULL,
+                        invocation_id TEXT NOT NULL,
+                        capability_id TEXT NOT NULL,
+                        capability_version TEXT NOT NULL,
+                        receipt_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS v3_validation_reports (
                         proposal_id TEXT PRIMARY KEY REFERENCES v3_proposals(proposal_id),
+                        proposal_hash TEXT NOT NULL DEFAULT '',
+                        report_hash TEXT NOT NULL DEFAULT '',
                         report_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS v3_gate_receipts (
                         receipt_id TEXT PRIMARY KEY,
+                        receipt_hash TEXT NOT NULL DEFAULT '',
+                        workspace_id TEXT NOT NULL DEFAULT '',
                         proposal_id TEXT NOT NULL REFERENCES v3_proposals(proposal_id),
                         proposal_hash TEXT NOT NULL,
+                        validation_report_id TEXT NOT NULL DEFAULT '',
+                        validation_report_hash TEXT NOT NULL DEFAULT '',
+                        artifact_kind TEXT NOT NULL DEFAULT '',
                         gate_id TEXT NOT NULL,
+                        gate_policy_version TEXT NOT NULL DEFAULT '',
                         verdict TEXT NOT NULL,
                         findings_json TEXT NOT NULL,
+                        issuer TEXT NOT NULL DEFAULT '',
                         reviewer TEXT NOT NULL,
                         reviewed_revision INTEGER NOT NULL,
+                        dependency_fingerprint TEXT NOT NULL DEFAULT '',
+                        dependency_snapshot_json TEXT NOT NULL DEFAULT '{}',
+                        issued_at TEXT NOT NULL DEFAULT '',
+                        expires_at TEXT,
+                        receipt_json TEXT NOT NULL DEFAULT '{}',
                         created_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS v3_artifact_revisions (
@@ -568,6 +615,7 @@ class ControlStore:
                         producer_role TEXT NOT NULL,
                         dependency_fingerprint TEXT NOT NULL,
                         proposal_id TEXT NOT NULL UNIQUE REFERENCES v3_proposals(proposal_id),
+                        proposal_hash TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
                         PRIMARY KEY (artifact_kind, revision)
                     );
@@ -579,16 +627,23 @@ class ControlStore:
                     );
                     CREATE TABLE IF NOT EXISTS v3_promotion_receipts (
                         receipt_id TEXT PRIMARY KEY,
+                        receipt_hash TEXT NOT NULL DEFAULT '',
+                        workspace_id TEXT NOT NULL DEFAULT '',
                         proposal_id TEXT NOT NULL UNIQUE REFERENCES v3_proposals(proposal_id),
+                        proposal_hash TEXT NOT NULL DEFAULT '',
                         artifact_kind TEXT NOT NULL,
                         operation_id TEXT NOT NULL,
                         artifact_id TEXT NOT NULL,
+                        base_revision INTEGER NOT NULL DEFAULT 0,
                         promoted_revision INTEGER NOT NULL,
                         artifact_hash TEXT NOT NULL,
                         dependency_fingerprint TEXT NOT NULL,
+                        dependency_snapshot_json TEXT NOT NULL DEFAULT '{}',
                         gate_receipt_ids_json TEXT NOT NULL,
+                        gate_receipts_json TEXT NOT NULL DEFAULT '[]',
+                        policy_version TEXT NOT NULL DEFAULT '',
                         created_at TEXT NOT NULL,
-                        UNIQUE (artifact_kind, operation_id)
+                        UNIQUE (artifact_kind, operation_id, proposal_hash)
                     );
                     CREATE INDEX IF NOT EXISTS idx_events_revision ON workspace_events(workspace_revision);
                     CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status, updated_at);
@@ -615,6 +670,7 @@ class ControlStore:
                 }
                 if "parent_operation_id" not in operation_columns:
                     connection.execute("ALTER TABLE operations ADD COLUMN parent_operation_id TEXT")
+                self._migrate_v3_kernel_columns(connection)
                 connection.execute(
                     """
                     INSERT INTO control_meta(key, value) VALUES ('schema_version', ?)
@@ -689,6 +745,27 @@ class ControlStore:
             row = connection.execute("SELECT * FROM evidence_needs WHERE need_id = ?", (need_id,)).fetchone()
         return dict(row) if row else None
 
+    def evidence_needs(self) -> list[dict[str, Any]]:
+        """Return the durable research schedule, including autonomous needs."""
+
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM evidence_needs
+                ORDER BY
+                    CASE priority
+                        WHEN 'blocking' THEN 0
+                        WHEN 'high' THEN 1
+                        WHEN 'normal' THEN 2
+                        ELSE 3
+                    END,
+                    created_at,
+                    need_id
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def upsert_content_unit_state(self, item: dict[str, Any]) -> dict[str, Any]:
         required = ("unit_id", "contract_revision", "state")
         missing = [key for key in required if item.get(key) is None or (isinstance(item.get(key), str) and not item[key].strip())]
@@ -717,6 +794,21 @@ class ControlStore:
         with self._connection() as connection:
             row = connection.execute("SELECT * FROM content_unit_states WHERE unit_id = ?", (item["unit_id"],)).fetchone()
         return dict(row) if row else {}
+
+    def content_unit_state(self, unit_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM content_unit_states WHERE unit_id = ?",
+                (str(unit_id or ""),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def content_unit_states(self) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM content_unit_states ORDER BY updated_at, unit_id"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def content_locks(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
@@ -2605,6 +2697,157 @@ class ControlStore:
     # V3 semantic artifacts deliberately live in their own append-only ledger.
     # These methods are only called by the Proposal/Gate/Promotion services; V3
     # agents receive a proposal sandbox and never a ControlStore instance.
+
+    @staticmethod
+    def _migrate_v3_kernel_columns(connection: sqlite3.Connection) -> None:
+        """Additive migration for PR-15.1 exact-binding columns (fail-open on exists)."""
+
+        def columns(table: str) -> set[str]:
+            return {str(row["name"]) for row in connection.execute(f"PRAGMA table_info({table})").fetchall()}
+
+        def add(table: str, column: str, ddl: str) -> None:
+            if column not in columns(table):
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN {ddl}")
+
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "stage_runs" in tables:
+            add("stage_runs", "output_json", "output_json TEXT")
+
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS llm_requests (
+                request_id TEXT PRIMARY KEY,
+                operation_id TEXT NOT NULL,
+                stage_id TEXT NOT NULL,
+                request_index INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                parameters_json TEXT NOT NULL,
+                error TEXT NOT NULL DEFAULT '',
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                UNIQUE(operation_id, stage_id, request_index)
+            );
+            CREATE INDEX IF NOT EXISTS idx_llm_requests_operation
+                ON llm_requests(operation_id, stage_id, request_index);
+            """
+        )
+
+        if "v3_proposals" in tables:
+            add("v3_proposals", "workspace_id", "workspace_id TEXT NOT NULL DEFAULT ''")
+            add("v3_proposals", "declared_dependencies_json", "declared_dependencies_json TEXT NOT NULL DEFAULT '[]'")
+            add("v3_proposals", "canonical_payload_hash", "canonical_payload_hash TEXT NOT NULL DEFAULT ''")
+            add("v3_proposals", "inference_receipt_refs_json", "inference_receipt_refs_json TEXT NOT NULL DEFAULT '[]'")
+            add("v3_proposals", "payload_schema_version", "payload_schema_version TEXT NOT NULL DEFAULT 'v3'")
+            add("v3_proposals", "canonicalization_version", "canonicalization_version TEXT NOT NULL DEFAULT 'v3-canon-2'")
+            add("v3_validation_reports", "proposal_hash", "proposal_hash TEXT NOT NULL DEFAULT ''")
+            add("v3_validation_reports", "report_hash", "report_hash TEXT NOT NULL DEFAULT ''")
+            for col, ddl in (
+                ("receipt_hash", "receipt_hash TEXT NOT NULL DEFAULT ''"),
+                ("workspace_id", "workspace_id TEXT NOT NULL DEFAULT ''"),
+                ("validation_report_id", "validation_report_id TEXT NOT NULL DEFAULT ''"),
+                ("validation_report_hash", "validation_report_hash TEXT NOT NULL DEFAULT ''"),
+                ("artifact_kind", "artifact_kind TEXT NOT NULL DEFAULT ''"),
+                ("gate_policy_version", "gate_policy_version TEXT NOT NULL DEFAULT ''"),
+                ("issuer", "issuer TEXT NOT NULL DEFAULT ''"),
+                ("dependency_fingerprint", "dependency_fingerprint TEXT NOT NULL DEFAULT ''"),
+                ("dependency_snapshot_json", "dependency_snapshot_json TEXT NOT NULL DEFAULT '{}'"),
+                ("issued_at", "issued_at TEXT NOT NULL DEFAULT ''"),
+                ("expires_at", "expires_at TEXT"),
+                ("receipt_json", "receipt_json TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                add("v3_gate_receipts", col, ddl)
+            add("v3_artifact_revisions", "proposal_hash", "proposal_hash TEXT NOT NULL DEFAULT ''")
+            for col, ddl in (
+                ("receipt_hash", "receipt_hash TEXT NOT NULL DEFAULT ''"),
+                ("workspace_id", "workspace_id TEXT NOT NULL DEFAULT ''"),
+                ("proposal_hash", "proposal_hash TEXT NOT NULL DEFAULT ''"),
+                ("base_revision", "base_revision INTEGER NOT NULL DEFAULT 0"),
+                ("dependency_snapshot_json", "dependency_snapshot_json TEXT NOT NULL DEFAULT '{}'"),
+                ("gate_receipts_json", "gate_receipts_json TEXT NOT NULL DEFAULT '[]'"),
+                ("policy_version", "policy_version TEXT NOT NULL DEFAULT ''"),
+            ):
+                add("v3_promotion_receipts", col, ddl)
+
+    def append_v3_inference_receipt(
+        self,
+        receipt: dict[str, Any],
+        *,
+        kernel_seal: Any = None,
+    ) -> dict[str, Any]:
+        """Append immutable inference provenance through the trusted service path."""
+
+        from document_pipeline.kernel_seal import KERNEL_SEAL
+        from document_pipeline.proposals import InferenceReceipt
+
+        if kernel_seal is not KERNEL_SEAL:
+            raise ControlPlaneError(
+                "V3_INFERENCE_RECEIPT_SEALED",
+                "InferenceReceipt 只能由可信推理凭证服务写入。",
+                status_code=403,
+            )
+        model = InferenceReceipt.model_validate(receipt)
+        stored = model.storage_record()
+        if model.workspace_id != self.context.workspace_id:
+            raise ControlPlaneError(
+                "V3_INFERENCE_WORKSPACE_MISMATCH",
+                "InferenceReceipt workspace 与 Store 不一致。",
+                status_code=409,
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                duplicate = connection.execute(
+                    "SELECT * FROM v3_inference_receipts WHERE receipt_id = ? OR receipt_hash = ?",
+                    (model.receipt_id, stored["receipt_hash"]),
+                ).fetchone()
+                if duplicate is not None:
+                    existing = self._v3_inference_receipt_row(duplicate)
+                    if existing["receipt_hash"] != stored["receipt_hash"]:
+                        raise ControlPlaneError(
+                            "V3_INFERENCE_RECEIPT_CONFLICT",
+                            "InferenceReceipt ID 已绑定其他内容。",
+                            status_code=409,
+                        )
+                    connection.commit()
+                    return existing
+                connection.execute(
+                    """
+                    INSERT INTO v3_inference_receipts(
+                        receipt_id, receipt_hash, workspace_id, invocation_id,
+                        capability_id, capability_version, receipt_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        model.receipt_id,
+                        stored["receipt_hash"],
+                        model.workspace_id,
+                        model.invocation_id,
+                        model.capability_id,
+                        model.capability_version,
+                        _json(stored),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.v3_inference_receipt(model.receipt_id) or {}
+
+    def v3_inference_receipt(self, receipt_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM v3_inference_receipts WHERE receipt_id = ?",
+                (str(receipt_id),),
+            ).fetchone()
+        return self._v3_inference_receipt_row(row) if row else None
+
     def append_v3_proposal(self, proposal: dict[str, Any]) -> dict[str, Any]:
         required = (
             "proposal_id", "artifact_kind", "producer_role", "operation_id",
@@ -2616,6 +2859,9 @@ class ControlStore:
             raise ControlPlaneError("V3_PROPOSAL_INVALID", "Proposal 的 revision 或 payload 无效。", status_code=400)
         proposal_id = str(proposal["proposal_id"])
         proposal_hash = str(proposal["proposal_hash"])
+        workspace_id = str(proposal.get("workspace_id") or self.context.workspace_id)
+        if workspace_id != self.context.workspace_id:
+            raise ControlPlaneError("V3_PROPOSAL_WORKSPACE_MISMATCH", "Proposal workspace 与 Store 不一致。", status_code=409)
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -2629,25 +2875,45 @@ class ControlStore:
                         raise ControlPlaneError("V3_PROPOSAL_CONFLICT", "Proposal ID 已被其他内容使用。", status_code=409)
                     connection.commit()
                     return self._v3_proposal_row(duplicate)
+                # Same operation_id with a different decision hash is a hard conflict.
+                op_conflict = connection.execute(
+                    "SELECT proposal_hash FROM v3_proposals WHERE artifact_kind = ? AND operation_id = ?",
+                    (str(proposal["artifact_kind"]), str(proposal["operation_id"])),
+                ).fetchone()
+                if op_conflict is not None and str(op_conflict["proposal_hash"]) != proposal_hash:
+                    raise ControlPlaneError(
+                        "V3_OPERATION_CONFLICT",
+                        "相同 operation_id 不能对应不同 proposal_hash。",
+                        status_code=409,
+                    )
                 revision = self._bump_revision(connection)
                 connection.execute(
                     """
                     INSERT INTO v3_proposals(
-                        proposal_id, artifact_kind, producer_role, operation_id, base_revision,
-                        dependency_fingerprint, proposal_hash, payload_json, cited_source_ids_json,
-                        prompt_version, model_fingerprint, status, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
+                        proposal_id, workspace_id, artifact_kind, producer_role, operation_id, base_revision,
+                        dependency_fingerprint, declared_dependencies_json, proposal_hash, canonical_payload_hash,
+                        payload_json, cited_source_ids_json, prompt_version, model_fingerprint,
+                        inference_receipt_refs_json, payload_schema_version, canonicalization_version,
+                        status, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?)
                     """,
                     (
-                        proposal_id, str(proposal["artifact_kind"]), str(proposal["producer_role"]),
+                        proposal_id, workspace_id, str(proposal["artifact_kind"]), str(proposal["producer_role"]),
                         str(proposal["operation_id"]), int(proposal["base_revision"]),
-                        str(proposal["dependency_fingerprint"]), proposal_hash, _json(proposal["payload"]),
-                        _json(proposal.get("cited_source_ids") or []), str(proposal["prompt_version"]),
-                        str(proposal["model_fingerprint"]), now,
+                        str(proposal["dependency_fingerprint"]), _json(proposal.get("declared_dependencies") or []),
+                        proposal_hash, str(proposal.get("canonical_payload_hash") or ""),
+                        _json(proposal["payload"]), _json(proposal.get("cited_source_ids") or []),
+                        str(proposal["prompt_version"]), str(proposal["model_fingerprint"]),
+                        _json(proposal.get("inference_receipt_refs") or []),
+                        str(proposal.get("payload_schema_version") or "v3"),
+                        str(proposal.get("canonicalization_version") or "v3-canon-2"), now,
                     ),
                 )
                 self._event(connection, revision, "V3ProposalAppended", "V3Proposal", proposal_id, {
-                    "artifact_kind": str(proposal["artifact_kind"]), "producer_role": str(proposal["producer_role"]),
+                    "artifact_kind": str(proposal["artifact_kind"]),
+                    "producer_role": str(proposal["producer_role"]),
+                    "proposal_hash": proposal_hash,
+                    "workspace_id": workspace_id,
                 })
                 connection.commit()
             except Exception:
@@ -2660,30 +2926,108 @@ class ControlStore:
             row = connection.execute("SELECT * FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
         return self._v3_proposal_row(row) if row else None
 
-    def record_v3_validation_report(self, proposal_id: str, report: dict[str, Any]) -> dict[str, Any]:
+    def record_v3_validation_report(
+        self,
+        proposal_id: str,
+        report: dict[str, Any],
+        *,
+        proposal_hash: str | None = None,
+        report_hash: str | None = None,
+        kernel_seal: Any = None,
+    ) -> dict[str, Any]:
+        from document_pipeline.kernel_seal import KERNEL_SEAL
+
+        if kernel_seal is not KERNEL_SEAL:
+            raise ControlPlaneError(
+                "V3_VALIDATION_SEALED",
+                "ValidationReport 只能由持有 KERNEL_SEAL 的可信 Validator 写入。",
+                status_code=403,
+            )
         proposal = self.v3_proposal(proposal_id)
         if proposal is None:
             raise ControlPlaneError("V3_PROPOSAL_NOT_FOUND", "Proposal 不存在。", status_code=404)
         if str(report.get("proposal_id") or "") != str(proposal_id):
             raise ControlPlaneError("V3_VALIDATION_INVALID", "ValidationReport 未绑定对应 Proposal。", status_code=400)
+        bound_hash = str(proposal_hash or report.get("proposal_hash") or "")
+        if not bound_hash or bound_hash != str(proposal["proposal_hash"]):
+            raise ControlPlaneError(
+                "V3_VALIDATION_HASH_MISMATCH",
+                "ValidationReport 必须绑定 Store 中的 exact proposal_hash。",
+                status_code=409,
+            )
+        if str(report.get("workspace_id") or self.context.workspace_id) != self.context.workspace_id:
+            raise ControlPlaneError("V3_VALIDATION_WORKSPACE_MISMATCH", "ValidationReport 跨工作空间。", status_code=409)
+
+        # Never trust caller-supplied schema_valid for sealed write: re-check payload.
+        from document_pipeline.artifact_registry import ARTIFACT_REGISTRY
+        from document_pipeline.canonicalization import canonical_payload_hash
+        from document_pipeline.proposals import ValidationReport
+
+        payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
+        try:
+            ARTIFACT_REGISTRY.validate_payload(str(proposal["artifact_kind"]), payload)
+            recomputed_schema_valid = True
+        except Exception:
+            recomputed_schema_valid = False
+        if bool(report.get("schema_valid")) and not recomputed_schema_valid:
+            raise ControlPlaneError(
+                "V3_VALIDATION_FORGED",
+                "ValidationReport 宣称 schema_valid，但 Store payload 未通过 Schema。",
+                status_code=409,
+            )
+        expected_payload_hash = canonical_payload_hash(payload)
+        if str(report.get("canonical_payload_hash") or "") != expected_payload_hash:
+            raise ControlPlaneError(
+                "V3_VALIDATION_HASH_MISMATCH",
+                "ValidationReport canonical_payload_hash 与 Store payload 不一致。",
+                status_code=409,
+            )
+
+        report_model = ValidationReport.model_validate(report)
+        recomputed_report_hash = report_model.compute_report_hash()
+        if report_hash and str(report_hash) != recomputed_report_hash:
+            raise ControlPlaneError(
+                "V3_VALIDATION_HASH_MISMATCH",
+                "ValidationReport report_hash 与内容不一致。",
+                status_code=409,
+            )
+        stored_report_hash = recomputed_report_hash
         valid = all(bool(report.get(field)) for field in (
             "schema_valid", "references_valid", "authority_policy_valid", "dependency_current",
-        ))
+        )) and recomputed_schema_valid
         now = _now()
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                current = connection.execute("SELECT status FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+                current = connection.execute(
+                    "SELECT status, proposal_hash FROM v3_proposals WHERE proposal_id = ?",
+                    (str(proposal_id),),
+                ).fetchone()
                 if current is None or str(current["status"]) == "promoted":
                     raise ControlPlaneError("V3_VALIDATION_FORBIDDEN", "已晋级 Proposal 不能重新校验。", status_code=409)
+                if str(current["proposal_hash"]) != bound_hash:
+                    raise ControlPlaneError("V3_VALIDATION_HASH_MISMATCH", "Proposal hash 在写入前已变化。", status_code=409)
                 revision = self._bump_revision(connection)
                 connection.execute(
-                    "INSERT INTO v3_validation_reports(proposal_id, report_json, created_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(proposal_id) DO UPDATE SET report_json = excluded.report_json, created_at = excluded.created_at",
-                    (str(proposal_id), _json(report), now),
+                    "INSERT INTO v3_validation_reports(proposal_id, proposal_hash, report_hash, report_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(proposal_id) DO UPDATE SET "
+                    "proposal_hash = excluded.proposal_hash, report_hash = excluded.report_hash, "
+                    "report_json = excluded.report_json, created_at = excluded.created_at",
+                    (str(proposal_id), bound_hash, stored_report_hash, _json(report), now),
                 )
-                connection.execute("UPDATE v3_proposals SET status = ? WHERE proposal_id = ?", ("validated" if valid else "rejected", str(proposal_id)))
-                self._event(connection, revision, "V3ProposalValidated", "V3Proposal", str(proposal_id), {"valid": valid})
+                connection.execute(
+                    "UPDATE v3_proposals SET status = ? WHERE proposal_id = ?",
+                    ("validated" if valid else "rejected", str(proposal_id)),
+                )
+                self._event(
+                    connection,
+                    revision,
+                    "V3ProposalValidated",
+                    "V3Proposal",
+                    str(proposal_id),
+                    {"valid": valid, "proposal_hash": bound_hash, "report_hash": stored_report_hash},
+                )
                 connection.commit()
             except Exception:
                 connection.rollback()
@@ -2698,108 +3042,654 @@ class ControlStore:
         value = _decode(str(row["report_json"]), {}) if row is not None else None
         return value if isinstance(value, dict) else None
 
-    def issue_v3_gate_receipt(self, receipt: dict[str, Any]) -> dict[str, Any]:
-        required = ("receipt_id", "proposal_id", "proposal_hash", "gate_id", "verdict", "reviewer")
-        if any(not str(receipt.get(key) or "").strip() for key in required) or str(receipt.get("verdict")) not in {"pass", "warn", "block", "needs_human"}:
+    def issue_v3_gate_receipt(self, receipt: dict[str, Any], *, kernel_seal: Any = None) -> dict[str, Any]:
+        from document_pipeline.kernel_seal import KERNEL_SEAL
+
+        if kernel_seal is not KERNEL_SEAL:
+            raise ControlPlaneError(
+                "V3_GATE_SEALED",
+                "GateReceipt 只能由持有 KERNEL_SEAL 的 GateService 签发。",
+                status_code=403,
+            )
+        required = ("receipt_id", "proposal_id", "proposal_hash", "gate_id", "verdict", "reviewer", "issuer")
+        if any(not str(receipt.get(key) or "").strip() for key in required) or str(receipt.get("verdict")) not in {
+            "pass", "warn", "block", "needs_human",
+        }:
             raise ControlPlaneError("V3_GATE_INVALID", "GateReceipt 输入无效。", status_code=400)
         proposal_id = str(receipt["proposal_id"])
+        workspace_id = str(receipt.get("workspace_id") or self.context.workspace_id)
+        if workspace_id != self.context.workspace_id:
+            raise ControlPlaneError("V3_GATE_WORKSPACE_MISMATCH", "GateReceipt 跨工作空间。", status_code=409)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                proposal = connection.execute("SELECT * FROM v3_proposals WHERE proposal_id = ?", (proposal_id,)).fetchone()
-                validation = connection.execute("SELECT report_json FROM v3_validation_reports WHERE proposal_id = ?", (proposal_id,)).fetchone()
+                proposal = connection.execute(
+                    "SELECT * FROM v3_proposals WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
+                validation = connection.execute(
+                    "SELECT * FROM v3_validation_reports WHERE proposal_id = ?", (proposal_id,)
+                ).fetchone()
                 if proposal is None or validation is None:
                     raise ControlPlaneError("V3_GATE_FORBIDDEN", "Gate 只能评审已验证的 Proposal。", status_code=409)
+                if str(proposal["workspace_id"] or workspace_id) not in {"", workspace_id}:
+                    raise ControlPlaneError("V3_GATE_WORKSPACE_MISMATCH", "Proposal 与 Gate workspace 不一致。", status_code=409)
                 report = _decode(str(validation["report_json"]), {})
-                if not isinstance(report, dict) or not all(bool(report.get(field)) for field in ("schema_valid", "references_valid", "authority_policy_valid", "dependency_current")):
-                    raise ControlPlaneError("V3_GATE_FORBIDDEN", "验证未通过，不能签发 GateReceipt。", status_code=409)
-                if str(proposal["proposal_hash"]) != str(receipt["proposal_hash"]) or int(proposal["base_revision"]) != int(receipt.get("reviewed_revision", -1)):
-                    raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定当前 Proposal 内容或基线 revision。", status_code=409)
+                if not isinstance(report, dict):
+                    raise ControlPlaneError("V3_GATE_FORBIDDEN", "ValidationReport 损坏。", status_code=409)
+                if str(receipt["proposal_hash"]) != str(proposal["proposal_hash"]):
+                    raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定 exact proposal_hash。", status_code=409)
+                if str(validation["proposal_hash"] or proposal["proposal_hash"]) != str(proposal["proposal_hash"]):
+                    raise ControlPlaneError("V3_GATE_STALE", "ValidationReport 未绑定 exact proposal_hash。", status_code=409)
+
+                # Recompute ValidationReport hash; never trust a caller-supplied binding alone.
+                from document_pipeline.artifact_registry import ARTIFACT_REGISTRY
+                from document_pipeline.proposals import GateReceipt, PlanningGateReceipt, ValidationReport
+
+                report_model = ValidationReport.model_validate(report)
+                expected_report_hash = report_model.compute_report_hash()
+                if str(validation["report_hash"] or "") != expected_report_hash:
+                    raise ControlPlaneError(
+                        "V3_GATE_STALE",
+                        "Store 中 ValidationReport hash 与内容不一致。",
+                        status_code=409,
+                    )
+                if str(receipt.get("validation_report_hash") or "") != expected_report_hash:
+                    raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定 ValidationReport hash。", status_code=409)
+
+                # Re-check payload schema independently of stored booleans.
+                proposal_payload = _decode(str(proposal["payload_json"]), {})
+                try:
+                    ARTIFACT_REGISTRY.validate_payload(str(proposal["artifact_kind"]), proposal_payload)
+                    payload_schema_ok = True
+                except Exception:
+                    payload_schema_ok = False
+
+                reviewed_revision = int(receipt.get("reviewed_revision", receipt.get("base_revision", -1)))
+                if reviewed_revision != int(proposal["base_revision"]):
+                    raise ControlPlaneError("V3_GATE_STALE", "GateReceipt 未绑定当前 base_revision。", status_code=409)
+                report_passed = all(
+                    bool(report.get(field))
+                    for field in ("schema_valid", "references_valid", "authority_policy_valid", "dependency_current")
+                )
+                if str(receipt["verdict"]) == "pass" and (not report_passed or not payload_schema_ok):
+                    raise ControlPlaneError(
+                        "V3_GATE_FORBIDDEN",
+                        "验证未通过或 payload Schema 非法，不能签发 pass GateReceipt。",
+                        status_code=409,
+                    )
+
+                # Recompute receipt content hash; reject forged hash claims.
+                receipt_for_hash = dict(receipt)
+                receipt_for_hash["workspace_id"] = workspace_id
+                receipt_for_hash["validation_report_hash"] = expected_report_hash
+                receipt_for_hash.pop("receipt_hash", None)
+                receipt_model = PlanningGateReceipt if receipt_for_hash.get("receipt_subtype") == "planning" else GateReceipt
+                gate_model = receipt_model.model_validate(
+                    {**receipt_for_hash, "receipt_hash": "", "reviewed_revision": reviewed_revision}
+                )
+                recomputed_receipt_hash = gate_model.compute_receipt_content_hash()
+                claimed_hash = str(receipt.get("receipt_hash") or "")
+                if claimed_hash and claimed_hash != recomputed_receipt_hash:
+                    raise ControlPlaneError(
+                        "V3_GATE_HASH_MISMATCH",
+                        "GateReceipt receipt_hash 与内容不一致。",
+                        status_code=409,
+                    )
+
                 revision = self._bump_revision(connection)
                 now = _now()
+                issued_at = str(receipt.get("issued_at") or now)
+                sealed_receipt = {
+                    **receipt,
+                    "workspace_id": workspace_id,
+                    "validation_report_hash": expected_report_hash,
+                    "receipt_hash": recomputed_receipt_hash,
+                    "issued_at": issued_at,
+                    "reviewed_revision": reviewed_revision,
+                }
                 connection.execute(
-                    "INSERT INTO v3_gate_receipts(receipt_id, proposal_id, proposal_hash, gate_id, verdict, findings_json, reviewer, reviewed_revision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(receipt["receipt_id"]), proposal_id, str(receipt["proposal_hash"]), str(receipt["gate_id"]), str(receipt["verdict"]), _json(receipt.get("findings") or []), str(receipt["reviewer"]), int(receipt["reviewed_revision"]), now),
+                    """
+                    INSERT INTO v3_gate_receipts(
+                        receipt_id, receipt_hash, workspace_id, proposal_id, proposal_hash,
+                        validation_report_id, validation_report_hash, artifact_kind, gate_id,
+                        gate_policy_version, verdict, findings_json, issuer, reviewer,
+                        reviewed_revision, dependency_fingerprint, dependency_snapshot_json,
+                        issued_at, expires_at, receipt_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(receipt["receipt_id"]),
+                        recomputed_receipt_hash,
+                        workspace_id,
+                        proposal_id,
+                        str(receipt["proposal_hash"]),
+                        str(receipt.get("validation_report_id") or report.get("report_id") or ""),
+                        expected_report_hash,
+                        str(receipt.get("artifact_kind") or proposal["artifact_kind"]),
+                        str(receipt["gate_id"]),
+                        str(receipt.get("gate_policy_version") or ""),
+                        str(receipt["verdict"]),
+                        _json(receipt.get("findings") or []),
+                        str(receipt["issuer"]),
+                        str(receipt["reviewer"]),
+                        reviewed_revision,
+                        str(receipt.get("dependency_fingerprint") or ""),
+                        _json(receipt.get("resolved_dependency_snapshot") or {}),
+                        issued_at,
+                        receipt.get("expires_at"),
+                        _json(sealed_receipt),
+                        now,
+                    ),
                 )
-                self._event(connection, revision, "V3GateReceiptIssued", "V3Proposal", proposal_id, {"gate_id": str(receipt["gate_id"]), "verdict": str(receipt["verdict"])})
+                self._event(
+                    connection,
+                    revision,
+                    "V3GateReceiptIssued",
+                    "V3Proposal",
+                    proposal_id,
+                    {
+                        "gate_id": str(receipt["gate_id"]),
+                        "verdict": str(receipt["verdict"]),
+                        "issuer": str(receipt["issuer"]),
+                        "proposal_hash": str(receipt["proposal_hash"]),
+                        "receipt_hash": recomputed_receipt_hash,
+                    },
+                )
                 connection.commit()
             except Exception:
                 connection.rollback()
                 raise
-        return {**receipt, "created_at": now}
+        return {**sealed_receipt, "created_at": now}
 
-    def promote_v3_proposal(self, *, proposal_id: str, gate_receipt_ids: list[str]) -> dict[str, Any]:
+    def has_v3_gate_receipt(self, proposal_id: str, gate_id: str) -> bool:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM v3_gate_receipts WHERE proposal_id = ? AND gate_id = ? AND verdict = 'pass' LIMIT 1",
+                (str(proposal_id), str(gate_id)),
+            ).fetchone()
+        return row is not None
+
+    def latest_v3_gate_receipt(self, proposal_id: str, gate_id: str) -> dict[str, Any] | None:
+        """Return the latest immutable receipt for one exact Proposal/Gate pair."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT receipt_json FROM v3_gate_receipts WHERE proposal_id = ? AND gate_id = ? "
+                "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                (str(proposal_id), str(gate_id)),
+            ).fetchone()
+        value = _decode(str(row["receipt_json"]), {}) if row is not None else None
+        return value if isinstance(value, dict) else None
+
+    def promote_v3_proposal(
+        self,
+        *,
+        proposal_id: str,
+        gate_receipt_ids: list[str],
+        workspace_id: str | None = None,
+        gate_policy_registry: Any = None,
+        artifact_registry: Any = None,
+    ) -> dict[str, Any]:
         ids = sorted({str(value).strip() for value in gate_receipt_ids if str(value).strip()})
         if not ids:
             raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "缺少通过的 GateReceipt，不能晋级。", status_code=409)
+        expected_workspace = str(workspace_id or self.context.workspace_id)
+        if expected_workspace != self.context.workspace_id:
+            raise ControlPlaneError("V3_PROMOTION_WORKSPACE_MISMATCH", "Promotion 跨工作空间。", status_code=409)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                proposal = connection.execute("SELECT * FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+                proposal = connection.execute(
+                    "SELECT * FROM v3_proposals WHERE proposal_id = ?", (str(proposal_id),)
+                ).fetchone()
                 if proposal is None:
                     raise ControlPlaneError("V3_PROPOSAL_NOT_FOUND", "Proposal 不存在。", status_code=404)
-                existing = connection.execute("SELECT * FROM v3_promotion_receipts WHERE proposal_id = ?", (str(proposal_id),)).fetchone()
+                if str(proposal["workspace_id"] or expected_workspace) not in {"", expected_workspace}:
+                    raise ControlPlaneError("V3_PROMOTION_WORKSPACE_MISMATCH", "Proposal 不属于当前工作空间。", status_code=409)
+
+                # Recompute proposal hash from stored decision fields (never trust caller body).
+                from document_pipeline.canonicalization import compute_proposal_hash
+                from document_pipeline.proposals import ProposalEnvelope
+
+                proposal_row = self._v3_proposal_row(proposal)
+                proposal_row["workspace_id"] = expected_workspace
+                envelope = ProposalEnvelope.from_storage(proposal_row)
+                recomputed_hash = compute_proposal_hash(envelope.decision_record())
+                if recomputed_hash != str(proposal["proposal_hash"]):
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_HASH_MISMATCH",
+                        "Store Proposal hash 与决策内容不一致，拒绝晋级。",
+                        status_code=409,
+                    )
+
+                existing = connection.execute(
+                    "SELECT * FROM v3_promotion_receipts WHERE proposal_id = ?", (str(proposal_id),)
+                ).fetchone()
                 if existing is not None:
                     connection.commit()
                     return self._v3_promotion_row(existing)
+
+                # Operation idempotency is bound to proposal_hash.
                 duplicate = connection.execute(
                     "SELECT * FROM v3_promotion_receipts WHERE artifact_kind = ? AND operation_id = ?",
                     (str(proposal["artifact_kind"]), str(proposal["operation_id"])),
                 ).fetchone()
                 if duplicate is not None:
-                    connection.commit()
-                    return self._v3_promotion_row(duplicate)
+                    if str(duplicate["proposal_hash"] or "") not in {"", recomputed_hash}:
+                        raise ControlPlaneError(
+                            "V3_OPERATION_CONFLICT",
+                            "相同 operation_id 已晋级不同 proposal_hash。",
+                            status_code=409,
+                        )
+                    if str(duplicate["proposal_id"]) == str(proposal_id):
+                        connection.commit()
+                        return self._v3_promotion_row(duplicate)
+                    # Same hash different id is treated as content-addressed replay only when hashes match.
+                    if str(duplicate["proposal_hash"] or "") == recomputed_hash:
+                        connection.commit()
+                        return self._v3_promotion_row(duplicate)
+                    raise ControlPlaneError(
+                        "V3_OPERATION_CONFLICT",
+                        "相同 operation 不能静默返回另一 Proposal 的 Receipt。",
+                        status_code=409,
+                    )
+
+                validation = connection.execute(
+                    "SELECT * FROM v3_validation_reports WHERE proposal_id = ?", (str(proposal_id),)
+                ).fetchone()
+                if validation is None:
+                    raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "缺少 ValidationReport。", status_code=409)
+                report = _decode(str(validation["report_json"]), {})
+                if not isinstance(report, dict) or not all(
+                    bool(report.get(field))
+                    for field in ("schema_valid", "references_valid", "authority_policy_valid", "dependency_current")
+                ):
+                    raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "ValidationReport 未通过。", status_code=409)
+                if str(validation["proposal_hash"] or recomputed_hash) != recomputed_hash:
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "ValidationReport 未绑定 exact proposal_hash。",
+                        status_code=409,
+                    )
+                if str(report.get("proposal_hash") or recomputed_hash) != recomputed_hash:
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "ValidationReport payload 未绑定 exact proposal_hash。",
+                        status_code=409,
+                    )
+
+                # Independent re-validation of Store payload Schema (never trust report flags alone).
+                from document_pipeline.artifact_registry import ARTIFACT_REGISTRY as _DEFAULT_ARTIFACT_REGISTRY
+                from document_pipeline.proposals import GateReceipt as _GateReceipt
+                from document_pipeline.proposals import ValidationReport as _ValidationReport
+
+                registry = artifact_registry or _DEFAULT_ARTIFACT_REGISTRY
+                try:
+                    registry.validate_payload(str(proposal["artifact_kind"]), envelope.payload)
+                except Exception as exc:
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        f"Store payload Schema 非法，拒绝晋级: {exc}",
+                        status_code=409,
+                    ) from exc
+
+                report_model = _ValidationReport.model_validate(report)
+                recomputed_report_hash = report_model.compute_report_hash()
+                if str(validation["report_hash"] or "") != recomputed_report_hash:
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "ValidationReport hash 与内容不一致。",
+                        status_code=409,
+                    )
+                if str(report.get("canonical_payload_hash") or "") != envelope.canonical_payload_hash():
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "ValidationReport canonical_payload_hash 与 Store payload 不一致。",
+                        status_code=409,
+                    )
+
                 placeholders = ",".join("?" for _ in ids)
                 gates = connection.execute(
                     f"SELECT * FROM v3_gate_receipts WHERE receipt_id IN ({placeholders}) AND proposal_id = ?",
                     [*ids, str(proposal_id)],
                 ).fetchall()
-                if len(gates) != len(ids) or any(
-                    str(gate["verdict"]) != "pass" or str(gate["proposal_hash"]) != str(proposal["proposal_hash"])
-                    or int(gate["reviewed_revision"]) != int(proposal["base_revision"])
-                    for gate in gates
-                ):
-                    raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "GateReceipt 未通过、过期或不属于该 Proposal。", status_code=409)
-                active = connection.execute("SELECT revision FROM v3_active_artifacts WHERE artifact_kind = ?", (str(proposal["artifact_kind"]),)).fetchone()
+                if len(gates) != len(ids):
+                    raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "GateReceipt 不完整或不属于该 Proposal。", status_code=409)
+
+                # Recompute every GateReceipt content hash inside the promotion transaction.
+                for gate in gates:
+                    body = _decode(str(gate["receipt_json"]), {})
+                    if not isinstance(body, dict):
+                        raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", "GateReceipt JSON 损坏。", status_code=409)
+                    body_for_hash = {**body, "receipt_hash": ""}
+                    try:
+                        gate_model = _GateReceipt.model_validate(body_for_hash)
+                    except Exception as exc:
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_FORBIDDEN",
+                            f"GateReceipt 内容无法解析: {exc}",
+                            status_code=409,
+                        ) from exc
+                    expected_gate_hash = gate_model.compute_receipt_content_hash()
+                    if str(gate["receipt_hash"] or "") != expected_gate_hash:
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_FORBIDDEN",
+                            f"GateReceipt {gate['gate_id']} receipt_hash 与内容不一致。",
+                            status_code=409,
+                        )
+                    if str(gate["validation_report_hash"] or "") != recomputed_report_hash:
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_FORBIDDEN",
+                            f"GateReceipt {gate['gate_id']} 未绑定 exact ValidationReport hash。",
+                            status_code=409,
+                        )
+
+                # Re-resolve active dependencies inside the promotion transaction.
+                resolved_snapshot: dict[str, Any] = {}
+                if artifact_registry is not None:
+                    try:
+                        registration = artifact_registry.require_promotable(str(proposal["artifact_kind"]))
+                    except Exception as exc:
+                        raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", str(exc), status_code=409) from exc
+                    for kind in registration.dependency_kinds:
+                        dep = connection.execute(
+                            "SELECT revision.* FROM v3_active_artifacts active "
+                            "JOIN v3_artifact_revisions revision "
+                            "ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision "
+                            "WHERE active.artifact_kind = ?",
+                            (kind,),
+                        ).fetchone()
+                        if dep is None:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时依赖 {kind} 已缺失。",
+                                status_code=409,
+                            )
+                        resolved_snapshot[kind] = {
+                            "artifact_kind": kind,
+                            "artifact_id": str(dep["artifact_id"]),
+                            "revision": int(dep["revision"]),
+                            "artifact_hash": str(dep["artifact_hash"]),
+                        }
+                    declared_dependencies = {
+                        item.artifact_kind: item
+                        for item in envelope.declared_dependencies
+                    }
+                    for kind in registration.optional_dependency_kinds:
+                        declared_ref = declared_dependencies.get(kind)
+                        if declared_ref is None:
+                            continue
+                        dep = connection.execute(
+                            "SELECT revision.* FROM v3_active_artifacts active "
+                            "JOIN v3_artifact_revisions revision "
+                            "ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision "
+                            "WHERE active.artifact_kind = ?",
+                            (kind,),
+                        ).fetchone()
+                        if dep is None:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时可选依赖 {kind} 已缺失。",
+                                status_code=409,
+                            )
+                        entry = {
+                            "artifact_kind": kind,
+                            "artifact_id": str(dep["artifact_id"]),
+                            "revision": int(dep["revision"]),
+                            "artifact_hash": str(dep["artifact_hash"]),
+                        }
+                        if (
+                            declared_ref.expected_revision is not None
+                            and int(declared_ref.expected_revision)
+                            != entry["revision"]
+                        ):
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时可选依赖 {kind} revision 已变化。",
+                                status_code=409,
+                            )
+                        if (
+                            declared_ref.expected_hash
+                            and declared_ref.expected_hash
+                            != entry["artifact_hash"]
+                        ):
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_STALE",
+                                f"晋级时可选依赖 {kind} hash 已变化。",
+                                status_code=409,
+                            )
+                        resolved_snapshot[kind] = entry
+
+                from document_pipeline.proposals import trusted_dependency_fingerprint
+
+                policy_version = ""
+                required_gate_ids: list[str] = []
+                if gate_policy_registry is not None:
+                    try:
+                        policy = gate_policy_registry.require_policy(str(proposal["artifact_kind"]))
+                    except Exception as exc:
+                        raise ControlPlaneError("V3_PROMOTION_FORBIDDEN", str(exc), status_code=409) from exc
+                    policy_version = policy.policy_version
+                    required_gate_ids = list(policy.gate_ids())
+                    trusted_fp = trusted_dependency_fingerprint(
+                        resolved_dependency_snapshot=resolved_snapshot,
+                        schema_version=policy.schema_version,
+                        policy_version=policy.policy_version,
+                        prompt_version=str(proposal["prompt_version"]),
+                        model_fingerprint=str(proposal["model_fingerprint"]),
+                        artifact_kind=str(proposal["artifact_kind"]),
+                    )
+                    if trusted_fp != str(proposal["dependency_fingerprint"]):
+                        raise ControlPlaneError(
+                            "V3_PROMOTION_STALE",
+                            "晋级时 dependency_fingerprint 与可信重算不一致。",
+                            status_code=409,
+                        )
+                    # Full required Gate set.
+                    present = {str(gate["gate_id"]): gate for gate in gates}
+                    for required_id in required_gate_ids:
+                        gate = present.get(required_id)
+                        if gate is None:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_FORBIDDEN",
+                                f"缺少必需 Gate {required_id}。",
+                                status_code=409,
+                            )
+                        requirement = policy.requirement_for(required_id)
+                        assert requirement is not None
+                        if str(gate["verdict"]) not in requirement.promotion_verdicts:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_FORBIDDEN",
+                                f"Gate {required_id} verdict 不允许晋级。",
+                                status_code=409,
+                            )
+                        issuer = str(gate["issuer"] or "")
+                        if issuer not in requirement.allowed_issuers:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_FORBIDDEN",
+                                f"Gate {required_id} issuer 非法: {issuer}",
+                                status_code=409,
+                            )
+                        if str(gate["proposal_hash"]) != recomputed_hash:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_FORBIDDEN",
+                                f"Gate {required_id} 未绑定 exact proposal_hash。",
+                                status_code=409,
+                            )
+                        if str(gate["workspace_id"] or expected_workspace) not in {"", expected_workspace}:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_FORBIDDEN",
+                                f"Gate {required_id} 跨工作空间。",
+                                status_code=409,
+                            )
+                        if gate["expires_at"]:
+                            expires = _parse_utc_timestamp(gate["expires_at"], label="GateReceipt.expires_at")
+                            if expires <= datetime.now(timezone.utc):
+                                raise ControlPlaneError(
+                                    "V3_PROMOTION_FORBIDDEN",
+                                    f"Gate {required_id} 已过期。",
+                                    status_code=409,
+                                )
+                        if str(gate["gate_policy_version"] or policy_version) not in {"", policy_version}:
+                            raise ControlPlaneError(
+                                "V3_PROMOTION_FORBIDDEN",
+                                f"Gate {required_id} policy version 不匹配。",
+                                status_code=409,
+                            )
+                else:
+                    # Fail closed without policy registry — never accept bare pass receipts.
+                    raise ControlPlaneError(
+                        "V3_PROMOTION_FORBIDDEN",
+                        "缺少 GatePolicyRegistry，不能晋级。",
+                        status_code=409,
+                    )
+
+                active = connection.execute(
+                    "SELECT revision FROM v3_active_artifacts WHERE artifact_kind = ?",
+                    (str(proposal["artifact_kind"]),),
+                ).fetchone()
                 current_revision = int(active["revision"]) if active is not None else 0
                 if current_revision != int(proposal["base_revision"]):
-                    connection.execute("UPDATE v3_proposals SET status = 'stale' WHERE proposal_id = ?", (str(proposal_id),))
+                    connection.execute(
+                        "UPDATE v3_proposals SET status = 'stale' WHERE proposal_id = ?",
+                        (str(proposal_id),),
+                    )
+                    self._event(
+                        connection,
+                        self._bump_revision(connection),
+                        "V3PromotionRejectedStale",
+                        "V3Proposal",
+                        str(proposal_id),
+                        {"base_revision": int(proposal["base_revision"]), "active_revision": current_revision},
+                    )
+                    connection.commit()
                     raise ControlPlaneError("V3_PROMOTION_STALE", "Proposal 的 base_revision 已过期，不能晋级。", status_code=409)
+
                 promoted_revision = current_revision + 1
                 artifact_id = f"{proposal['artifact_kind']}@{promoted_revision}"
-                artifact_hash = hashlib.sha256(str(proposal["payload_json"]).encode("utf-8")).hexdigest()
+                from document_pipeline.canonicalization import canonical_payload_hash as _payload_hash
+
+                artifact_hash = _payload_hash(_decode(str(proposal["payload_json"]), {}))
                 receipt_id = str(uuid.uuid4())
                 now = _now()
+                gate_bindings = [
+                    {
+                        "receipt_id": str(gate["receipt_id"]),
+                        "receipt_hash": str(gate["receipt_hash"] or ""),
+                        "gate_id": str(gate["gate_id"]),
+                    }
+                    for gate in gates
+                ]
+                promotion_body = {
+                    "workspace_id": expected_workspace,
+                    "proposal_id": str(proposal_id),
+                    "proposal_hash": recomputed_hash,
+                    "artifact_kind": str(proposal["artifact_kind"]),
+                    "operation_id": str(proposal["operation_id"]),
+                    "artifact_id": artifact_id,
+                    "base_revision": int(proposal["base_revision"]),
+                    "promoted_revision": promoted_revision,
+                    "artifact_hash": artifact_hash,
+                    "dependency_fingerprint": str(proposal["dependency_fingerprint"]),
+                    "resolved_dependency_snapshot": resolved_snapshot,
+                    "gate_receipts": gate_bindings,
+                    "gate_receipt_ids": [item["receipt_id"] for item in gate_bindings],
+                    "policy_version": policy_version,
+                }
+                from document_pipeline.proposals import PromotionReceipt as _PromotionReceipt
+
+                # receipt_id is assigned below; content hash excludes it and the hash field itself.
+                promotion_for_hash = {
+                    **promotion_body,
+                    "receipt_id": "pending",
+                    "receipt_hash": "",
+                    "created_at": now,
+                }
+                receipt_hash = _PromotionReceipt.model_validate(promotion_for_hash).compute_receipt_content_hash()
                 revision = self._bump_revision(connection)
                 connection.execute(
-                    "INSERT INTO v3_artifact_revisions(artifact_kind, revision, artifact_id, artifact_hash, payload_json, producer_role, dependency_fingerprint, proposal_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (str(proposal["artifact_kind"]), promoted_revision, artifact_id, artifact_hash, str(proposal["payload_json"]), str(proposal["producer_role"]), str(proposal["dependency_fingerprint"]), str(proposal_id), now),
+                    """
+                    INSERT INTO v3_artifact_revisions(
+                        artifact_kind, revision, artifact_id, artifact_hash, payload_json,
+                        producer_role, dependency_fingerprint, proposal_id, proposal_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(proposal["artifact_kind"]), promoted_revision, artifact_id, artifact_hash,
+                        str(proposal["payload_json"]), str(proposal["producer_role"]),
+                        str(proposal["dependency_fingerprint"]), str(proposal_id), recomputed_hash, now,
+                    ),
                 )
                 connection.execute(
-                    "INSERT INTO v3_active_artifacts(artifact_kind, artifact_id, revision, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(artifact_kind) DO UPDATE SET artifact_id = excluded.artifact_id, revision = excluded.revision, updated_at = excluded.updated_at",
+                    """
+                    INSERT INTO v3_active_artifacts(artifact_kind, artifact_id, revision, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(artifact_kind) DO UPDATE SET
+                        artifact_id = excluded.artifact_id,
+                        revision = excluded.revision,
+                        updated_at = excluded.updated_at
+                    """,
                     (str(proposal["artifact_kind"]), artifact_id, promoted_revision, now),
                 )
                 connection.execute(
-                    "INSERT INTO v3_promotion_receipts(receipt_id, proposal_id, artifact_kind, operation_id, artifact_id, promoted_revision, artifact_hash, dependency_fingerprint, gate_receipt_ids_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (receipt_id, str(proposal_id), str(proposal["artifact_kind"]), str(proposal["operation_id"]), artifact_id, promoted_revision, artifact_hash, str(proposal["dependency_fingerprint"]), _json(ids), now),
+                    """
+                    INSERT INTO v3_promotion_receipts(
+                        receipt_id, receipt_hash, workspace_id, proposal_id, proposal_hash,
+                        artifact_kind, operation_id, artifact_id, base_revision, promoted_revision,
+                        artifact_hash, dependency_fingerprint, dependency_snapshot_json,
+                        gate_receipt_ids_json, gate_receipts_json, policy_version, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id, receipt_hash, expected_workspace, str(proposal_id), recomputed_hash,
+                        str(proposal["artifact_kind"]), str(proposal["operation_id"]), artifact_id,
+                        int(proposal["base_revision"]), promoted_revision, artifact_hash,
+                        str(proposal["dependency_fingerprint"]), _json(resolved_snapshot),
+                        _json([item["receipt_id"] for item in gate_bindings]), _json(gate_bindings),
+                        policy_version, now,
+                    ),
                 )
-                connection.execute("UPDATE v3_proposals SET status = 'promoted' WHERE proposal_id = ?", (str(proposal_id),))
-                self._event(connection, revision, "V3ArtifactPromoted", "V3Artifact", artifact_id, {"artifact_kind": str(proposal["artifact_kind"]), "revision": promoted_revision, "proposal_id": str(proposal_id)})
+                connection.execute(
+                    "UPDATE v3_proposals SET status = 'promoted' WHERE proposal_id = ?",
+                    (str(proposal_id),),
+                )
+                self._event(
+                    connection,
+                    revision,
+                    "V3ArtifactPromoted",
+                    "V3Artifact",
+                    artifact_id,
+                    {
+                        "artifact_kind": str(proposal["artifact_kind"]),
+                        "revision": promoted_revision,
+                        "proposal_id": str(proposal_id),
+                        "proposal_hash": recomputed_hash,
+                        "receipt_hash": receipt_hash,
+                        "dependency_snapshot": resolved_snapshot,
+                    },
+                )
                 connection.commit()
             except Exception:
-                connection.rollback()
+                try:
+                    connection.rollback()
+                except Exception:
+                    pass
                 raise
         return self.v3_promotion_receipt(receipt_id) or {}
 
     def v3_promotion_receipt(self, receipt_id: str) -> dict[str, Any] | None:
         with self._connection() as connection:
-            row = connection.execute("SELECT * FROM v3_promotion_receipts WHERE receipt_id = ?", (str(receipt_id),)).fetchone()
+            row = connection.execute(
+                "SELECT * FROM v3_promotion_receipts WHERE receipt_id = ?", (str(receipt_id),)
+            ).fetchone()
         return self._v3_promotion_row(row) if row else None
 
     def v3_active_artifact(self, artifact_kind: str) -> dict[str, Any] | None:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT revision.* FROM v3_active_artifacts active JOIN v3_artifact_revisions revision ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision WHERE active.artifact_kind = ?",
+                "SELECT revision.* FROM v3_active_artifacts active "
+                "JOIN v3_artifact_revisions revision "
+                "ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision "
+                "WHERE active.artifact_kind = ?",
                 (str(artifact_kind),),
             ).fetchone()
         return self._v3_artifact_row(row) if row else None
@@ -2807,7 +3697,10 @@ class ControlStore:
     def v3_promoted_artifacts(self) -> list[dict[str, Any]]:
         with self._connection() as connection:
             rows = connection.execute(
-                "SELECT revision.* FROM v3_active_artifacts active JOIN v3_artifact_revisions revision ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision ORDER BY revision.artifact_kind"
+                "SELECT revision.* FROM v3_active_artifacts active "
+                "JOIN v3_artifact_revisions revision "
+                "ON revision.artifact_kind = active.artifact_kind AND revision.revision = active.revision "
+                "ORDER BY revision.artifact_kind"
             ).fetchall()
         return [self._v3_artifact_row(row) for row in rows]
 
@@ -2816,7 +3709,20 @@ class ControlStore:
         value = dict(row)
         value["payload"] = _decode(value.pop("payload_json"), {})
         value["cited_source_ids"] = _decode(value.pop("cited_source_ids_json"), [])
+        value["declared_dependencies"] = _decode(value.pop("declared_dependencies_json", None), [])
+        value["inference_receipt_refs"] = _decode(
+            value.pop("inference_receipt_refs_json", None),
+            [],
+        )
         return value
+
+    @staticmethod
+    def _v3_inference_receipt_row(row: sqlite3.Row) -> dict[str, Any]:
+        value = dict(row)
+        receipt = _decode(value.pop("receipt_json"), {})
+        receipt["receipt_hash"] = value["receipt_hash"]
+        receipt["created_at"] = value["created_at"]
+        return receipt
 
     @staticmethod
     def _v3_artifact_row(row: sqlite3.Row) -> dict[str, Any]:
@@ -2828,7 +3734,10 @@ class ControlStore:
     def _v3_promotion_row(row: sqlite3.Row) -> dict[str, Any]:
         value = dict(row)
         value["gate_receipt_ids"] = _decode(value.pop("gate_receipt_ids_json"), [])
+        value["gate_receipts"] = _decode(value.pop("gate_receipts_json", None), [])
+        value["resolved_dependency_snapshot"] = _decode(value.pop("dependency_snapshot_json", None), {})
         return value
+
 
     def ensure_goal_state(self, goal: dict[str, Any] | None) -> int:
         """Import the V1 Goal once; absence is also recorded to prevent later stale-file takeover."""
@@ -3356,14 +4265,15 @@ class ControlStore:
         *,
         disposition: str = "",
         error: dict[str, Any] | None = None,
+        output: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         operation = str(operation_id or "").strip()
         command = str(stage_command or "").strip()
         state = str(status or "").strip().lower()
-        if not operation or not command or state not in {"queued", "running", "succeeded", "failed", "reused", "cancelled", "paused"}:
+        if not operation or not command or state not in {"queued", "running", "succeeded", "failed", "reused", "cancelled", "paused", "blocked_human"}:
             raise ControlPlaneError("STATE_UNAVAILABLE", "StageRun 状态无效。", status_code=503)
         now = _now()
-        terminal = state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+        terminal = state in {"succeeded", "failed", "reused", "cancelled", "paused", "blocked_human"}
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
@@ -3373,7 +4283,7 @@ class ControlStore:
                     (operation, command),
                 ).fetchone()
                 latest_state = str(latest["status"]) if latest else ""
-                latest_terminal = latest_state in {"succeeded", "failed", "reused", "cancelled", "paused"}
+                latest_terminal = latest_state in {"succeeded", "failed", "reused", "cancelled", "paused", "blocked_human"}
                 if latest is not None and terminal and latest_terminal:
                     if latest_state == state:
                         connection.commit()
@@ -3396,20 +4306,50 @@ class ControlStore:
                             "requested_status": state,
                         },
                     )
-                if latest is None or state == "queued" or (state == "running" and str(latest["status"]) != "queued"):
+                if (
+                    latest is None
+                    or state == "queued"
+                    or (
+                        state == "running"
+                        and str(latest["status"]) not in {"queued", "running"}
+                    )
+                ):
                     attempt = int(latest["attempt"] if latest else 0) + 1
                     run_id = str(uuid.uuid4())
                     connection.execute(
-                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, error_json, started_at, completed_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (run_id, operation, command, attempt, state, disposition, _json(error) if error else None, now, now if terminal else None),
+                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, error_json, output_json, started_at, completed_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            run_id,
+                            operation,
+                            command,
+                            attempt,
+                            state,
+                            disposition,
+                            _json(error) if error else None,
+                            _json(output) if output is not None else None,
+                            now,
+                            now if terminal else None,
+                        ),
                     )
                 else:
                     run_id = str(latest["stage_run_id"])
                     attempt = int(latest["attempt"])
+                    output_json = (
+                        _json(output)
+                        if output is not None
+                        else latest["output_json"]
+                    )
                     connection.execute(
-                        "UPDATE stage_runs SET status = ?, disposition = ?, error_json = ?, completed_at = ? WHERE stage_run_id = ?",
-                        (state, disposition, _json(error) if error else None, now if terminal else None, run_id),
+                        "UPDATE stage_runs SET status = ?, disposition = ?, error_json = ?, output_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                        (
+                            state,
+                            disposition,
+                            _json(error) if error else None,
+                            output_json,
+                            now if terminal else None,
+                            run_id,
+                        ),
                     )
                 revision = self._bump_revision(connection)
                 self._event(
@@ -3432,6 +4372,123 @@ class ControlStore:
         for row in rows:
             item = dict(row)
             item["error"] = _decode(item.pop("error_json", None), None)
+            item["output"] = _decode(item.pop("output_json", None), None)
+            result.append(item)
+        return result
+
+    def start_llm_request(
+        self,
+        operation_id: str,
+        stage_id: str,
+        *,
+        parameters: dict[str, Any],
+    ) -> dict[str, Any]:
+        operation = str(operation_id or "").strip()
+        stage = str(stage_id or "").strip()
+        if not operation or not stage:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "大模型请求必须绑定 Operation 和阶段。",
+                status_code=503,
+            )
+        request_id = str(uuid.uuid4())
+        started_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(request_index), 0) AS latest "
+                    "FROM llm_requests WHERE operation_id = ? AND stage_id = ?",
+                    (operation, stage),
+                ).fetchone()
+                request_index = int(row["latest"] or 0) + 1
+                connection.execute(
+                    "INSERT INTO llm_requests(request_id, operation_id, stage_id, "
+                    "request_index, status, parameters_json, error, started_at, completed_at) "
+                    "VALUES (?, ?, ?, ?, 'running', ?, '', ?, NULL)",
+                    (
+                        request_id,
+                        operation,
+                        stage,
+                        request_index,
+                        _json(parameters),
+                        started_at,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "LLMRequestStarted",
+                    "LLMRequest",
+                    request_id,
+                    {
+                        "operation_id": operation,
+                        "stage_id": stage,
+                        "request_index": request_index,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "request_id": request_id,
+            "operation_id": operation,
+            "stage_id": stage,
+            "request_index": request_index,
+            "status": "running",
+        }
+
+    def finish_llm_request(
+        self,
+        request_id: str,
+        *,
+        status: str,
+        error: str = "",
+    ) -> None:
+        state = str(status or "").strip().lower()
+        if state not in {"succeeded", "failed"}:
+            raise ControlPlaneError(
+                "STATE_UNAVAILABLE",
+                "大模型请求终态无效。",
+                status_code=503,
+            )
+        completed_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                updated = connection.execute(
+                    "UPDATE llm_requests SET status = ?, error = ?, completed_at = ? "
+                    "WHERE request_id = ? AND status = 'running'",
+                    (state, str(error or "")[:4000], completed_at, str(request_id)),
+                )
+                if updated.rowcount:
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection,
+                        revision,
+                        "LLMRequestFinished",
+                        "LLMRequest",
+                        str(request_id),
+                        {"status": state},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
+    def llm_requests(self, operation_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM llm_requests WHERE operation_id = ? "
+                "ORDER BY stage_id, request_index",
+                (str(operation_id or ""),),
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["parameters"] = _decode(item.pop("parameters_json", None), {})
             result.append(item)
         return result
 
@@ -3486,6 +4543,142 @@ class ControlStore:
                 connection.rollback()
                 raise
 
+    def reconcile_expired_operations(self) -> list[dict[str, Any]]:
+        """Fail operations orphaned by a backend restart.
+
+        The workspace lease is the durable liveness signal for the process that
+        owns an operation.  Once it is missing or expired, an operation in a
+        transient state cannot make progress in this process and must not keep
+        being presented as running to the UI.  Reconcile the operation, its
+        in-flight stages, and any open LLM receipts in one transaction so a
+        restart cannot leave a partially active control record behind.
+        """
+        now = _now()
+        now_dt = datetime.now(timezone.utc)
+        interrupted: list[dict[str, Any]] = []
+        transient_states = ("queued", "running", "pausing", "cancelling")
+        placeholders = ",".join("?" for _ in transient_states)
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                rows = connection.execute(
+                    f"""
+                    SELECT o.operation_id, o.status,
+                           l.operation_id AS lease_operation_id, l.expires_at
+                    FROM operations AS o
+                    LEFT JOIN workspace_lease AS l ON l.operation_id = o.operation_id
+                    WHERE o.status IN ({placeholders})
+                    ORDER BY o.created_at
+                    """,
+                    transient_states,
+                ).fetchall()
+                for row in rows:
+                    expires_at = str(row["expires_at"] or "")
+                    lease_missing = not str(row["lease_operation_id"] or "")
+                    lease_expired = False
+                    if expires_at:
+                        try:
+                            lease_expired = _parse_utc_timestamp(
+                                expires_at,
+                                label="workspace lease 到期时间",
+                            ) <= now_dt
+                        except ControlPlaneError:
+                            # A malformed lease cannot be used as a liveness
+                            # signal, so treat it as orphaned and fail closed.
+                            lease_expired = True
+                    if not lease_missing and not lease_expired:
+                        continue
+
+                    operation_id = str(row["operation_id"])
+                    reason = {
+                        "code": "BACKEND_RESTART_INTERRUPTED",
+                        "message": "后端重启导致任务中断，未完成阶段已关闭；请重新执行。",
+                        "details": {
+                            "operation_id": operation_id,
+                            "previous_status": str(row["status"]),
+                            "lease_missing": lease_missing,
+                            "lease_expired_at": expires_at,
+                        },
+                    }
+                    revision = self._bump_revision(connection)
+                    stage_rows = connection.execute(
+                        "SELECT stage_run_id, stage_command, attempt FROM stage_runs "
+                        "WHERE operation_id = ? AND status IN ('queued', 'running')",
+                        (operation_id,),
+                    ).fetchall()
+                    for stage in stage_rows:
+                        stage_id = str(stage["stage_run_id"])
+                        connection.execute(
+                            "UPDATE stage_runs SET status = 'failed', disposition = ?, "
+                            "error_json = ?, completed_at = ? WHERE stage_run_id = ?",
+                            ("backend_restart", _json(reason), now, stage_id),
+                        )
+                        self._event(
+                            connection,
+                            revision,
+                            "StageRunRecorded",
+                            "StageRun",
+                            stage_id,
+                            {
+                                "operation_id": operation_id,
+                                "command": str(stage["stage_command"]),
+                                "attempt": int(stage["attempt"]),
+                                "status": "failed",
+                                "disposition": "backend_restart",
+                            },
+                        )
+
+                    request_rows = connection.execute(
+                        "SELECT request_id FROM llm_requests WHERE operation_id = ? AND status = 'running'",
+                        (operation_id,),
+                    ).fetchall()
+                    for request in request_rows:
+                        request_id = str(request["request_id"])
+                        connection.execute(
+                            "UPDATE llm_requests SET status = 'failed', error = ?, completed_at = ? "
+                            "WHERE request_id = ? AND status = 'running'",
+                            (reason["message"], now, request_id),
+                        )
+                        self._event(
+                            connection,
+                            revision,
+                            "LLMRequestFinished",
+                            "LLMRequest",
+                            request_id,
+                            {"status": "failed", "error": reason["message"]},
+                        )
+
+                    connection.execute(
+                        "UPDATE operations SET status = 'failed', message = ?, error_json = ?, "
+                        "updated_at = ?, completed_at = ? WHERE operation_id = ?",
+                        (reason["message"], _json(reason), now, now, operation_id),
+                    )
+                    connection.execute(
+                        "DELETE FROM workspace_lease WHERE operation_id = ?",
+                        (operation_id,),
+                    )
+                    self._event(
+                        connection,
+                        revision,
+                        "OperationStatusChanged",
+                        "Operation",
+                        operation_id,
+                        {"status": "failed", "message": reason["message"], "error": reason},
+                    )
+                    interrupted.append(
+                        {
+                            "operation_id": operation_id,
+                            "previous_status": str(row["status"]),
+                            "stage_runs": len(stage_rows),
+                            "llm_requests": len(request_rows),
+                        }
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return interrupted
+
     def latest_stage_run(self, operation_id: str, stage_command: str) -> dict[str, Any] | None:
         """Return the latest attempt for one stage without inferring its state."""
         with self._connection() as connection:
@@ -3498,6 +4691,7 @@ class ControlStore:
             return None
         item = dict(row)
         item["error"] = _decode(item.pop("error_json", None), None)
+        item["output"] = _decode(item.pop("output_json", None), None)
         return item
 
     def latest_stage_run_for_command(self, stage_command: str) -> dict[str, Any] | None:
@@ -3511,6 +4705,7 @@ class ControlStore:
             return None
         item = dict(row)
         item["error"] = _decode(item.pop("error_json", None), None)
+        item["output"] = _decode(item.pop("output_json", None), None)
         return item
 
     def latest_terminal_stage_run_for_command(self, stage_command: str) -> dict[str, Any] | None:
@@ -3526,6 +4721,7 @@ class ControlStore:
             return None
         item = dict(row)
         item["error"] = _decode(item.pop("error_json", None), None)
+        item["output"] = _decode(item.pop("output_json", None), None)
         return item
 
     def document_undo(self) -> dict[str, Any] | None:
@@ -3895,7 +5091,7 @@ class ControlStore:
                     """,
                     (command_status, message, _json(error) if error else None, now, envelope.command_id),
                 )
-                terminal_at = now if operation_status in {"succeeded", "failed", "cancelled"} else None
+                terminal_at = now if operation_status in {"succeeded", "failed", "cancelled", "blocked_human"} else None
                 connection.execute(
                     """
                     UPDATE operations SET status = ?, message = ?, error_json = ?, updated_at = ?,
@@ -3904,7 +5100,7 @@ class ControlStore:
                     """,
                     (operation_status, message, _json(error) if error else None, now, terminal_at, operation_id),
                 )
-                if operation_status in {"succeeded", "failed", "cancelled", "blocked"}:
+                if operation_status in {"succeeded", "failed", "cancelled", "blocked", "blocked_human"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 self._event(
                     connection,
@@ -4189,6 +5385,7 @@ class ControlStore:
             operation["error"] = _decode(operation.pop("error_json", None), None)
         for stage_run in stage_runs:
             stage_run["error"] = _decode(stage_run.pop("error_json", None), None)
+            stage_run["output"] = _decode(stage_run.pop("output_json", None), None)
         current_operation = next(
             (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
             operations[0] if operations else None,
@@ -4284,6 +5481,18 @@ class CommandGateway:
                 message=message,
                 error=error,
             )
+            public_result = {
+                key: result[key]
+                for key in (
+                    "operation_status",
+                    "completed_stages",
+                    "planning_snapshot",
+                    "planning_receipt",
+                )
+                if key in result
+            }
+            if public_result:
+                receipt = replace(receipt, result=public_result)
         except ControlPlaneError as exc:
             blocked = exc.code == "GATE_BLOCKED" or envelope.kind in {
                 "pipeline.pause",

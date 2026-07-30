@@ -22,7 +22,7 @@
             id="password"
             v-model="password"
             type="password"
-            placeholder="本机可留空后直接登录"
+            placeholder="请输入密码"
             autocomplete="current-password"
           />
         </div>
@@ -44,7 +44,7 @@ import { login } from '../api'
 const router = useRouter()
 
 const username = ref('admin')
-const password = ref('')
+const password = ref('123456')
 const loading = ref(false)
 const error = ref('')
 

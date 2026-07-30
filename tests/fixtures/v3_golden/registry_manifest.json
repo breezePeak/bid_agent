@@ -1,0 +1,48 @@
+{
+  "registry_version": "v3-golden-1",
+  "description": "V3 Golden registry with expert-accepted anonymized Suite A samples for Gate A.",
+  "suites": [
+    "A",
+    "B",
+    "C",
+    "D"
+  ],
+  "samples": [
+    "G-A-SOFT-001",
+    "G-A-OPS-001",
+    "G-A-SI-001",
+    "G-A-SCORE-FILE-001",
+    "G-A-AMEND-001",
+    "G-A-TABLE-001",
+    "G-A-TEMPLATE-001",
+    "G-A-COMPLEX-SCORE-001",
+    "G-A1-SCAN-PLACEHOLDER"
+  ],
+  "policy": {
+    "historical_92_198_not_threshold": true,
+    "git_stores_only_anonymized_fixtures": true,
+    "expert_dual_annotation_required_for_gate_a": true,
+    "scaffold_samples_not_gate_a_evidence": true,
+    "gate_a_counts_only_expert_accepted": true,
+    "gate_u_requires_independent_holdout": true
+  },
+  "thresholds": {
+    "A1": {
+      "critical_recall": 1.0,
+      "recall": 0.95,
+      "precision": 0.92,
+      "anchor_accuracy": 1.0
+    },
+    "A2": {
+      "score_row_accuracy": 1.0,
+      "precision": 0.95,
+      "recall": 0.95
+    },
+    "A3": {
+      "topic_recall": 0.95,
+      "topic_precision": 0.9,
+      "blocking_duty_coverage": 1.0,
+      "unique_primary": 1.0
+    }
+  }
+}

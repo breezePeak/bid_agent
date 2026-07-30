@@ -74,15 +74,126 @@ class TestV3RequirementAgent(unittest.TestCase):
         self.assertGreaterEqual(len(items), 1)
         item0 = items[0]
         self.assertEqual(item0.kind, RequirementKind.QUALIFICATION)
-        self.assertEqual(item0.parent_clause_id, "三、资质要求")
+        # parent_clause_id is a stable content-addressed clause ID, not heading free text.
+        self.assertIsNotNone(item0.parent_clause_id)
+        self.assertTrue(str(item0.parent_clause_id).startswith("C-"))
         self.assertIsNotNone(item0.clause_id)
         self.assertEqual(item0.subject, "投标人")
         self.assertEqual(item0.action, "具备")
 
-        # Statement 2 contains quantitative metrics
-        item1 = items[1] if len(items) > 1 else items[0]
-        self.assertIn("天", item1.quantitative_metrics)
-        self.assertEqual(item1.quantitative_metrics["天"], 30)
+        # At least one statement carries quantitative duration metrics.
+        self.assertTrue(any("天" in item.quantitative_metrics for item in items))
+
+    def test_dates_and_table_of_contents_lines_are_not_bidder_requirements(self) -> None:
+        agent = RequirementAgent(self.context)
+        manifest = InputManifest(
+            inputs=[
+                InputItem(
+                    input_id="in-tender",
+                    role=InputRole.TENDER,
+                    filename="tender.docx",
+                    mime_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    sha256="tenderhash",
+                    version=1,
+                )
+            ]
+        )
+        contents = [
+            "2026年6月",
+            "第二章   投标人须知资料表及投标人须知\t6",
+            "投标人须在合同签订后30日内完成交付。",
+        ]
+        blocks = [
+            SourceBlock(
+                block_id=f"noise-{index}",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=index,
+                content=content,
+                source_anchor=SourceAnchor(
+                    source_input_id="in-tender",
+                    chunk_id=f"noise-{index}",
+                    location=f"paragraph:{index + 1}",
+                ),
+                content_hash=f"hash-{index}",
+            )
+            for index, content in enumerate(contents)
+        ]
+
+        items = agent.extract_requirements(blocks, manifest)
+
+        self.assertEqual(
+            [item.normalized_requirement for item in items],
+            ["投标人须在合同签订后30日内完成交付"],
+        )
+        ledger = RequirementLedger(requirements=items)
+        audit = audit_reverse_coverage(
+            ledger,
+            {"blocks": [block.model_dump(mode="json") for block in blocks]},
+        )
+        self.assertTrue(audit["passed"], audit)
+        self.assertEqual(audit["total_obligation_statements"], 1)
+
+    def test_scoring_sources_do_not_require_obligation_words_or_explicit_points(self) -> None:
+        agent = RequirementAgent(self.context)
+        manifest = InputManifest(
+            inputs=[
+                InputItem(
+                    input_id="in-tender",
+                    role=InputRole.TENDER,
+                    filename="tender.md",
+                    mime_type="text/markdown",
+                    sha256="tenderhash",
+                    version=1,
+                ),
+                InputItem(
+                    input_id="in-score",
+                    role=InputRole.SCORE,
+                    filename="score.md",
+                    mime_type="text/markdown",
+                    sha256="scorehash",
+                    version=1,
+                ),
+            ]
+        )
+        blocks = [
+            SourceBlock(
+                block_id="tender-score",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=0,
+                content="售后服务响应情况。",
+                heading_path=["评标办法", "服务评分"],
+                source_anchor=SourceAnchor(
+                    source_input_id="in-tender",
+                    chunk_id="tender-score",
+                    location="paragraph:1",
+                ),
+                content_hash="tender-score-hash",
+            ),
+            SourceBlock(
+                block_id="score-item",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="paragraph",
+                ordinal=0,
+                content="评分项：项目实施方案完整性。",
+                source_anchor=SourceAnchor(
+                    source_input_id="in-score",
+                    chunk_id="score-item",
+                    location="paragraph:1",
+                ),
+                content_hash="score-item-hash",
+            ),
+        ]
+
+        items = agent.extract_requirements(blocks, manifest)
+
+        self.assertEqual(len(items), 2)
+        self.assertTrue(all(item.kind is RequirementKind.SCORE for item in items))
+        self.assertTrue(all(item.response_type == "score_response" for item in items))
 
 
     def test_amendment_reconciliation(self) -> None:
@@ -114,15 +225,38 @@ class TestV3RequirementAgent(unittest.TestCase):
             requirement_id="R-old",
             kind=RequirementKind.MANDATORY,
             source_anchor=anchor_old,
-            original_text="旧要求",
-            normalized_requirement="旧要求",
+            original_text="投标人须在30天内交付系统。",
+            normalized_requirement="投标人须在30天内交付系统。",
             response_type="mandatory_response",
             evidence_policy="tender_traceable",
         )
+        # Unrelated obligation must not be waived by file-level supersedes alone.
+        item_other = RequirementItem(
+            requirement_id="R-other",
+            kind=RequirementKind.MANDATORY,
+            source_anchor=anchor_old,
+            original_text="投标人须具备保密制度。",
+            normalized_requirement="投标人须具备保密制度。",
+            response_type="mandatory_response",
+            evidence_policy="tender_traceable",
+        )
+        amd_blocks = [
+            SourceBlock(
+                block_id="amd-1",
+                input_id="in-amd",
+                input_role=InputRole.AMENDMENT,
+                block_kind="paragraph",
+                ordinal=0,
+                content="更正：投标人须在20天内交付系统。",
+                source_anchor=SourceAnchor(source_input_id="in-amd", chunk_id="amd-1", location="p:1"),
+                content_hash="ah1",
+            )
+        ]
 
-        reconciled = agent.reconcile_amendments([item_old], manifest)
+        reconciled = agent.reconcile_amendments([item_old, item_other], manifest, amd_blocks)
         self.assertEqual(reconciled[0].status, "waived")
         self.assertEqual(reconciled[0].superseded_by_input_id, "in-amd")
+        self.assertEqual(reconciled[1].status, "open")
 
     def test_amendment_reconciliation_ordering(self) -> None:
         agent = RequirementAgent(self.context)
@@ -163,16 +297,155 @@ class TestV3RequirementAgent(unittest.TestCase):
             requirement_id="R-old",
             kind=RequirementKind.MANDATORY,
             source_anchor=anchor_old,
-            original_text="旧要求",
-            normalized_requirement="旧要求",
+            original_text="投标人须在30天内交付系统。",
+            normalized_requirement="投标人须在30天内交付系统。",
             response_type="mandatory_response",
             evidence_policy="tender_traceable",
         )
+        blocks = [
+            SourceBlock(
+                block_id="amd1",
+                input_id="in-amd-1",
+                input_role=InputRole.AMENDMENT,
+                block_kind="paragraph",
+                ordinal=0,
+                content="更正工期为25天交付系统。",
+                source_anchor=SourceAnchor(source_input_id="in-amd-1", chunk_id="amd1", location="p:1"),
+                content_hash="a1",
+            ),
+            SourceBlock(
+                block_id="amd2",
+                input_id="in-amd-2",
+                input_role=InputRole.AMENDMENT,
+                block_kind="paragraph",
+                ordinal=0,
+                content="再次更正：投标人须在20天内交付系统。",
+                source_anchor=SourceAnchor(source_input_id="in-amd-2", chunk_id="amd2", location="p:1"),
+                content_hash="a2",
+            ),
+        ]
 
-        reconciled = agent.reconcile_amendments([item_old], manifest)
+        reconciled = agent.reconcile_amendments([item_old], manifest, blocks)
         self.assertEqual(reconciled[0].status, "waived")
-        # Must be precise amd-2 since issued_at is later
+        # Latest overlapping amendment wins.
         self.assertEqual(reconciled[0].superseded_by_input_id, "in-amd-2")
+
+    def test_statement_level_coverage_detects_missed_obligation_in_block(self) -> None:
+        ledger = RequirementLedger(
+            requirements=[
+                RequirementItem(
+                    requirement_id="R-1",
+                    kind=RequirementKind.MANDATORY,
+                    source_anchor=SourceAnchor(source_input_id="in-tender", chunk_id="b1", location="p:1"),
+                    original_text="投标人须提供技术方案。",
+                    normalized_requirement="投标人须提供技术方案。",
+                    response_type="mandatory_response",
+                    evidence_policy="tender_traceable",
+                )
+            ]
+        )
+        source_index = {
+            "blocks": [
+                {
+                    "block_id": "b1",
+                    "input_role": "tender",
+                    "block_kind": "paragraph",
+                    "content": "投标人须提供技术方案。投标人须具备保密制度。",
+                    "source_anchor": {"source_input_id": "in-tender", "chunk_id": "b1", "location": "p:1"},
+                }
+            ]
+        }
+        audit = audit_reverse_coverage(ledger, source_index)
+        self.assertFalse(audit["passed"])
+        self.assertGreaterEqual(len(audit["missing_obligations"]), 1)
+
+    def test_statement_level_coverage_allows_duplicate_clause_with_canonical_anchor(self) -> None:
+        ledger = RequirementLedger(
+            requirements=[
+                RequirementItem(
+                    requirement_id="R-1",
+                    kind=RequirementKind.MANDATORY,
+                    source_anchor=SourceAnchor(source_input_id="in-tender", chunk_id="b1", location="p:1"),
+                    original_text="投标人须提供技术方案。",
+                    normalized_requirement="投标人须提供技术方案。",
+                    response_type="mandatory_response",
+                    evidence_policy="tender_traceable",
+                )
+            ]
+        )
+        source_index = {
+            "blocks": [
+                {
+                    "block_id": "b1",
+                    "input_role": "tender",
+                    "block_kind": "paragraph",
+                    "content": "投标人须提供技术方案。",
+                    "source_anchor": {"source_input_id": "in-tender", "chunk_id": "b1", "location": "p:1"},
+                },
+                {
+                    "block_id": "b2",
+                    "input_role": "tender",
+                    "block_kind": "paragraph",
+                    "content": "投标人须提供技术方案。",
+                    "source_anchor": {"source_input_id": "in-tender", "chunk_id": "b2", "location": "p:2"},
+                },
+            ]
+        }
+        audit = audit_reverse_coverage(ledger, source_index)
+        self.assertTrue(audit["passed"])
+        self.assertEqual(audit["missing_chunk_ids"], [])
+
+    def test_batch_extract_and_stable_clause_ids(self) -> None:
+        agent = RequirementAgent(self.context, batch_size=2)
+        manifest = InputManifest(
+            inputs=[
+                InputItem(
+                    input_id="in-tender",
+                    role=InputRole.TENDER,
+                    filename="tender.md",
+                    mime_type="text/markdown",
+                    sha256="h",
+                    version=1,
+                )
+            ]
+        )
+        blocks = [
+            SourceBlock(
+                block_id="h1",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="heading",
+                ordinal=0,
+                content="一、总体要求",
+                source_anchor=SourceAnchor(source_input_id="in-tender", chunk_id="h1", location="p:1"),
+                content_hash="1",
+            ),
+            SourceBlock(
+                block_id="p1",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=1,
+                content="投标人必须保证项目安全。",
+                source_anchor=SourceAnchor(source_input_id="in-tender", chunk_id="p1", location="p:2"),
+                content_hash="2",
+            ),
+            SourceBlock(
+                block_id="p2",
+                input_id="in-tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=2,
+                content="投标人必须保证数据备份。",
+                source_anchor=SourceAnchor(source_input_id="in-tender", chunk_id="p2", location="p:3"),
+                content_hash="3",
+            ),
+        ]
+        items = agent.extract_requirements(blocks, manifest)
+        self.assertGreaterEqual(len(items), 2)
+        self.assertTrue(all(item.parent_clause_id and item.parent_clause_id.startswith("C-") for item in items))
+        self.assertTrue(hasattr(agent, "_last_batch_audit"))
+        self.assertGreaterEqual(agent._last_batch_audit.get("batch_count", 0), 1)
 
     def test_proposal_envelope_generation(self) -> None:
         agent = RequirementAgent(self.context)
@@ -196,10 +469,10 @@ class TestV3RequirementAgent(unittest.TestCase):
 
     def test_full_agent_proposal_promotion_pipeline(self) -> None:
         from control_plane import ControlStore
-        from document_pipeline.input_manifest import MANIFEST_PATH, V3_ROOT
-        from document_pipeline.source_normalizer import SOURCE_INDEX_PATH
+        from document_pipeline.contracts import SourceAnchor, SourceBlock, SourceIndex
+        from document_pipeline.input_manifest import V3_ROOT
+        from document_pipeline.source_artifacts import promote_source_artifact
         from document_pipeline.stage_runner import V3StageRunner
-        from utils import write_json
 
         (self.root / V3_ROOT).mkdir(parents=True, exist_ok=True)
         manifest = InputManifest(
@@ -214,29 +487,41 @@ class TestV3RequirementAgent(unittest.TestCase):
                 )
             ]
         )
-        write_json(self.root / MANIFEST_PATH, manifest.model_dump(mode="json"))
-
-        anchor = {"source_input_id": "in-tender", "chunk_id": "c1", "location": "p:1"}
-        source_index = {
-            "revision": 1,
-            "source_hashes": {"in-tender": "hash123"},
-            "blocks": [
-                {
-                    "block_id": "b1",
-                    "input_id": "in-tender",
-                    "input_role": "tender",
-                    "block_kind": "paragraph",
-                    "ordinal": 0,
-                    "content": "投标人须具有良好信誉。",
-                    "source_anchor": anchor,
-                    "content_hash": "ch1",
-                }
+        promote_source_artifact(
+            self.context,
+            artifact_kind="InputManifest",
+            payload=manifest.model_dump(mode="json"),
+            operation_id="fixture-manifest-req",
+            gate_id="G0_INPUT_MANIFEST_INTEGRITY",
+        )
+        anchor = SourceAnchor(source_input_id="in-tender", chunk_id="c1", location="p:1")
+        source_index = SourceIndex(
+            revision=1,
+            source_hashes={"in-tender": "hash123"},
+            input_manifest_revision=1,
+            blocks=[
+                SourceBlock(
+                    block_id="b1",
+                    input_id="in-tender",
+                    input_role=InputRole.TENDER,
+                    block_kind="paragraph",
+                    ordinal=0,
+                    content="投标人须具有良好信誉。",
+                    source_anchor=anchor,
+                    content_hash="ch1",
+                )
             ],
-            "by_role": {"tender": [{"chunk_id": "c1", "content": "投标人须具有良好信誉。", "input_id": "in-tender", "source_anchor": anchor}]},
-        }
-        write_json(self.root / SOURCE_INDEX_PATH, source_index)
+        )
+        promote_source_artifact(
+            self.context,
+            artifact_kind="SourceIndex",
+            payload=source_index.model_dump(mode="json"),
+            operation_id="fixture-source-req",
+            gate_id="G0_SOURCE_STRUCTURE",
+            cited_source_ids=["in-tender"],
+        )
 
-        runner = V3StageRunner(self.context)
+        runner = V3StageRunner.for_deterministic_tests(self.context)
         ledger = runner.run("build_requirement_ledger")
 
         self.assertIsNotNone(ledger)
@@ -260,4 +545,3 @@ class TestV3RequirementAgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

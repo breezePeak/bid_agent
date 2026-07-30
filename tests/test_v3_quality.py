@@ -10,9 +10,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from control_plane import WorkspaceContext  # noqa: E402
-from document_pipeline.artifact_promotion import AgentProposalSandbox, ArtifactPromotionService, GateService, validate_and_record  # noqa: E402
-from document_pipeline.proposals import ProposalEnvelope, dependency_fingerprint  # noqa: E402
+from document_pipeline.contracts import InputRole  # noqa: E402
+from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.quality import QualityGate  # noqa: E402
+from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 
 
 class V3QualityTests(unittest.TestCase):
@@ -20,12 +21,12 @@ class V3QualityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             base = Path(tmp); runs = base / "runs"; workspace = runs / "alpha"; (workspace / "workspace" / "v3").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
-            payload = {"schema_version":"v3","revision":1,"source_hashes":{},"requirements":[{"requirement_id":"R1","kind":"mandatory","source_anchor":{"source_input_id":"I1","chunk_id":"C1","location":"p1"},"original_text":"必须响应","normalized_requirement":"必须响应","severity":"blocking","response_type":"mandatory_response","evidence_policy":"tender_traceable","status":"open"}]}
-            proposal = ProposalEnvelope(artifact_kind="RequirementLedger", producer_role="requirement_agent", operation_id="quality-fixture", base_revision=0, dependency_fingerprint=dependency_fingerprint(payload), payload=payload, prompt_version="fixture", model_fingerprint="fixture")
-            AgentProposalSandbox(context, "requirement_agent").submit(proposal)
-            validate_and_record(context, proposal)
-            gate = GateService(context).evaluate(proposal.proposal_id, gate_id="fixture")
-            ArtifactPromotionService(context).promote(proposal.proposal_id, [gate.receipt_id])
+            tender = base / "tender.md"
+            tender.write_text("投标人必须响应本项目全部采购要求。", encoding="utf-8")
+            InputManifestService(context).register_local_file(tender, InputRole.TENDER)
+            runner = V3StageRunner.for_deterministic_tests(context)
+            runner.run("normalize_sources")
+            runner.run("build_requirement_ledger")
             (workspace / "workspace" / "v3" / "integrated_document.json").write_text(json.dumps({"schema_version":"v3","revision":1,"source_hashes":{},"contract_revision":1,"plan_revision":1,"blocks":[]}), encoding="utf-8")
             report = QualityGate(context).verify()
             self.assertEqual(report.verdict, "fail")

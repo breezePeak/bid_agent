@@ -53,8 +53,15 @@ class InputManifestService:
         return self.root / MANIFEST_PATH
 
     def load(self) -> InputManifest:
+        # Prefer promoted canonical Artifact; disk JSON is only a rebuildable projection.
+        from control_plane import ControlStore
+
+        active = ControlStore(self.context).v3_active_artifact("InputManifest")
+        if active is not None:
+            return InputManifest.model_validate(active["payload"])
         if not self.manifest_path.exists():
             return InputManifest(revision=1)
+        # Pre-PR-16.1 workspaces may only have disk projection; not production authority after Gate S.
         return InputManifest.model_validate(read_json(self.manifest_path))
 
     def register_local_file(
@@ -114,12 +121,24 @@ class InputManifestService:
             source_hashes={entry.input_id: entry.sha256 for entry in inputs if entry.active},
             inputs=inputs,
         )
-        write_json(self.manifest_path, next_manifest.model_dump(mode="json"))
+        from .source_artifacts import promote_source_artifact, write_manifest_projection
+
+        promote_source_artifact(
+            self.context,
+            artifact_kind="InputManifest",
+            payload=next_manifest.model_dump(mode="json"),
+            operation_id=f"input-manifest:{next_manifest.revision}:{item.input_id}",
+            gate_id="G0_INPUT_MANIFEST_INTEGRITY",
+            # InputManifest is the authority for input IDs; do not self-cite unresolved IDs.
+            cited_source_ids=[],
+        )
+        promoted = self.load()
+        write_manifest_projection(self.context, promoted)
         if change_set:
             change_path = self.root / CHANGESET_PATH / f"{change_set.change_id}.json"
             change_path.parent.mkdir(parents=True, exist_ok=True)
             write_json(change_path, change_set.model_dump(mode="json"))
-        return InputRegistration(manifest=next_manifest, item=item, change_set=change_set)
+        return InputRegistration(manifest=promoted, item=item, change_set=change_set)
 
     @staticmethod
     def _replacement_change_set(previous: InputItem, current: InputItem, *, revision: int) -> ChangeSet:

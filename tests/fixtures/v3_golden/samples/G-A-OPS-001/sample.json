@@ -1,0 +1,223 @@
+{
+  "sample_id": "G-A-OPS-001",
+  "suite": "A",
+  "layers": [
+    "A1",
+    "A2",
+    "A3"
+  ],
+  "status": "expert_accepted",
+  "title": "匿名运维服务采购",
+  "tags": [
+    "ops_service",
+    "A1",
+    "A2",
+    "A3",
+    "expert_accepted"
+  ],
+  "input_manifest_hash": "96bddbd4db1bdb0ed051b01c9b8303de34e4bbe2c59b3ce54d17babd4b92f7b2",
+  "inputs": [
+    {
+      "role": "tender",
+      "relative_path": "source/tender.md",
+      "content_sha256": "14068a426904c09468cde17dd982a3738b1861105d0b45218d32b40e238cc059",
+      "external_original_ref": null
+    },
+    {
+      "role": "score",
+      "relative_path": "source/score.md",
+      "content_sha256": "611f055bc71f259100162e8b81ffb8a1c5374d2b1538237118181666c7394d73",
+      "external_original_ref": null
+    }
+  ],
+  "expectations": [
+    {
+      "layer": "A1",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "requirement_id": "R-ops-duty",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "服务单位须提供7x24小时系统运维值守",
+          "match_key": "服务单位须提供7x24小时系统运维值守",
+          "source_anchor": {
+            "location_contains": "7x24"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-ops-resp",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "一般故障响应时间不得超过15分钟",
+          "match_key": "一般故障响应时间不得超过15分钟",
+          "source_anchor": {
+            "location_contains": "15分钟"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-ops-recover",
+          "kind": "mandatory",
+          "severity": "blocking",
+          "normalized_requirement": "重大故障恢复时间不得超过2小时",
+          "match_key": "重大故障恢复时间不得超过2小时",
+          "source_anchor": {
+            "location_contains": "2小时"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-ops-staff",
+          "kind": "qualification",
+          "severity": "blocking",
+          "normalized_requirement": "投标人须配备不少于3名具备信息系统运维证书的专职人员",
+          "match_key": "投标人须配备不少于3名具备信息系统运维证书的专职人员",
+          "source_anchor": {
+            "location_contains": "3名"
+          },
+          "allowed_variants": []
+        },
+        {
+          "requirement_id": "R-ops-report",
+          "kind": "deliverable",
+          "severity": "normal",
+          "normalized_requirement": "每月须提交运维月报和隐患排查报告",
+          "match_key": "每月须提交运维月报和隐患排查报告",
+          "source_anchor": {
+            "location_contains": "月报"
+          },
+          "allowed_variants": []
+        }
+      ],
+      "blocking_ids": [
+        "R-ops-duty",
+        "R-ops-resp",
+        "R-ops-recover",
+        "R-ops-staff"
+      ],
+      "notes": "{\"waived_keys\": []}"
+    },
+    {
+      "layer": "A2",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "score_point_id": "SP-ops-plan",
+          "title": "运维值守与应急预案完整性",
+          "criterion": "运维值守与应急预案完整性，满分50分",
+          "max_points": 50,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "ops_plan"
+          ],
+          "linked_requirement_match_keys": [
+            "服务单位须提供7x24小时系统运维值守",
+            "一般故障响应时间不得超过15分钟"
+          ],
+          "match_key": "运维值守与应急预案完整性，满分50分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-ops-staff",
+          "title": "专职运维人员数量与证书",
+          "criterion": "专职运维人员数量与证书，满分30分",
+          "max_points": 30,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "staff_cert"
+          ],
+          "linked_requirement_match_keys": [
+            "投标人须配备不少于3名具备信息系统运维证书的专职人员"
+          ],
+          "match_key": "专职运维人员数量与证书，满分30分",
+          "group_total_points": 100
+        },
+        {
+          "score_point_id": "SP-ops-spare",
+          "title": "备件与备援机制",
+          "criterion": "备件与备援机制，满分20分",
+          "max_points": 20,
+          "scoring_levels": [],
+          "required_evidence_types": [
+            "spare_plan"
+          ],
+          "linked_requirement_match_keys": [],
+          "match_key": "备件与备援机制，满分20分",
+          "group_total_points": 100
+        }
+      ],
+      "blocking_ids": [
+        "SP-ops-plan",
+        "SP-ops-staff",
+        "SP-ops-spare"
+      ],
+      "notes": "total_points=100"
+    },
+    {
+      "layer": "A3",
+      "schema_version": "v3-golden-1",
+      "objects": [
+        {
+          "topic_id": "T-ops-sla",
+          "topic_type": "service",
+          "canonical_name": "运维服务级别",
+          "duty_type": "operate",
+          "requirement_match_keys": [
+            "服务单位须提供7x24小时系统运维值守",
+            "一般故障响应时间不得超过15分钟",
+            "重大故障恢复时间不得超过2小时"
+          ],
+          "score_match_keys": [
+            "运维值守与应急预案完整性，满分50分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-ops-staff",
+          "topic_type": "qualification",
+          "canonical_name": "运维人员资格",
+          "duty_type": "prove",
+          "requirement_match_keys": [
+            "投标人须配备不少于3名具备信息系统运维证书的专职人员"
+          ],
+          "score_match_keys": [
+            "专职运维人员数量与证书，满分30分"
+          ],
+          "primary_required": true
+        },
+        {
+          "topic_id": "T-ops-report",
+          "topic_type": "deliverable",
+          "canonical_name": "运维报告交付",
+          "duty_type": "deliver",
+          "requirement_match_keys": [
+            "每月须提交运维月报和隐患排查报告"
+          ],
+          "score_match_keys": [],
+          "primary_required": true
+        }
+      ],
+      "blocking_ids": [
+        "T-ops-sla",
+        "T-ops-staff",
+        "T-ops-report"
+      ],
+      "notes": "each topic requires exactly one primary duty/chapter coverage"
+    }
+  ],
+  "annotation": {
+    "annotator": "expert_annotator_a",
+    "reviewer": "expert_annotator_b",
+    "adjudicator": "expert_adjudicator",
+    "guideline_version": "v3-golden-guideline-1.0",
+    "annotated_at": "2026-07-27T10:00:00+00:00",
+    "adjudicated_at": "2026-07-27T12:00:00+00:00",
+    "agreement_rate": 1.0,
+    "dispute_rate": 0.0
+  },
+  "allowed_variants": [],
+  "severity_policy_version": "v1",
+  "notes": "profile=ops_service; dual-reviewed anonymized domain fixture for Gate A; not Gate U holdout."
+}

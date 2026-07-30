@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import os
 import sys
 import tempfile
 import unittest
+from http.cookies import SimpleCookie
 from pathlib import Path
 from unittest import mock
 
@@ -21,8 +23,9 @@ from api.settings_service import SettingsService
 
 
 class _Request:
-    def __init__(self, body: object) -> None:
+    def __init__(self, body: object, cookies: dict[str, str] | None = None) -> None:
         self.body = body
+        self.cookies = cookies or {}
 
     async def json(self) -> object:
         return self.body
@@ -32,7 +35,50 @@ def _payload(response) -> dict[str, object]:
     return json.loads(response.body)
 
 
+def _response_cookie(response, name: str) -> str:
+    cookies = SimpleCookie()
+    for key, value in response.raw_headers:
+        if key.lower() == b"set-cookie":
+            cookies.load(value.decode("latin-1"))
+    return cookies[name].value
+
+
 class V3SettingsAndUploadTests(unittest.TestCase):
+    def test_validation_failure_gate_defaults_off_and_persists(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            root = Path(temporary)
+            settings = SettingsService(root)
+            with mock.patch.dict(
+                os.environ,
+                {},
+                clear=False,
+            ):
+                os.environ.pop(
+                    "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
+                    None,
+                )
+                self.assertFalse(
+                    settings.flow_settings()[
+                        "validation_failure_blocks_pipeline"
+                    ]
+                )
+                saved = settings.write_flow_settings(
+                    {"validation_failure_blocks_pipeline": True}
+                )
+                self.assertTrue(
+                    saved["validation_failure_blocks_pipeline"]
+                )
+                self.assertEqual(
+                    os.environ[
+                        "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE"
+                    ],
+                    "1",
+                )
+            self.assertIn(
+                "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE=1",
+                (root / ".env").read_text(encoding="utf-8"),
+            )
+
     def test_settings_routes_are_owned_by_the_standalone_v3_app(self) -> None:
         paths = {getattr(route, "path", "") for route in v3_app.app.routes}
         self.assertIn("/api/llm-settings", paths)
@@ -40,6 +86,14 @@ class V3SettingsAndUploadTests(unittest.TestCase):
         self.assertIn("/api/llm-settings/delete", paths)
         self.assertIn("/api/llm-settings/test", paths)
         self.assertIn("/api/flow-settings", paths)
+        self.assertIn(
+            "/api/v3/workspaces/{workspace_id}/generation-stages/{stage_id}",
+            paths,
+        )
+        self.assertIn(
+            "/api/v3/workspaces/{workspace_id}/document-preview",
+            paths,
+        )
 
     def test_runtime_settings_are_scoped_to_the_application_lifespan(self) -> None:
         async def exercise_lifespan() -> None:
@@ -106,6 +160,7 @@ class V3SettingsAndUploadTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, environment, clear=False),
                 mock.patch.object(v3_app, "SETTINGS", settings),
+                mock.patch.object(v3_app, "RUNS_DIR", root / "runs"),
             ):
                 response = asyncio.run(
                     v3_app.login(
@@ -131,6 +186,91 @@ class V3SettingsAndUploadTests(unittest.TestCase):
             self.assertIn("bid_agent_csrf=", cookies)
             self.assertIn("HttpOnly", cookies)
             self.assertEqual(cookies.count("Secure"), 2)
+            with v3_app._SESSION_LOCK:
+                v3_app._SESSIONS.clear()
+
+    def test_session_survives_memory_reset_without_persisting_raw_token(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            runs = Path(temporary) / "runs"
+            with mock.patch.object(v3_app, "RUNS_DIR", runs):
+                response = v3_app._issue_session("persistent-user")
+                token = _response_cookie(response, "bid_agent_session")
+                store_path = v3_app._session_store_path()
+                persisted_text = store_path.read_text(encoding="utf-8")
+                persisted = json.loads(persisted_text)
+
+                self.assertNotIn(token, persisted_text)
+                self.assertIn(
+                    hashlib.sha256(token.encode("utf-8")).hexdigest(),
+                    persisted["sessions"],
+                )
+                with v3_app._SESSION_LOCK:
+                    v3_app._SESSIONS.clear()
+
+                restored = v3_app._session_record(token)
+                self.assertIsNotNone(restored)
+                self.assertEqual(restored["principal"]["id"], "persistent-user")
+
+            with v3_app._SESSION_LOCK:
+                v3_app._SESSIONS.clear()
+
+    def test_expired_persisted_session_is_removed_and_rejected(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            runs = Path(temporary) / "runs"
+            with (
+                mock.patch.object(v3_app, "RUNS_DIR", runs),
+                mock.patch.object(v3_app.time, "time", return_value=1_000.0),
+            ):
+                response = v3_app._issue_session("expired-user")
+                token = _response_cookie(response, "bid_agent_session")
+                with v3_app._SESSION_LOCK:
+                    v3_app._SESSIONS.clear()
+
+            with (
+                mock.patch.object(v3_app, "RUNS_DIR", runs),
+                mock.patch.object(
+                    v3_app.time,
+                    "time",
+                    return_value=1_000.0 + v3_app._AUTH_SESSION_SECONDS + 1,
+                ),
+            ):
+                self.assertIsNone(v3_app._session_record(token))
+                persisted = json.loads(
+                    v3_app._session_store_path().read_text(encoding="utf-8")
+                )
+                self.assertEqual(persisted["sessions"], {})
+
+            with v3_app._SESSION_LOCK:
+                v3_app._SESSIONS.clear()
+
+    def test_logout_removes_persisted_session_after_memory_reset(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            runs = Path(temporary) / "runs"
+            with mock.patch.object(v3_app, "RUNS_DIR", runs):
+                response = v3_app._issue_session("logout-user")
+                token = _response_cookie(response, "bid_agent_session")
+                csrf = _response_cookie(response, "bid_agent_csrf")
+                with v3_app._SESSION_LOCK:
+                    v3_app._SESSIONS.clear()
+
+                logout_response = v3_app.logout(
+                    _Request(
+                        {},
+                        {
+                            "bid_agent_session": token,
+                            "bid_agent_csrf": csrf,
+                        },
+                    )
+                )
+                self.assertTrue(_payload(logout_response)["ok"])
+                with v3_app._SESSION_LOCK:
+                    v3_app._SESSIONS.clear()
+                self.assertIsNone(v3_app._session_record(token))
+                persisted = json.loads(
+                    v3_app._session_store_path().read_text(encoding="utf-8")
+                )
+                self.assertEqual(persisted["sessions"], {})
+
             with v3_app._SESSION_LOCK:
                 v3_app._SESSIONS.clear()
 
@@ -414,6 +554,46 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                 "stored-probe-secret",
                 by_id.body.decode("utf-8") + by_active.body.decode("utf-8"),
             )
+
+    def test_live_model_changes_invalidate_inference_runtime_metadata(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            settings = SettingsService(Path(temporary))
+            with mock.patch(
+                "api.settings_service._invalidate_inference_runtime_metadata"
+            ) as invalidate:
+                first = settings.save_model(
+                    {
+                        "name": "first",
+                        "base_url": "https://first.example/v1",
+                        "api_key": "first-secret",
+                        "model": "first-model",
+                    },
+                    set_active=True,
+                )
+                self.assertEqual(invalidate.call_count, 1)
+
+                second = settings.save_model(
+                    {
+                        "name": "second",
+                        "base_url": "https://second.example/v1",
+                        "api_key": "second-secret",
+                        "model": "second-model",
+                    },
+                    set_active=False,
+                )
+                self.assertEqual(invalidate.call_count, 1)
+
+                settings.activate_model(str(second["saved_id"]))
+                self.assertEqual(invalidate.call_count, 2)
+                with mock.patch.object(
+                    settings,
+                    "_write_models_store_locked",
+                ):
+                    settings.delete_model(str(second["saved_id"]))
+                self.assertEqual(invalidate.call_count, 3)
+                self.assertNotEqual(first["saved_id"], second["saved_id"])
 
     def test_probe_rejects_non_http_and_credential_bearing_urls(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
