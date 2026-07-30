@@ -175,14 +175,26 @@ class WriterBundleContentGate:
         if str(target.get("content_policy") or "full") != "full":
             return
         compact = "".join(str(content or "").split())
+        forbidden = (
+            "满分条件",
+            "得分任务",
+            "本节用于",
+            "按已确认的章节边界",
+            "章节边界组织响应内容",
+            "展开具体响应内容",
+            "评分要求",
+            "评分标准",
+            "得分点",
+        )
+        if any(token in str(content or "") for token in forbidden):
+            raise ValueError(
+                "G4_CONTENT_SCORE_CONDITION_VISIBLE_OR_TEMPLATE_TRACE"
+            )
         target_size = int(target.get("target_size") or 0)
         if target_size >= 500 and len(compact) < 180:
             raise ValueError("G4_CONTENT_TOO_SHORT_OR_HOLLOW")
         if target_size < 500:
             return
-        forbidden = ("满分条件", "评分要求", "评分标准规定", "得分点")
-        if any(token in str(content or "") for token in forbidden):
-            raise ValueError("G4_CONTENT_SCORE_CONDITION_VISIBLE")
         for condition_id in target.get("score_condition_ids", []):
             condition = score_catalog["conditions"].get(str(condition_id))
             if not condition:
@@ -241,6 +253,11 @@ class WriterBundleContentGate:
                     [],
                 ):
                     condition_id = str(condition_id_value)
+                    # Units may historically list sibling conditions owned by
+                    # other chapter slices. Only map conditions frozen in this
+                    # Bundle; foreign ids are ignored rather than fail closed.
+                    if condition_id not in conditions:
+                        continue
                     if (
                         condition_id in condition_unit_ids
                         and condition_unit_ids[condition_id] != unit_id
@@ -249,14 +266,6 @@ class WriterBundleContentGate:
                             "G4_CONTENT_CONDITION_MULTIPLE_RESPONSE_UNITS"
                         )
                     condition_unit_ids[condition_id] = unit_id
-        unknown_unit_conditions = (
-            set(condition_unit_ids) - set(conditions)
-        )
-        if unknown_unit_conditions:
-            raise ValueError(
-                "G4_CONTENT_CONDITION_OUT_OF_BUNDLE: "
-                f"{sorted(unknown_unit_conditions)}"
-            )
         return {
             "scores": scores,
             "conditions": conditions,
@@ -312,7 +321,8 @@ class WriterBundleContentGate:
                 )
                 if not unit_id:
                     raise ValueError(
-                        "G4_CONTENT_EVIDENCE_CONDITION_UNIT_MISSING"
+                        "G4_CONTENT_EVIDENCE_CONDITION_UNIT_MISSING: "
+                        f"{condition_id}"
                     )
                 evidence_conditions_by_unit.setdefault(
                     unit_id,

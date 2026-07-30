@@ -217,6 +217,14 @@ class V3StageRunner:
             configured_validation_failure_blocks()
         )
         self._stage_warnings: dict[str, list[dict[str, Any]]] = {}
+        self._generation_chapter_ids: list[str] = []
+
+    def set_generation_scope(self, chapter_ids: list[str] | None) -> None:
+        self._generation_chapter_ids = [
+            str(item).strip()
+            for item in (chapter_ids or [])
+            if str(item).strip()
+        ]
 
     def validation_policy_scope(self):
         return validation_policy_scope(
@@ -1692,6 +1700,9 @@ class V3StageRunner:
                             writing_objectives=[
                                 condition.response_intent
                             ],
+                            # Primary stays on the unit chapter; condition child
+                            # keeps the unit as supporting for evidence mapping.
+                            supporting_response_unit_ids=[unit.unit_id],
                             score_condition_ids=[condition_id],
                             planned_tables=(
                                 ["证明材料清单"]
@@ -1724,7 +1735,7 @@ class V3StageRunner:
                         else "保持严格模板既有章节结构"
                     ),
                     writing_objectives=(
-                        ["完整覆盖需求、评分点及满分条件"]
+                        ["完整覆盖需求、评分点及响应义务"]
                         if node.node_id == first_node_id
                         else []
                     ),
@@ -1940,6 +1951,12 @@ class V3StageRunner:
             execution_mode="program_audit_fallback",
         )
         return blueprint, result
+
+    @staticmethod
+    def _content_unit_write_priority(title: str) -> tuple[int, str]:
+        normalized = str(title or "")
+        deferred = any(token in normalized for token in ("商务", "报价", "价格", "财务"))
+        return (1 if deferred else 0, normalized)
 
     def run(self, stage: str, *, operation_id: str | None = None):
         if stage == "ingest_inputs":
@@ -3066,30 +3083,131 @@ class V3StageRunner:
             return DocumentContractCompiler(self.context).compile()
         if stage == "plan_document":
             return DocumentPlanner(self.context).build()
-        if stage == "resolve_evidence":
-            from .autonomous_research import AutonomousResearchCoordinator
-
-            return AutonomousResearchCoordinator(
-                self.context,
-                enabled=self.inference_mode != _INFERENCE_MODE_DETERMINISTIC_TEST,
-            ).resolve()
         if stage == "execute_content_plan":
             from .artifact_promotion import HumanGateService
             from .writer_bundle import WriterInputBundleAssembler
             HumanGateService(self.context).require_current_confirmation()
-            scheduler = ContentUnitScheduler(self.context)
+            deterministic_writer = (
+                self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
+            )
+            scheduler = ContentUnitScheduler(
+                self.context,
+                deterministic_test=deterministic_writer,
+            )
             units = scheduler.initialize()
-            writer = ContentWriter(self.context)
-            assembler = WriterInputBundleAssembler(self.context)
+            blueprint = load_promoted_chapter_blueprint(self.context)
+            requested_chapter_ids = list(
+                dict.fromkeys(
+                    getattr(self, "_generation_chapter_ids", []) or []
+                )
+            )
+            if requested_chapter_ids:
+                blueprint_by_id = {
+                    node.chapter_id: node for node in blueprint.nodes
+                }
+                unknown = sorted(
+                    set(requested_chapter_ids) - set(blueprint_by_id)
+                )
+                if unknown:
+                    raise ValueError(
+                        "DOCUMENT_WRITE_SCOPE_INVALID: 已确认目录中不存在章节 "
+                        f"{unknown}"
+                    )
+                selected_ids: set[str] = set()
+                for requested_id in requested_chapter_ids:
+                    selected_ids.add(requested_id)
+                    changed = True
+                    while changed:
+                        before = len(selected_ids)
+                        selected_ids.update(
+                            node.chapter_id
+                            for node in blueprint.nodes
+                            if node.parent_chapter_id in selected_ids
+                        )
+                        changed = len(selected_ids) != before
+                scoped_units = []
+                for unit in units:
+                    node_ids = [
+                        node_id for node_id in unit.node_ids
+                        if node_id in selected_ids
+                    ]
+                    if not node_ids:
+                        continue
+                    scoped_units.append(
+                        unit.model_copy(
+                            update={
+                                "unit_id": "unit-scope-" + node_ids[0],
+                                "node_ids": node_ids,
+                            }
+                        )
+                    )
+                units = scoped_units
+            title_by_chapter = {
+                node.chapter_id: node.title
+                for node in blueprint.nodes
+            }
+            deferred_tokens = ("商务", "报价", "价格", "财务", "业绩", "资质", "人员", "资格")
+            technical_units = [
+                unit for unit in units
+                if all(
+                    not any(
+                        token in title_by_chapter.get(node_id, "")
+                        for token in deferred_tokens
+                    )
+                    for node_id in unit.node_ids
+                )
+            ]
+            deferred_units = [
+                unit for unit in units
+                if unit not in technical_units
+            ]
+            writer = (
+                ContentWriter.for_deterministic_tests(self.context)
+                if deterministic_writer
+                else ContentWriter(self.context)
+            )
+            assembler = WriterInputBundleAssembler(
+                self.context,
+                deterministic_test=deterministic_writer,
+            )
+            from .writer_research import writer_research_enabled
+
+            # Public policy/method research is allowed when a research provider
+            # is configured. Enterprise facts still require operator materials;
+            # WriterResearchCoordinator hard-blocks those scopes.
+            allow_writer_research = (
+                not deterministic_writer and writer_research_enabled()
+            )
             results = []
-            for unit in units:
+            for unit in technical_units:
+                current = scheduler.store.content_unit_state(unit.unit_id) or {}
+                if str(current.get("state") or "") == "completed":
+                    continue
                 scheduler.mark_running(unit)
                 try:
                     bundle = assembler.assemble(unit.unit_id, unit.node_ids)
-                    results.append(writer.write_bundle(bundle))
+                    results.append(
+                        writer.write_bundle(
+                            bundle,
+                            operation_id=operation_id or "",
+                            enable_writer_research=allow_writer_research,
+                        )
+                    )
                 except Exception as exc:
-                    scheduler.mark_failed(unit, exc)
+                    if getattr(exc, "code", "") in {
+                        "WRITER_RESEARCH_ACTION_REQUIRED",
+                        "WRITER_MODEL_ACTION_REQUIRED",
+                    }:
+                        scheduler.mark_blocked(unit, exc)
+                    else:
+                        scheduler.mark_failed(unit, exc)
                     raise
+            if deferred_units:
+                raise ControlPlaneError(
+                    "TECHNICAL_DRAFT_READY",
+                    "技术章节已写完；商务部分和价格部分按当前要求暂不写入。",
+                    details={"deferred_unit_ids": [unit.unit_id for unit in deferred_units]},
+                )
             return results
         if stage == "integrate_document":
             from .document_contract import DOCUMENT_CONTRACT_PATH
@@ -3097,11 +3215,25 @@ class V3StageRunner:
             from .contracts import DOCUMENT_CONTRACT_ADAPTER, DocumentPlan
             contract = DOCUMENT_CONTRACT_ADAPTER.validate_python(read_json(self.context.root / DOCUMENT_CONTRACT_PATH))
             plan = DocumentPlan.model_validate(read_json(self.context.root / DOCUMENT_PLAN_PATH))
-            return DocumentIntegrator(self.context).integrate(
+            return DocumentIntegrator(
+                self.context,
+                deterministic_test=(
+                    self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
+                ),
+            ).integrate(
                 contract_revision=contract.revision,
                 plan_revision=plan.revision,
             )
         if stage == "verify_document":
+            from .writer_policy import require_all_content_units_fresh
+
+            require_all_content_units_fresh(
+                self.context,
+                deterministic_test=(
+                    self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
+                ),
+                code="QUALITY_GATE_STALE_CONTENT",
+            )
             report = QualityGate(self.context).verify()
             if report.verdict != "pass":
                 message = (
@@ -3120,6 +3252,15 @@ class V3StageRunner:
         if stage == "render_document":
             from .document_contract import DOCUMENT_CONTRACT_PATH
             from .contracts import DOCUMENT_CONTRACT_ADAPTER, TemplateContract
+            from .writer_policy import require_all_content_units_fresh
+
+            require_all_content_units_fresh(
+                self.context,
+                deterministic_test=(
+                    self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
+                ),
+                code="RENDER_BLOCKED_STALE_CONTENT",
+            )
             quality_path = self.context.root / CONTENT_QUALITY_PATH
 
             if not quality_path.is_file():
@@ -3142,6 +3283,15 @@ class V3StageRunner:
                 )
             return StandardRenderer(self.context).render()
         if stage == "verify_delivery":
+            from .writer_policy import require_all_content_units_fresh
+
+            require_all_content_units_fresh(
+                self.context,
+                deterministic_test=(
+                    self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
+                ),
+                code="DELIVERY_BLOCKED_STALE_CONTENT",
+            )
             return DeliveryVerifier(
                 self.context,
                 allow_quality_warnings=(

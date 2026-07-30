@@ -34,12 +34,32 @@
       <div class="stepper-bar-header">
         <div class="stepper-bar-title">
           <p class="section-kicker">流水线进度</p>
-          <h3>后台步骤拆分流程 ({{ topPipelineStages.length }} 阶段)</h3>
+          <h3>{{ topPipelineTitle }}（{{ topPipelineStages.length }} 步）</h3>
+          <p class="pipeline-context-copy">{{ topPipelineDescription }}</p>
         </div>
         <div class="stepper-right-info">
           <span class="pipeline-state-pill" :class="`pipeline-state-${topPipelineStatus}`">
             {{ topPipelineStatusLabel }}
           </span>
+          <button
+            v-if="planningStatus !== 'confirmed' && hasTender"
+            class="btn btn-primary"
+            type="button"
+            :disabled="outlineActionDisabled"
+            @click="prepareOutline"
+          >
+            <span v-if="outlineBusy" class="spinner" aria-hidden="true" />
+            {{ outlineBusy ? outlineRunningLabel : outlineActionLabel }}
+          </button>
+          <button
+            v-else-if="planningStatus === 'confirmed'"
+            class="btn btn-primary"
+            type="button"
+            :disabled="running || generationBusy"
+            @click="runDocument"
+          >
+            {{ generationBusy ? '正在生成，不要重复提交' : (generation.status === 'failed' ? '重新生成完整标书' : '生成完整标书') }}
+          </button>
           <button
             class="text-button log-toggle-btn"
             type="button"
@@ -48,6 +68,14 @@
             {{ activeTab === 'pipeline' ? '返回结果主视窗' : '查看完整步骤产物明细 →' }}
           </button>
         </div>
+      </div>
+
+      <div v-if="showGenerationPipeline" class="pipeline-prerequisite-note">
+        <strong>前置规划不会重复展示</strong>
+        <span>
+          已完成 {{ generationPrerequisiteCompleted }}/{{ generationPrerequisiteStages.length }} 个目录前置步骤，
+          其中 {{ generationPrerequisiteReused }} 个直接复用；下方只展示正文生成与交付步骤。
+        </span>
       </div>
 
       <ol class="stepper-bar-list" aria-label="处理步骤节点">
@@ -75,6 +103,7 @@
             <div class="node-content">
               <strong>{{ stage.label }}</strong>
               <small>{{ stage.warning_count > 0 ? '已带警告继续' : pipelineStageStatus(stage) }}</small>
+              <small class="stage-operation">{{ pipelineStageOperation(stage) }}</small>
             </div>
             <span v-if="stage.llm_request_count > 0" class="node-req-tag">
               {{ stage.llm_request_count }}次 LLM 请求
@@ -86,11 +115,16 @@
 
     <!-- 步骤细节诊断 Drawer 抽屉/弹窗 -->
     <div v-if="selectedDrawerStage" class="stage-drawer-overlay" @click.self="closeStageDrawer">
-      <aside class="stage-drawer" aria-label="步骤诊断明细">
+      <aside
+        class="stage-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="stage-drawer-heading"
+      >
         <header class="drawer-header">
           <div>
-            <p class="section-kicker">步骤诊断与排查</p>
-            <h3>{{ selectedDrawerStage.label }}</h3>
+            <p class="section-kicker">节点详情 · 可审计执行轨迹</p>
+            <h3 id="stage-drawer-heading">{{ selectedDrawerStage.label }}</h3>
           </div>
           <button class="drawer-close-btn" type="button" aria-label="关闭步骤详情" @click="closeStageDrawer">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18" /></svg>
@@ -101,8 +135,59 @@
             <strong>步骤状态：{{ pipelineStageStatus(selectedDrawerStage) }}</strong>
             <span>尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
           </div>
+          <dl
+            v-if="selectedDrawerStage.started_at || selectedDrawerStage.completed_at"
+            class="drawer-timestamps"
+          >
+            <div v-if="selectedDrawerStage.started_at">
+              <dt>开始时间</dt>
+              <dd>{{ formatTimestamp(selectedDrawerStage.started_at) }}</dd>
+            </div>
+            <div v-if="selectedDrawerStage.completed_at">
+              <dt>完成时间</dt>
+              <dd>{{ formatTimestamp(selectedDrawerStage.completed_at) }}</dd>
+            </div>
+          </dl>
+
+          <section
+            v-if="stageDetail?.current_writing"
+            class="current-writing-card"
+            aria-live="polite"
+          >
+            <p class="section-kicker">实时写作位置</p>
+            <strong>
+              {{ writingPhaseLabel(stageDetail.current_writing.phase) }}：
+              {{
+                stageDetail.current_writing.chapter_title
+                  || stageDetail.current_writing.unit_title
+                  || '正在确定章节'
+              }}
+            </strong>
+            <p>
+              写作单元 {{ stageDetail.current_writing.unit_id || '—' }}
+              <template v-if="stageDetail.current_writing.chapter_id">
+                · 章节 {{ stageDetail.current_writing.chapter_id }}
+              </template>
+            </p>
+            <small v-if="stageDetail.current_writing.updated_at">
+              最近更新：{{ formatTimestamp(stageDetail.current_writing.updated_at) }}
+            </small>
+          </section>
+          <section
+            v-else-if="selectedDrawerStage.stage_id === 'execute_content_plan' && selectedDrawerStage.status === 'running'"
+            class="current-writing-card current-writing-pending"
+            aria-live="polite"
+          >
+            <p class="section-kicker">实时写作位置</p>
+            <strong>正在初始化写作单元…</strong>
+            <p>写作器写入首个章节后会自动显示具体章节与当前阶段。</p>
+          </section>
 
           <p v-if="stageDetailLoading" class="drawer-empty-hint">正在读取该步骤的完整详情…</p>
+          <div v-else-if="stageDetailError" class="drawer-error-alert" role="alert">
+            <strong>节点详情暂时无法读取</strong>
+            <p>{{ stageDetailError }}</p>
+          </div>
 
           <div v-if="stageDetail?.warning_count" class="drawer-warning-alert" role="status">
             <strong>已带 {{ stageDetail.warning_count }} 项风险继续</strong>
@@ -118,6 +203,183 @@
             <strong>错误明细：</strong>
             <p>{{ pipelineStageError(selectedDrawerStage) }}</p>
           </div>
+
+          <section
+            v-if="stageDetail?.research_trace?.length"
+            class="drawer-trace-panel"
+            aria-labelledby="research-trace-heading"
+          >
+            <header class="drawer-trace-heading">
+              <div>
+                <p class="section-kicker">章节写作中的判断与工具调用</p>
+                <h4 id="research-trace-heading">Agent 执行轨迹</h4>
+              </div>
+              <span>{{ stageDetail.research_trace.length }} 个写作单元</span>
+            </header>
+            <p v-if="stageDetail.trace_disclosure" class="trace-disclosure">
+              {{ stageDetail.trace_disclosure }}
+            </p>
+
+            <article
+              v-for="trace in stageDetail.research_trace"
+              :key="trace.decision_id || trace.unit_id"
+              class="research-trace-card"
+            >
+              <header class="research-trace-summary">
+                <div>
+                  <span
+                    class="trace-stage-label"
+                    :class="`trace-unit-${trace.unit_status || 'unknown'}`"
+                  >
+                    {{ contentUnitTraceLabel(trace.unit_status) }}
+                  </span>
+                  <h5>{{ trace.chapter_titles?.join('、') || trace.unit_id }}</h5>
+                  <small>
+                    写作单元 {{ trace.unit_id || '—' }}
+                    <template v-if="trace.unit_attempt"> · 第 {{ trace.unit_attempt }} 次执行</template>
+                  </small>
+                </div>
+                <span
+                  class="research-decision-pill"
+                  :class="trace.needs_research ? 'decision-search' : 'decision-skip'"
+                >
+                  {{ trace.needs_research ? '需要联网' : '无需联网' }}
+                </span>
+              </header>
+
+              <ol class="research-trace-steps">
+                <li>
+                  <span class="trace-step-index">1</span>
+                  <div>
+                    <strong>启动写作单元</strong>
+                    <p>
+                      包含章节：{{ trace.chapter_titles?.join('、') || '当前写作单元' }}
+                    </p>
+                    <small v-if="trace.created_at">
+                      联网判断记录于 {{ formatTimestamp(trace.created_at) }}
+                    </small>
+                  </div>
+                </li>
+                <li>
+                  <span class="trace-step-index">2</span>
+                  <div>
+                    <strong>判断是否需要联网搜索</strong>
+                    <p>
+                      <b>决策依据摘要：</b>
+                      {{ trace.decision_summary || '未记录判断摘要。' }}
+                    </p>
+                    <small>
+                      {{ researchStatusLabel(trace.decision_status) }}
+                    </small>
+                  </div>
+                </li>
+                <li v-if="trace.needs_research">
+                  <span class="trace-step-index">3</span>
+                  <div>
+                    <strong>执行公开资料搜索</strong>
+                    <div
+                      v-for="query in trace.queries"
+                      :key="query.query_id || query.question"
+                      class="research-query-card"
+                    >
+                      <header>
+                        <span>查询内容</span>
+                        <em>{{ researchStatusLabel(query.status) }}</em>
+                      </header>
+                      <p>{{ query.question }}</p>
+                      <small v-if="query.applicability">
+                        用于：{{ query.applicability }}
+                      </small>
+                      <small v-if="query.batch_id">证据批次：{{ query.batch_id }}</small>
+                      <ol v-if="query.attempts?.length" class="research-attempt-list">
+                        <li
+                          v-for="attempt in query.attempts"
+                          :key="`${query.query_id}-${attempt.attempt}`"
+                        >
+                          <strong>第 {{ attempt.attempt }} 次</strong>
+                          <span>{{ researchStatusLabel(attempt.status) }}</span>
+                          <small>
+                            来源 {{ attempt.source_count ?? 0 }} 个 ·
+                            证据 {{ attempt.evidence_count ?? 0 }} 条 ·
+                            {{ attempt.duration_ms ?? 0 }} ms
+                          </small>
+                          <p v-if="attempt.error">{{ attempt.error }}</p>
+                        </li>
+                      </ol>
+
+                      <div v-if="query.results?.length" class="research-result-list">
+                        <article
+                          v-for="result in query.results"
+                          :key="result.evidence_id || result.source_url"
+                          class="research-result-card"
+                          :class="{ used: result.used_in_bid }"
+                        >
+                          <header>
+                            <a
+                              v-if="result.source_url"
+                              :href="result.source_url"
+                              target="_blank"
+                              rel="noopener noreferrer"
+                            >
+                              {{ result.title || result.source_url }}
+                            </a>
+                            <strong v-else>{{ result.title || result.evidence_id }}</strong>
+                            <span
+                              :class="result.usage_status === 'used' ? 'result-used' : 'result-unused'"
+                            >
+                              {{ researchUsageLabel(result.usage_status) }}
+                            </span>
+                          </header>
+                          <small>
+                            {{ result.publisher || '公开来源' }}
+                            <template v-if="result.evidence_id"> · {{ result.evidence_id }}</template>
+                          </small>
+                          <p v-if="result.answer_excerpt">
+                            <b>检索回答摘要：</b>{{ result.answer_excerpt }}
+                          </p>
+                          <small v-if="result.used_in_chapters?.length" class="result-usage">
+                            写入：
+                            {{ result.used_in_chapters.map(item => item.chapter_title).join('、') }}
+                          </small>
+                        </article>
+                      </div>
+                      <p v-else class="trace-empty-result">
+                        尚未取得可核验来源，或本次查询仍在执行。
+                      </p>
+                      <p v-if="query.error" class="trace-query-error">{{ query.error }}</p>
+                    </div>
+                  </div>
+                </li>
+                <li>
+                  <span class="trace-step-index">{{ trace.needs_research ? 4 : 3 }}</span>
+                  <div>
+                    <strong>写入标书时采用哪些证据</strong>
+                    <template v-if="trace.used_by_chapter?.length">
+                      <p
+                        v-for="usage in trace.used_by_chapter"
+                        :key="usage.chapter_id"
+                        class="trace-evidence-usage"
+                      >
+                        <b>{{ usage.chapter_title }}</b>
+                        <span>{{ usage.evidence_ids.join('、') }}</span>
+                      </p>
+                    </template>
+                    <p v-else>
+                      {{
+                        trace.needs_research
+                          ? (
+                            trace.unit_status === 'completed'
+                              ? '本写作单元完成后未记录正文采用。'
+                              : '采用情况待写作单元完成后确认。'
+                          )
+                          : '本单元未调用公开搜索。'
+                      }}
+                    </p>
+                  </div>
+                </li>
+              </ol>
+            </article>
+          </section>
 
           <div v-if="selectedDrawerStage.llm_requests?.length" class="drawer-llm-list">
             <h4>大模型请求历史明细 ({{ selectedDrawerStage.llm_requests.length }} 次)</h4>
@@ -167,7 +429,7 @@
             </article>
           </section>
 
-          <p v-if="!stageDetailLoading && !stageDetail?.items?.length && !Object.keys(stageDetail?.details || {}).length && !selectedDrawerStage.llm_requests?.length" class="drawer-empty-hint">
+          <p v-if="!stageDetailLoading && !stageDetailError && !stageDetail?.research_trace?.length && !stageDetail?.items?.length && !Object.keys(stageDetail?.details || {}).length && !selectedDrawerStage.llm_requests?.length" class="drawer-empty-hint">
             该步骤尚未产生可展示的业务明细。
           </p>
         </div>
@@ -185,6 +447,7 @@
         <div class="tab-text">
           <strong>1. 输入资料与配置</strong>
           <small>{{ hasTender ? `${activeInputs.length} 个文件已登记` : '请上传招标文件' }}</small>
+          <span class="tab-action-hint">操作：上传、替换或补充项目资料</span>
         </div>
       </button>
 
@@ -198,6 +461,7 @@
         <div class="tab-text">
           <strong>2. 审阅评分目录草案</strong>
           <small>{{ hasOutline ? `${planningView.summary.chapter_count} 章节 · ${planningView.summary.score_point_count} 评分点` : (outlineBusy ? '正在解析目录…' : '结果主视窗') }}</small>
+          <span class="tab-action-hint">操作：生成目录、检查评分覆盖、确认目录</span>
         </div>
         <span v-if="hasOutline" class="tab-badge">结果就绪</span>
       </button>
@@ -212,6 +476,7 @@
         <div class="tab-text">
           <strong>3. 完整标书生成</strong>
           <small>{{ generationTabLabel }}</small>
+          <span class="tab-action-hint">操作：整本生成或只生成所选章节、补充人工材料、预览并下载 Word</span>
         </div>
         <span v-if="generationBusy" class="tab-badge">生成中</span>
       </button>
@@ -371,7 +636,7 @@
         <button
           class="btn btn-primary primary-action"
           type="button"
-          :disabled="running || pipelineBusy || uploading || !hasTender"
+          :disabled="outlineActionDisabled"
           @click="prepareOutline"
         >
           <span v-if="outlineBusy" class="spinner" aria-hidden="true" />
@@ -427,14 +692,6 @@
             </div>
             <span class="file-count">{{ evidenceNeeds.length }} 项</span>
           </div>
-          <div v-if="autoResearch.enabled" class="research-summary">
-            <strong>自动研究：{{ autoResearch.provider_id || 'DeepSeek' }}</strong>
-            <span>
-              已发布 {{ autoResearch.published_count || 0 }} 项，
-              无结果 {{ autoResearch.gap_count || 0 }} 项，
-              失败 {{ autoResearch.failed_count || 0 }} 项
-            </span>
-          </div>
           <ul class="evidence-list">
             <li v-for="need in evidenceNeeds" :key="need.need_id">
               <span>
@@ -442,25 +699,17 @@
                 <small>
                   {{ need.status === 'satisfied'
                     ? '已满足'
-                    : (need.status === 'researching' ? '正在自动检索' : '待补充') }}
+                    : '待人工补充' }}
                 </small>
               </span>
-              <button
-                class="btn"
-                type="button"
-                :disabled="researchingNeedId === need.need_id || need.status === 'satisfied'"
-                @click="research(need)"
-              >
-                {{ researchingNeedId === need.need_id ? '检索中…' : 'DeepSeek 检索' }}
-              </button>
+              <span class="manual-evidence-badge">请上传项目真实材料</span>
             </li>
             <li v-if="!evidenceNeeds.length" class="support-empty">
               当前没有已识别的证据缺口。
             </li>
           </ul>
           <p class="support-note">
-            生成完整标书时会根据当前章节与招标要求自动检索公开资料，但不会自动上传附件；
-            只有上方明确勾选的文件会发送给 DeepSeek。外部检索不能替代企业资质证明。
+            证据缺口必须由人工提供真实的企业、人员、业绩、资质或项目材料；系统不会联网补造或代替证明文件。
           </p>
         </section>
 
@@ -499,77 +748,166 @@
             <h2 id="generation-heading">完整标书生成进度</h2>
             <p>{{ generationHeadline }}</p>
           </div>
-          <button
-            v-if="planningStatus === 'confirmed'"
-            class="btn btn-primary"
-            type="button"
-            :disabled="running || generationBusy"
-            @click="runDocument"
-          >
-            {{ generationBusy ? '正在生成，不要重复提交' : (generation.status === 'failed' ? '重新生成' : '生成完整标书') }}
-          </button>
         </div>
 
-        <div class="generation-progress-card">
-          <div>
-            <strong>{{ generationPercent }}%</strong>
-            <span>{{ completedGenerationStages }}/{{ generationStages.length || 16 }} 个阶段完成</span>
-          </div>
-          <progress :value="generationPercent" max="100">{{ generationPercent }}%</progress>
-          <p v-if="generation.current_stage_id">
-            当前阶段：{{ currentGenerationStage?.label || generation.current_stage_id }}
-          </p>
-          <p v-else-if="generation.status === 'failed'" class="generation-error">
-            {{ generationErrorMessage }}
-          </p>
-        </div>
+        <section class="writer-workspace" aria-label="标书实时写作工作区">
+          <aside class="writer-outline-pane">
+            <header>
+              <p class="section-kicker">目录章节</p>
+              <h3>标书目录</h3>
+              <small>点击目录定位中间 Word 正文</small>
+            </header>
+            <nav v-if="visibleWriterOutline.length" class="writer-word-toc" aria-label="标书目录导航">
+              <button
+                v-for="(chapter, chapterIndex) in visibleWriterOutline"
+                :key="chapter.chapter_id"
+                class="writer-toc-item"
+                :class="{ active: selectedWriterChapterId === chapter.chapter_id }"
+                :aria-current="selectedWriterChapterId === chapter.chapter_id ? 'location' : undefined"
+                :style="{ paddingLeft: `${4 + Math.max(0, (chapter.level || 1) - 1) * 14}px` }"
+                type="button"
+                @click="selectWriterChapter(chapter)"
+              >
+                <span
+                  v-if="chapter.children?.length"
+                  class="writer-toc-toggle"
+                  role="button"
+                  :aria-label="expandedWriterChapterIds.has(chapter.chapter_id) ? '折叠子目录' : '展开子目录'"
+                  @click.stop="toggleWriterChapter(chapter.chapter_id)"
+                >{{ expandedWriterChapterIds.has(chapter.chapter_id) ? '▾' : '▸' }}</span>
+                <span v-else class="writer-toc-spacer" aria-hidden="true"></span>
+                <span>{{ chapter.number || `${chapterIndex + 1}.` }}</span>
+                <strong>{{ chapter.title }}</strong>
+              </button>
+            </nav>
+            <p v-else class="generation-empty">确认目录并启动生成后，章节会在这里按写作进度出现。</p>
+          </aside>
 
-        <ol class="generation-stage-grid" aria-label="完整标书生成阶段">
-          <li
-            v-for="(stage, index) in generationStages"
-            :key="stage.stage_id"
-            :class="`generation-stage-${stage.status}`"
-          >
-            <button
-              class="generation-stage-button"
-              :class="{ 'has-warning': stage.warning_count > 0 }"
-              type="button"
-              @click="openStageDrawer(stage)"
-            >
-              <span>{{ stage.warning_count > 0 ? '!' : (['succeeded', 'reused'].includes(stage.status) ? '✓' : index + 1) }}</span>
+          <main class="writer-document-pane">
+            <header>
               <div>
-                <strong>{{ stage.label }}</strong>
-                <small>{{ stage.warning_count > 0 ? '已带警告继续' : pipelineStageStatus(stage) }}</small>
-                <small v-if="generationStageSummary(stage)" class="generation-stage-summary">
-                  {{ generationStageSummary(stage) }}
-                </small>
-                <em v-if="stage.error?.message">{{ pipelineStageError(stage) }}</em>
+                <p class="section-kicker">实时 Word 草稿</p>
+                <h3 :id="`writer-document-${selectedWriterChapterId}`">{{ selectedWriterChapter?.title || writerUnit?.current_chapter_title || writerUnit?.title || '等待开始写作' }}</h3>
               </div>
-            </button>
-          </li>
-        </ol>
+              <div class="writer-chapter-actions">
+                <span class="writer-live-status">{{ writerPhaseText }}</span>
+                <button
+                  class="btn btn-primary"
+                  type="button"
+                  :disabled="running || generationBusy || !selectedWriterChapterId"
+                  @click="runSelectedChapter"
+                >
+                  {{ runningAction === 'selected-chapter' ? '正在生成本章…' : '只生成本章' }}
+                </button>
+              </div>
+            </header>
+            <p v-if="writerUnit?.status === 'running'" class="writer-preview-notice">
+              此处是已落盘的实时草稿检查点；正在生成的句子会在本章一次写作返回后显示，尚未通过全文质量门。
+            </p>
+            <article v-if="writerPreviewText" class="writer-word-canvas" aria-live="polite">
+              <p v-for="(paragraph, index) in writerPreviewParagraphs" :key="index">{{ paragraph }}</p>
+            </article>
+            <p v-else class="writer-preview-empty">
+              {{ writerUnit?.status === 'running' ? 'Agent 正在生成本章内容，等待首个草稿检查点…' : '选择已完成章节，或开始生成后查看实时草稿。' }}
+            </p>
+          </main>
 
-        <div class="generation-columns">
+          <aside class="writer-agent-pane">
+            <header>
+              <div>
+                <p class="section-kicker">Agent 协作</p>
+                <h3>材料与写入建议</h3>
+              </div>
+            </header>
+            <p class="agent-disclosure">显示当前章节任务和材料写入建议；证据缺口只接受人工提供的真实资料。</p>
+            <div class="agent-trace-feed">
+              <article v-if="writerUnit?.current_chapter_title" class="agent-trace-item">
+                <strong>当前任务</strong>
+                <p>{{ writingPhaseLabel(writerUnit.progress_phase) }}：{{ writerUnit.current_chapter_title }}</p>
+              </article>
+              <article v-for="call in writerResearchCalls" :key="call.decision_id" class="agent-trace-item">
+                <strong>{{ call.needs_research ? '联网检索判断' : '无需联网' }}</strong>
+                <p>{{ call.reason }}</p>
+                <small v-for="query in call.queries || []" :key="query.query_id">搜索：{{ query.question }}（{{ researchStatusLabel(query.status) }}）</small>
+                <small v-if="Object.values(call.used_evidence_by_chapter || {}).flat().length">已用于正文：{{ Object.values(call.used_evidence_by_chapter).flat().join('、') }}</small>
+              </article>
+              <p v-if="!writerUnit?.current_chapter_title && !writerResearchCalls.length" class="generation-empty">选择左侧章节后，可只生成该章；缺少的事实材料由人工补充。</p>
+            </div>
+            <div class="writer-chat-history" aria-live="polite">
+              <article v-for="turn in writerChatTurns" :key="turn.id" :class="`writer-chat-${turn.role}`">
+                <strong>{{ turn.role === 'user' ? '你的补充' : 'Agent 写入分析' }}</strong>
+                <p>{{ turn.content }}</p>
+              </article>
+            </div>
+            <label class="visually-hidden" for="writer-reference">补充写作资料</label>
+            <textarea id="writer-reference" v-model="question" rows="3" placeholder="补充公司能力、项目情况或写作要求；Agent 会结合当前章节说明如何写入。" />
+            <button class="btn btn-primary chat-button" type="button" :disabled="asking || !question.trim()" @click="ask">
+              {{ asking ? '正在分析…' : '作为本章参考发送' }}
+            </button>
+          </aside>
+        </section>
+
+        <details class="generation-details">
+          <summary>查看生成明细（章节与材料记录）</summary>
+          <div class="generation-columns">
           <section class="generation-section">
             <header>
               <div>
-                <p class="section-kicker">DeepSeek 研究</p>
-                <h3>公开资料检索</h3>
+                <p class="section-kicker">章节写作中的 Agent 判断与调用记录</p>
+                <h3>章节写作外部资料检索记录</h3>
               </div>
               <span>
                 来源 {{ generationResearch.source_count || 0 }} ·
-                成功问题 {{ generationResearch.published_count || 0 }} ·
-                无结果 {{ generationResearch.gap_count || 0 }} ·
-                失败 {{ generationResearch.failed_count || 0 }}
+                已发布 {{ generationResearch.published_count || 0 }} ·
+                等待处理 {{ generationResearch.blocked_count || 0 }}
               </span>
             </header>
-            <ul v-if="generationResearch.questions?.length" class="generation-research-list">
-              <li v-for="questionItem in generationResearch.questions" :key="questionItem.need_id">
-                <strong>{{ questionItem.question }}</strong>
-                <small>{{ researchStatusLabel(questionItem.status) }}</small>
+            <ul v-if="generationResearch.calls?.length" class="generation-research-list">
+              <li v-for="call in generationResearch.calls" :key="call.decision_id">
+                <strong>
+                  {{ call.applicable_chapter_titles?.join('、') || call.unit_id }} ·
+                  {{ call.needs_research ? 'Agent 决定调用' : 'Agent 决定不调用' }}
+                </strong>
+                <small>{{ call.reason }}</small>
+                <small>{{ researchStatusLabel(call.decision_status) }}</small>
+                <small v-if="call.runtime?.python_executable">
+                  运行时：{{ call.runtime.python_executable }} ·
+                  Playwright {{ call.runtime.playwright_installed ? '已安装' : '缺失' }} ·
+                  Chromium {{ call.runtime.chromium_installed ? '可用' : '不可用' }}
+                </small>
+                <ol v-if="call.queries?.length">
+                  <li v-for="query in call.queries" :key="query.query_id">
+                    <small>查询：{{ query.question }}</small>
+                    <small>
+                      {{ researchStatusLabel(query.status) }}
+                      <template v-if="query.batch_id"> · 证据批次 {{ query.batch_id }}</template>
+                    </small>
+                    <small
+                      v-for="attempt in query.attempts"
+                      :key="`${query.query_id}-${attempt.attempt}`"
+                    >
+                      第 {{ attempt.attempt }} 次 · {{ researchStatusLabel(attempt.status) }} ·
+                      {{ attempt.duration_ms || 0 }} ms
+                      <template v-if="attempt.error"> · {{ attempt.error }}</template>
+                    </small>
+                    <a
+                      v-for="source in query.sources"
+                      :key="source.evidence_id || source.source_url"
+                      :href="source.source_url"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      {{ source.title || source.publisher || source.source_url }}
+                    </a>
+                  </li>
+                </ol>
+                <small v-if="Object.keys(call.used_evidence_by_chapter || {}).length">
+                  正文已使用证据：
+                  {{ Object.values(call.used_evidence_by_chapter).flat().join('、') || '无' }}
+                </small>
               </li>
             </ul>
-            <p v-else class="generation-empty">进入研究阶段后，这里会显示当前检索问题和结果。</p>
+            <p v-else class="generation-empty">章节写作开始后，这里会显示 Agent 判断、查询、来源校验和正文使用情况。</p>
           </section>
 
           <section class="generation-section content-progress-section">
@@ -578,10 +916,11 @@
                 <p class="section-kicker">章节写作</p>
                 <h3>正文单元</h3>
               </div>
-              <span>
-                {{ generationContent.completed_units || 0 }}/{{ generationContent.total_units || 0 }} 完成
-              </span>
+              <span>{{ generationContent.completed_units || 0 }}/{{ generationContent.total_units || 0 }} 完成</span>
             </header>
+            <p v-if="generationContent.stale_units" class="generation-error">
+              {{ generationContent.stale_units }} 个旧正文已过期，必须重新生成后才能预览、整合或下载。
+            </p>
             <progress
               :value="generationContent.completed_units || 0"
               :max="generationContent.total_units || 1"
@@ -593,24 +932,21 @@
                 class="content-unit-card"
                 :class="[`content-unit-${unit.status}`, { selected: selectedContentUnitId === unit.unit_id }]"
                 type="button"
-                :disabled="unit.status !== 'completed'"
+                :disabled="unit.status !== 'completed' || unit.stale"
                 @click="openContentUnit(unit)"
               >
                 <span class="content-unit-status">{{ contentUnitStatusLabel(unit.status) }}</span>
                 <strong>{{ unit.title }}</strong>
-                <small>
-                  {{ unit.character_count || 0 }} 字 · {{ unit.block_count || 0 }} 块
-                  <template v-if="unit.updated_at"> · {{ formatTimestamp(unit.updated_at) }}</template>
-                </small>
+                <small>{{ unit.character_count || 0 }} 字 · {{ unit.block_count || 0 }} 块</small>
                 <p v-if="unit.preview">{{ unit.preview }}</p>
-                <em v-if="unit.error">{{ unit.error }}</em>
+                <em v-if="unit.stale_reason">{{ unit.stale_reason }}</em>
+                <em v-else-if="unit.error">{{ unit.error }}</em>
               </button>
             </div>
-            <p v-else class="generation-empty">写作计划完成后，这里会逐章显示状态和正文预览。</p>
           </section>
-        </div>
+          </div>
 
-        <section v-if="selectedContentUnitId" class="content-unit-detail">
+          <section v-if="selectedContentUnitId" class="content-unit-detail">
           <header>
             <div>
               <p class="section-kicker">章节全文</p>
@@ -626,7 +962,7 @@
               </div>
             </article>
             <aside v-if="contentUnitDetail.sources?.length" class="content-unit-sources">
-              <h4>引用来源</h4>
+              <h4>正文实际使用的公开来源</h4>
               <ul>
                 <li v-for="source in contentUnitDetail.sources" :key="source.evidence_id || source.source_url">
                   <a :href="source.source_url" target="_blank" rel="noopener noreferrer">
@@ -636,20 +972,25 @@
               </ul>
             </aside>
           </template>
-        </section>
+          </section>
+        </details>
 
         <section class="document-preview-panel" aria-labelledby="document-preview-heading">
           <header class="document-preview-header">
             <div>
               <p class="section-kicker">完整标书</p>
-              <h3 id="document-preview-heading">Word 式全文预览</h3>
-              <p>左侧选择目录，右侧查看最终 Markdown 与 Word 对应的完整正文。</p>
+              <h3 id="document-preview-heading">完整标书预览</h3>
+              <p>在同一阅读区切换 Markdown 或 Word 排版，目录用于快速定位章节。</p>
             </div>
             <div class="document-preview-actions">
+              <div class="preview-mode-switch" role="group" aria-label="预览格式">
+                <button type="button" :class="{ active: previewMode === 'markdown' }" @click="previewMode = 'markdown'">Markdown</button>
+                <button type="button" :class="{ active: previewMode === 'word' }" @click="previewMode = 'word'">Word 预览</button>
+              </div>
               <button class="btn" type="button" :disabled="documentPreviewLoading" @click="loadDocumentPreview(true)">
                 {{ documentPreviewLoading ? '读取中…' : '刷新预览' }}
               </button>
-              <button class="btn btn-primary" type="button" :disabled="!documentPreview" @click="download">
+              <button class="btn btn-primary" type="button" :disabled="!deliveryReady || !documentPreview" @click="download">
                 下载 Word
               </button>
             </div>
@@ -686,7 +1027,8 @@
                 </small>
               </button>
             </nav>
-            <article class="word-preview-canvas" aria-label="标书正文">
+            <pre v-if="previewMode === 'markdown'" class="markdown-preview-canvas" aria-label="Markdown 标书正文">{{ documentPreviewMarkdown }}</pre>
+            <article v-else class="word-preview-canvas" aria-label="Word 式标书正文">
               <template v-for="block in documentPreview.blocks" :key="block.id">
                 <component
                   :is="`h${Math.min(block.level || 1, 6)}`"
@@ -921,7 +1263,7 @@
             v-if="!hasOutline && hasTender"
             class="btn btn-primary"
             type="button"
-            :disabled="running || pipelineBusy || uploading"
+            :disabled="outlineActionDisabled"
             @click="prepareOutline"
           >
             <span v-if="outlineBusy" class="spinner" aria-hidden="true" />
@@ -985,7 +1327,7 @@
             <button
               class="btn btn-primary"
               type="button"
-              :disabled="running || pipelineBusy || uploading || !hasTender"
+              :disabled="outlineActionDisabled"
               @click="prepareOutline"
             >
               重新解析生成目录
@@ -1401,6 +1743,7 @@ const errorDetails = ref([])
 const message = ref('')
 const reply = ref('')
 const question = ref('')
+const writerChatTurns = ref([])
 const selectedScoreId = ref('')
 const selectedPipelineProductKind = ref('')
 const expandedChapterIds = ref(new Set())
@@ -1411,20 +1754,54 @@ const activeTab = ref('upload')
 const activeStageDrawerId = ref('')
 const selectedContentUnitId = ref('')
 const selectedContentUnitTitle = ref('')
+const selectedWriterChapterId = ref('')
+const expandedWriterChapterIds = ref(new Set())
 const contentUnitDetail = ref(null)
 const contentUnitLoading = ref(false)
 const stageDetail = ref(null)
 const stageDetailLoading = ref(false)
+const stageDetailError = ref('')
 const documentPreview = ref(null)
 const documentPreviewLoading = ref(false)
 const documentPreviewError = ref('')
 const selectedPreviewSectionId = ref('')
+const previewMode = ref('word')
 const loadedPreviewOperationId = ref('')
 let timer = null
+let stageDetailRequestToken = 0
 
 const selectedDrawerStage = computed(() => (
   topPipelineStages.value.find(s => s.stage_id === activeStageDrawerId.value) || null
 ))
+
+async function loadStageDetail(stageId, { showLoading = false } = {}) {
+  const normalized = String(stageId || '')
+  if (!normalized) return
+  const requestToken = ++stageDetailRequestToken
+  if (showLoading) stageDetailLoading.value = true
+  stageDetailError.value = ''
+  try {
+    const { data } = await fetchV3GenerationStage(props.runId, normalized)
+    if (
+      requestToken === stageDetailRequestToken
+      && activeStageDrawerId.value === normalized
+    ) {
+      stageDetail.value = data?.stage || null
+    }
+  } catch (cause) {
+    if (
+      requestToken === stageDetailRequestToken
+      && activeStageDrawerId.value === normalized
+      && (showLoading || !stageDetail.value)
+    ) {
+      stageDetailError.value = formatV3ApiError(cause, '节点详情读取失败。')
+    }
+  } finally {
+    if (requestToken === stageDetailRequestToken) {
+      stageDetailLoading.value = false
+    }
+  }
+}
 
 async function openStageDrawer(stage) {
   if (activeStageDrawerId.value === stage.stage_id) {
@@ -1432,15 +1809,7 @@ async function openStageDrawer(stage) {
   } else {
     activeStageDrawerId.value = stage.stage_id
     stageDetail.value = null
-    stageDetailLoading.value = true
-    try {
-      const { data } = await fetchV3GenerationStage(props.runId, stage.stage_id)
-      stageDetail.value = data?.stage || null
-    } catch (cause) {
-      reportError(cause, '步骤详情读取失败。')
-    } finally {
-      stageDetailLoading.value = false
-    }
+    await loadStageDetail(stage.stage_id, { showLoading: true })
   }
 }
 
@@ -1456,9 +1825,30 @@ async function openWarningStage(warning) {
 }
 
 function closeStageDrawer() {
+  stageDetailRequestToken += 1
   activeStageDrawerId.value = ''
   stageDetail.value = null
   stageDetailLoading.value = false
+  stageDetailError.value = ''
+}
+
+function handleWorkspaceKeydown(event) {
+  if (event.key === 'Escape' && activeStageDrawerId.value) {
+    closeStageDrawer()
+  }
+}
+
+function markdownTable(rows) {
+  if (!rows.length) return ''
+  const escapeCell = value => String(value ?? '').replace(/\|/g, '\\|').replace(/\n/g, '<br>')
+  const [header, ...body] = rows
+  const width = Math.max(header?.length || 0, ...body.map(row => row.length))
+  const normalize = row => Array.from({ length: width }, (_, index) => escapeCell(row?.[index]))
+  return [
+    `| ${normalize(header).join(' | ')} |`,
+    `| ${Array.from({ length: width }, () => '---').join(' | ')} |`,
+    ...body.map(row => `| ${normalize(row).join(' | ')} |`),
+  ].join('\n')
 }
 
 const uploading = computed(() => Boolean(uploadingRole.value))
@@ -1473,9 +1863,44 @@ const companyInputs = computed(() => activeInputs.value.filter(item => item.role
 const hasTender = computed(() => tenderInputs.value.length > 0)
 const document = computed(() => snapshot.value.document || {})
 const generation = computed(() => snapshot.value.generation || {})
+const documentPreviewMarkdown = computed(() => (documentPreview.value?.blocks || [])
+  .map((block) => {
+    if (block.type === 'heading') return `${'#'.repeat(Math.min(Math.max(block.level || 1, 1), 6))} ${block.text || ''}`
+    if (block.type === 'paragraph') return block.text || ''
+    if (block.type === 'list') return (block.items || []).map(item => `- ${item}`).join('\n')
+    if (block.type === 'table') return markdownTable(block.rows || [])
+    return ''
+  })
+  .filter(Boolean)
+  .join('\n\n'))
 const generationStages = computed(() => generation.value.stages || [])
 const generationContent = computed(() => generation.value.content || {})
 const generationResearch = computed(() => generation.value.research || {})
+const writerUnit = computed(() => {
+  const units = generationContent.value.units || []
+  return units.find(unit => unit.unit_id === selectedContentUnitId.value)
+    || units.find(unit => unit.status === 'running')
+    || units[0]
+    || null
+})
+const selectedWriterChapter = computed(() => flatOutline.value.find(
+  chapter => chapter.chapter_id === selectedWriterChapterId.value,
+) || null)
+const writerPreviewText = computed(() => {
+  if (contentUnitDetail.value && selectedContentUnitId.value === writerUnit.value?.unit_id) {
+    return (contentUnitDetail.value.blocks || []).map(block => block.content || '').filter(Boolean).join('\n\n')
+  }
+  return String(writerUnit.value?.draft_preview || writerUnit.value?.preview || '')
+})
+const writerPreviewParagraphs = computed(() => writerPreviewText.value.split(/\n{2,}/).filter(Boolean))
+const writerPhaseText = computed(() => writerUnit.value?.status === 'running'
+  ? writingPhaseLabel(writerUnit.value.progress_phase)
+  : contentUnitStatusLabel(writerUnit.value?.status || 'queued'))
+const writerResearchCalls = computed(() => {
+  const unitId = writerUnit.value?.unit_id
+  const calls = generationResearch.value.calls || []
+  return unitId ? calls.filter(call => call.unit_id === unitId) : calls.slice(0, 2)
+})
 const generationBusy = computed(() => (
   (running.value && runningAction.value === 'document')
   || ['queued', 'running', 'processing'].includes(String(generation.value.status || ''))
@@ -1506,23 +1931,29 @@ const generationHeadline = computed(() => {
       ? `正在执行“${currentGenerationStage.value.label}”，页面每 2 秒自动更新。`
       : '任务已启动，正在等待后端阶段状态。'
   }
+  if (generationContent.value.stale_units) {
+    return '旧正文与当前写作器、模型或研究策略不一致，必须重新生成。'
+  }
   if (generation.value.status === 'succeeded') return '全部阶段已完成，可查看章节正文并下载 Word。'
+  if (generation.value.status === 'blocked') return `已暂停，等待处理：${generationErrorMessage.value}`
   if (generation.value.status === 'failed') return `生成已停止：${generationErrorMessage.value}`
-  return '确认目录后开始生成；研究、写作、审核和 Word 渲染进度会显示在这里。'
+  return '确认目录后可生成整本标书，也可在左侧选择目录后只生成该章。'
 })
 const generationTabLabel = computed(() => {
   if (generationBusy.value) return currentGenerationStage.value?.label || '任务已启动'
+  if (generationContent.value.stale_units) return '旧正文已过期，需重新生成'
   if (generation.value.status === 'succeeded') return '完整标书已生成'
+  if (generation.value.status === 'blocked') return '等待处理后重新生成'
   if (generation.value.status === 'failed') return '生成失败，可重新生成'
   return '实时进度与章节预览'
 })
 const evidenceNeeds = computed(() => snapshot.value.evidence_needs || [])
-const autoResearch = computed(() => snapshot.value.auto_research || {})
 const planning = computed(() => snapshot.value.planning || {})
 const planningStatus = computed(() => planning.value.status || 'not_ready')
 const deliveryStatus = computed(() => document.value.delivery?.status || 'new')
 const deliveryReady = computed(() => (
   ['ready', 'ready_with_warnings'].includes(deliveryStatus.value)
+  && Number(generationContent.value.stale_units || 0) === 0
 ))
 const planningView = computed(() => projectV3Planning(snapshot.value))
 const hasScorePoints = computed(() => planningView.value.summary.score_point_count > 0)
@@ -1539,7 +1970,7 @@ watch(
   (operationId) => {
     if (
       operationId
-      && ['queued', 'running', 'processing', 'failed'].includes(generation.value.status)
+      && ['queued', 'running', 'processing', 'blocked', 'failed'].includes(generation.value.status)
     ) {
       activeTab.value = 'generation'
     }
@@ -1547,10 +1978,20 @@ watch(
   { immediate: true },
 )
 watch(
-  () => [deliveryStatus.value, generation.value.operation_id],
+  () => [
+    deliveryStatus.value,
+    generation.value.operation_id,
+    generationContent.value.stale_units,
+  ],
   ([status]) => {
-    if (['ready', 'ready_with_warnings'].includes(status)) {
+    if (
+      ['ready', 'ready_with_warnings'].includes(status)
+      && Number(generationContent.value.stale_units || 0) === 0
+    ) {
       loadDocumentPreview()
+    } else if (Number(generationContent.value.stale_units || 0) > 0) {
+      documentPreview.value = null
+      documentPreviewError.value = '旧正文已过期，请重新生成后再预览或下载。'
     }
   },
   { immediate: true },
@@ -1558,10 +1999,62 @@ watch(
 const sourceIndex = computed(() => snapshot.value.analysis?.source_index || {})
 const analysisPipeline = computed(() => snapshot.value.analysis?.pipeline || {})
 const pipelineStages = computed(() => analysisPipeline.value.stages || [])
+const latestWorkspaceOperation = computed(() => (
+  snapshot.value.analysis?.latest_operation || {}
+))
+const latestOperationKind = computed(() => String(
+  latestWorkspaceOperation.value.kind || '',
+))
+const latestOperationStatus = computed(() => String(
+  latestWorkspaceOperation.value.status || '',
+))
+const latestOutlineOperationBusy = computed(() => (
+  latestOperationKind.value === 'document.prepare_outline'
+  && ['queued', 'running', 'processing'].includes(latestOperationStatus.value)
+))
+const showGenerationPipeline = computed(() => (
+  (running.value && runningAction.value === 'document')
+  || latestOperationKind.value === 'document.run_pipeline'
+  || (!latestOperationKind.value && Boolean(generation.value.operation_id))
+))
+const generationStageIds = new Set([
+  'sync_material_requirements',
+  'compile_document_contract',
+  'plan_document',
+  'execute_content_plan',
+  'integrate_document',
+  'verify_document',
+  'render_document',
+  'verify_delivery',
+])
+const generationPrerequisiteStages = computed(() => (
+  generationStages.value.filter(stage => !generationStageIds.has(stage.stage_id))
+))
+const generationExecutionStages = computed(() => (
+  generationStages.value.filter(stage => generationStageIds.has(stage.stage_id))
+))
+const generationPrerequisiteCompleted = computed(() => (
+  generationPrerequisiteStages.value.filter(
+    stage => ['succeeded', 'reused'].includes(stage.status),
+  ).length
+))
+const generationPrerequisiteReused = computed(() => (
+  generationPrerequisiteStages.value.filter(stage => stage.status === 'reused').length
+))
 const topPipelineStages = computed(() => (
-  generation.value.operation_id || (running.value && runningAction.value === 'document')
-    ? generationStages.value
+  showGenerationPipeline.value
+    ? generationExecutionStages.value
     : pipelineStages.value
+))
+const topPipelineTitle = computed(() => (
+  showGenerationPipeline.value
+    ? '阶段 3 · 完整标书生成'
+    : '阶段 2 · 解析评分并生成目录'
+))
+const topPipelineDescription = computed(() => (
+  showGenerationPipeline.value
+    ? '使用已经确认的评分目录，执行材料同步、逐章写作、全文整合、质量审核和 Word 交付。'
+    : '只解析招标要求、评分点并生成章节目录；本阶段不会写正文。'
 ))
 const pipelineProducts = computed(() => analysisPipeline.value.products || [])
 const activePipelineProduct = computed(() => (
@@ -1586,11 +2079,17 @@ const pipelineStatus = computed(() => {
   if (pipelineStages.value.some(stage => stage.status === 'blocked_human')) return 'blocked_human'
   return status
 })
-const pipelineBusy = computed(() => (
-  ['queued', 'running', 'processing'].includes(pipelineStatus.value)
-))
 const outlineBusy = computed(() => (
-  (running.value && runningAction.value === 'outline') || pipelineBusy.value
+  (running.value && runningAction.value === 'outline')
+  || latestOutlineOperationBusy.value
+))
+const pipelineBusy = computed(() => outlineBusy.value)
+const outlineActionDisabled = computed(() => (
+  running.value
+  || outlineBusy.value
+  || generationBusy.value
+  || uploading.value
+  || !hasTender.value
 ))
 const activePipelineStage = computed(() => (
   pipelineStages.value.find(stage => ['running', 'queued'].includes(stage.status))
@@ -1612,7 +2111,7 @@ const pipelineStatusLabel = computed(() => ({
   completed: '已完成',
 }[pipelineStatus.value] || pipelineStatus.value))
 const topPipelineStatus = computed(() => (
-  generation.value.operation_id || (running.value && runningAction.value === 'document')
+  showGenerationPipeline.value
     ? (generationBusy.value ? 'running' : String(generation.value.status || 'not_started'))
     : pipelineStatus.value
 ))
@@ -1663,6 +2162,19 @@ const flatOutline = computed(() => {
   append(planningView.value.outline)
   return result
 })
+const visibleWriterOutline = computed(() => {
+  const result = []
+  const append = chapters => {
+    for (const chapter of chapters || []) {
+      result.push(chapter)
+      if (chapter.children?.length && expandedWriterChapterIds.value.has(chapter.chapter_id)) {
+        append(chapter.children)
+      }
+    }
+  }
+  append(planningView.value.outline)
+  return result
+})
 const visibleOutline = computed(() => {
   const result = []
   const appendVisible = chapters => {
@@ -1690,6 +2202,17 @@ watch(
   () => planningView.value.outline.map(chapter => chapter.chapter_id).join('|'),
   () => {
     expandedChapterIds.value = new Set(
+      planningView.value.outline
+        .filter(chapter => chapter.children?.length)
+        .map(chapter => chapter.chapter_id),
+    )
+  },
+  { immediate: true },
+)
+watch(
+  () => planningView.value.outline.map(chapter => chapter.chapter_id).join('|'),
+  () => {
+    expandedWriterChapterIds.value = new Set(
       planningView.value.outline
         .filter(chapter => chapter.children?.length)
         .map(chapter => chapter.chapter_id),
@@ -1785,6 +2308,9 @@ async function refresh(resetError = false) {
   try {
     const { data } = await fetchV3WorkspaceSnapshot(props.runId)
     snapshot.value = normalizeV3WorkspaceSnapshot(data)
+    if (activeStageDrawerId.value && !stageDetailLoading.value) {
+      void loadStageDetail(activeStageDrawerId.value)
+    }
     if (resetError) {
       clearError()
     } else if (!error.value) {
@@ -1886,17 +2412,39 @@ async function confirmPlanning() {
   }
 }
 
-async function runDocument() {
+async function runDocument(chapterIds = []) {
+  const normalizedChapterIds = Array.isArray(chapterIds) ? chapterIds.filter(Boolean) : []
   running.value = true
-  runningAction.value = 'document'
+  runningAction.value = normalizedChapterIds.length ? 'selected-chapter' : 'document'
   activeTab.value = 'generation'
   clearError()
-  message.value = '完整标书生成任务已启动，正在等待后端阶段状态。'
+  // A regenerate is a new attempt. Do not leave the previous attempt's
+  // research failures, chapter body, or Word preview visible while it starts.
+  closeStageDrawer()
   closeContentUnit()
+  documentPreview.value = null
+  documentPreviewError.value = ''
+  loadedPreviewOperationId.value = ''
+  selectedPreviewSectionId.value = ''
+  writerChatTurns.value = []
+  snapshot.value = {
+    ...snapshot.value,
+    generation: {
+      ...generation.value,
+      status: 'queued',
+      current_stage_id: '',
+      stages: [],
+      research: { calls: [] },
+      content: { total_units: 0, completed_units: 0, units: [] },
+    },
+  }
+  message.value = normalizedChapterIds.length
+    ? `章节“${selectedWriterChapter.value?.title || normalizedChapterIds[0]}”已开始单独生成。`
+    : '完整标书生成任务已启动，正在等待后端阶段状态。'
   try {
-    const { data } = await runV3Pipeline(props.runId)
-    assertCommandAccepted(data, '完整标书生成失败。')
-    message.value = data.message || data.receipt?.message || '完整标书已生成。'
+    const { data } = await runV3Pipeline(props.runId, normalizedChapterIds)
+    assertCommandAccepted(data, normalizedChapterIds.length ? '本章生成失败。' : '完整标书生成失败。')
+    message.value = data.message || data.receipt?.message || (normalizedChapterIds.length ? '本章已生成。' : '完整标书已生成。')
     await refresh()
   } catch (cause) {
     let refreshError = null
@@ -1922,8 +2470,16 @@ async function runDocument() {
   }
 }
 
+async function runSelectedChapter() {
+  if (!selectedWriterChapterId.value) {
+    error.value = '请先在左侧目录选择要生成的章节。'
+    return
+  }
+  await runDocument([selectedWriterChapterId.value])
+}
+
 async function openContentUnit(unit) {
-  if (!unit?.unit_id || unit.status !== 'completed') return
+  if (!unit?.unit_id || unit.status !== 'completed' || unit.stale) return
   selectedContentUnitId.value = unit.unit_id
   selectedContentUnitTitle.value = unit.title || unit.unit_id
   contentUnitDetail.value = null
@@ -1938,6 +2494,38 @@ async function openContentUnit(unit) {
   }
 }
 
+async function selectWriterUnit(unit) {
+  if (!unit?.unit_id) return
+  selectedContentUnitId.value = unit.unit_id
+  selectedContentUnitTitle.value = unit.title || unit.unit_id
+  if (unit.status === 'completed' && !unit.stale) {
+    await openContentUnit(unit)
+  } else {
+    contentUnitDetail.value = null
+  }
+}
+
+async function selectWriterChapter(chapter) {
+  selectedWriterChapterId.value = chapter?.chapter_id || ''
+  const unit = (generationContent.value.units || []).find(item => (
+    (item.node_ids || []).includes(chapter?.chapter_id)
+    || item.current_chapter_id === chapter?.chapter_id
+  ))
+  if (unit) await selectWriterUnit(unit)
+  await nextTick()
+  globalThis.document?.getElementById(`writer-document-${selectedWriterChapterId.value}`)?.scrollIntoView({
+    behavior: globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ? 'auto' : 'smooth',
+    block: 'start',
+  })
+}
+
+function toggleWriterChapter(chapterId) {
+  const next = new Set(expandedWriterChapterIds.value)
+  if (next.has(chapterId)) next.delete(chapterId)
+  else next.add(chapterId)
+  expandedWriterChapterIds.value = next
+}
+
 function closeContentUnit() {
   selectedContentUnitId.value = ''
   selectedContentUnitTitle.value = ''
@@ -1946,6 +2534,11 @@ function closeContentUnit() {
 }
 
 async function loadDocumentPreview(force = false) {
+  if (Number(generationContent.value.stale_units || 0) > 0) {
+    documentPreview.value = null
+    documentPreviewError.value = '旧正文已过期，请重新生成后再预览或下载。'
+    return
+  }
   if (
     documentPreviewLoading.value
     || (!force && loadedPreviewOperationId.value === generation.value.operation_id)
@@ -1993,6 +2586,11 @@ function stageDetailLabel(key) {
     failed_count: '失败问题',
     max_retries: '最大重试',
     blocking_policy: '失败策略',
+    research_call_count: '联网判断',
+    search_query_count: '搜索查询',
+    research_source_count: '取得来源',
+    used_evidence_count: '正文采用证据',
+    research_published_count: '已完成检索',
     total_units: '正文单元',
     completed_units: '已完成',
     running_units: '执行中',
@@ -2043,9 +2641,13 @@ async function research(need) {
 async function ask() {
   asking.value = true
   clearError()
+  const reference = question.value.trim()
+  const chapter = writerUnit.value?.current_chapter_title || writerUnit.value?.title || '未选择章节'
   try {
-    const { data } = await chatV3(props.runId, question.value)
+    writerChatTurns.value.push({ id: `user-${Date.now()}`, role: 'user', content: `参考章节「${chapter}」：${reference}` })
+    const { data } = await chatV3(props.runId, `当前参考章节：${chapter}\n用户补充资料：${reference}\n请先判断这条资料是否可直接写入标书；再说明应写入本章的哪个位置、如何表述、还缺哪些佐证。不要展示隐藏推理过程。`)
     reply.value = data.reply || ''
+    writerChatTurns.value.push({ id: `assistant-${Date.now()}`, role: 'assistant', content: reply.value || '暂未得到写入建议。' })
     question.value = ''
   } catch (cause) {
     reportError(cause, '对话处理失败。')
@@ -2102,6 +2704,26 @@ function pipelineStageStatus(stage) {
   return stage.attempt > 1 ? `${status} · 第 ${stage.attempt} 次尝试` : status
 }
 
+function pipelineStageOperation(stage) {
+  return {
+    ingest_inputs: '操作：检查已上传文件',
+    normalize_sources: '操作：解析正文、标题和表格',
+    compile_template_structure: '操作：识别模板目录与可写位置',
+    build_requirement_ledger: '操作：提取采购要求和约束',
+    analyze_scores: '操作：解析评分点与满分条件',
+    compile_chapter_blueprint: '操作：生成评分驱动章节目录',
+    confirm_planning: '用户操作：审阅并确认目录',
+    sync_material_requirements: '操作：列出需人工提供的真实材料',
+    compile_document_contract: '操作：锁定已确认章节结构',
+    plan_document: '操作：生成逐章写作计划',
+    execute_content_plan: '操作：按所选章节写作；缺公开依据时自动联网检索',
+    integrate_document: '操作：合并章节并统一术语',
+    verify_document: '操作：检查覆盖、质量和一致性',
+    render_document: '操作：生成 Word 文档',
+    verify_delivery: '用户操作：预览并下载交付件',
+  }[stage.stage_id] || '操作：执行并记录该步骤产物'
+}
+
 function pipelineStageError(stage) {
   const stageError = stage?.error && typeof stage.error === 'object'
     ? stage.error
@@ -2145,19 +2767,51 @@ function contentUnitStatusLabel(status) {
     pending: '等待计划',
     queued: '等待写作',
     running: '正在写作',
+    blocked_human: '等待人工处理',
+    stale: '旧正文已过期',
     completed: '已完成，可查看全文',
     failed: '写作失败',
   }[status] || status
 }
 
+function contentUnitTraceLabel(status) {
+  return {
+    queued: '写作单元等待中',
+    running: '写作单元进行中',
+    blocked_human: '写作单元等待处理',
+    stale: '写作单元已过期',
+    completed: '写作单元已完成',
+    failed: '写作单元失败',
+  }[status] || '写作单元状态待确认'
+}
+
 function researchStatusLabel(status) {
   return {
     open: '等待检索',
-    researching: '正在自动检索',
+    planned: 'Agent 已决定调用',
+    researching: '正在调用 DeepSeek',
     satisfied: '已找到公开来源',
+    published: '已发布可核验证据',
+    skipped: 'Agent 决定不调用',
+    blocked_human: '等待用户处理',
     gap: '未找到可核验结果',
     failed: '检索失败',
   }[status] || status
+}
+
+function researchUsageLabel(status) {
+  return {
+    used: '已用于标书',
+    not_used: '未采用',
+    unknown: '采用情况待确认',
+  }[status] || '采用情况待确认'
+}
+
+function writingPhaseLabel(phase) {
+  return {
+    preparing_research: '正在检查人工材料',
+    drafting: '正在撰写',
+  }[phase] || '正在处理'
 }
 
 function formatTimestamp(value) {
@@ -2513,6 +3167,7 @@ watch(
     deepSeekAttachmentIds.value = []
     activeTab.value = 'upload'
     closeContentUnit()
+    closeStageDrawer()
     pendingUploads.tender.splice(0)
     pendingUploads.score.splice(0)
     pendingUploads.company.splice(0)
@@ -2522,11 +3177,15 @@ watch(
 
 onMounted(() => {
   refresh()
+  window.addEventListener('keydown', handleWorkspaceKeydown)
   timer = window.setInterval(() => {
     if (!uploading.value && !loading.value) refresh()
   }, 2000)
 })
-onUnmounted(() => window.clearInterval(timer))
+onUnmounted(() => {
+  window.clearInterval(timer)
+  window.removeEventListener('keydown', handleWorkspaceKeydown)
+})
 </script>
 
 <style scoped>
@@ -2689,6 +3348,31 @@ onUnmounted(() => window.clearInterval(timer))
   color: #0f172a;
 }
 
+.pipeline-context-copy {
+  max-width: 760px;
+  margin: 5px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.pipeline-prerequisite-note {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: -2px 0 14px;
+  padding: 9px 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 9px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+}
+
+.pipeline-prerequisite-note span {
+  color: #475569;
+}
+
 .stepper-right-info {
   display: flex;
   align-items: center;
@@ -2732,7 +3416,7 @@ onUnmounted(() => window.clearInterval(timer))
   cursor: pointer;
   transition: all 0.2s ease;
   width: 100%;
-  min-height: 76px;
+  min-height: 104px;
   font: inherit;
   text-align: left;
 }
@@ -2820,6 +3504,12 @@ onUnmounted(() => window.clearInterval(timer))
   color: #64748b;
 }
 
+.node-content .stage-operation {
+  margin-top: 5px;
+  color: #334155;
+  line-height: 1.4;
+}
+
 .node-req-tag {
   font-size: 10px;
   color: #6366f1;
@@ -2847,8 +3537,8 @@ onUnmounted(() => window.clearInterval(timer))
 }
 
 .stage-drawer {
-  width: 520px;
-  max-width: 90vw;
+  width: 640px;
+  max-width: 94vw;
   height: 100%;
   background: #ffffff;
   box-shadow: -4px 0 24px rgba(0, 0, 0, 0.15);
@@ -2877,8 +3567,11 @@ onUnmounted(() => window.clearInterval(timer))
 }
 
 .drawer-close-btn {
-  width: 32px;
-  height: 32px;
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  place-items: center;
   border-radius: 50%;
   border: none;
   background: #f1f5f9;
@@ -2912,6 +3605,44 @@ onUnmounted(() => window.clearInterval(timer))
   justify-content: space-between;
   font-size: 13px;
 }
+.drawer-timestamps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: -8px 0 18px;
+}
+.drawer-timestamps > div {
+  display: flex;
+  gap: 6px;
+  color: #64748b;
+  font-size: 12px;
+}
+.drawer-timestamps dt { font-weight: 700; }
+.drawer-timestamps dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+.current-writing-card {
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid #a5b4fc;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eef2ff, #f8fafc);
+}
+.current-writing-card .section-kicker { margin-bottom: 5px; }
+.current-writing-card strong {
+  display: block;
+  color: #312e81;
+  font-size: 15px;
+  line-height: 1.5;
+}
+.current-writing-card p:not(.section-kicker),
+.current-writing-card small {
+  display: block;
+  margin: 6px 0 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.current-writing-pending { border-style: dashed; }
 
 .drawer-error-alert {
   padding: 14px;
@@ -2933,6 +3664,248 @@ onUnmounted(() => window.clearInterval(timer))
 }
 .drawer-warning-alert ul { margin: 8px 0 0; padding-left: 18px; }
 .drawer-warning-alert li { display: grid; gap: 2px; margin-top: 6px; }
+.drawer-trace-panel { margin-top: 20px; }
+.drawer-trace-heading,
+.research-trace-summary,
+.research-query-card > header,
+.research-result-card > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.drawer-trace-heading h4 {
+  margin: 0;
+  color: #1e293b;
+  font-size: 16px;
+}
+.drawer-trace-heading > span {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+  font-weight: 700;
+}
+.trace-disclosure {
+  margin: 9px 0 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #6366f1;
+  border-radius: 0 8px 8px 0;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.research-trace-card {
+  margin-top: 12px;
+  overflow: hidden;
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  background: #fff;
+}
+.research-trace-summary {
+  padding: 14px 16px;
+  border-bottom: 1px solid #e2e8f0;
+  background: linear-gradient(135deg, #f8fafc, #eef2ff);
+}
+.trace-stage-label {
+  display: block;
+  margin-bottom: 3px;
+  color: #4f46e5;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.research-trace-summary h5 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 15px;
+  line-height: 1.45;
+}
+.research-trace-summary small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+.research-decision-pill {
+  flex: 0 0 auto;
+  padding: 5px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+}
+.research-decision-pill.decision-search {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+.research-decision-pill.decision-skip {
+  background: #e2e8f0;
+  color: #475569;
+}
+.research-trace-steps {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 4px 16px 14px;
+  list-style: none;
+}
+.research-trace-steps > li {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 10px;
+  padding-top: 14px;
+}
+.research-trace-steps > li:not(:last-child)::after {
+  position: absolute;
+  top: 38px;
+  bottom: -10px;
+  left: 14px;
+  width: 1px;
+  background: #cbd5e1;
+  content: "";
+}
+.trace-step-index {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid #a5b4fc;
+  border-radius: 50%;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 12px;
+  font-weight: 800;
+}
+.research-trace-steps > li > div > strong {
+  color: #1e293b;
+  font-size: 13px;
+}
+.research-trace-steps > li > div > p {
+  margin: 5px 0 0;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.research-trace-steps > li > div > small {
+  display: block;
+  margin-top: 4px;
+  color: #64748b;
+  font-size: 12px;
+}
+.research-query-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 10px;
+  background: #f8fbff;
+}
+.research-query-card > header span {
+  color: #1e40af;
+  font-size: 12px;
+  font-weight: 800;
+}
+.research-query-card > header em {
+  color: #475569;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+.research-query-card > p {
+  margin: 7px 0 0;
+  color: #1e293b;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.research-query-card > small {
+  display: block;
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 11px;
+}
+.research-result-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+.research-result-card {
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+.research-result-card.used {
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+.research-result-card a,
+.research-result-card header > strong {
+  min-width: 0;
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.research-result-card a:hover { text-decoration-thickness: 2px; }
+.research-result-card a:focus-visible {
+  border-radius: 3px;
+  outline: 3px solid rgb(59 130 246 / 28%);
+  outline-offset: 2px;
+}
+.research-result-card header > span {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+}
+.result-used { background: #dcfce7; color: #166534; }
+.result-unused { background: #f1f5f9; color: #64748b; }
+.research-result-card > small {
+  display: block;
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 11px;
+}
+.research-result-card > p {
+  margin: 7px 0 0;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.research-result-card .result-usage {
+  color: #166534;
+  font-weight: 700;
+}
+.trace-empty-result {
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: #f1f5f9;
+  color: #64748b !important;
+}
+.trace-query-error { color: #b91c1c !important; }
+.trace-evidence-usage {
+  display: grid;
+  gap: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f0fdf4;
+}
+.trace-evidence-usage b { color: #166534; }
+.trace-evidence-usage span {
+  color: #475569;
+  overflow-wrap: anywhere;
+}
+.research-query-card .research-attempt-list {
+  margin-top: 8px;
+  padding-left: 18px;
+}
 .drawer-business-detail,
 .drawer-item-list { margin-top: 20px; }
 .drawer-business-detail h4,
@@ -3061,6 +4034,13 @@ onUnmounted(() => window.clearInterval(timer))
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.tab-text .tab-action-hint {
+  margin-top: 5px;
+  color: #4338ca;
+  font-size: 11px;
+  line-height: 1.35;
 }
 
 .tab-badge {
@@ -3441,6 +4421,51 @@ onUnmounted(() => window.clearInterval(timer))
 .pipeline-state-succeeded,
 .pipeline-state-completed { background: #ecfdf5; color: #047857; }
 .generation-workbench { display: grid; gap: 18px; }
+
+.writer-workspace {
+  display: grid;
+  grid-template-columns: minmax(190px, .78fr) minmax(360px, 1.65fr) minmax(280px, 1fr);
+  min-height: 560px;
+  border: 1px solid var(--border-color, #dbe3ef);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #f7f9fc;
+}
+.writer-outline-pane, .writer-agent-pane { padding: 18px; background: #fff; }
+.writer-outline-pane { border-right: 1px solid var(--border-color, #dbe3ef); }
+.writer-agent-pane { border-left: 1px solid var(--border-color, #dbe3ef); display: flex; flex-direction: column; gap: 12px; }
+.writer-outline-pane h3, .writer-document-pane h3, .writer-agent-pane h3 { margin: 3px 0 0; font-size: 16px; }
+.writer-chapter-list { display: grid; gap: 7px; margin-top: 16px; }
+.writer-word-toc { display: grid; gap: 2px; margin-top: 16px; }
+.writer-toc-item { display: flex; width: 100%; gap: 7px; padding-top: 7px; padding-bottom: 7px; border: 0; border-radius: 5px; color: #27384d; background: transparent; text-align: left; cursor: pointer; line-height: 1.45; }
+.writer-toc-item:hover, .writer-toc-item.active { background: #eaf0ff; color: #315bc4; }
+.writer-toc-item > span { flex: 0 0 auto; font-family: 'Times New Roman', serif; }
+.writer-toc-item strong { font-weight: 500; }
+.writer-toc-toggle, .writer-toc-spacer { display: inline-grid; place-items: center; width: 14px; flex: 0 0 14px; }
+.writer-toc-toggle { color: #66758a; font-family: sans-serif !important; cursor: pointer; }
+.writer-chapter-item { width: 100%; text-align: left; border: 1px solid #e3e9f2; border-radius: 9px; padding: 10px; background: #fff; cursor: pointer; }
+.writer-chapter-item:hover, .writer-chapter-item.active { border-color: #5876d9; background: #f0f4ff; }
+.writer-chapter-item.writing { box-shadow: inset 3px 0 #3eaf7c; }
+.writer-chapter-item span, .writer-chapter-item small { display: block; color: #66758a; font-size: 12px; margin-top: 4px; }
+.writer-chapter-item span { color: #4564c6; margin-top: 0; }
+.writer-chapter-item strong { display: block; line-height: 1.45; }
+.writer-document-pane { display: flex; flex-direction: column; min-width: 0; background: #eef2f7; }
+.writer-document-pane > header { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; padding: 18px 22px 12px; }
+.writer-chapter-actions { display: flex; align-items: center; gap: 8px; }
+.writer-live-status { border-radius: 999px; padding: 5px 9px; background: #e3f6ed; color: #18754c; white-space: nowrap; font-size: 12px; }
+.manual-evidence-badge { flex: 0 0 auto; border-radius: 999px; padding: 5px 9px; color: #92400e; background: #fef3c7; font-size: 12px; white-space: nowrap; }
+.writer-preview-notice { margin: 0 22px 12px; color: #756236; font-size: 12px; }
+.writer-word-canvas { flex: 1; margin: 0 22px 22px; padding: 42px 50px; background: #fff; box-shadow: 0 2px 12px #3142601a; font-family: 'SimSun', serif; line-height: 2; overflow: auto; max-height: 690px; }
+.writer-word-canvas p { margin: 0 0 16px; text-indent: 2em; white-space: pre-wrap; }
+.writer-preview-empty { display: grid; place-items: center; min-height: 300px; margin: 0 22px 22px; padding: 30px; color: #68788d; background: #fff; }
+.agent-disclosure { margin: 0; color: #718096; font-size: 12px; line-height: 1.5; }
+.agent-trace-feed, .writer-chat-history { display: grid; gap: 8px; overflow: auto; max-height: 220px; }
+.agent-trace-item, .writer-chat-history article { padding: 10px; border-radius: 8px; background: #f5f8fc; font-size: 13px; }
+.agent-trace-item p, .writer-chat-history p { margin: 5px 0 0; line-height: 1.5; white-space: pre-wrap; }
+.agent-trace-item small { display: block; margin-top: 4px; color: #63738a; }
+.writer-chat-user { background: #edf4ff !important; }
+.writer-chat-assistant { background: #eff9f3 !important; }
+.writer-agent-pane textarea { width: 100%; resize: vertical; box-sizing: border-box; }
 .generation-heading { align-items: flex-start; }
 .generation-heading p:not(.section-kicker) {
   max-width: 760px;
@@ -3471,27 +4496,31 @@ onUnmounted(() => window.clearInterval(timer))
   accent-color: #4f46e5;
 }
 .generation-error { color: #b91c1c !important; }
-.generation-stage-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 9px;
-  padding: 0;
+.generation-flow {
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+  padding: 4px 0;
   margin: 0;
+  overflow-x: auto;
   list-style: none;
 }
-.generation-stage-grid li {
-  min-width: 0;
+.generation-flow li {
+  min-width: 132px;
+  flex: 1 0 132px;
   border: 1px solid #e2e8f0;
-  border-radius: 11px;
   background: #fff;
-  overflow: hidden;
 }
+.generation-flow li:not(:last-child) { border-right: 0; }
+.generation-flow li:first-child { border-radius: 11px 0 0 11px; }
+.generation-flow li:last-child { border-radius: 0 11px 11px 0; }
 .generation-stage-button {
   display: flex;
   width: 100%;
-  min-height: 68px;
-  gap: 9px;
-  padding: 11px;
+  min-height: 62px;
+  align-items: center;
+  gap: 7px;
+  padding: 9px 8px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -3499,11 +4528,11 @@ onUnmounted(() => window.clearInterval(timer))
   text-align: left;
   cursor: pointer;
 }
-.generation-stage-button > span {
+.generation-flow-marker {
   display: grid;
-  flex: 0 0 25px;
-  width: 25px;
-  height: 25px;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
   place-items: center;
   border-radius: 50%;
   background: #f1f5f9;
@@ -3512,28 +4541,19 @@ onUnmounted(() => window.clearInterval(timer))
   font-weight: 800;
 }
 .generation-stage-button > div { display: grid; min-width: 0; gap: 2px; }
-.generation-stage-grid strong { color: #1e293b; font-size: 11px; }
-.generation-stage-grid small { color: #64748b; font-size: 9px; }
-.generation-stage-grid .generation-stage-summary { color: #4338ca; }
-.generation-stage-grid em {
-  overflow: hidden;
-  color: #b91c1c;
-  font-size: 9px;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.generation-flow strong { color: #1e293b; font-size: 11px; }
+.generation-flow small { color: #64748b; font-size: 9px; }
 .generation-stage-succeeded,
 .generation-stage-reused { border-color: #a7f3d0 !important; background: #f0fdf4 !important; }
-.generation-stage-succeeded .generation-stage-button > span,
-.generation-stage-reused .generation-stage-button > span { background: #10b981 !important; color: #fff !important; }
+.generation-stage-succeeded .generation-flow-marker,
+.generation-stage-reused .generation-flow-marker { background: #10b981 !important; color: #fff !important; }
 .generation-stage-running,
 .generation-stage-queued { border-color: #a5b4fc !important; background: #eef2ff !important; }
-.generation-stage-running .generation-stage-button > span,
-.generation-stage-queued .generation-stage-button > span { background: #4f46e5 !important; color: #fff !important; }
+.generation-stage-running .generation-flow-marker,
+.generation-stage-queued .generation-flow-marker { background: #4f46e5 !important; color: #fff !important; }
 .generation-stage-failed { border-color: #fecaca !important; background: #fef2f2 !important; }
 .generation-stage-button.has-warning { background: #fffbeb; }
-.generation-stage-button.has-warning > span { background: #d97706 !important; color: #fff !important; }
+.generation-stage-button.has-warning .generation-flow-marker { background: #d97706 !important; color: #fff !important; }
 .generation-columns {
   display: grid;
   grid-template-columns: minmax(260px, .8fr) minmax(420px, 1.5fr);
@@ -3578,6 +4598,8 @@ onUnmounted(() => window.clearInterval(timer))
 }
 .generation-research-list small,
 .generation-empty { color: #64748b; font-size: 10px; }
+.generation-research-list ol { display: grid; gap: 6px; margin: 4px 0; padding-left: 18px; }
+.generation-research-list a { color: #4338ca; font-size: 10px; overflow-wrap: anywhere; }
 .content-unit-list { display: grid; gap: 9px; margin-top: 12px; }
 .content-unit-card {
   display: grid;
@@ -3618,6 +4640,8 @@ onUnmounted(() => window.clearInterval(timer))
 .content-unit-running .content-unit-status { background: #e0e7ff; color: #4338ca; }
 .content-unit-completed .content-unit-status { background: #d1fae5; color: #047857; }
 .content-unit-failed .content-unit-status { background: #fee2e2; color: #b91c1c; }
+.content-unit-stale { border-color: #f59e0b; background: #fffbeb; }
+.content-unit-stale .content-unit-status { background: #fef3c7; color: #92400e; }
 .content-unit-blocks {
   display: grid;
   gap: 10px;
@@ -3658,6 +4682,27 @@ onUnmounted(() => window.clearInterval(timer))
   line-height: 1.6;
 }
 .document-preview-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.preview-mode-switch {
+  display: inline-flex;
+  padding: 3px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  background: #fff;
+}
+.preview-mode-switch button {
+  min-height: 34px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #64748b;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.preview-mode-switch button.active { background: #4338ca; color: #fff; }
+.preview-mode-switch button:focus-visible { outline: 3px solid rgb(79 70 229 / 28%); outline-offset: 2px; }
 .document-risk-banner {
   display: flex;
   align-items: flex-start;
@@ -3765,6 +4810,22 @@ onUnmounted(() => window.clearInterval(timer))
   box-shadow: 0 16px 42px rgb(15 23 42 / 10%);
   color: #111827;
   font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif;
+}
+.markdown-preview-canvas {
+  width: min(100%, 850px);
+  min-height: 720px;
+  box-sizing: border-box;
+  margin: 0 auto;
+  padding: 28px 32px;
+  overflow: auto;
+  border: 1px solid #d5dbe5;
+  border-radius: 4px;
+  background: #0f172a;
+  box-shadow: 0 16px 42px rgb(15 23 42 / 10%);
+  color: #e2e8f0;
+  font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 .word-preview-canvas h1,
 .word-preview-canvas h2,
@@ -4595,6 +5656,10 @@ onUnmounted(() => window.clearInterval(timer))
 
 @media (max-width: 900px) {
   .upload-zones { grid-template-columns: 1fr; }
+  .writer-workspace { grid-template-columns: 1fr; }
+  .writer-outline-pane, .writer-agent-pane { border: 0; border-bottom: 1px solid var(--border-color, #dbe3ef); }
+  .writer-agent-pane { border-top: 1px solid var(--border-color, #dbe3ef); border-bottom: 0; }
+  .writer-word-canvas { max-height: 480px; }
   .generation-columns { grid-template-columns: 1fr; }
   .document-reader { grid-template-columns: 1fr; }
   .document-toc {
