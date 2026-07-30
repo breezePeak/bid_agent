@@ -256,22 +256,75 @@ class ContentWriter:
                         "chapter_id": str(target.get("node_id") or ""),
                     },
                 )
-            blocks.append(
-                ContentBlock(
-                    block_id=f"{bundle.bundle_id}-{target['node_id']}-chapter",
-                    target_node_id=target_id,
-                    type="paragraph",
-                    content=content,
-                    topic_ids=sorted(topic_ids),
-                    duty_ids=sorted(duty_ids),
-                    requirement_ids=all_requirement_ids,
-                    score_point_ids=sorted(score_ids),
-                    evidence_ids=used_evidence_ids,
-                    claim_ids=target_condition_ids,
-                    confidence=0.82,
-                    source_bundle_hash=bundle.bundle_hash,
-                )
+            from .chapter_editing import split_text_into_blocks
+
+            # Phase 3: AI output is multiple blocks (paragraph/list/table), not one chapter string.
+            split_payloads = split_text_into_blocks(
+                content,
+                chapter_id=target_id,
+                actor_id="writer",
+                source="AI_GENERATED",
+                confidence=0.82,
+                source_bundle_hash=bundle.bundle_hash,
             )
+            if not split_payloads:
+                split_payloads = [
+                    {
+                        "block_id": f"{bundle.bundle_id}-{target_id}-chapter",
+                        "target_node_id": target_id,
+                        "type": "paragraph",
+                        "content": content,
+                        "order": 0,
+                        "source": "AI_GENERATED",
+                        "confidence": 0.82,
+                        "source_bundle_hash": bundle.bundle_hash,
+                    }
+                ]
+            for payload in split_payloads:
+                blocks.append(
+                    ContentBlock(
+                        block_id=str(payload["block_id"]),
+                        target_node_id=target_id,
+                        type=payload.get("type") or "paragraph",
+                        content=str(payload["content"]),
+                        topic_ids=sorted(topic_ids),
+                        duty_ids=sorted(duty_ids),
+                        requirement_ids=all_requirement_ids,
+                        score_point_ids=sorted(score_ids),
+                        evidence_ids=used_evidence_ids,
+                        claim_ids=target_condition_ids,
+                        confidence=float(payload.get("confidence") or 0.82),
+                        source_bundle_hash=bundle.bundle_hash,
+                        source="AI_GENERATED",
+                        order=int(payload.get("order") or 0),
+                        created_by="writer",
+                        updated_by="writer",
+                        created_at=str(payload.get("created_at") or ""),
+                        updated_at=str(payload.get("updated_at") or ""),
+                        lock_state="UNLOCKED",
+                        human_locked=False,
+                    )
+                )
+            # Phase 7: if chapter workspace exists, also append a draft content revision
+            # (never formal). Locked blocks are preserved by the merge service.
+            if self.store.chapter_workspace(target_id) is not None:
+                try:
+                    from .chapter_editing import ChapterEditingService
+
+                    workspace = self.store.chapter_workspace(target_id) or {}
+                    ChapterEditingService(self.context).generate_draft(
+                        chapter_id=target_id,
+                        expected_chapter_revision=int(
+                            workspace.get("chapter_revision") or 0
+                        ),
+                        text=content,
+                        overwrite_locked=False,
+                        actor={"type": "system", "id": "writer", "role": "writer"},
+                    )
+                except Exception:
+                    # Content unit path remains authoritative for pipeline G4; chapter
+                    # workspace draft is best-effort overlay until Phase 7 hard-wires.
+                    pass
             # This is an execution checkpoint only.  It lets the workspace show
             # the durable part of a running draft without promoting it to the
             # final Word artifact before the unit-level quality gate passes.

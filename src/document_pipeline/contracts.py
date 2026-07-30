@@ -1258,6 +1258,13 @@ class WriterInputBundle(ContractModel):
     prompt_version: str = Field(min_length=1)
     model_config_hash: str = Field(min_length=1)
     bundle_hash: str = Field(min_length=1)
+    # Phase 7: chapter workspace overlays (optional; empty when not materialised).
+    chapter_id: str | None = None
+    chapter_context_revision: int = Field(default=0, ge=0)
+    chapter_context_items: list[dict[str, Any]] = Field(default_factory=list)
+    head_content_revision: int = Field(default=0, ge=0)
+    locked_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    content_history_summary: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ContentBlock(BaseModel):
@@ -1278,12 +1285,73 @@ class ContentBlock(BaseModel):
     critical_claims: list[str] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
     source_bundle_hash: str | None = None
+    # Phase 3+ chapter editor fields. Missing legacy fields map to AI_GENERATED.
+    source: Literal["AI_GENERATED", "USER_CREATED", "USER_EDITED"] = "AI_GENERATED"
+    created_by: str = ""
+    updated_by: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    order: int = Field(default=0, ge=0)
+    lock_state: Literal["UNLOCKED", "USER_LOCKED"] = "UNLOCKED"
 
     @model_validator(mode="after")
     def critical_claims_need_sources(self) -> "ContentBlock":
         if self.critical_claims and not (self.evidence_ids or self.fact_ids):
             raise ValueError("关键 Claim 必须关联 evidence_ids 或 fact_ids")
+        # Keep human_locked and lock_state aligned for integrators/renderers.
+        updates: dict[str, Any] = {}
+        if self.lock_state == "USER_LOCKED" and not self.human_locked:
+            updates["human_locked"] = True
+        elif self.human_locked and self.lock_state == "UNLOCKED":
+            updates["lock_state"] = "USER_LOCKED"
+        return self.model_copy(update=updates) if updates else self
+
+
+class ChapterContentRevisionRecord(BaseModel):
+    """Append-only ordered ContentBlock[] revision for one chapter workspace."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    content_revision: int = Field(ge=1)
+    parent_content_revision: int | None = Field(default=None, ge=1)
+    blocks: list[ContentBlock] = Field(default_factory=list)
+    content_hash: str = Field(min_length=1)
+    source: Literal[
+        "user_edit",
+        "ai_draft",
+        "restore",
+        "merge",
+        "auto_approve",
+    ]
+    approval_policy: dict[str, Any] = Field(default_factory=dict)
+    actor: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def blocks_are_consistent(self) -> "ChapterContentRevisionRecord":
+        ids = [block.block_id for block in self.blocks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ChapterContentRevision 不允许重复 block_id")
         return self
+
+
+class ChapterApprovalReceiptRecord(BaseModel):
+    """H2 chapter body approval (or explicit auto-approval) for one content revision."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    receipt_id: str = Field(min_length=1)
+    chapter_id: str = Field(min_length=1)
+    content_revision: int = Field(ge=1)
+    content_hash: str = Field(min_length=1)
+    decision: Literal["approved", "auto_approved"]
+    principal_id: str = Field(min_length=1)
+    confirmation_required: bool
+    receipt_hash: str = Field(min_length=1)
+    actor: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+    gate_id: Literal["H2_CHAPTER_APPROVAL"] = "H2_CHAPTER_APPROVAL"
 
 
 class ContentProposal(BaseModel):

@@ -204,6 +204,8 @@ class ChapterWorkspaceService:
                 "context": None,
             }
         context = self.store.chapter_context_head(chapter_id)
+        content = self.store.chapter_content_head(chapter_id)
+        formal = self.store.chapter_formal_content(chapter_id)
         return {
             **row,
             "materialized": True,
@@ -211,6 +213,8 @@ class ChapterWorkspaceService:
             "blueprint_revision_active": int(blueprint["revision"]),
             "blueprint_hash_active": str(blueprint["artifact_hash"]),
             "context": context,
+            "content": content,
+            "formal_content": formal,
         }
 
     @staticmethod

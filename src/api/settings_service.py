@@ -47,6 +47,15 @@ FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
         "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
         False,
     ),
+    # Phase 5: chapter body H2 confirmation. Independent of chapter_review_enabled.
+    "confirmation_required": ("BID_AGENT_CHAPTER_CONFIRMATION_REQUIRED", True),
+}
+FLOW_CHOICE_SPECS: dict[str, tuple[str, str, tuple[str, ...]]] = {
+    "research_provider": (
+        "BID_AGENT_RESEARCH_PROVIDER",
+        "doubao_web",
+        ("doubao_web", "deepseek_web", "disabled"),
+    ),
 }
 RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
     dict.fromkeys(
@@ -54,6 +63,7 @@ RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
             *(key for key, _alias in LLM_ENV_KEYS),
             *(key for key, _default, _low, _high in FLOW_SETTING_SPECS.values()),
             *(key for key, _default in FLOW_REVIEW_SPECS.values()),
+            *(key for key, _default, _choices in FLOW_CHOICE_SPECS.values()),
         ]
     )
 )
@@ -502,6 +512,12 @@ class SettingsService:
             )
             os.environ.update(
                 {
+                    key: str(flow[alias])
+                    for alias, (key, _default, _choices) in FLOW_CHOICE_SPECS.items()
+                }
+            )
+            os.environ.update(
+                {
                     key: "1" if flow[alias] else "0"
                     for alias, (key, _default) in FLOW_REVIEW_SPECS.items()
                 }
@@ -544,6 +560,9 @@ class SettingsService:
                 else os.environ.get(key, "1" if default else "0")
             )
             result[alias] = _parse_bool(raw, default)
+        for alias, (key, default, choices) in FLOW_CHOICE_SPECS.items():
+            raw = str(file_values[key] if key in file_values else os.environ.get(key, default)).strip().lower()
+            result[alias] = raw if raw in choices else default
         if not result["chapter_review_enabled"]:
             result["chapter_review_gate"] = False
             result["global_review_gate"] = False
@@ -566,6 +585,12 @@ class SettingsService:
             for alias, (_key, default) in FLOW_REVIEW_SPECS.items():
                 if alias in updates:
                     current[alias] = _parse_bool(updates[alias], default)
+            for alias, (_key, default, choices) in FLOW_CHOICE_SPECS.items():
+                if alias in updates:
+                    candidate = str(updates[alias] or "").strip().lower()
+                    if candidate not in choices:
+                        raise ValueError(f"{alias} 必须是: {', '.join(choices)}")
+                    current[alias] = candidate
             if not current["chapter_review_enabled"]:
                 current["chapter_review_gate"] = False
                 current["global_review_gate"] = False
@@ -579,6 +604,12 @@ class SettingsService:
                 {
                     key: "1" if current[alias] else "0"
                     for alias, (key, _default) in FLOW_REVIEW_SPECS.items()
+                }
+            )
+            env_updates.update(
+                {
+                    key: str(current[alias])
+                    for alias, (key, _default, _choices) in FLOW_CHOICE_SPECS.items()
                 }
             )
             existing_lines = (

@@ -711,6 +711,88 @@ def get_chapter_context_revision(
         return _error(exc)
 
 
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/revisions")
+def list_chapter_content_revisions(
+    workspace_id: str,
+    chapter_id: str,
+    limit: int = Query(100),
+) -> JSONResponse:
+    try:
+        store = ControlStore(_context(workspace_id))
+        workspace = store.chapter_workspace(chapter_id)
+        if workspace is None:
+            raise ControlPlaneError(
+                "CHAPTER_NOT_FOUND",
+                f"章节 Workspace 不存在: {chapter_id}",
+                status_code=404,
+            )
+        revisions = store.chapter_content_revisions(chapter_id, limit=limit)
+        return JSONResponse(
+            {
+                "ok": True,
+                "chapter_id": chapter_id,
+                "head_content_revision": int(workspace.get("head_content_revision") or 0),
+                "formal_content_revision": int(workspace.get("formal_content_revision") or 0),
+                "chapter_revision": int(workspace.get("chapter_revision") or 0),
+                "revisions": revisions,
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/revisions/compare")
+def compare_chapter_content_revisions(
+    workspace_id: str,
+    chapter_id: str,
+    from_revision: int = Query(..., alias="from"),
+    to_revision: int = Query(..., alias="to"),
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_editing import ChapterEditingService
+
+        payload = ChapterEditingService(_context(workspace_id)).compare_revisions(
+            chapter_id,
+            from_revision=from_revision,
+            to_revision=to_revision,
+        )
+        return JSONResponse({"ok": True, "compare": payload})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/revisions/{revision}")
+def get_chapter_content_revision(
+    workspace_id: str,
+    chapter_id: str,
+    revision: int,
+) -> JSONResponse:
+    try:
+        content = ControlStore(_context(workspace_id)).chapter_content_revision(
+            chapter_id, revision
+        )
+        if content is None:
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_NOT_FOUND",
+                f"Content revision 不存在: {chapter_id}@{revision}",
+                status_code=404,
+            )
+        return JSONResponse({"ok": True, "content": content})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/document/compose")
+def compose_formal_document(workspace_id: str) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_editing import ChapterEditingService
+
+        document = ChapterEditingService(_context(workspace_id)).compose_formal_document()
+        return JSONResponse({"ok": True, "document": document})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 @app.get("/api/v3/workspaces/{workspace_id}/content-units/{unit_id}")
 def content_unit_detail(workspace_id: str, unit_id: str) -> JSONResponse:
     try:
@@ -761,6 +843,22 @@ def latest_gate(workspace_id: str) -> JSONResponse:
 def export(workspace_id: str):
     context = _context(workspace_id)
     try:
+        from document_pipeline.chapter_editing import ChapterEditingService
+
+        composed = ChapterEditingService(context).compose_formal_document()
+        if composed.get("pending_chapters"):
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "message": "存在未确认章节，仅允许草稿预览，阻断 final export。",
+                    "error": {
+                        "code": "CHAPTER_FORMAL_PENDING",
+                        "message": "存在未确认章节，仅允许草稿预览，阻断 final export。",
+                        "details": {"pending_chapters": composed.get("pending_chapters")},
+                    },
+                },
+                status_code=409,
+            )
         DocumentPreviewService(context).build()
     except ControlPlaneError as exc:
         return _error(exc)

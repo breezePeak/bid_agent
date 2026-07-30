@@ -6,6 +6,7 @@ from typing import Any
 
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
+from .chapter_editing import ChapterEditingService
 from .chapter_workspace import ChapterWorkspaceService
 from .stage_runner import V3StageRunner
 from .research_tool import V3ResearchTool
@@ -84,6 +85,7 @@ class V3ExecutionController:
 
     def handlers(self) -> dict[str, Any]:
         chapters = ChapterWorkspaceService(self.context)
+        editing = ChapterEditingService(self.context)
         return {
             "document.run_stage": self.run_stage,
             "document.prepare_outline": self.prepare_outline,
@@ -94,6 +96,10 @@ class V3ExecutionController:
             "chapter.workspace.archive": chapters.handle_archive,
             "chapter.workspace.save_metadata": chapters.handle_save_metadata,
             "chapter.context.save": chapters.handle_save_context,
+            "chapter.content.apply": editing.handle_content_apply,
+            "chapter.revision.restore": editing.handle_revision_restore,
+            "chapter.generate_draft": editing.handle_generate_draft,
+            "chapter.approval.confirm": editing.handle_approval_confirm,
         }
 
     def _active_artifact_identity(self, stage: str) -> tuple[str, int, str] | None:

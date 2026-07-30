@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 26
+    SCHEMA_VERSION = 27
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -690,6 +690,35 @@ class ControlStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_chapter_context_revisions_head
                         ON chapter_context_revisions(chapter_id, context_revision DESC);
+                    CREATE TABLE IF NOT EXISTS chapter_content_revisions (
+                        chapter_id TEXT NOT NULL,
+                        content_revision INTEGER NOT NULL,
+                        blocks_json TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        parent_content_revision INTEGER,
+                        source TEXT NOT NULL,
+                        approval_policy_json TEXT NOT NULL DEFAULT '{}',
+                        actor_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (chapter_id, content_revision)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_content_revisions_head
+                        ON chapter_content_revisions(chapter_id, content_revision DESC);
+                    CREATE TABLE IF NOT EXISTS chapter_approval_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        receipt_hash TEXT NOT NULL UNIQUE,
+                        chapter_id TEXT NOT NULL,
+                        content_revision INTEGER NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        decision TEXT NOT NULL,
+                        principal_id TEXT NOT NULL,
+                        confirmation_required INTEGER NOT NULL,
+                        actor_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        UNIQUE (chapter_id, content_revision, content_hash, decision)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_approval_receipts_chapter
+                        ON chapter_approval_receipts(chapter_id, content_revision DESC);
                     """
                 )
                 operation_columns = {
@@ -898,6 +927,35 @@ class ControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_chapter_context_revisions_head
                 ON chapter_context_revisions(chapter_id, context_revision DESC);
+            CREATE TABLE IF NOT EXISTS chapter_content_revisions (
+                chapter_id TEXT NOT NULL,
+                content_revision INTEGER NOT NULL,
+                blocks_json TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                parent_content_revision INTEGER,
+                source TEXT NOT NULL,
+                approval_policy_json TEXT NOT NULL DEFAULT '{}',
+                actor_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chapter_id, content_revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_content_revisions_head
+                ON chapter_content_revisions(chapter_id, content_revision DESC);
+            CREATE TABLE IF NOT EXISTS chapter_approval_receipts (
+                receipt_id TEXT PRIMARY KEY,
+                receipt_hash TEXT NOT NULL UNIQUE,
+                chapter_id TEXT NOT NULL,
+                content_revision INTEGER NOT NULL,
+                content_hash TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                confirmation_required INTEGER NOT NULL,
+                actor_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                UNIQUE (chapter_id, content_revision, content_hash, decision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_approval_receipts_chapter
+                ON chapter_approval_receipts(chapter_id, content_revision DESC);
             """
         )
 
@@ -1745,6 +1803,21 @@ class ControlStore:
         chapter = self.chapter_workspace(normalized) or {}
         context = self.chapter_context_revision(normalized, int(chapter.get("head_context_revision") or 0)) or {}
         return {"chapter": chapter, "context": context, "unchanged": False}
+
+    def record_gate_evaluation(
+        self,
+        *,
+        command: str,
+        verdict: str,
+        input_fingerprint: str,
+        findings: list[dict[str, Any]],
+        source: str,
+    ) -> dict[str, Any]:
+        command_name = str(command or "").strip()
+        verdict_name = str(verdict or "").strip().lower()
+        fingerprint = str(input_fingerprint or "").strip()
+        if not command_name or verdict_name not in {"pass", "block", "error"} or not fingerprint:
+            raise ControlPlaneError("STATE_UNAVAILABLE", "GateEvaluation 输入无效，已拒绝记录。", status_code=503)
         normalized = [dict(item) for item in findings if isinstance(item, dict)]
         evaluation_id = str(uuid.uuid4())
         created_at = _now()
@@ -1784,6 +1857,616 @@ class ControlStore:
             "source_revision": source_revision,
             "created_at": created_at,
         }
+
+    @staticmethod
+    def _normalize_content_blocks(blocks: list[Any], *, chapter_id: str) -> list[dict[str, Any]]:
+        from document_pipeline.contracts import ContentBlock
+
+        if not isinstance(blocks, list):
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_INVALID",
+                "blocks 必须是数组。",
+                status_code=400,
+            )
+        if len(blocks) > 500:
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_INVALID",
+                "单章正文最多 500 个 Block。",
+                status_code=400,
+            )
+        normalized: list[dict[str, Any]] = []
+        for index, raw in enumerate(blocks):
+            if not isinstance(raw, dict):
+                raise ControlPlaneError(
+                    "CHAPTER_CONTENT_INVALID",
+                    "每个 ContentBlock 必须是对象。",
+                    status_code=400,
+                )
+            payload = dict(raw)
+            payload.setdefault("target_node_id", chapter_id)
+            payload.setdefault("order", index)
+            payload.setdefault("confidence", float(payload.get("confidence") or 0.8))
+            if not payload.get("source"):
+                payload["source"] = "AI_GENERATED"
+            try:
+                model = ContentBlock.model_validate(payload)
+            except Exception as exc:
+                raise ControlPlaneError(
+                    "CHAPTER_CONTENT_INVALID",
+                    f"ContentBlock 校验失败: {exc}",
+                    status_code=400,
+                ) from exc
+            normalized.append(model.model_dump(mode="json"))
+        ids = [item["block_id"] for item in normalized]
+        if len(ids) != len(set(ids)):
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_INVALID",
+                "ContentBlock block_id 不允许重复。",
+                status_code=400,
+            )
+        normalized.sort(key=lambda item: (int(item.get("order") or 0), str(item["block_id"])))
+        for index, item in enumerate(normalized):
+            item["order"] = index
+        return normalized
+
+    @staticmethod
+    def _content_blocks_hash(blocks: list[dict[str, Any]]) -> str:
+        return hashlib.sha256(_json(blocks).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _chapter_content_revision_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        blocks = _decode(item.pop("blocks_json", "[]"), [])
+        if not isinstance(blocks, list):
+            blocks = []
+        actor = _decode(item.pop("actor_json", "{}"), {})
+        if not isinstance(actor, dict):
+            actor = {}
+        policy = _decode(item.pop("approval_policy_json", "{}"), {})
+        if not isinstance(policy, dict):
+            policy = {}
+        parent = item.get("parent_content_revision")
+        return {
+            "chapter_id": str(item.get("chapter_id") or ""),
+            "content_revision": int(item.get("content_revision") or 0),
+            "parent_content_revision": int(parent) if parent is not None else None,
+            "blocks": blocks,
+            "content_hash": str(item.get("content_hash") or ""),
+            "source": str(item.get("source") or "user_edit"),
+            "approval_policy": policy,
+            "actor": actor,
+            "created_at": str(item.get("created_at") or ""),
+        }
+
+    def chapter_content_revisions(
+        self,
+        chapter_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        capped = max(1, min(int(limit), 500))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chapter_content_revisions
+                WHERE chapter_id = ?
+                ORDER BY content_revision DESC
+                LIMIT ?
+                """,
+                (normalized, capped),
+            ).fetchall()
+        return [self._chapter_content_revision_row(row) for row in rows]
+
+    def chapter_content_revision(
+        self,
+        chapter_id: str,
+        content_revision: int,
+    ) -> dict[str, Any] | None:
+        normalized = self._normalize_chapter_id(chapter_id)
+        try:
+            revision = int(content_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_REVISION_INVALID",
+                "content_revision 必须是整数。",
+                status_code=400,
+            ) from exc
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM chapter_content_revisions
+                WHERE chapter_id = ? AND content_revision = ?
+                """,
+                (normalized, revision),
+            ).fetchone()
+        return self._chapter_content_revision_row(row) if row else None
+
+    def chapter_content_head(self, chapter_id: str) -> dict[str, Any] | None:
+        workspace = self.chapter_workspace(chapter_id)
+        if workspace is None:
+            return None
+        head = int(workspace.get("head_content_revision") or 0)
+        if head < 1:
+            return None
+        return self.chapter_content_revision(chapter_id, head)
+
+    def chapter_formal_content(self, chapter_id: str) -> dict[str, Any] | None:
+        workspace = self.chapter_workspace(chapter_id)
+        if workspace is None:
+            return None
+        formal = int(workspace.get("formal_content_revision") or 0)
+        if formal < 1:
+            return None
+        return self.chapter_content_revision(chapter_id, formal)
+
+    def append_chapter_content_revision(
+        self,
+        *,
+        chapter_id: str,
+        expected_chapter_revision: int,
+        blocks: list[dict[str, Any]],
+        source: str,
+        approval_policy: dict[str, Any] | None = None,
+        actor: dict[str, Any] | None = None,
+        set_formal: bool = False,
+        approval_status: str | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        try:
+            expected = int(expected_chapter_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_REVISION_INVALID",
+                "expected_chapter_revision 必须是整数。",
+                status_code=400,
+            ) from exc
+        source_value = str(source or "").strip()
+        if source_value not in {"user_edit", "ai_draft", "restore", "merge", "auto_approve"}:
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_INVALID",
+                f"不支持的 content source: {source_value}",
+                status_code=400,
+            )
+        normalized_blocks = self._normalize_content_blocks(blocks, chapter_id=normalized)
+        content_hash = self._content_blocks_hash(normalized_blocks)
+        policy = dict(approval_policy or {})
+        actor_value = {
+            "type": str((actor or {}).get("type") or "")[:64],
+            "id": str((actor or {}).get("id") or "")[:128],
+            "role": str((actor or {}).get("role") or "")[:32],
+        }
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                if existing is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_NOT_FOUND",
+                        f"章节 Workspace 不存在: {normalized}",
+                        status_code=404,
+                    )
+                current = self._chapter_workspace_row(existing)
+                if str(current.get("status") or "") == "archived":
+                    raise ControlPlaneError(
+                        "CHAPTER_ARCHIVED",
+                        "已归档章节不能修改正文。",
+                        status_code=409,
+                    )
+                current_revision = int(current["chapter_revision"])
+                if expected != current_revision:
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                head_content = int(current.get("head_content_revision") or 0)
+                if head_content >= 1:
+                    head_row = connection.execute(
+                        """
+                        SELECT * FROM chapter_content_revisions
+                        WHERE chapter_id = ? AND content_revision = ?
+                        """,
+                        (normalized, head_content),
+                    ).fetchone()
+                    if head_row is not None:
+                        head = self._chapter_content_revision_row(head_row)
+                        if str(head.get("content_hash") or "") == content_hash and not set_formal:
+                            connection.commit()
+                            return {
+                                "chapter": current,
+                                "content": head,
+                                "unchanged": True,
+                            }
+                next_content_revision = head_content + 1
+                parent = head_content if head_content >= 1 else None
+                chapter_revision = current_revision + 1
+                formal = int(current.get("formal_content_revision") or 0)
+                if set_formal:
+                    formal = next_content_revision
+                status = str(approval_status or current.get("approval_status") or "draft")
+                meta = dict(current.get("metadata") or {})
+                state_hash = self._chapter_workspace_state_hash(
+                    chapter_id=normalized,
+                    blueprint_revision=int(current["blueprint_revision"]),
+                    blueprint_hash=str(current["blueprint_hash"]),
+                    title=str(current["title"]),
+                    parent_chapter_id=current.get("parent_chapter_id"),
+                    order_index=int(current["order"]),
+                    status=str(current.get("status") or "active"),
+                    approval_status=status,
+                    chapter_revision=chapter_revision,
+                    head_content_revision=next_content_revision,
+                    formal_content_revision=formal,
+                    head_context_revision=int(current.get("head_context_revision") or 0),
+                    metadata=meta,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO chapter_content_revisions(
+                        chapter_id, content_revision, blocks_json, content_hash,
+                        parent_content_revision, source, approval_policy_json, actor_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized,
+                        next_content_revision,
+                        _json(normalized_blocks),
+                        content_hash,
+                        parent,
+                        source_value,
+                        _json(policy),
+                        _json(actor_value),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE chapter_workspaces SET
+                        chapter_revision = ?,
+                        head_content_revision = ?,
+                        formal_content_revision = ?,
+                        approval_status = ?,
+                        state_hash = ?,
+                        updated_at = ?
+                    WHERE chapter_id = ?
+                    """,
+                    (
+                        chapter_revision,
+                        next_content_revision,
+                        formal,
+                        status,
+                        state_hash,
+                        now,
+                        normalized,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "ChapterContentRevisionAppended",
+                    "ChapterContent",
+                    f"{normalized}@{next_content_revision}",
+                    {
+                        "chapter_id": normalized,
+                        "content_revision": next_content_revision,
+                        "parent_content_revision": parent,
+                        "chapter_revision": chapter_revision,
+                        "content_hash": content_hash,
+                        "source": source_value,
+                        "set_formal": bool(set_formal),
+                        "block_count": len(normalized_blocks),
+                        "actor": actor_value,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        chapter = self.chapter_workspace(normalized) or {}
+        content = self.chapter_content_revision(
+            normalized, int(chapter.get("head_content_revision") or 0)
+        ) or {}
+        return {"chapter": chapter, "content": content, "unchanged": False}
+
+    def set_chapter_formal_pointer(
+        self,
+        *,
+        chapter_id: str,
+        expected_chapter_revision: int,
+        content_revision: int,
+        content_hash: str,
+        approval_status: str = "approved",
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Point formal_revision at an existing content revision without rewriting blocks."""
+        normalized = self._normalize_chapter_id(chapter_id)
+        try:
+            expected = int(expected_chapter_revision)
+            target_revision = int(content_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_REVISION_INVALID",
+                "revision 参数必须是整数。",
+                status_code=400,
+            ) from exc
+        wanted_hash = str(content_hash or "").strip()
+        if not wanted_hash:
+            raise ControlPlaneError(
+                "CHAPTER_CONTENT_HASH_REQUIRED",
+                "缺少 content_hash。",
+                status_code=400,
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                if existing is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_NOT_FOUND",
+                        f"章节 Workspace 不存在: {normalized}",
+                        status_code=404,
+                    )
+                current = self._chapter_workspace_row(existing)
+                if str(current.get("status") or "") == "archived":
+                    raise ControlPlaneError(
+                        "CHAPTER_ARCHIVED",
+                        "已归档章节不能确认正文。",
+                        status_code=409,
+                    )
+                current_revision = int(current["chapter_revision"])
+                if expected != current_revision:
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                content_row = connection.execute(
+                    """
+                    SELECT * FROM chapter_content_revisions
+                    WHERE chapter_id = ? AND content_revision = ?
+                    """,
+                    (normalized, target_revision),
+                ).fetchone()
+                if content_row is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_CONTENT_NOT_FOUND",
+                        f"Content revision 不存在: {normalized}@{target_revision}",
+                        status_code=404,
+                    )
+                content = self._chapter_content_revision_row(content_row)
+                if str(content.get("content_hash") or "") != wanted_hash:
+                    raise ControlPlaneError(
+                        "CHAPTER_CONTENT_HASH_MISMATCH",
+                        "content_hash 与目标 revision 不一致。",
+                        status_code=409,
+                    )
+                chapter_revision = current_revision + 1
+                meta = dict(current.get("metadata") or {})
+                state_hash = self._chapter_workspace_state_hash(
+                    chapter_id=normalized,
+                    blueprint_revision=int(current["blueprint_revision"]),
+                    blueprint_hash=str(current["blueprint_hash"]),
+                    title=str(current["title"]),
+                    parent_chapter_id=current.get("parent_chapter_id"),
+                    order_index=int(current["order"]),
+                    status=str(current.get("status") or "active"),
+                    approval_status=str(approval_status),
+                    chapter_revision=chapter_revision,
+                    head_content_revision=int(current.get("head_content_revision") or 0),
+                    formal_content_revision=target_revision,
+                    head_context_revision=int(current.get("head_context_revision") or 0),
+                    metadata=meta,
+                )
+                connection.execute(
+                    """
+                    UPDATE chapter_workspaces SET
+                        chapter_revision = ?,
+                        formal_content_revision = ?,
+                        approval_status = ?,
+                        state_hash = ?,
+                        updated_at = ?
+                    WHERE chapter_id = ?
+                    """,
+                    (
+                        chapter_revision,
+                        target_revision,
+                        str(approval_status),
+                        state_hash,
+                        now,
+                        normalized,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "ChapterFormalPointerUpdated",
+                    "ChapterWorkspace",
+                    normalized,
+                    {
+                        "chapter_id": normalized,
+                        "formal_content_revision": target_revision,
+                        "content_hash": wanted_hash,
+                        "chapter_revision": chapter_revision,
+                        "approval_status": str(approval_status),
+                        "actor": actor or {},
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.chapter_workspace(normalized) or {}
+
+    def record_chapter_approval_receipt(
+        self,
+        *,
+        chapter_id: str,
+        content_revision: int,
+        content_hash: str,
+        decision: str,
+        principal_id: str,
+        confirmation_required: bool,
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        decision_value = str(decision or "").strip()
+        if decision_value not in {"approved", "auto_approved"}:
+            raise ControlPlaneError(
+                "CHAPTER_APPROVAL_INVALID",
+                "decision 必须是 approved 或 auto_approved。",
+                status_code=400,
+            )
+        principal = str(principal_id or "").strip()
+        if not principal:
+            raise ControlPlaneError(
+                "CHAPTER_APPROVAL_INVALID",
+                "缺少 principal_id。",
+                status_code=400,
+            )
+        if decision_value == "approved" and principal in {"system", "auto"}:
+            raise ControlPlaneError(
+                "CHAPTER_APPROVAL_INVALID",
+                "人工确认不得使用 system/auto principal。",
+                status_code=403,
+            )
+        if decision_value == "auto_approved" and confirmation_required:
+            raise ControlPlaneError(
+                "CHAPTER_APPROVAL_INVALID",
+                "confirmation_required=true 时不得签发 auto_approved。",
+                status_code=409,
+            )
+        actor_value = {
+            "type": str((actor or {}).get("type") or "")[:64],
+            "id": str((actor or {}).get("id") or principal)[:128],
+            "role": str((actor or {}).get("role") or "")[:32],
+        }
+        body = {
+            "gate_id": "H2_CHAPTER_APPROVAL",
+            "chapter_id": normalized,
+            "content_revision": int(content_revision),
+            "content_hash": str(content_hash),
+            "decision": decision_value,
+            "principal_id": principal,
+            "confirmation_required": bool(confirmation_required),
+            "actor": actor_value,
+        }
+        receipt_hash = hashlib.sha256(_json(body).encode("utf-8")).hexdigest()
+        receipt_id = f"h2-{receipt_hash[:24]}"
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM chapter_approval_receipts WHERE receipt_id = ? OR receipt_hash = ?",
+                    (receipt_id, receipt_hash),
+                ).fetchone()
+                if existing is not None:
+                    connection.commit()
+                    row = dict(existing)
+                    row["actor"] = _decode(row.pop("actor_json", "{}"), {})
+                    row["confirmation_required"] = bool(int(row.get("confirmation_required") or 0))
+                    return row
+                connection.execute(
+                    """
+                    INSERT INTO chapter_approval_receipts(
+                        receipt_id, receipt_hash, chapter_id, content_revision, content_hash,
+                        decision, principal_id, confirmation_required, actor_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        receipt_id,
+                        receipt_hash,
+                        normalized,
+                        int(content_revision),
+                        str(content_hash),
+                        decision_value,
+                        principal,
+                        1 if confirmation_required else 0,
+                        _json(actor_value),
+                        now,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "ChapterApprovalReceiptIssued",
+                    "ChapterApproval",
+                    receipt_id,
+                    {
+                        "chapter_id": normalized,
+                        "content_revision": int(content_revision),
+                        "content_hash": str(content_hash),
+                        "decision": decision_value,
+                        "principal_id": principal,
+                        "confirmation_required": bool(confirmation_required),
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            "receipt_id": receipt_id,
+            "receipt_hash": receipt_hash,
+            "chapter_id": normalized,
+            "content_revision": int(content_revision),
+            "content_hash": str(content_hash),
+            "decision": decision_value,
+            "principal_id": principal,
+            "confirmation_required": bool(confirmation_required),
+            "actor": actor_value,
+            "created_at": now,
+            "gate_id": "H2_CHAPTER_APPROVAL",
+        }
+
+    def chapter_approval_receipts(
+        self,
+        chapter_id: str,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        capped = max(1, min(int(limit), 200))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chapter_approval_receipts
+                WHERE chapter_id = ?
+                ORDER BY created_at DESC, content_revision DESC
+                LIMIT ?
+                """,
+                (normalized, capped),
+            ).fetchall()
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["actor"] = _decode(item.pop("actor_json", "{}"), {})
+            item["confirmation_required"] = bool(int(item.get("confirmation_required") or 0))
+            item["gate_id"] = "H2_CHAPTER_APPROVAL"
+            result.append(item)
+        return result
 
     def gate_evaluations(self, *, command: str = "", limit: int = 50) -> list[dict[str, Any]]:
         capped_limit = max(1, min(int(limit), 200))
@@ -5383,6 +6066,8 @@ class CommandGateway:
                     "planning_receipt",
                     "chapter",
                     "context",
+                    "content",
+                    "approval",
                     "unchanged",
                 )
                 if key in result

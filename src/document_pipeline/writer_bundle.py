@@ -394,6 +394,54 @@ class WriterInputBundleAssembler:
                 )
             ),
         }
+        # Phase 7: attach chapter-local context/locks when a workspace is materialised.
+        primary_chapter_id = ""
+        for item in body.get("document_target_constraints") or []:
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip():
+                primary_chapter_id = str(item.get("node_id") or "").strip()
+                break
+        if primary_chapter_id:
+            workspace = self.store.chapter_workspace(primary_chapter_id)
+            if workspace is not None:
+                context_head = self.store.chapter_context_head(primary_chapter_id)
+                content_head = self.store.chapter_content_head(primary_chapter_id)
+                locked = [
+                    block
+                    for block in ((content_head or {}).get("blocks") or [])
+                    if isinstance(block, dict)
+                    and (
+                        block.get("human_locked")
+                        or str(block.get("lock_state") or "") == "USER_LOCKED"
+                    )
+                ]
+                history = [
+                    {
+                        "content_revision": item.get("content_revision"),
+                        "content_hash": item.get("content_hash"),
+                        "source": item.get("source"),
+                        "created_at": item.get("created_at"),
+                        "block_count": len(item.get("blocks") or []),
+                    }
+                    for item in self.store.chapter_content_revisions(
+                        primary_chapter_id, limit=5
+                    )
+                ]
+                body.update(
+                    {
+                        "chapter_id": primary_chapter_id,
+                        "chapter_context_revision": int(
+                            workspace.get("head_context_revision") or 0
+                        ),
+                        "chapter_context_items": list(
+                            (context_head or {}).get("items") or []
+                        ),
+                        "head_content_revision": int(
+                            workspace.get("head_content_revision") or 0
+                        ),
+                        "locked_blocks": locked,
+                        "content_history_summary": history,
+                    }
+                )
         source_hashes = dict(blueprint.source_hashes)
         for item in evidence_snapshot:
             source_hashes[
@@ -414,9 +462,22 @@ def load_writer_bundle(root: Path, bundle_id: str) -> WriterInputBundle:
     bundle = WriterInputBundle.model_validate(read_json(path))
     body = bundle.model_dump(mode="json", exclude={"revision", "source_hashes", "bundle_id", "bundle_hash"})
     body_hash = canonical_hash(body)
+    if body_hash != bundle.bundle_hash:
+        # Read-only compatibility for older bundle field sets.
+        legacy_body = dict(body)
+        legacy_body.pop("evidence_snapshot", None)
+        for key in (
+            "chapter_id",
+            "chapter_context_revision",
+            "chapter_context_items",
+            "head_content_revision",
+            "locked_blocks",
+            "content_history_summary",
+            "research_decisions",
+        ):
+            legacy_body.pop(key, None)
+        body_hash = canonical_hash(legacy_body)
     if body_hash != bundle.bundle_hash and not bundle.evidence_snapshot:
-        # Read-only compatibility for bundles created before evidence_snapshot
-        # became part of the frozen contract.
         legacy_body = dict(body)
         legacy_body.pop("evidence_snapshot", None)
         body_hash = canonical_hash(legacy_body)

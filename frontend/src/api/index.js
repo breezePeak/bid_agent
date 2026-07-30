@@ -119,12 +119,13 @@ export function fetchV3DocumentPreview(runId) {
   })
 }
 
-export async function runV3Pipeline(runId) {
+export async function runV3Pipeline(runId, chapterIds = []) {
   const snapshot = await fetchV3WorkspaceSnapshot(runId)
   const commandId = newCommandId()
   const command = buildRunPipelineCommand(
     commandId,
     workspaceRevisionFromV3Payload(snapshot?.data),
+    chapterIds,
   )
   // Full generation may include several bounded DeepSeek research turns before
   // Writer bundles are frozen.
@@ -180,6 +181,51 @@ export function chatV3(runId, message) {
 
 export function downloadV3Final(runId) {
   window.open(`/api${v3WorkspacePath(runId, 'exports/final')}`, '_blank')
+}
+
+export function fetchChapters(runId, includeArchived = true) {
+  return api.get(v3WorkspacePath(runId, 'chapters'), {
+    params: { include_archived: includeArchived },
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchChapter(runId, chapterId) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}`), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchChapterRevisions(runId, chapterId, limit = 100) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}/revisions`), {
+    params: { limit },
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchDocumentCompose(runId) {
+  return api.get(v3WorkspacePath(runId, 'document/compose'), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchSnapshot(runId) {
+  return fetchV3WorkspaceSnapshot(runId)
+}
+
+export function submitV3Command(runId, command) {
+  const body = {
+    command_id: command.command_id || newCommandId(),
+    kind: command.kind,
+    payload: command.payload || {},
+    expected_revision: Number(command.expected_revision || 0),
+    idempotency_key: command.idempotency_key || newCommandId(),
+  }
+  return api.post(v3WorkspacePath(runId, 'commands'), body, { timeout: 300000 })
 }
 
 export default api
