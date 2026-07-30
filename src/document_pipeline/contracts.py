@@ -1030,6 +1030,75 @@ class ChapterWorkspaceRecord(BaseModel):
         return self
 
 
+ChapterContextItemKind = Literal[
+    "GOAL",
+    "SCORING_REQUIREMENT",
+    "TECHNICAL_CONSTRAINT",
+    "KEY_FACT",
+]
+
+
+class ChapterContextItem(BaseModel):
+    """Stable chapter-local context item (Phase 2).
+
+    Overlay on shared global artifacts (RequirementLedger / ScoreModel / …).
+    Does not replace or delete upstream facts.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    item_id: str = Field(min_length=1)
+    kind: ChapterContextItemKind
+    title: str = Field(min_length=1)
+    body: str = Field(default="")
+    order: int = Field(ge=0)
+    source: Literal["BLUEPRINT_SEED", "USER"] = "USER"
+    origin_ref: str | None = None
+
+    @model_validator(mode="after")
+    def item_id_is_safe(self) -> "ChapterContextItem":
+        value = self.item_id
+        if (
+            not value
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or value != value.strip()
+        ):
+            raise ValueError("item_id 非法")
+        return self
+
+
+class ChapterContextRevisionRecord(BaseModel):
+    """Append-only chapter context revision metadata + ordered items."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    context_revision: int = Field(ge=1)
+    parent_context_revision: int | None = Field(default=None, ge=1)
+    items: list[ChapterContextItem] = Field(default_factory=list)
+    content_hash: str = Field(min_length=1)
+    seeded_from_blueprint: bool = False
+    actor: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def items_are_consistent(self) -> "ChapterContextRevisionRecord":
+        ids = [item.item_id for item in self.items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ChapterContextRevision 不允许重复 item_id")
+        orders = [item.order for item in self.items]
+        if len(orders) != len(set(orders)):
+            raise ValueError("ChapterContextRevision 不允许重复 order")
+        if (
+            self.parent_context_revision is not None
+            and self.parent_context_revision >= self.context_revision
+        ):
+            raise ValueError("parent_context_revision 必须小于 context_revision")
+        return self
+
+
 class DocumentMode(str, Enum):
     TEMPLATE_STRICT = "template_strict"
     AUTO_OUTLINE = "auto_outline"

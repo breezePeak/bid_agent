@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 25
+    SCHEMA_VERSION = 26
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
@@ -677,6 +677,19 @@ class ControlStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_chapter_workspaces_status
                         ON chapter_workspaces(status, order_index, chapter_id);
+                    CREATE TABLE IF NOT EXISTS chapter_context_revisions (
+                        chapter_id TEXT NOT NULL,
+                        context_revision INTEGER NOT NULL,
+                        items_json TEXT NOT NULL,
+                        content_hash TEXT NOT NULL,
+                        parent_context_revision INTEGER,
+                        seeded_from_blueprint INTEGER NOT NULL DEFAULT 0,
+                        actor_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (chapter_id, context_revision)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_context_revisions_head
+                        ON chapter_context_revisions(chapter_id, context_revision DESC);
                     """
                 )
                 operation_columns = {
@@ -872,6 +885,19 @@ class ControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_chapter_workspaces_status
                 ON chapter_workspaces(status, order_index, chapter_id);
+            CREATE TABLE IF NOT EXISTS chapter_context_revisions (
+                chapter_id TEXT NOT NULL,
+                context_revision INTEGER NOT NULL,
+                items_json TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                parent_context_revision INTEGER,
+                seeded_from_blueprint INTEGER NOT NULL DEFAULT 0,
+                actor_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chapter_id, context_revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_context_revisions_head
+                ON chapter_context_revisions(chapter_id, context_revision DESC);
             """
         )
 
@@ -1433,20 +1459,292 @@ class ControlStore:
                 raise
         return self.chapter_workspace(normalized) or {}
 
-    def record_gate_evaluation(
+    @staticmethod
+    def _normalize_context_items(items: list[dict[str, Any]] | list[Any]) -> list[dict[str, Any]]:
+        from document_pipeline.contracts import ChapterContextItem
+
+        if not isinstance(items, list):
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_INVALID",
+                "context items 必须是数组。",
+                status_code=400,
+            )
+        if len(items) > 200:
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_INVALID",
+                "单章 Context 最多 200 项。",
+                status_code=400,
+            )
+        normalized: list[dict[str, Any]] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                raise ControlPlaneError(
+                    "CHAPTER_CONTEXT_INVALID",
+                    "每个 Context Item 必须是对象。",
+                    status_code=400,
+                )
+            try:
+                model = ChapterContextItem.model_validate(raw)
+            except Exception as exc:
+                raise ControlPlaneError(
+                    "CHAPTER_CONTEXT_INVALID",
+                    f"Context Item 校验失败: {exc}",
+                    status_code=400,
+                ) from exc
+            normalized.append(model.model_dump(mode="json"))
+        ids = [item["item_id"] for item in normalized]
+        if len(ids) != len(set(ids)):
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_INVALID",
+                "Context Item item_id 不允许重复。",
+                status_code=400,
+            )
+        orders = [int(item["order"]) for item in normalized]
+        if len(orders) != len(set(orders)):
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_INVALID",
+                "Context Item order 不允许重复。",
+                status_code=400,
+            )
+        normalized.sort(key=lambda item: (int(item["order"]), str(item["item_id"])))
+        return normalized
+
+    @staticmethod
+    def _context_items_hash(items: list[dict[str, Any]]) -> str:
+        return hashlib.sha256(_json(items).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _chapter_context_revision_row(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        items = _decode(item.pop("items_json", "[]"), [])
+        if not isinstance(items, list):
+            items = []
+        actor = _decode(item.pop("actor_json", "{}"), {})
+        if not isinstance(actor, dict):
+            actor = {}
+        parent = item.get("parent_context_revision")
+        return {
+            "chapter_id": str(item.get("chapter_id") or ""),
+            "context_revision": int(item.get("context_revision") or 0),
+            "parent_context_revision": int(parent) if parent is not None else None,
+            "items": items,
+            "content_hash": str(item.get("content_hash") or ""),
+            "seeded_from_blueprint": bool(int(item.get("seeded_from_blueprint") or 0)),
+            "actor": actor,
+            "created_at": str(item.get("created_at") or ""),
+        }
+
+    def chapter_context_revisions(
+        self,
+        chapter_id: str,
+        *,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        capped = max(1, min(int(limit), 500))
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM chapter_context_revisions
+                WHERE chapter_id = ?
+                ORDER BY context_revision DESC
+                LIMIT ?
+                """,
+                (normalized, capped),
+            ).fetchall()
+        return [self._chapter_context_revision_row(row) for row in rows]
+
+    def chapter_context_revision(
+        self,
+        chapter_id: str,
+        context_revision: int,
+    ) -> dict[str, Any] | None:
+        normalized = self._normalize_chapter_id(chapter_id)
+        try:
+            revision = int(context_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_REVISION_INVALID",
+                "context_revision 必须是整数。",
+                status_code=400,
+            ) from exc
+        with self._connection() as connection:
+            row = connection.execute(
+                """
+                SELECT * FROM chapter_context_revisions
+                WHERE chapter_id = ? AND context_revision = ?
+                """,
+                (normalized, revision),
+            ).fetchone()
+        return self._chapter_context_revision_row(row) if row else None
+
+    def chapter_context_head(self, chapter_id: str) -> dict[str, Any] | None:
+        workspace = self.chapter_workspace(chapter_id)
+        if workspace is None:
+            return None
+        head = int(workspace.get("head_context_revision") or 0)
+        if head < 1:
+            return None
+        return self.chapter_context_revision(chapter_id, head)
+
+    def append_chapter_context_revision(
         self,
         *,
-        command: str,
-        verdict: str,
-        input_fingerprint: str,
-        findings: list[dict[str, Any]],
-        source: str,
+        chapter_id: str,
+        expected_chapter_revision: int,
+        items: list[dict[str, Any]],
+        seeded_from_blueprint: bool = False,
+        actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        command_name = str(command or "").strip()
-        verdict_name = str(verdict or "").strip().lower()
-        fingerprint = str(input_fingerprint or "").strip()
-        if not command_name or verdict_name not in {"pass", "block", "error"} or not fingerprint:
-            raise ControlPlaneError("STATE_UNAVAILABLE", "GateEvaluation 输入无效，已拒绝记录。", status_code=503)
+        """Append-only context revision; bumps chapter_revision and head pointer."""
+        normalized = self._normalize_chapter_id(chapter_id)
+        try:
+            expected = int(expected_chapter_revision)
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "CHAPTER_REVISION_INVALID",
+                "expected_chapter_revision 必须是整数。",
+                status_code=400,
+            ) from exc
+        normalized_items = self._normalize_context_items(items)
+        content_hash = self._context_items_hash(normalized_items)
+        actor_value = {
+            "type": str((actor or {}).get("type") or "")[:64],
+            "id": str((actor or {}).get("id") or "")[:128],
+            "role": str((actor or {}).get("role") or "")[:32],
+        }
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                existing = connection.execute(
+                    "SELECT * FROM chapter_workspaces WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                if existing is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_NOT_FOUND",
+                        f"章节 Workspace 不存在: {normalized}",
+                        status_code=404,
+                    )
+                current = self._chapter_workspace_row(existing)
+                if str(current.get("status") or "") == "archived":
+                    raise ControlPlaneError(
+                        "CHAPTER_ARCHIVED",
+                        "已归档章节不能修改 Context。",
+                        status_code=409,
+                    )
+                current_revision = int(current["chapter_revision"])
+                if expected != current_revision:
+                    raise ControlPlaneError(
+                        "CHAPTER_REVISION_CONFLICT",
+                        "章节状态已变化，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "chapter_id": normalized,
+                            "expected_chapter_revision": expected,
+                            "current_chapter_revision": current_revision,
+                        },
+                    )
+                head_context = int(current.get("head_context_revision") or 0)
+                # Idempotent no-op when payload matches current head.
+                if head_context >= 1:
+                    head_row = connection.execute(
+                        """
+                        SELECT * FROM chapter_context_revisions
+                        WHERE chapter_id = ? AND context_revision = ?
+                        """,
+                        (normalized, head_context),
+                    ).fetchone()
+                    if head_row is not None:
+                        head = self._chapter_context_revision_row(head_row)
+                        if str(head.get("content_hash") or "") == content_hash:
+                            connection.commit()
+                            return {
+                                "chapter": current,
+                                "context": head,
+                                "unchanged": True,
+                            }
+
+                next_context_revision = head_context + 1
+                parent = head_context if head_context >= 1 else None
+                chapter_revision = current_revision + 1
+                meta = dict(current.get("metadata") or {})
+                state_hash = self._chapter_workspace_state_hash(
+                    chapter_id=normalized,
+                    blueprint_revision=int(current["blueprint_revision"]),
+                    blueprint_hash=str(current["blueprint_hash"]),
+                    title=str(current["title"]),
+                    parent_chapter_id=current.get("parent_chapter_id"),
+                    order_index=int(current["order"]),
+                    status=str(current.get("status") or "active"),
+                    approval_status=str(current.get("approval_status") or "not_started"),
+                    chapter_revision=chapter_revision,
+                    head_content_revision=int(current.get("head_content_revision") or 0),
+                    formal_content_revision=int(current.get("formal_content_revision") or 0),
+                    head_context_revision=next_context_revision,
+                    metadata=meta,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO chapter_context_revisions(
+                        chapter_id, context_revision, items_json, content_hash,
+                        parent_context_revision, seeded_from_blueprint, actor_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized,
+                        next_context_revision,
+                        _json(normalized_items),
+                        content_hash,
+                        parent,
+                        1 if seeded_from_blueprint else 0,
+                        _json(actor_value),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    """
+                    UPDATE chapter_workspaces SET
+                        chapter_revision = ?,
+                        head_context_revision = ?,
+                        state_hash = ?,
+                        updated_at = ?
+                    WHERE chapter_id = ?
+                    """,
+                    (
+                        chapter_revision,
+                        next_context_revision,
+                        state_hash,
+                        now,
+                        normalized,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "ChapterContextRevisionAppended",
+                    "ChapterContext",
+                    f"{normalized}@{next_context_revision}",
+                    {
+                        "chapter_id": normalized,
+                        "context_revision": next_context_revision,
+                        "parent_context_revision": parent,
+                        "chapter_revision": chapter_revision,
+                        "content_hash": content_hash,
+                        "seeded_from_blueprint": bool(seeded_from_blueprint),
+                        "item_count": len(normalized_items),
+                        "actor": actor_value,
+                    },
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        chapter = self.chapter_workspace(normalized) or {}
+        context = self.chapter_context_revision(normalized, int(chapter.get("head_context_revision") or 0)) or {}
+        return {"chapter": chapter, "context": context, "unchanged": False}
         normalized = [dict(item) for item in findings if isinstance(item, dict)]
         evaluation_id = str(uuid.uuid4())
         created_at = _now()
@@ -5084,6 +5382,8 @@ class CommandGateway:
                     "planning_snapshot",
                     "planning_receipt",
                     "chapter",
+                    "context",
+                    "unchanged",
                 )
                 if key in result
             }

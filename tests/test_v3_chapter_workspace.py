@@ -178,7 +178,8 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
             created_a = service.create(chapter_id="ch-a", expected_chapter_revision=0)
             self.assertEqual(created_a["chapter_id"], "ch-a")
             self.assertEqual(created_a["status"], "active")
-            self.assertEqual(created_a["chapter_revision"], 1)
+            # Materialize + optional blueprint context seed both bump chapter_revision.
+            self.assertGreaterEqual(created_a["chapter_revision"], 1)
             self.assertEqual(created_a["blueprint_revision"], int(active["revision"]))
             self.assertTrue(created_a["state_hash"])
 
@@ -188,10 +189,13 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
 
             updated_a = service.save_metadata(
                 chapter_id="ch-a",
-                expected_chapter_revision=1,
+                expected_chapter_revision=created_a["chapter_revision"],
                 metadata={"note": "A only"},
             )
-            self.assertEqual(updated_a["chapter_revision"], 2)
+            self.assertEqual(
+                updated_a["chapter_revision"],
+                created_a["chapter_revision"] + 1,
+            )
             self.assertEqual(updated_a["metadata"]["note"], "A only")
             self.assertNotEqual(updated_a["state_hash"], created_a["state_hash"])
 
@@ -308,6 +312,7 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
                 gateway.submit(stale)
             self.assertEqual(conflict.exception.code, "REVISION_CONFLICT")
 
+            chapter_rev = int(receipt.result["chapter"]["chapter_revision"])
             current = store.revision()
             meta = gateway.submit(
                 CommandEnvelope.from_mapping(
@@ -316,7 +321,7 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
                         "kind": "chapter.workspace.save_metadata",
                         "payload": {
                             "chapter_id": "ch-a",
-                            "expected_chapter_revision": 1,
+                            "expected_chapter_revision": chapter_rev,
                             "metadata": {"owner": "qa"},
                         },
                         "expected_revision": current,
@@ -337,7 +342,7 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
                     "chapter.workspace.archive",
                     payload={
                         "chapter_id": "ch-a",
-                        "expected_chapter_revision": 2,
+                        "expected_chapter_revision": chapter_rev + 1,
                     },
                 )
             )

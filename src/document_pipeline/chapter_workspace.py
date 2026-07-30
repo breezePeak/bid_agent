@@ -1,9 +1,12 @@
-"""Chapter Workspace control service (Phase 1).
+"""Chapter Workspace control service (Phase 1–2).
 
 A Chapter Workspace is a logical aggregate inside a project Workspace. It does
 not create a second control.db, runner, or canonical Artifact write path.
 ChapterBlueprint remains the structural authority; materialization is an
 idempotent control-plane projection of one blueprint node.
+
+Phase 2 adds chapter-local Context as an overlay on shared global artifacts:
+Blueprint projection seeds once; subsequent user saves append-only revisions.
 """
 
 from __future__ import annotations
@@ -12,7 +15,11 @@ from typing import Any
 
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
-from .contracts import ChapterWorkspaceRecord
+from .contracts import (
+    ChapterContextItem,
+    ChapterContextRevisionRecord,
+    ChapterWorkspaceRecord,
+)
 
 
 class ChapterWorkspaceService:
@@ -194,14 +201,152 @@ class ChapterWorkspaceService:
                 "blueprint_hash": str(blueprint["artifact_hash"]),
                 "blueprint_node": node,
                 "metadata": {},
+                "context": None,
             }
+        context = self.store.chapter_context_head(chapter_id)
         return {
             **row,
             "materialized": True,
             "blueprint_node": node,
             "blueprint_revision_active": int(blueprint["revision"]),
             "blueprint_hash_active": str(blueprint["artifact_hash"]),
+            "context": context,
         }
+
+    @staticmethod
+    def seed_items_from_blueprint_node(node: dict[str, Any]) -> list[dict[str, Any]]:
+        """Deterministic first-time seed. Never reapplied over existing context."""
+        items: list[dict[str, Any]] = []
+        order = 0
+        purpose = str(node.get("purpose") or "").strip()
+        if purpose:
+            items.append(
+                ChapterContextItem(
+                    item_id="seed:goal:purpose",
+                    kind="GOAL",
+                    title="章节目的",
+                    body=purpose,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref="blueprint.purpose",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        for index, objective in enumerate(node.get("writing_objectives") or []):
+            text = str(objective or "").strip()
+            if not text:
+                continue
+            items.append(
+                ChapterContextItem(
+                    item_id=f"seed:goal:objective:{index}",
+                    kind="GOAL",
+                    title=f"写作目标 {index + 1}",
+                    body=text,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref=f"blueprint.writing_objectives[{index}]",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        for score_id in node.get("score_point_ids") or []:
+            value = str(score_id or "").strip()
+            if not value:
+                continue
+            items.append(
+                ChapterContextItem(
+                    item_id=f"seed:scoring:point:{value}",
+                    kind="SCORING_REQUIREMENT",
+                    title=f"评分点 {value}",
+                    body=value,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref=f"blueprint.score_point_ids:{value}",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        for condition_id in node.get("score_condition_ids") or []:
+            value = str(condition_id or "").strip()
+            if not value:
+                continue
+            items.append(
+                ChapterContextItem(
+                    item_id=f"seed:scoring:condition:{value}",
+                    kind="SCORING_REQUIREMENT",
+                    title=f"评分条件 {value}",
+                    body=value,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref=f"blueprint.score_condition_ids:{value}",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        content_policy = str(node.get("content_policy") or "").strip()
+        if content_policy and content_policy != "full":
+            deferred = str(node.get("deferred_reason") or "").strip()
+            body = f"content_policy={content_policy}"
+            if deferred:
+                body = f"{body}; deferred_reason={deferred}"
+            items.append(
+                ChapterContextItem(
+                    item_id="seed:constraint:content_policy",
+                    kind="TECHNICAL_CONSTRAINT",
+                    title="内容策略约束",
+                    body=body,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref="blueprint.content_policy",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        for topic_id in node.get("forbidden_topic_ids") or []:
+            value = str(topic_id or "").strip()
+            if not value:
+                continue
+            items.append(
+                ChapterContextItem(
+                    item_id=f"seed:constraint:forbidden:{value}",
+                    kind="TECHNICAL_CONSTRAINT",
+                    title=f"禁止主题 {value}",
+                    body=value,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref=f"blueprint.forbidden_topic_ids:{value}",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        for requirement_id in node.get("requirement_ids") or []:
+            value = str(requirement_id or "").strip()
+            if not value:
+                continue
+            items.append(
+                ChapterContextItem(
+                    item_id=f"seed:fact:requirement:{value}",
+                    kind="KEY_FACT",
+                    title=f"需求 {value}",
+                    body=value,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref=f"blueprint.requirement_ids:{value}",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        for index, mention in enumerate(node.get("required_mentions") or []):
+            text = str(mention or "").strip()
+            if not text:
+                continue
+            items.append(
+                ChapterContextItem(
+                    item_id=f"seed:fact:mention:{index}",
+                    kind="KEY_FACT",
+                    title=f"必提要点 {index + 1}",
+                    body=text,
+                    order=order,
+                    source="BLUEPRINT_SEED",
+                    origin_ref=f"blueprint.required_mentions[{index}]",
+                ).model_dump(mode="json")
+            )
+            order += 1
+        return items
 
     def create(
         self,
@@ -227,6 +372,19 @@ class ChapterWorkspaceService:
             metadata=metadata,
             actor=actor,
         )
+        # Blueprint seed only when context head is still empty.
+        if int(record.get("head_context_revision") or 0) == 0:
+            seed_items = self.seed_items_from_blueprint_node(node)
+            if seed_items:
+                saved = self.store.append_chapter_context_revision(
+                    chapter_id=chapter_id,
+                    expected_chapter_revision=int(record["chapter_revision"]),
+                    items=seed_items,
+                    seeded_from_blueprint=True,
+                    actor=actor,
+                )
+                record = saved["chapter"]
+            # Empty seed still leaves head at 0; first user save becomes rev 1.
         return ChapterWorkspaceRecord.model_validate(record).model_dump(mode="json")
 
     def archive(
@@ -263,6 +421,70 @@ class ChapterWorkspaceService:
             actor=actor,
         )
         return ChapterWorkspaceRecord.model_validate(record).model_dump(mode="json")
+
+    def save_context(
+        self,
+        *,
+        chapter_id: str,
+        expected_chapter_revision: int,
+        items: list[dict[str, Any]],
+        actor: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        # User saves never mark seeded_from_blueprint; seed is first materialize only.
+        result = self.store.append_chapter_context_revision(
+            chapter_id=chapter_id,
+            expected_chapter_revision=expected_chapter_revision,
+            items=items,
+            seeded_from_blueprint=False,
+            actor=actor,
+        )
+        chapter = ChapterWorkspaceRecord.model_validate(result["chapter"]).model_dump(
+            mode="json"
+        )
+        context = ChapterContextRevisionRecord.model_validate(result["context"]).model_dump(
+            mode="json"
+        )
+        return {
+            "chapter": chapter,
+            "context": context,
+            "unchanged": bool(result.get("unchanged")),
+        }
+
+    def list_context_revisions(
+        self,
+        chapter_id: str,
+        *,
+        limit: int = 100,
+    ) -> dict[str, Any]:
+        ControlStore._normalize_chapter_id(chapter_id)
+        workspace = self.store.chapter_workspace(chapter_id)
+        if workspace is None:
+            raise ControlPlaneError(
+                "CHAPTER_NOT_FOUND",
+                f"章节 Workspace 不存在: {chapter_id}",
+                status_code=404,
+            )
+        revisions = self.store.chapter_context_revisions(chapter_id, limit=limit)
+        return {
+            "chapter_id": workspace["chapter_id"],
+            "head_context_revision": int(workspace.get("head_context_revision") or 0),
+            "chapter_revision": int(workspace.get("chapter_revision") or 0),
+            "revisions": revisions,
+        }
+
+    def get_context_revision(
+        self,
+        chapter_id: str,
+        context_revision: int,
+    ) -> dict[str, Any]:
+        record = self.store.chapter_context_revision(chapter_id, context_revision)
+        if record is None:
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_NOT_FOUND",
+                f"Context revision 不存在: {chapter_id}@{context_revision}",
+                status_code=404,
+            )
+        return ChapterContextRevisionRecord.model_validate(record).model_dump(mode="json")
 
     def handle_create(
         self,
@@ -347,4 +569,42 @@ class ChapterWorkspaceService:
             "operation_status": "succeeded",
             "message": f"章节元数据已保存: {chapter['chapter_id']}",
             "chapter": chapter,
+        }
+
+    def handle_save_context(
+        self,
+        context: WorkspaceContext,
+        envelope: CommandEnvelope,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        del context, operation_id
+        payload = envelope.payload if isinstance(envelope.payload, dict) else {}
+        chapter_id = str(payload.get("chapter_id") or "").strip()
+        if not chapter_id:
+            raise ControlPlaneError("CHAPTER_ID_REQUIRED", "缺少 chapter_id。", status_code=400)
+        items = payload.get("items")
+        if not isinstance(items, list):
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_INVALID",
+                "items 必须是数组。",
+                status_code=400,
+            )
+        result = self.save_context(
+            chapter_id=chapter_id,
+            expected_chapter_revision=self._expected_chapter_revision(payload),
+            items=items,
+            actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+        )
+        message = (
+            f"章节 Context 未变化: {chapter_id}"
+            if result.get("unchanged")
+            else f"章节 Context 已保存: {chapter_id}@{result['context']['context_revision']}"
+        )
+        return {
+            "accepted": True,
+            "operation_status": "succeeded",
+            "message": message,
+            "chapter": result["chapter"],
+            "context": result["context"],
+            "unchanged": result.get("unchanged"),
         }

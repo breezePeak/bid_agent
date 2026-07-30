@@ -93,6 +93,7 @@ class V3ExecutionController:
             "chapter.workspace.create": chapters.handle_create,
             "chapter.workspace.archive": chapters.handle_archive,
             "chapter.workspace.save_metadata": chapters.handle_save_metadata,
+            "chapter.context.save": chapters.handle_save_context,
         }
 
     def _active_artifact_identity(self, stage: str) -> tuple[str, int, str] | None:

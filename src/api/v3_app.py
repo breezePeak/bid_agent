@@ -673,6 +673,44 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
         return _error(exc)
 
 
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/context/revisions")
+def list_chapter_context_revisions(
+    workspace_id: str,
+    chapter_id: str,
+    limit: int = Query(100),
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        payload = ChapterWorkspaceService(_context(workspace_id)).list_context_revisions(
+            chapter_id,
+            limit=limit,
+        )
+        return JSONResponse({"ok": True, **payload})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get(
+    "/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/context/revisions/{revision}"
+)
+def get_chapter_context_revision(
+    workspace_id: str,
+    chapter_id: str,
+    revision: int,
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = ChapterWorkspaceService(_context(workspace_id)).get_context_revision(
+            chapter_id,
+            revision,
+        )
+        return JSONResponse({"ok": True, "context": context})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 @app.get("/api/v3/workspaces/{workspace_id}/content-units/{unit_id}")
 def content_unit_detail(workspace_id: str, unit_id: str) -> JSONResponse:
     try:
