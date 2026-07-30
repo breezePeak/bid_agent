@@ -4,7 +4,7 @@ import json
 import re
 
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
-from utils import write_json
+from utils import extract_json_text, write_json
 
 from .contracts import ContentBlock, WriterInputBundle
 from .content_gate import WriterBundleContentGate
@@ -452,6 +452,81 @@ class ContentWriter:
         )
 
     @staticmethod
+    def _escape_raw_control_chars_in_json_strings(text: str) -> str:
+        """Escape bare control characters that models often leave inside strings."""
+
+        out: list[str] = []
+        in_string = False
+        escaped = False
+        for char in text:
+            if escaped:
+                out.append(char)
+                escaped = False
+                continue
+            if char == "\\" and in_string:
+                out.append(char)
+                escaped = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                out.append(char)
+                continue
+            if in_string and ord(char) < 0x20:
+                if char == "\n":
+                    out.append("\\n")
+                elif char == "\r":
+                    out.append("\\r")
+                elif char == "\t":
+                    out.append("\\t")
+                else:
+                    out.append(f"\\u{ord(char):04x}")
+                continue
+            out.append(char)
+        return "".join(out)
+
+    @classmethod
+    def _parse_writer_json(cls, raw: str) -> dict:
+        """Parse writer model output as a JSON object (never a bare array/scalar)."""
+
+        cleaned = str(raw or "").strip()
+        if cleaned.startswith("```"):
+            fence = re.match(
+                r"^```[a-zA-Z0-9_-]*\s*(.*?)\s*```$",
+                cleaned,
+                re.DOTALL,
+            )
+            if fence:
+                cleaned = fence.group(1).strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start < 0 or end <= start:
+            # Fall back to shared extractor only for object-shaped payloads.
+            try:
+                extracted = extract_json_text(raw)
+            except Exception as exc:  # noqa: BLE001
+                raise ValueError("模型输出中未找到 JSON 对象") from exc
+            if not str(extracted).lstrip().startswith("{"):
+                raise ValueError("Writer 输出必须是 JSON 对象")
+            start, end = 0, len(extracted) - 1
+            cleaned = extracted
+        text = cleaned[start : end + 1]
+        last_error: Exception | None = None
+        for payload in (
+            text,
+            cls._escape_raw_control_chars_in_json_strings(text),
+        ):
+            try:
+                decoded = json.loads(payload)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                continue
+            if isinstance(decoded, dict):
+                return decoded
+            last_error = ValueError("Writer 输出必须是 JSON 对象")
+        assert last_error is not None
+        raise last_error
+
+    @staticmethod
     def _short_items(values: list[object], limit: int = 4) -> list[str]:
         result: list[str] = []
         for value in values:
@@ -599,55 +674,58 @@ class ContentWriter:
             try:
                 from llm_client import chat
 
-                raw = chat(
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "你是技术标书正文写作器。以章节标题和评分义务为主线输出项目化正文，"
-                                "不得复述评分条件、招标写作指令或生成占位话术。"
-                                "需求与评分信息只用于内部覆盖检查，不能写成“本节用于、"
-                                "围绕要求、满分条件、得分任务”等正文。"
-                                "公开研究只可支持背景、现行依据、专业方法和风险控制；"
-                                "禁止用公开资料虚构企业资质、业绩、人员、报价或承诺。"
-                                "只展开与本章相关、能够支撑评分义务的内容；不要为了凑模板"
-                                "强行补写不相关的方法、步骤、质量控制、成果、验收或风险。"
-                                "并严格输出 JSON 对象，不要 Markdown。"
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": json.dumps(
-                                prompt_bundle,
-                                ensure_ascii=False,
-                            ),
-                        },
-                    ],
-                    temperature=0.25,
-                ).strip()
-                try:
-                    decoded = json.loads(raw)
-                except json.JSONDecodeError:
-                    start = raw.find("{")
-                    end = raw.rfind("}")
-                    if start < 0 or end <= start:
-                        raise
-                    decoded = json.loads(raw[start : end + 1])
-                if not isinstance(decoded, dict):
-                    raise ValueError("Writer 输出必须是 JSON 对象")
-                content = str(decoded.get("content") or "").strip()
-                used_evidence_ids = sorted(
+                messages = [
                     {
-                        str(item)
-                        for item in (
-                            decoded.get("used_evidence_ids") or []
+                        "role": "system",
+                        "content": (
+                            "你是技术标书正文写作器。以章节标题和评分义务为主线输出项目化正文，"
+                            "不得复述评分条件、招标写作指令或生成占位话术。"
+                            "需求与评分信息只用于内部覆盖检查，不能写成“本节用于、"
+                            "围绕要求、满分条件、得分任务”等正文。"
+                            "公开研究只可支持背景、现行依据、专业方法和风险控制；"
+                            "禁止用公开资料虚构企业资质、业绩、人员、报价或承诺。"
+                            "只展开与本章相关、能够支撑评分义务的内容；不要为了凑模板"
+                            "强行补写不相关的方法、步骤、质量控制、成果、验收或风险。"
+                            "并严格输出 JSON 对象，不要 Markdown；"
+                            "content 字段内不要插入未转义的换行控制字符。"
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            prompt_bundle,
+                            ensure_ascii=False,
+                        ),
+                    },
+                ]
+                last_error: Exception | None = None
+                # One automatic retry absorbs occasional malformed model JSON
+                # without falling back to template prose.
+                for attempt in range(2):
+                    try:
+                        raw = chat(
+                            messages,
+                            temperature=0.25 if attempt == 0 else 0.15,
+                        ).strip()
+                        decoded = ContentWriter._parse_writer_json(raw)
+                        content = str(decoded.get("content") or "").strip()
+                        used_evidence_ids = sorted(
+                            {
+                                str(item)
+                                for item in (
+                                    decoded.get("used_evidence_ids") or []
+                                )
+                                if str(item)
+                            }
                         )
-                        if str(item)
-                    }
-                )
-                if not content:
-                    raise ValueError("Writer 输出正文为空")
-                return content, used_evidence_ids
+                        if not content:
+                            raise ValueError("Writer 输出正文为空")
+                        return content, used_evidence_ids
+                    except Exception as attempt_exc:
+                        last_error = attempt_exc
+                        continue
+                assert last_error is not None
+                raise last_error
             except ControlPlaneError:
                 raise
             except Exception as exc:

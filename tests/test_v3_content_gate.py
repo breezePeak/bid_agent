@@ -103,6 +103,20 @@ def _condition_bundle() -> WriterInputBundle:
     )
 
 
+class ContentWriterJsonParseTests(unittest.TestCase):
+    def test_accepts_raw_newlines_inside_content_string(self) -> None:
+        raw = (
+            '前言\n'
+            '{\n'
+            '  "content": "第一段\n第二段",\n'
+            '  "used_evidence_ids": ["ev-1"]\n'
+            '}\n'
+        )
+        decoded = ContentWriter._parse_writer_json(raw)
+        self.assertEqual(decoded["content"], "第一段\n第二段")
+        self.assertEqual(decoded["used_evidence_ids"], ["ev-1"])
+
+
 class WriterBundleContentGateTests(unittest.TestCase):
     def test_quality_gate_does_not_require_every_generic_writing_dimension(self) -> None:
         content = (
