@@ -3170,6 +3170,14 @@ class V3StageRunner:
                 self.context,
                 deterministic_test=deterministic_writer,
             )
+            from .writer_research import writer_research_enabled
+
+            # Public policy/method research is allowed when a research provider
+            # is configured. Enterprise facts still require operator materials;
+            # WriterResearchCoordinator hard-blocks those scopes.
+            allow_writer_research = (
+                not deterministic_writer and writer_research_enabled()
+            )
             results = []
             for unit in technical_units:
                 current = scheduler.store.content_unit_state(unit.unit_id) or {}
@@ -3182,10 +3190,7 @@ class V3StageRunner:
                         writer.write_bundle(
                             bundle,
                             operation_id=operation_id or "",
-                            # Evidence gaps are supplied by the operator. The
-                            # writer must not turn missing company/project facts
-                            # into an automatic web-search task.
-                            enable_writer_research=False,
+                            enable_writer_research=allow_writer_research,
                         )
                     )
                 except Exception as exc:

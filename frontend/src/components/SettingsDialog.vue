@@ -178,6 +178,15 @@
         <form v-else class="settings-form flow-settings-form" @submit.prevent="saveFlow">
           <div class="settings-form-title">系统参数</div>
           <p class="settings-hint">修改后只作用于之后启动的任务；流水线启动时会冻结设置快照，运行中修改不会改变当前任务。</p>
+          <div class="form-group">
+            <label for="flow-research-provider">联网搜索 Provider</label>
+            <select id="flow-research-provider" v-model="flowForm.research_provider">
+              <option value="doubao_web">豆包网页</option>
+              <option value="deepseek_web">DeepSeek 网页</option>
+              <option value="disabled">不联网搜索</option>
+            </select>
+            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时会自动调用该 Provider；选「不联网搜索」则只写招标已有材料。右侧 Agent 轨迹会显示是否联网及来源。</p>
+          </div>
           <div class="form-row">
             <div class="form-group"><label for="flow-workers">章节并发数</label><input id="flow-workers" v-model.number="flowForm.workers" type="number" min="1" max="10" /></div>
             <div class="form-group"><label for="flow-llm">模型并发数</label><input id="flow-llm" v-model.number="flowForm.llm_concurrency" type="number" min="1" max="32" /></div>
@@ -265,7 +274,7 @@ const activeTab = ref('model')
 const flowSaving = ref(false)
 const flowError = ref('')
 const flowSuccess = ref('')
-const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false, validation_failure_blocks_pipeline: false })
+const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, research_provider: 'doubao_web', write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false, validation_failure_blocks_pipeline: false })
 
 async function loadFlow() {
   try {

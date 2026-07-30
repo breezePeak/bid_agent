@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -26,6 +27,24 @@ from .writer_policy import RESEARCH_DECISION_POLICY_VERSION
 
 
 WRITER_RESEARCH_REPORT_PATH = V3_ROOT / "evidence" / "writer_research.json"
+
+
+def writer_research_enabled() -> bool:
+    """Whether execute_content_plan may auto-search public sources.
+
+    Enterprise facts remain operator-supplied. This only unlocks public
+    policy/method research when a non-disabled research provider is configured.
+    """
+
+    flag = str(
+        os.environ.get("BID_AGENT_WRITER_RESEARCH_ENABLED", "1")
+    ).strip().lower()
+    if flag in {"0", "false", "no", "off"}:
+        return False
+    provider = str(
+        os.environ.get("BID_AGENT_RESEARCH_PROVIDER", "doubao_web")
+    ).strip().lower()
+    return provider not in {"", "disabled", "manual"}
 _MANDATORY_RESEARCH_CUES = re.compile(
     r"项目背景|任务背景|行业现状|发展现状|政策|法律|法规|标准|规范|"
     r"专业方法|技术方法|技术路线|工艺|风险控制",

@@ -14,6 +14,7 @@ from document_pipeline.research_service import ResearchCandidate
 from document_pipeline.writer_research import (
     WRITER_RESEARCH_REPORT_PATH,
     WriterResearchCoordinator,
+    writer_research_enabled,
 )
 from utils import read_json
 
@@ -165,3 +166,33 @@ class WriterResearchTests(TestCase):
                         deterministic_test=True,
                     ).resolve_for_bundle(_bundle())
             self.assertEqual(raised.exception.code, "WRITER_RESEARCH_ACTION_REQUIRED")
+
+class WriterResearchEnabledTests(TestCase):
+    def test_respects_provider_and_kill_switch(self) -> None:
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "BID_AGENT_RESEARCH_PROVIDER": "doubao_web",
+                "BID_AGENT_WRITER_RESEARCH_ENABLED": "1",
+            },
+            clear=False,
+        ):
+            self.assertTrue(writer_research_enabled())
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "BID_AGENT_RESEARCH_PROVIDER": "disabled",
+                "BID_AGENT_WRITER_RESEARCH_ENABLED": "1",
+            },
+            clear=False,
+        ):
+            self.assertFalse(writer_research_enabled())
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "BID_AGENT_RESEARCH_PROVIDER": "doubao_web",
+                "BID_AGENT_WRITER_RESEARCH_ENABLED": "0",
+            },
+            clear=False,
+        ):
+            self.assertFalse(writer_research_enabled())
