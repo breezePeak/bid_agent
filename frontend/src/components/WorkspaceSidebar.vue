@@ -33,6 +33,12 @@
             <span v-if="run.progress" class="sidebar-item-progress">
               {{ run.progress.done }}/{{ run.progress.total }}
             </span>
+            <span v-if="chapterSummary(run)" class="sidebar-item-chapters" :title="chapterSummary(run)">
+              {{ chapterSummary(run) }}
+            </span>
+          </div>
+          <div v-if="run.delivery_status" class="sidebar-item-status">
+            {{ deliveryLabel(run.delivery_status) }}
           </div>
         </div>
         <button
@@ -102,4 +108,35 @@ function formatDate(id) {
   const d = match[1]
   return `${d.slice(0, 4)}-${d.slice(4, 6)}-${d.slice(6, 8)}`
 }
+
+function chapterSummary(run) {
+  const chapters = run?.chapters
+  if (!chapters || typeof chapters !== 'object') return ''
+  const total = Number(chapters.total || 0)
+  const materialized = Number(chapters.materialized || 0)
+  const active = Number(chapters.active || 0)
+  if (!total && !materialized) return ''
+  return `章 ${materialized || active}/${total || materialized || 0}`
+}
+
+function deliveryLabel(status) {
+  const value = String(status || '')
+  if (!value || value === 'new') return ''
+  if (value === 'ready' || value === 'ready_with_warnings') return '可交付'
+  if (value === 'draft_with_gaps') return '草稿'
+  return value
+}
 </script>
+
+<style scoped>
+.sidebar-item-chapters {
+  margin-left: 6px;
+  color: #2563eb;
+  font-size: 11px;
+}
+.sidebar-item-status {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #64748b;
+}
+</style>

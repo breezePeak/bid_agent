@@ -11,6 +11,10 @@
       <span v-if="activeRun" class="topbar-run-name">
         / {{ extractName(activeRun.id) }}
       </span>
+      <template v-if="activeRun">
+        <router-link class="topbar-link" :to="`/business/${activeRun.id}`">主页</router-link>
+        <router-link class="topbar-link" :to="`/business/${activeRun.id}/pipeline`">流水线</router-link>
+      </template>
     </div>
     <div class="topbar-right">
       <button class="btn btn-icon sidebar-toggle settings-btn" @click="$emit('settings')" title="模型与流程设置" aria-label="模型与流程设置">
@@ -66,5 +70,18 @@ function extractName(id) {
   color: #8a5a00;
   background: rgba(196, 140, 0, 0.12);
   border-color: rgba(196, 140, 0, 0.3);
+}
+.topbar-link {
+  margin-left: 10px;
+  font-size: 13px;
+  color: #2563eb;
+  text-decoration: none;
+}
+.topbar-link:hover {
+  text-decoration: underline;
+}
+.topbar-link.router-link-active {
+  font-weight: 600;
+  color: #1d4ed8;
 }
 </style>

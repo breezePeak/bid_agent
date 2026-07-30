@@ -200,6 +200,18 @@
             <label class="form-check"><input v-model="flowForm.chapter_review_enabled" type="checkbox" /><span>启用审核</span></label>
           </div>
           <p class="settings-hint">开启时，每章生成后在“生成章节”内部完成自审和按需改稿，并执行全文审核；关闭时直接生成第一版，不执行审核相关阶段。</p>
+          <div class="settings-form-title">章节正文确认（H2）</div>
+          <div class="form-check-group">
+            <label class="form-check">
+              <input v-model="flowForm.confirmation_required" type="checkbox" />
+              <span>章节正文需人工确认后才能成为正式版</span>
+            </label>
+          </div>
+          <p class="settings-hint">
+            与「启用审核」独立。开启后：草稿 → 用户编辑 → H2 确认 exact revision/hash → formal；
+            关闭后：草稿由系统签发 auto_approved 收据并指向 formal（不会伪装成人确认）。
+            开关值会冻结进新正文 revision 的审批策略，不追溯改写旧版本。H1 目录确认始终保留。
+          </p>
           <div class="settings-form-title">失败处理</div>
           <div class="form-check-group">
             <label class="form-check">
@@ -274,7 +286,21 @@ const activeTab = ref('model')
 const flowSaving = ref(false)
 const flowError = ref('')
 const flowSuccess = ref('')
-const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, research_provider: 'doubao_web', write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false, validation_failure_blocks_pipeline: false })
+const flowForm = reactive({
+  workers: 4,
+  llm_concurrency: 8,
+  write_batch_retries: 5,
+  max_repair_rounds: 2,
+  research_provider: 'doubao_web',
+  write_failure_fallback: true,
+  chapter_review_enabled: true,
+  chapter_review_gate: true,
+  global_review_gate: true,
+  anti_fabrication_gate: true,
+  allow_accept_risk: false,
+  validation_failure_blocks_pipeline: false,
+  confirmation_required: true,
+})
 
 async function loadFlow() {
   try {

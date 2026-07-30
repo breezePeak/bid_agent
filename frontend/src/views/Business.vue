@@ -25,27 +25,30 @@
             <p>请从左侧选择一个工作空间，或创建一个新的工作空间开始</p>
           </div>
         </template>
-        <template v-else-if="viewMode === 'chapter'">
-          <ChapterWorkspaceView
-            :key="`${activeRunId}:${chapterId}`"
-            :workspace-id="activeRunId"
-            :chapter-id="chapterId"
-          />
-        </template>
-        <template v-else-if="viewMode === 'home'">
-          <ProjectHomeView
-            :key="`home-${activeRunId}`"
-            :workspace-id="activeRunId"
-          />
-        </template>
         <template v-else>
-          <div class="pipeline-nav">
-            <router-link :to="`/business/${activeRunId}`">项目主页</router-link>
-          </div>
-          <V3WorkspaceView
-            :key="activeRunId"
-            :run-id="activeRunId"
+          <WorkspaceSubNav
+            :workspace-id="activeRunId"
+            :mode="viewMode"
+            :chapter-hint="chapterNavHint"
           />
+          <div class="workspace-body">
+            <ChapterWorkspaceView
+              v-if="viewMode === 'chapter'"
+              :key="`${activeRunId}:${chapterId}`"
+              :workspace-id="activeRunId"
+              :chapter-id="chapterId"
+            />
+            <ProjectHomeView
+              v-else-if="viewMode === 'home'"
+              :key="`home-${activeRunId}`"
+              :workspace-id="activeRunId"
+            />
+            <V3WorkspaceView
+              v-else
+              :key="`pipeline-${activeRunId}`"
+              :run-id="activeRunId"
+            />
+          </div>
         </template>
       </div>
     </div>
@@ -66,6 +69,7 @@
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkspaceSidebar from '../components/WorkspaceSidebar.vue'
+import WorkspaceSubNav from '../components/WorkspaceSubNav.vue'
 import TopBar from '../components/TopBar.vue'
 import CreateWorkspaceDialog from '../components/CreateWorkspaceDialog.vue'
 import SettingsDialog from '../components/SettingsDialog.vue'
@@ -86,10 +90,15 @@ const sidebarCollapsed = ref(false)
 const chapterId = computed(() => String(route.params.chapterId || ''))
 const viewMode = computed(() => {
   if (route.name === 'ChapterWorkspace' && chapterId.value) return 'chapter'
-  if (route.name === 'ProjectHome') return 'home'
   if (route.name === 'WorkspacePipeline') return 'pipeline'
-  // default list selection uses pipeline shell for backward compatibility
-  return activeRunId.value ? 'pipeline' : 'empty'
+  // Project home is default for workspace deep links and bare /business selection.
+  if (route.name === 'ProjectHome' || route.name === 'Business') return activeRunId.value ? 'home' : 'empty'
+  return activeRunId.value ? 'home' : 'empty'
+})
+
+const chapterNavHint = computed(() => {
+  if (viewMode.value !== 'chapter') return ''
+  return chapterId.value ? `当前章节：${chapterId.value}` : ''
 })
 
 const activeRun = computed(() => {
@@ -98,7 +107,14 @@ const activeRun = computed(() => {
 
 function syncActiveFromRoute() {
   const fromRoute = String(route.params.workspaceId || '').trim()
-  if (fromRoute) activeRunId.value = fromRoute
+  if (fromRoute) {
+    activeRunId.value = fromRoute
+    return
+  }
+  // Bare /business keeps current selection if still present.
+  if (activeRunId.value && runs.value.some(item => item.id === activeRunId.value)) {
+    return
+  }
 }
 
 async function loadRuns() {
@@ -110,6 +126,9 @@ async function loadRuns() {
       syncActiveFromRoute()
       if (!activeRunId.value && runs.value.length) {
         activeRunId.value = runs.value[0].id
+        if (route.name === 'Business' && !route.params.workspaceId) {
+          router.replace(`/business/${activeRunId.value}`)
+        }
       }
     }
   } catch (e) {
@@ -120,9 +139,10 @@ async function loadRuns() {
 }
 
 function handleSelectRun(runId) {
-  if (runId === activeRunId.value && route.name === 'WorkspacePipeline') return
   activeRunId.value = runId
-  router.push(`/business/${runId}/pipeline`)
+  // Selecting a workspace opens the project home (chapters / formal status).
+  if (route.params.workspaceId === runId && route.name === 'ProjectHome') return
+  router.push(`/business/${runId}`)
 }
 
 function onWorkspaceCreated(runId) {
@@ -133,7 +153,7 @@ function onWorkspaceCreated(runId) {
 }
 
 function onSettingsSaved() {
-  // 配置已写入 .env，下次调用大模型时生效，无需额外操作
+  // 配置已写入 .env / 流程设置；章节 H2 开关对新 revision 生效
 }
 
 watch(() => route.fullPath, syncActiveFromRoute)
@@ -142,10 +162,16 @@ onMounted(loadRuns)
 </script>
 
 <style scoped>
-.pipeline-nav {
-  padding: 8px 12px;
-  border-bottom: 1px solid #e2e8f0;
-  font-size: 13px;
+.workspace-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
-.pipeline-nav a { color: #2563eb; text-decoration: none; }
+.main-content {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
 </style>
