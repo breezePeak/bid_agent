@@ -415,6 +415,11 @@ async def delete_llm_model(request: Request) -> JSONResponse:
 
 @app.post("/api/llm-settings/test")
 async def test_llm_settings(request: Request) -> JSONResponse:
+    """Probe must never surface as a bare 500 to the settings UI.
+
+    Connectivity failures (bad key, Cloudflare 1010, timeout) are returned as
+    HTTP 200 with ``ok: false`` and a human-readable message.
+    """
     try:
         body = await request.json()
     except Exception:
@@ -422,10 +427,19 @@ async def test_llm_settings(request: Request) -> JSONResponse:
     if not isinstance(body, dict):
         body = {}
     raw_model = body.get("model") if isinstance(body.get("model"), dict) else None
-    model = SETTINGS.resolve_probe_model(
-        raw_model,
-        use_active=bool(body.get("use_active")),
-    )
+    try:
+        model = SETTINGS.resolve_probe_model(
+            raw_model,
+            use_active=bool(body.get("use_active")),
+        )
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"无法解析模型配置: {exc}",
+            },
+            status_code=400,
+        )
     if not model:
         return JSONResponse(
             {"ok": False, "message": "没有可测试的模型，请先填写配置。"},
@@ -435,7 +449,24 @@ async def test_llm_settings(request: Request) -> JSONResponse:
         result = await run_in_threadpool(SETTINGS.probe_model, model)
     except ValueError as exc:
         return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
-    return JSONResponse(result)
+    except Exception as exc:
+        return JSONResponse(
+            {
+                "ok": False,
+                "message": f"测试过程异常: {type(exc).__name__}: {exc}",
+                "model": str(model.get("model") or ""),
+                "provider": str(model.get("provider") or ""),
+                "base_url": str(model.get("base_url") or ""),
+            },
+            status_code=200,
+        )
+    if not isinstance(result, dict):
+        return JSONResponse(
+            {"ok": False, "message": "测试返回格式异常。"},
+            status_code=200,
+        )
+    # Always 200 for structured probe outcomes so axios surfaces data.message.
+    return JSONResponse(result, status_code=200)
 
 
 @app.get("/api/flow-settings")

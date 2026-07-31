@@ -635,6 +635,14 @@ class SettingsService:
             os.environ.update(env_updates)
             return current
 
+    # Keep in sync with llm_client so mid-tier proxies behind Cloudflare do not
+    # reject the settings probe with browser-signature bans (e.g. CF 1010).
+    _PROBE_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/137.0.0.0 Safari/537.36"
+    )
+
     def probe_model(self, raw_model: dict[str, Any]) -> dict[str, Any]:
         model = self.normalize_model(raw_model)
         self._validate_model(model)
@@ -653,6 +661,12 @@ class SettingsService:
                 "Base URL 必须是无用户名和密码的有效 http(s) 地址。"
             )
 
+        common_headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Connection": "close",
+            "User-Agent": self._PROBE_USER_AGENT,
+        }
         if provider == "anthropic":
             if base_url.endswith("/messages"):
                 endpoint = base_url
@@ -668,11 +682,14 @@ class SettingsService:
                 "system": "You are a connectivity probe. Reply briefly.",
             }
             headers = {
+                **common_headers,
                 "x-api-key": str(model["api_key"]),
                 "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
             }
+            # Some OpenAI-compatible gateways still want bearer for anthropic-shaped routes.
+            api_key = str(model["api_key"] or "")
+            if api_key and not api_key.startswith("sk-ant"):
+                headers["Authorization"] = f"Bearer {api_key}"
         else:
             endpoint = (
                 base_url
@@ -682,6 +699,7 @@ class SettingsService:
             payload = {
                 "model": model_id,
                 "temperature": 0,
+                "max_tokens": 64,
                 "messages": [
                     {
                         "role": "system",
@@ -691,9 +709,8 @@ class SettingsService:
                 ],
             }
             headers = {
+                **common_headers,
                 "Authorization": f"Bearer {model['api_key']}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
             }
 
         context = (
@@ -758,9 +775,18 @@ class SettingsService:
                 "elapsed_ms": elapsed_ms,
             }
         except urllib.error.HTTPError as exc:
+            detail = self._probe_http_error_detail(exc)
             return {
                 "ok": False,
-                "message": f"连接失败: HTTP {exc.code} {exc.reason}",
+                "message": detail,
+                "model": model_id,
+                "provider": provider,
+                "base_url": base_url,
+            }
+        except TimeoutError:
+            return {
+                "ok": False,
+                "message": f"连接超时（{timeout}s）。请检查 Base URL、网络或增大超时。",
                 "model": model_id,
                 "provider": provider,
                 "base_url": base_url,
@@ -768,11 +794,43 @@ class SettingsService:
         except Exception as exc:
             return {
                 "ok": False,
-                "message": f"连接失败: {type(exc).__name__}",
+                "message": f"连接失败: {type(exc).__name__}: {exc}",
                 "model": model_id,
                 "provider": provider,
                 "base_url": base_url,
             }
+
+    @classmethod
+    def _probe_http_error_detail(cls, exc: urllib.error.HTTPError) -> str:
+        body = ""
+        try:
+            body = exc.read(4_096).decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = ""
+        snippet = body[:280].replace("\n", " ") if body else ""
+        code = int(getattr(exc, "code", 0) or 0)
+        reason = str(getattr(exc, "reason", "") or "")
+        lower = snippet.lower()
+        if code == 401:
+            hint = "API Key 无效或未授权。"
+        elif code == 403 and ("1010" in snippet or "cloudflare" in lower):
+            hint = (
+                "网关/Cloudflare 拒绝了探测请求（常见 error 1010）。"
+                "已使用与正式调用相同的浏览器 UA；仍失败时请检查 Key、IP 白名单或中转站风控。"
+            )
+        elif code == 403:
+            hint = "无权限访问该模型，请检查 API Key 与模型 ID。"
+        elif code == 404:
+            hint = "接口路径或模型 ID 不存在，请核对 Base URL（通常以 /v1 结尾）与模型名。"
+        elif code == 429:
+            hint = "请求过于频繁或额度不足。"
+        elif code >= 500:
+            hint = "上游服务异常，请稍后重试或更换中转。"
+        else:
+            hint = "请检查 Base URL、模型 ID 与 API Key。"
+        if snippet:
+            return f"连接失败: HTTP {code} {reason}。{hint} 上游返回: {snippet}"
+        return f"连接失败: HTTP {code} {reason}。{hint}"
 
     @staticmethod
     def _probe_response_text(parsed: Any, provider: str) -> str:

@@ -448,7 +448,17 @@ async function handleTest() {
     }
   } catch (e) {
     testOk.value = false
-    const msg = e.response?.data?.message || e.message || '测试请求失败'
+    const status = e?.response?.status
+    const data = e?.response?.data
+    const serverMsg = data?.message || data?.error?.message || data?.detail
+    let msg = serverMsg || e.message || '测试请求失败'
+    if (!serverMsg && status) {
+      msg = `测试请求失败（HTTP ${status}）。请确认后端已重启并查看服务日志。`
+    }
+    // Avoid showing bare axios strings like "Request failed with status code 500".
+    if (/^Request failed with status code \d+$/i.test(String(msg))) {
+      msg = `测试请求失败（HTTP ${status || '?'}）。后端未返回可读错误，请重启后端后再试。`
+    }
     testResult.value = msg
     error.value = msg
   } finally {
