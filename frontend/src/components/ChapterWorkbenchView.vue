@@ -1,5 +1,5 @@
 <template>
-  <div class="workbench">
+  <div class="workbench" :style="workbenchStyle" :class="{ 'is-dragging': isDragging }">
     <!-- 左：目录结构 -->
     <aside class="pane pane-tree">
       <header class="pane-header">
@@ -11,10 +11,16 @@
       </header>
 
       <div class="tree-toolbar">
-        <button type="button" class="btn btn-sm btn-primary" :disabled="busy || !selectedId" @click="materializeSelected">
+        <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="openCreateModal">
+          + 新建章节
+        </button>
+        <button type="button" class="btn btn-sm" :disabled="busy || !selectedId" @click="materializeSelected">
           打开/物化
         </button>
         <button type="button" class="btn btn-sm" :disabled="busy" @click="composeCheck">检查组装</button>
+        <button type="button" class="btn btn-sm" :disabled="busy || !treeItems.length" @click="exportMarkdownOutline">
+          导出 MD
+        </button>
       </div>
 
       <div v-if="listError" class="banner error">{{ listError }}</div>
@@ -26,24 +32,76 @@
       </div>
 
       <nav class="tree-list" aria-label="章节目录">
-        <button
-          v-for="item in treeItems"
+        <div
+          v-for="(item, idx) in treeItems"
           :key="item.chapter_id"
-          type="button"
           class="tree-item"
           :class="{
             active: item.chapter_id === selectedId,
             archived: item.status === 'archived',
+            editing: editingChapterId === item.chapter_id
           }"
           :style="{ paddingLeft: `${12 + (item.depth || 0) * 14}px` }"
           @click="selectChapter(item.chapter_id)"
         >
           <span class="tree-dot" :class="statusClass(item)" />
-          <span class="tree-title">{{ item.title || item.chapter_id }}</span>
-          <span class="tree-meta">{{ shortStatus(item) }}</span>
-        </button>
+
+          <template v-if="editingChapterId === item.chapter_id">
+            <input
+              ref="editInputRef"
+              v-model="editingTitle"
+              class="tree-item-input"
+              @keydown.enter.prevent="saveRenameChapter(item)"
+              @keydown.esc.prevent="cancelRename"
+              @click.stop
+              @blur="saveRenameChapter(item)"
+            />
+          </template>
+          <template v-else>
+            <span class="tree-title" :title="item.title || item.chapter_id" @dblclick="startRenameChapter(item, $event)">
+              {{ item.title || item.chapter_id }}
+            </span>
+            <span class="tree-meta">{{ shortStatus(item) }}</span>
+            <div class="tree-item-actions" @click.stop>
+              <button
+                type="button"
+                class="icon-action-btn"
+                title="修改标题"
+                @click="startRenameChapter(item, $event)"
+              >
+                ✏️
+              </button>
+              <button
+                type="button"
+                class="icon-action-btn"
+                title="向上移动"
+                :disabled="idx === 0"
+                @click="handleMoveChapter(item, 'up', $event)"
+              >
+                ⬆️
+              </button>
+              <button
+                type="button"
+                class="icon-action-btn"
+                title="向下移动"
+                :disabled="idx === treeItems.length - 1"
+                @click="handleMoveChapter(item, 'down', $event)"
+              >
+                ⬇️
+              </button>
+              <button
+                type="button"
+                class="icon-action-btn danger"
+                title="归档/删除章节"
+                @click="handleArchiveChapter(item, $event)"
+              >
+                🗑️
+              </button>
+            </div>
+          </template>
+        </div>
         <p v-if="!items.length && !busy" class="empty-hint">
-          暂无目录。请先在「流水线」完成规划并晋级 Blueprint。
+          暂无目录。请先在「流水线」完成规划并晋级 Blueprint 或使用上方「+ 新建章节」。
         </p>
       </nav>
 
@@ -55,6 +113,11 @@
         </small>
       </div>
     </aside>
+
+    <!-- 左拖拽分割线 -->
+    <div class="resizer resizer-left" title="拖动调整目录栏宽度" @mousedown="startDragLeft">
+      <div class="resizer-handle"></div>
+    </div>
 
     <!-- 中：文档生成 -->
     <main class="pane pane-doc">
@@ -73,10 +136,11 @@
           <button
             type="button"
             class="btn btn-primary"
-            :disabled="busy || !selectedId || !chapterDetail?.materialized"
+            :disabled="busy || !selectedId || !chapterDetail?.materialized || !selectedIsLeaf"
+            :title="selectedIsLeaf ? '生成当前叶子章节正文' : '目录父节点只保留标题，不生成正文'"
             @click="generateDraft"
           >
-            {{ busyAction === 'draft' ? '生成中…' : '生成草稿' }}
+            {{ busyAction === 'draft' ? '生成中…' : (selectedIsLeaf ? '生成草稿' : '目录节点') }}
           </button>
           <button
             type="button"
@@ -95,56 +159,170 @@
       <div v-if="actionError" class="banner error">{{ actionError }}</div>
       <div v-if="actionMessage" class="banner ok">{{ actionMessage }}</div>
 
-      <div class="doc-body">
-        <div v-if="!selectedId" class="placeholder">
-          <h4>从左侧选择章节</h4>
-          <p>中间区域用于生成与编辑正文；右侧可查看上下文并与 Agent 对话。</p>
+      <div ref="docBodyEl" class="chapter-doc-body">
+        <div class="document-stage">
+          <article
+            class="document-paper"
+            :aria-busy="detailLoading"
+            aria-label="A4 正文编辑页"
+          >
+            <header v-if="selectedId" class="paper-heading">
+              <h1>{{ selectedChapter?.title || selectedId || '未命名章节' }}</h1>
+            </header>
+
+            <div v-if="!selectedId" class="document-state">
+              <h4>从左侧选择章节</h4>
+              <p>中间区域用于生成与编辑正文；右侧是本章专属对话与上下文（各章历史互不混用）。</p>
+            </div>
+            <div
+              v-else-if="detailLoading"
+              class="document-state document-loading"
+              role="status"
+              aria-live="polite"
+            >
+              <span class="document-loading-mark" aria-hidden="true" />
+              <h4>正在加载章节</h4>
+              <p>正在把本章内容放入当前 Word 页面…</p>
+            </div>
+            <div v-else-if="detailError" class="document-state document-error" role="alert">
+              <h4>章节加载失败</h4>
+              <p>{{ detailError }}</p>
+              <button type="button" class="btn" :disabled="busy" @click="loadChapterDetail({ force: true })">重新加载</button>
+            </div>
+            <div v-else-if="!selectedIsLeaf" class="document-state">
+              <h4>该章节是目录父节点</h4>
+              <p>父节点只保留标题和层级，不写正文。请从左侧选择其下级叶子章节生成内容。</p>
+            </div>
+            <div v-else-if="!chapterDetail?.materialized" class="document-state">
+              <h4>章节尚未物化</h4>
+              <p>点击左上角「打开/物化」，从 Blueprint 创建章节 Workspace。</p>
+              <button type="button" class="btn btn-primary" :disabled="busy" @click="materializeSelected">打开/物化</button>
+            </div>
+            <template v-else>
+              <section v-if="researchStatus" class="research-status" aria-live="polite">
+                <strong>{{ researchStatus }}</strong>
+                <ul v-if="researchSources.length">
+                  <li v-for="source in researchSources" :key="source.evidence_id || source.source_url">
+                    <span class="source-tier" :class="source.relevance_tier || 'general_reference'">
+                      {{ relevanceTierLabel(source.relevance_tier) }}
+                    </span>
+                    <a :href="source.source_url" target="_blank" rel="noreferrer">{{ source.title || source.source_url }}</a>
+                    <span v-if="source.publisher"> · {{ source.publisher }}</span>
+                  </li>
+                </ul>
+              </section>
+              <ContentBlockEditor
+                ref="editorRef"
+                :blocks="editorBlocks"
+                :busy="busy"
+                :streaming="streamingDraft"
+                :stream-text="streamText"
+                :remote-hint="remoteHint"
+                @save="onSaveBlocks"
+              />
+            </template>
+          </article>
         </div>
-        <div v-else-if="detailLoading" class="placeholder">加载章节…</div>
-        <div v-else-if="!chapterDetail?.materialized" class="placeholder">
-          <h4>章节尚未物化</h4>
-          <p>点击左上角「打开/物化」，从 Blueprint 创建章节 Workspace。</p>
-          <button type="button" class="btn btn-primary" :disabled="busy" @click="materializeSelected">打开/物化</button>
-        </div>
-        <ContentBlockEditor
-          v-else
-          ref="editorRef"
-          :blocks="editorBlocks"
-          :busy="busy"
-          :remote-hint="remoteHint"
-          @save="onSaveBlocks"
-        />
       </div>
     </main>
+
+    <!-- 右拖拽分割线 -->
+    <div class="resizer resizer-right" title="拖动调整对话栏宽度" @mousedown="startDragRight">
+      <div class="resizer-handle"></div>
+    </div>
 
     <!-- 右：聊天 + 上下文 -->
     <aside class="pane pane-chat">
       <header class="pane-header">
         <div>
-          <p class="kicker">Agent</p>
+          <p class="kicker">Agent · 本章专属</p>
           <h3>聊天与上下文</h3>
+          <p v-if="selectedChapter" class="chat-chapter-label">
+            {{ selectedChapter.title || selectedId }}
+          </p>
+          <p v-else class="chat-chapter-label muted">请先选择左侧章节</p>
         </div>
       </header>
 
       <div class="chat-tabs">
-        <button type="button" class="tab" :class="{ active: rightTab === 'chat' }" @click="rightTab = 'chat'">对话</button>
+        <button type="button" class="tab" :class="{ active: rightTab === 'chat' }" @click="rightTab = 'chat'">本章对话</button>
         <button type="button" class="tab" :class="{ active: rightTab === 'context' }" @click="rightTab = 'context'">上下文</button>
       </div>
 
       <div v-show="rightTab === 'context'" class="context-panel">
-        <div v-if="!contextItems.length" class="empty-hint">当前章节暂无 Context。物化后会从 Blueprint 种子生成。</div>
-        <article v-for="item in contextItems" :key="item.item_id" class="context-card">
-          <div class="context-kind">{{ item.kind }}</div>
-          <div class="context-title">{{ item.title }}</div>
-          <div class="context-body">{{ item.body }}</div>
-          <div class="context-src">{{ item.source }}</div>
-        </article>
+        <section class="context-section shared-context">
+          <header class="context-section-header">
+            <div>
+              <strong>公共项目事实</strong>
+              <small>所有章节继承 · 只读</small>
+            </div>
+            <span v-if="globalProjectContext.global_context_revision" class="context-version">
+              r{{ globalProjectContext.global_context_revision }}
+            </span>
+          </header>
+          <div v-if="!globalContextReady" class="context-warning">
+            公共项目事实尚未就绪，系统会阻止生成，不能以空上下文继续写作。
+          </div>
+          <template v-else>
+            <dl class="identity-grid">
+              <template v-for="item in globalIdentityRows" :key="item.label">
+                <dt>{{ item.label }}</dt>
+                <dd>{{ item.value }}</dd>
+              </template>
+            </dl>
+            <details v-for="group in globalFactGroups" :key="group.key" class="fact-group" :open="group.key === 'scope' || group.key === 'work_packages'">
+              <summary>{{ group.label }} <span>{{ group.items.length }}</span></summary>
+              <ul>
+                <li v-for="(fact, index) in group.items" :key="`${group.key}-${index}`">{{ fact }}</li>
+              </ul>
+            </details>
+            <p class="context-note">
+              已确认详细事实 {{ globalProjectContext.confirmed_facts?.length || 0 }} 条。共同事实只能在项目级统一更新，本章不能覆盖。
+            </p>
+            <button type="button" class="context-project-link" @click="openProjectContextSource">
+              修改公共事实：返回项目流水线
+            </button>
+          </template>
+        </section>
+
+        <section class="context-section chapter-only-context">
+          <header class="context-section-header">
+            <div>
+              <strong>本章专属要求</strong>
+              <small>追加到公共事实之上</small>
+            </div>
+            <span class="context-version">r{{ chapterContextRef.chapter_context_revision || 0 }}</span>
+          </header>
+          <div v-if="!chapterRequirements.length && !chapterScoringRequirements.length && !contextItems.length" class="empty-hint">
+            当前章节暂无专属要求。物化后会从 Blueprint 生成。
+          </div>
+          <article v-for="item in chapterRequirements" :key="item.requirement_id" class="context-card requirement-card">
+            <div class="context-kind">招标要求 · {{ item.requirement_id }}</div>
+            <div class="context-body">{{ item.text }}</div>
+          </article>
+          <article v-for="item in chapterScoringRequirements" :key="item.score_point_id" class="context-card scoring-card">
+            <div class="context-kind">评分要求 · {{ item.score_point_id }}</div>
+            <div class="context-title">{{ item.title }}</div>
+            <div class="context-body">{{ item.response_expectation }}</div>
+          </article>
+          <article v-for="item in contextItems" :key="item.item_id" class="context-card">
+            <div class="context-kind">{{ item.kind }}</div>
+            <div class="context-title">{{ item.title }}</div>
+            <div class="context-body">{{ item.body }}</div>
+            <div class="context-src">{{ item.source }}</div>
+          </article>
+        </section>
       </div>
 
       <div v-show="rightTab === 'chat'" class="chat-panel">
         <div class="chat-history" ref="chatHistoryEl">
-          <div v-if="!chatTurns.length" class="empty-hint">
-            可询问当前章节如何写、还缺什么材料。Agent 会结合右侧上下文与工作区状态回答。
+          <div v-if="!selectedId" class="empty-hint">
+            选择左侧章节后，将打开该章独立对话；历史不会与其他章节混用。
+          </div>
+          <div v-else-if="chatLoading" class="empty-hint">正在加载本章对话…</div>
+          <div v-else-if="!chatTurns.length" class="empty-hint">
+            这是「{{ selectedChapter?.title || selectedId }}」的专属对话。
+            可询问本章怎么写、还缺什么材料；Agent 只结合本章上下文与公共项目事实回答。
           </div>
           <article
             v-for="turn in chatTurns"
@@ -160,13 +338,16 @@
           <textarea
             v-model="chatInput"
             rows="3"
-            placeholder="例如：结合评分要求，这一章应强调哪些交付物？"
+            :disabled="!selectedId || asking"
+            :placeholder="selectedId
+              ? '例如：结合评分要求，这一章应强调哪些交付物？'
+              : '请先选择章节'"
             @keydown.ctrl.enter.prevent="sendChat"
           />
           <button
             type="button"
             class="btn btn-primary"
-            :disabled="asking || !chatInput.trim()"
+            :disabled="!selectedId || asking || !chatInput.trim()"
             @click="sendChat"
           >
             {{ asking ? '思考中…' : '发送' }}
@@ -184,20 +365,53 @@
       @restore="onRestore"
       @approve="onApproveRevision"
     />
+
+    <!-- 新建章节 Modal -->
+    <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
+      <div class="modal-card">
+        <header class="modal-header">
+          <h3>新建章节</h3>
+          <button type="button" class="close-btn" @click="showCreateModal = false">&times;</button>
+        </header>
+        <div class="modal-body">
+          <div class="form-group">
+            <label>章节 ID</label>
+            <input v-model="newChapterId" type="text" class="form-control" placeholder="如 chapter_03" />
+            <small class="form-hint">英文字母、数字或下划线</small>
+          </div>
+          <div class="form-group">
+            <label>章节标题</label>
+            <input v-model="newChapterTitle" type="text" class="form-control" placeholder="如 3.1 项目管理方案" />
+          </div>
+        </div>
+        <footer class="modal-footer">
+          <button type="button" class="btn" @click="showCreateModal = false">取消</button>
+          <button type="button" class="btn btn-primary" :disabled="busy || !newChapterId.trim()" @click="handleCreateChapter">
+            确认新建
+          </button>
+        </footer>
+      </div>
+    </div>
   </div>
 </template>
 
 <script setup>
+defineOptions({ name: 'ChapterWorkbenchView' })
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  chatV3,
+  chatChapterV3,
+  fetchChapterChatHistory,
   fetchChapter,
   fetchChapterRevisions,
   fetchChapters,
   fetchDocumentCompose,
   fetchSnapshot,
   submitV3Command,
+  createChapter,
+  saveChapterMetadata,
+  archiveChapter,
+  streamChapterDraft,
 } from '../api'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
@@ -209,36 +423,293 @@ const props = defineProps({
 
 const router = useRouter()
 
+const leftWidth = ref(480)
+const rightWidth = ref(520)
+const isDragging = ref(false)
+
+const workbenchStyle = computed(() => ({
+  gridTemplateColumns: `${leftWidth.value}px 6px minmax(0, 1fr) 6px ${rightWidth.value}px`,
+}))
+
+function startDragLeft(e) {
+  e.preventDefault()
+  isDragging.value = true
+  const startX = e.clientX
+  const startWidth = leftWidth.value
+
+  const onMouseMove = (moveEvent) => {
+    const deltaX = moveEvent.clientX - startX
+    const newWidth = Math.min(Math.max(startWidth + deltaX, 160), 480)
+    leftWidth.value = newWidth
+  }
+
+  const onMouseUp = () => {
+    isDragging.value = false
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+  }
+
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+}
+
+function startDragRight(e) {
+  e.preventDefault()
+  isDragging.value = true
+  const startX = e.clientX
+  const startWidth = rightWidth.value
+
+  const onMouseMove = (moveEvent) => {
+    const deltaX = startX - moveEvent.clientX
+    const newWidth = Math.min(Math.max(startWidth + deltaX, 220), 520)
+    rightWidth.value = newWidth
+  }
+
+  const onMouseUp = () => {
+    isDragging.value = false
+    document.removeEventListener('mousemove', onMouseMove)
+    document.removeEventListener('mouseup', onMouseUp)
+  }
+
+  document.addEventListener('mousemove', onMouseMove)
+  document.addEventListener('mouseup', onMouseUp)
+}
+
 const items = ref([])
 const selectedId = ref('')
 const chapterDetail = ref(null)
 const revisions = ref([])
 const composeResult = ref(null)
 const workspaceRevision = ref(0)
+const globalProjectContext = ref({})
 
 const busy = ref(false)
 const busyAction = ref('')
 const detailLoading = ref(false)
+const detailError = ref('')
 const listError = ref('')
 const actionError = ref('')
 const actionMessage = ref('')
 const remoteHint = ref('')
 const showRevisions = ref(false)
+const streamingDraft = ref(false)
+const streamText = ref('')
+const streamOperationId = ref('')
+const researchStatus = ref('')
+const researchSources = ref([])
+const docBodyEl = ref(null)
+let draftAbortController = null
+
+const showCreateModal = ref(false)
+const newChapterId = ref('')
+const newChapterTitle = ref('')
+
+const editingChapterId = ref('')
+const editingTitle = ref('')
+const editInputRef = ref(null)
+
+function openCreateModal() {
+  const nextNum = (items.value.length + 1).toString().padStart(2, '0')
+  newChapterId.value = `chapter_${nextNum}`
+  newChapterTitle.value = `${items.value.length + 1}.1 新增章节`
+  showCreateModal.value = true
+}
+
+async function handleCreateChapter() {
+  const cid = newChapterId.value.trim()
+  const title = newChapterTitle.value.trim()
+  if (!cid) {
+    actionError.value = '章节ID不能为空'
+    return
+  }
+  busy.value = true
+  actionError.value = ''
+  try {
+    const { data } = await createChapter(props.workspaceId, cid, title)
+    if (!data.ok) throw new Error(data.message || '创建章节失败')
+    showCreateModal.value = false
+    await loadChapterList()
+    selectChapter(cid)
+    actionMessage.value = `章节 ${cid} 创建成功`
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+function startRenameChapter(item, e) {
+  if (e) e.stopPropagation()
+  editingChapterId.value = item.chapter_id
+  editingTitle.value = item.title || item.chapter_id
+  nextTick(() => {
+    if (editInputRef.value) {
+      if (Array.isArray(editInputRef.value)) {
+        editInputRef.value[0]?.focus()
+      } else {
+        editInputRef.value?.focus()
+      }
+    }
+  })
+}
+
+async function saveRenameChapter(item) {
+  if (!editingChapterId.value) return
+  const title = editingTitle.value.trim()
+  if (!title) {
+    cancelRename()
+    return
+  }
+  const cid = item.chapter_id
+  editingChapterId.value = ''
+  if (title === (item.title || item.chapter_id)) return
+
+  busy.value = true
+  try {
+    const { data } = await saveChapterMetadata(props.workspaceId, cid, { title })
+    if (!data.ok) throw new Error(data.message || '修改章节标题失败')
+    await loadChapterList()
+    if (selectedId.value === cid) {
+      await loadChapterDetail({ force: true })
+    }
+    actionMessage.value = `章节标题已更新`
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+function cancelRename() {
+  editingChapterId.value = ''
+  editingTitle.value = ''
+}
+
+async function handleArchiveChapter(item, e) {
+  if (e) e.stopPropagation()
+  const name = item.title || item.chapter_id
+  if (!confirm(`确定要归档/删除章节 "${name}" 吗？`)) return
+  busy.value = true
+  try {
+    const { data } = await archiveChapter(props.workspaceId, item.chapter_id)
+    if (!data.ok) throw new Error(data.message || '归档章节失败')
+    await loadChapterList()
+    if (selectedId.value === item.chapter_id) {
+      const remaining = items.value.find(i => i.status !== 'archived')
+      if (remaining) selectChapter(remaining.chapter_id)
+    }
+    actionMessage.value = `章节 ${name} 已归档`
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  } finally {
+    busy.value = false
+  }
+}
+
+async function handleMoveChapter(item, direction, e) {
+  if (e) e.stopPropagation()
+  const currentIndex = items.value.findIndex(i => i.chapter_id === item.chapter_id)
+  if (currentIndex === -1) return
+  const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+  if (targetIndex < 0 || targetIndex >= items.value.length) return
+
+  const currentOrder = Number(item.order || currentIndex + 1)
+  const targetItem = items.value[targetIndex]
+  const targetOrder = Number(targetItem.order || targetIndex + 1)
+
+  busy.value = true
+  try {
+    await saveChapterMetadata(props.workspaceId, item.chapter_id, { order: targetOrder })
+    await saveChapterMetadata(props.workspaceId, targetItem.chapter_id, { order: currentOrder })
+    await loadChapterList()
+  } catch (e) {
+    actionError.value = '调整排序失败: ' + (e.message || String(e))
+  } finally {
+    busy.value = false
+  }
+}
+
+function exportMarkdownOutline() {
+  if (!treeItems.value || !treeItems.value.length) return
+  let mdText = '# 章节目录\n\n'
+  for (const item of treeItems.value) {
+    const depth = item.depth || 0
+    const indent = '  '.repeat(depth)
+    const title = item.title || item.chapter_id
+    mdText += `${indent}- ${title}\n`
+  }
+  const blob = new Blob([mdText], { type: 'text/markdown;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `章节目录_${props.workspaceId || 'outline'}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
 
 const rightTab = ref('chat')
 const chatInput = ref('')
 const chatTurns = ref([])
+const chatLoading = ref(false)
 const asking = ref(false)
 const chatHistoryEl = ref(null)
 const editorRef = ref(null)
+/** In-session cache of chapter dialogue; server history remains source of truth. */
+const chatByChapter = new Map()
+let chatLoadToken = 0
 
 let pollTimer = null
 
 const selectedChapter = computed(() =>
   items.value.find(item => item.chapter_id === selectedId.value) || null,
 )
+const selectedIsLeaf = computed(() => {
+  if (!selectedId.value) return false
+  if (typeof chapterDetail.value?.is_leaf === 'boolean') return chapterDetail.value.is_leaf
+  if (typeof selectedChapter.value?.is_leaf === 'boolean') return selectedChapter.value.is_leaf
+  return !items.value.some(item => item.parent_chapter_id === selectedId.value)
+})
 const editorBlocks = computed(() => chapterDetail.value?.content?.blocks || [])
 const contextItems = computed(() => chapterDetail.value?.context?.items || [])
+const chapterRequirements = computed(() => chapterDetail.value?.chapter_requirements || [])
+const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_scoring_requirements || [])
+const chapterContextRef = computed(() => chapterDetail.value?.chapter_context_ref || {})
+const globalContextReady = computed(() => Boolean(
+  globalProjectContext.value?.global_context_id
+  && Number(globalProjectContext.value?.global_context_revision || 0) > 0
+  && globalProjectContext.value?.global_context_hash
+  && Object.keys(globalProjectContext.value?.identity || {}).length,
+))
+const globalIdentityRows = computed(() => {
+  const identity = globalProjectContext.value?.identity || {}
+  const aliases = [
+    ['项目名称', ['project_name', '项目名称', 'project', '项目']],
+    ['项目编号', ['project_no', 'project_number', '项目编号', '采购编号', '招标编号']],
+    ['采购人', ['purchaser', 'procurer', 'buyer', '采购人', '招标人', '采购单位']],
+    ['标包', ['package', 'lot', '标包', '包号', '包件', '标段']],
+    ['项目地点', ['location', 'project_location', '项目地点', '服务地点']],
+  ]
+  return aliases
+    .map(([label, keys]) => ({ label, value: keys.map(key => identity[key]).find(Boolean) || '' }))
+    .filter(item => item.value)
+})
+const globalFactGroups = computed(() => [
+  ['background', '项目背景'],
+  ['goals', '建设目标'],
+  ['scope', '采购范围'],
+  ['work_packages', '核心工作任务'],
+  ['inputs', '输入数据'],
+  ['processing', '处理任务'],
+  ['outputs', '输出成果'],
+  ['deliverables', '交付物'],
+  ['acceptance_conditions', '验收条件'],
+  ['milestones', '服务期限与进度'],
+  ['constraints', '共同约束'],
+].map(([key, label]) => ({
+  key,
+  label,
+  items: Array.isArray(globalProjectContext.value?.[key]) ? globalProjectContext.value[key] : [],
+})).filter(group => group.items.length))
 const materializedCount = computed(() =>
   items.value.filter(item => item.materialized || item.status === 'active').length,
 )
@@ -248,7 +719,10 @@ const formalCount = computed(() =>
 const canApprove = computed(() => {
   const head = Number(chapterDetail.value?.head_content_revision || 0)
   const formal = Number(chapterDetail.value?.formal_content_revision || 0)
-  return Boolean(chapterDetail.value?.materialized) && head > 0 && head !== formal
+  return selectedIsLeaf.value
+    && Boolean(chapterDetail.value?.materialized)
+    && head > 0
+    && head !== formal
 })
 
 const treeItems = computed(() => {
@@ -284,10 +758,23 @@ function statusClass(item) {
   return 'projected'
 }
 
+function relevanceTierLabel(tier) {
+  return {
+    project_direct: '本项目资料',
+    similar_project: '同类项目资料',
+    industry_standard: '行业标准',
+  }[String(tier || '')] || '公开线索'
+}
+
+function openProjectContextSource() {
+  router.push(`/business/${encodeURIComponent(props.workspaceId)}/pipeline`).catch(() => {})
+}
+
 async function refreshSnapshotRevision() {
   const snap = await fetchSnapshot(props.workspaceId)
   if (snap.data?.ok) {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
+    globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
   }
 }
 
@@ -310,9 +797,11 @@ async function loadChapterList() {
 }
 
 async function loadChapterDetail(options = {}) {
-  const { force = true } = options
+  const { force = true, background = false } = options
+  if (background && streamingDraft.value) return
   if (!selectedId.value) {
     chapterDetail.value = null
+    detailError.value = ''
     return
   }
   const dirty = editorRef.value?.dirty
@@ -320,18 +809,30 @@ async function loadChapterDetail(options = {}) {
     remoteHint.value = '远端已更新；本地有未保存编辑，未覆盖草稿'
     return
   }
-  detailLoading.value = true
-  actionError.value = ''
+  const requestedChapterId = selectedId.value
+  if (!background || !chapterDetail.value) detailLoading.value = true
+  if (!background) {
+    actionError.value = ''
+    detailError.value = ''
+  }
   try {
-    const { data } = await fetchChapter(props.workspaceId, selectedId.value)
+    const { data } = await fetchChapter(props.workspaceId, requestedChapterId)
     if (!data.ok) throw new Error(data.message || '加载章节失败')
-    chapterDetail.value = data.chapter
+    if (requestedChapterId !== selectedId.value) return
+    const currentContent = chapterDetail.value?.content
+    const nextContent = data.chapter?.content
+    const currentSignature = `${currentContent?.content_revision || 0}:${currentContent?.content_hash || ''}`
+    const nextSignature = `${nextContent?.content_revision || 0}:${nextContent?.content_hash || ''}`
+    chapterDetail.value = currentContent && currentSignature === nextSignature
+      ? { ...data.chapter, content: currentContent }
+      : data.chapter
+    detailError.value = ''
     remoteHint.value = ''
     await refreshSnapshotRevision()
   } catch (e) {
-    actionError.value = e?.response?.data?.message || e.message || String(e)
+    if (!background) detailError.value = e?.response?.data?.message || e.message || String(e)
   } finally {
-    detailLoading.value = false
+    if (requestedChapterId === selectedId.value) detailLoading.value = false
   }
 }
 
@@ -339,7 +840,10 @@ async function reloadAll() {
   busy.value = true
   try {
     await loadChapterList()
-    await loadChapterDetail({ force: true })
+    await Promise.all([
+      loadChapterDetail({ force: true }),
+      selectedId.value ? loadChapterChat(selectedId.value, { force: true }) : Promise.resolve(),
+    ])
   } finally {
     busy.value = false
   }
@@ -347,6 +851,21 @@ async function reloadAll() {
 
 function selectChapter(chapterId) {
   if (selectedId.value === chapterId) return
+  if (editorRef.value?.dirty) {
+    actionError.value = '当前章节有未保存修改，请先保存正文再切换章节。'
+    return
+  }
+  if (draftAbortController) draftAbortController.abort()
+  draftAbortController = null
+  streamingDraft.value = false
+  busy.value = false
+  busyAction.value = ''
+  streamText.value = ''
+  streamOperationId.value = ''
+  researchStatus.value = ''
+  researchSources.value = []
+  detailError.value = ''
+  chapterDetail.value = null
   selectedId.value = chapterId
   router.replace(`/business/${props.workspaceId}/chapters/${encodeURIComponent(chapterId)}`).catch(() => {})
 }
@@ -403,13 +922,140 @@ function materializeSelected() {
   }, '章节已物化')
 }
 
-function generateDraft() {
+function streamDeltaText(event) {
+  const payload = event?.data && typeof event.data === 'object' ? event.data : event
+  return String(payload?.text ?? payload?.delta ?? payload?.content ?? '')
+}
+
+function shouldFollowDraft() {
+  const el = docBodyEl.value
+  if (!el) return false
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= 80
+}
+
+async function appendDraftDelta(text) {
+  if (!text) return
+  const follow = shouldFollowDraft()
+  streamText.value += text
+  if (follow) {
+    await nextTick()
+    const el = docBodyEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  }
+}
+
+async function generateDraft() {
   if (!selectedId.value) return
-  return runCommand('chapter.generate_draft', {
-    chapter_id: selectedId.value,
-    expected_chapter_revision: Number(chapterDetail.value?.chapter_revision || 0),
-    overwrite_locked: false,
-  }, '草稿已生成', 'draft')
+  if (!selectedIsLeaf.value) {
+    actionError.value = '目录父节点只保留标题，不生成正文；请选择下级叶子章节。'
+    return
+  }
+  if (editorRef.value?.dirty) {
+    actionError.value = '当前章节有未保存修改，请先保存后再生成草稿。'
+    return
+  }
+  const chapterId = selectedId.value
+  draftAbortController?.abort()
+  draftAbortController = new AbortController()
+  const controller = draftAbortController
+  const operationId = `draft-${chapterId}-${Date.now()}`
+  streamOperationId.value = operationId
+  streamText.value = ''
+  researchStatus.value = ''
+  researchSources.value = []
+  streamingDraft.value = true
+  busy.value = true
+  busyAction.value = 'draft'
+  actionError.value = ''
+  actionMessage.value = ''
+  let streamCompleted = false
+  let completedChapter = null
+  let completedContent = null
+  try {
+    await refreshSnapshotRevision()
+    const globalRef = globalProjectContext.value || {}
+    const chapterRef = chapterDetail.value?.chapter_context_ref || {}
+    if (!globalContextReady.value) {
+      throw new Error('公共项目事实尚未就绪，已阻止生成。请先完成项目理解并晋级。')
+    }
+    if (!chapterRef.chapter_context_id || !chapterRef.chapter_context_hash) {
+      throw new Error('本章上下文版本缺失，已阻止生成。请刷新章节后重试。')
+    }
+    await streamChapterDraft(props.workspaceId, chapterId, {
+      expected_revision: workspaceRevision.value,
+      expected_chapter_revision: Number(chapterDetail.value?.chapter_revision || 0),
+      idempotency_key: operationId,
+      overwrite_locked: false,
+      global_context_id: globalRef.global_context_id,
+      global_context_revision: Number(globalRef.global_context_revision),
+      global_context_hash: globalRef.global_context_hash,
+      chapter_context_id: chapterRef.chapter_context_id,
+      chapter_context_revision: Number(chapterRef.chapter_context_revision || 0),
+      chapter_context_hash: chapterRef.chapter_context_hash,
+    }, {
+      signal: controller.signal,
+      onEvent: (event) => {
+        if (controller.signal.aborted || chapterId !== selectedId.value) return
+        const type = String(event?.type || event?.event || '').toLowerCase()
+        if (type === 'meta') {
+          streamOperationId.value = String(event.operation_id || event?.data?.operation_id || operationId)
+        } else if (type === 'research') {
+          const payload = event?.data && typeof event.data === 'object' ? event.data : event
+          researchStatus.value = String(payload.message || '正在检索公开资料…')
+          researchSources.value = Array.isArray(payload.sources) ? payload.sources : []
+        } else if (['delta', 'content_delta', 'token'].includes(type)) {
+          appendDraftDelta(streamDeltaText(event))
+        } else if (type === 'done') {
+          const payload = event?.data && typeof event.data === 'object' ? event.data : event
+          streamCompleted = true
+          completedChapter = payload?.chapter && typeof payload.chapter === 'object'
+            ? payload.chapter
+            : null
+          completedContent = payload?.content && typeof payload.content === 'object'
+            ? payload.content
+            : null
+        } else if (type === 'error') {
+          const payload = event?.data && typeof event.data === 'object' ? event.data : event
+          const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
+          const message = String(payload?.message || '流式生成失败')
+          if (String(payload?.code || '') === 'CHAPTER_RESEARCH_UNAVAILABLE') {
+            researchStatus.value = reason ? `公开资料检索失败：${reason}` : message
+          }
+          throw new Error(reason ? `${message}（${reason}）` : message)
+        }
+      },
+    })
+    if (controller.signal.aborted || chapterId !== selectedId.value) return
+    if (!streamCompleted) throw new Error('流式连接提前结束，未收到完成事件')
+    if (completedChapter || completedContent) {
+      const current = chapterDetail.value || {}
+      chapterDetail.value = {
+        ...current,
+        ...(completedChapter || {}),
+        content: completedContent || completedChapter?.content || current.content,
+      }
+    }
+    streamingDraft.value = false
+    streamText.value = ''
+    researchStatus.value = ''
+    researchSources.value = []
+    remoteHint.value = ''
+    actionMessage.value = '草稿已生成'
+    await loadChapterList()
+    await loadChapterDetail({ force: true, background: true })
+  } catch (e) {
+    if (e?.name !== 'AbortError') {
+      actionError.value = e?.message || String(e)
+      remoteHint.value = '流式连接已中断，已保留当前预览；可刷新检查后端是否已完成。'
+    }
+  } finally {
+    if (draftAbortController === controller) draftAbortController = null
+    if (chapterId === selectedId.value) {
+      streamingDraft.value = false
+      busy.value = false
+      busyAction.value = ''
+    }
+  }
 }
 
 function onSaveBlocks(operations) {
@@ -471,27 +1117,89 @@ watch(showRevisions, (open) => {
   if (open) openRevisions()
 })
 
+function mapChatTurns(turns) {
+  return (Array.isArray(turns) ? turns : []).map((turn, index) => ({
+    id: `${turn.role || 'turn'}-${turn.created_at || index}-${index}`,
+    role: turn.role === 'user' ? 'user' : 'assistant',
+    content: String(turn.content || ''),
+    created_at: turn.created_at || '',
+  }))
+}
+
+function rememberChapterChat(chapterId, turns) {
+  if (!chapterId) return
+  chatByChapter.set(chapterId, turns)
+}
+
+async function loadChapterChat(chapterId, { force = false } = {}) {
+  const id = String(chapterId || '').trim()
+  if (!id) {
+    chatTurns.value = []
+    chatLoading.value = false
+    return
+  }
+  if (!force && chatByChapter.has(id)) {
+    chatTurns.value = chatByChapter.get(id)
+    await nextTick()
+    if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
+    return
+  }
+  const token = ++chatLoadToken
+  chatLoading.value = true
+  try {
+    const { data } = await fetchChapterChatHistory(props.workspaceId, id)
+    if (token !== chatLoadToken || selectedId.value !== id) return
+    if (!data?.ok) throw new Error(data?.message || '加载本章对话失败')
+    const turns = mapChatTurns(data.turns)
+    rememberChapterChat(id, turns)
+    chatTurns.value = turns
+    await nextTick()
+    if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
+  } catch (e) {
+    if (token !== chatLoadToken || selectedId.value !== id) return
+    // Soft-fail: keep empty local thread so user can still type.
+    if (!chatByChapter.has(id)) {
+      chatTurns.value = []
+    }
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  } finally {
+    if (token === chatLoadToken) chatLoading.value = false
+  }
+}
+
 async function sendChat() {
   const text = chatInput.value.trim()
-  if (!text || asking.value) return
+  const chapterId = String(selectedId.value || '').trim()
+  if (!text || asking.value || !chapterId) return
   asking.value = true
   actionError.value = ''
   const userTurn = { id: `u-${Date.now()}`, role: 'user', content: text }
-  chatTurns.value = [...chatTurns.value, userTurn]
+  const nextTurns = [...chatTurns.value, userTurn]
+  chatTurns.value = nextTurns
+  rememberChapterChat(chapterId, nextTurns)
   chatInput.value = ''
   await nextTick()
   if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
   try {
-    // Prefixed chapter context so the agent sees the active chapter overlay.
-    const contextHint = selectedId.value
-      ? `[当前章节 ${selectedId.value} / ${selectedChapter.value?.title || ''}]\n上下文条目 ${contextItems.value.length} 条。\n\n${text}`
-      : text
-    const { data } = await chatV3(props.workspaceId, contextHint)
+    const { data } = await chatChapterV3(props.workspaceId, chapterId, text)
     if (!data.ok) throw new Error(data.message || '对话失败')
-    chatTurns.value = [
-      ...chatTurns.value,
-      { id: `a-${Date.now()}`, role: 'assistant', content: data.reply || '（无回复）' },
-    ]
+    // If user switched chapter mid-flight, do not pollute the visible thread.
+    if (selectedId.value !== chapterId) {
+      const cached = chatByChapter.get(chapterId) || []
+      const synced = data.turns?.length
+        ? mapChatTurns(data.turns)
+        : [...cached, { id: `a-${Date.now()}`, role: 'assistant', content: data.reply || '（无回复）' }]
+      rememberChapterChat(chapterId, synced)
+      return
+    }
+    const turns = data.turns?.length
+      ? mapChatTurns(data.turns)
+      : [
+          ...chatTurns.value,
+          { id: `a-${Date.now()}`, role: 'assistant', content: data.reply || '（无回复）' },
+        ]
+    chatTurns.value = turns
+    rememberChapterChat(chapterId, turns)
     if (data.workspace_revision != null) {
       workspaceRevision.value = Number(data.workspace_revision)
     }
@@ -499,10 +1207,13 @@ async function sendChat() {
     if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
-    chatTurns.value = [
+    if (selectedId.value !== chapterId) return
+    const failed = [
       ...chatTurns.value,
       { id: `e-${Date.now()}`, role: 'assistant', content: `请求失败：${actionError.value}` },
     ]
+    chatTurns.value = failed
+    rememberChapterChat(chapterId, failed)
   } finally {
     asking.value = false
   }
@@ -512,15 +1223,19 @@ watch(
   () => selectedId.value,
   async (id, prev) => {
     if (!id || id === prev) return
-    await loadChapterDetail({ force: true })
-    rightTab.value = contextItems.value.length ? 'context' : 'chat'
+    chatInput.value = ''
+    await Promise.all([
+      loadChapterDetail({ force: true }),
+      loadChapterChat(id),
+    ])
+    rightTab.value = (globalContextReady.value || contextItems.value.length) ? 'context' : 'chat'
   },
 )
 
 watch(
   () => props.initialChapterId,
   (id) => {
-    if (id && id !== selectedId.value) selectedId.value = id
+    if (id && id !== selectedId.value) selectChapter(id)
   },
 )
 
@@ -530,7 +1245,7 @@ onMounted(async () => {
   pollTimer = setInterval(async () => {
     try {
       await loadChapterList()
-      await loadChapterDetail({ force: false })
+      if (!streamingDraft.value) await loadChapterDetail({ force: false, background: true })
     } catch (_) {
       /* ignore */
     }
@@ -539,29 +1254,66 @@ onMounted(async () => {
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  draftAbortController?.abort()
 })
 </script>
 
 <style scoped>
 .workbench {
   display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr) minmax(280px, 340px);
   height: 100%;
   min-height: 0;
   overflow: hidden;
   background: #f1f5f9;
 }
+
+.workbench.is-dragging {
+  user-select: none !important;
+  cursor: col-resize !important;
+}
+
+.resizer {
+  width: 6px;
+  background: #f8fafc;
+  border-left: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
+  cursor: col-resize;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, border-color 0.15s;
+  z-index: 10;
+}
+
+.resizer:hover,
+.workbench.is-dragging .resizer {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+.resizer-handle {
+  width: 2px;
+  height: 20px;
+  background: #cbd5e1;
+  border-radius: 1px;
+  transition: background 0.15s;
+}
+
+.resizer:hover .resizer-handle,
+.workbench.is-dragging .resizer-handle {
+  background: #ffffff;
+}
+
 .pane {
   display: flex;
   flex-direction: column;
   min-height: 0;
   min-width: 0;
   background: #fff;
-  border-right: 1px solid #e2e8f0;
 }
 .pane-chat {
-  border-right: none;
-  border-left: 1px solid #e2e8f0;
+  border-left: none;
 }
 .pane-header {
   display: flex;
@@ -584,12 +1336,28 @@ onUnmounted(() => {
   font-size: 15px;
   color: #0f172a;
 }
+.chat-chapter-label {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: #1d4ed8;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.chat-chapter-label.muted {
+  color: #94a3b8;
+}
 .tree-toolbar {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   padding: 8px 12px;
   border-bottom: 1px solid #f1f5f9;
   flex-shrink: 0;
+}
+.tree-toolbar > .btn {
+  flex: 1 1 calc(50% - 3px);
+  min-width: 0;
+  white-space: nowrap;
 }
 .tree-stats {
   display: flex;
@@ -681,16 +1449,70 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
 }
-.doc-body {
+.chapter-doc-body {
+  --word-page-width: 850px;
+  --word-page-min-height: 1120px;
   flex: 1;
+  display: block;
   min-height: 0;
   overflow: auto;
-  padding: 12px 14px;
-  background: #f8fafc;
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+  padding: 28px 32px 56px;
+  background: #e7ebf0;
 }
-.placeholder {
-  height: 100%;
-  min-height: 240px;
+.document-stage {
+  width: var(--word-page-width);
+  min-height: var(--word-page-min-height);
+  margin: 0 auto;
+}
+.document-paper {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--word-page-min-height);
+  padding: 72px 78px;
+  border: 1px solid #d5dbe5;
+  background: #fff;
+  box-shadow: 0 16px 42px rgb(15 23 42 / 10%);
+  color: #111827;
+  font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif;
+}
+.paper-heading { margin-bottom: 30px; }
+.paper-heading h1 {
+  margin: 0;
+  color: #111827;
+  font-family: "SimHei", "Microsoft YaHei", sans-serif;
+  font-size: 28px;
+  line-height: 1.45;
+  font-weight: 700;
+  text-align: center;
+}
+.research-status {
+  margin: 0 0 24px;
+  padding: 12px 14px;
+  border-left: 3px solid #0f766e;
+  background: #f0fdfa;
+  color: #115e59;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.research-status ul { margin: 8px 0 0; padding-left: 18px; }
+.research-status a { color: #0f766e; text-decoration: underline; }
+.source-tier {
+  display: inline-flex;
+  margin-right: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 10px;
+  font-weight: 700;
+}
+.source-tier.project_direct { background: #dcfce7; color: #166534; }
+.source-tier.similar_project { background: #ffedd5; color: #9a3412; }
+.source-tier.industry_standard { background: #dbeafe; color: #1d4ed8; }
+.document-state {
+  min-height: 820px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -698,13 +1520,23 @@ onUnmounted(() => {
   gap: 10px;
   text-align: center;
   color: #64748b;
-  background: #fff;
-  border: 1px dashed #cbd5e1;
-  border-radius: 12px;
   padding: 24px;
 }
-.placeholder h4 { margin: 0; color: #0f172a; }
-.placeholder p { margin: 0; max-width: 360px; font-size: 13px; }
+.document-state h4 { margin: 0; color: #0f172a; font-family: "Microsoft YaHei", sans-serif; }
+.document-state p { margin: 0; max-width: 360px; font-family: "Microsoft YaHei", sans-serif; font-size: 13px; }
+.document-error h4 { color: #b91c1c; }
+.document-error p { color: #7f1d1d; }
+.document-loading-mark {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #dbeafe;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: document-loading-spin 800ms linear infinite;
+}
+@keyframes document-loading-spin {
+  to { transform: rotate(360deg); }
+}
 .pill {
   display: inline-flex;
   padding: 1px 8px;
@@ -758,6 +1590,67 @@ onUnmounted(() => {
   padding: 10px;
   gap: 8px;
 }
+.context-section {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px;
+  background: #fff;
+}
+.shared-context { border-color: #bfdbfe; background: #f8fbff; }
+.chapter-only-context { margin-top: 2px; }
+.context-section-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 9px;
+}
+.context-section-header strong { display: block; font-size: 13px; color: #0f172a; }
+.context-section-header small { display: block; margin-top: 2px; color: #64748b; font-size: 10px; }
+.context-version {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 10px;
+  font-weight: 700;
+}
+.context-warning {
+  padding: 8px;
+  border-radius: 7px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.identity-grid {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 5px 8px;
+  margin: 0 0 9px;
+  font-size: 11px;
+}
+.identity-grid dt { color: #64748b; }
+.identity-grid dd { margin: 0; color: #0f172a; overflow-wrap: anywhere; }
+.fact-group { border-top: 1px solid #dbeafe; padding: 6px 0; }
+.fact-group summary { cursor: pointer; color: #1e3a8a; font-size: 11px; font-weight: 700; }
+.fact-group summary span { color: #94a3b8; font-weight: 500; }
+.fact-group ul { margin: 6px 0 0; padding-left: 17px; color: #334155; font-size: 11px; line-height: 1.55; }
+.context-note { margin: 8px 0 0; color: #64748b; font-size: 10px; line-height: 1.5; }
+.context-project-link {
+  width: 100%;
+  margin-top: 7px;
+  border: 1px solid #bfdbfe;
+  border-radius: 7px;
+  padding: 6px 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  cursor: pointer;
+}
+.requirement-card { border-left: 3px solid #2563eb; }
+.scoring-card { border-left: 3px solid #f59e0b; }
 .context-card {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
@@ -847,9 +1740,123 @@ onUnmounted(() => {
   padding: 12px 4px;
   line-height: 1.5;
 }
+
+/* 侧边栏菜单手动修改样式扩展 */
+.tree-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  font-size: 13px;
+  color: #334155;
+  transition: all 0.15s ease;
+}
+.tree-item:hover {
+  background: #f1f5f9;
+}
+.tree-item.active {
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
+  font-weight: 600;
+}
+.tree-item-input {
+  flex: 1;
+  min-width: 0;
+  padding: 2px 6px;
+  font-size: 12px;
+  border: 1px solid #2563eb;
+  border-radius: 4px;
+  outline: none;
+  background: #fff;
+}
+.tree-item-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+.tree-item:hover .tree-item-actions {
+  display: flex;
+}
+.tree-item:hover .tree-meta {
+  display: none;
+}
+.icon-action-btn {
+  background: transparent;
+  border: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.7;
+  transition: opacity 0.15s, background 0.15s;
+}
+.icon-action-btn:hover:not(:disabled) {
+  opacity: 1;
+  background: #e2e8f0;
+}
+.icon-action-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.icon-action-btn.danger:hover:not(:disabled) {
+  background: #fee2e2;
+}
+
+/* Modal 弹窗样式 */
+.modal-overlay {
+  position: fixed;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(2px);
+}
+.modal-card {
+  background: #fff;
+  border-radius: 12px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #e2e8f0;
+}
+.modal-header h3 { margin: 0; font-size: 16px; color: #0f172a; }
+.close-btn { background: none; border: none; font-size: 20px; color: #64748b; cursor: pointer; }
+.modal-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; }
+.form-group label { font-size: 13px; font-weight: 600; color: #334155; }
+.form-control { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; outline: none; }
+.form-control:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); }
+.form-hint { font-size: 11px; color: #94a3b8; }
+.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; background: #f8fafc; border-top: 1px solid #e2e8f0; }
+
 @media (max-width: 1100px) {
   .workbench {
-    grid-template-columns: 220px minmax(0, 1fr) 260px;
+    /* inline style still drives columns; keep media hook for future tweaks */
   }
+}
+@media (max-width: 720px) {
+  .chapter-doc-body { padding: 16px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .document-loading-mark { animation: none; }
 }
 </style>

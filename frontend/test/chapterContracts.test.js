@@ -2,6 +2,8 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  chapterChatHistoryPath,
+  chapterChatTurnPath,
   chapterPath,
   chapterStatusLabel,
   chaptersPath,
@@ -13,6 +15,18 @@ test('chapter paths are rooted under v3 workspaces', () => {
   assert.equal(chaptersPath('ws-1'), '/v3/workspaces/ws-1/chapters')
   assert.equal(chapterPath('ws-1', 'ch-a'), '/v3/workspaces/ws-1/chapters/ch-a')
   assert.equal(documentComposePath('ws-1'), '/v3/workspaces/ws-1/document/compose')
+  assert.equal(
+    chapterChatHistoryPath('ws-1', 'ch-a'),
+    '/v3/workspaces/ws-1/chapters/ch-a/chat/history',
+  )
+  assert.equal(
+    chapterChatTurnPath('ws-1', 'ch-a'),
+    '/v3/workspaces/ws-1/chapters/ch-a/chat/turn',
+  )
+  assert.equal(
+    chapterChatHistoryPath('客户/A', '章 1'),
+    `/v3/workspaces/${encodeURIComponent('客户/A')}/chapters/${encodeURIComponent('章 1')}/chat/history`,
+  )
 })
 
 test('normalizeChapterList accepts API envelope', () => {

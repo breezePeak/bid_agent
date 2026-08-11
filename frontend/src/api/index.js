@@ -1,11 +1,15 @@
 import axios from 'axios'
 import { csrfToken } from '../csrf'
+import { readNdjsonStream } from './ndjsonStream.js'
 import {
   V3_WORKSPACES_PATH,
   buildResearchResolveCommand,
   buildConfirmPlanningCommand,
   buildPrepareOutlineCommand,
   buildRunPipelineCommand,
+  buildCreateChapterCommand,
+  buildSaveChapterMetadataCommand,
+  buildArchiveChapterCommand,
   v3WorkspacePath,
   workspaceRevisionFromV3Payload,
 } from './v3Contracts.js'
@@ -56,6 +60,10 @@ export function createRun(name, projectType, expectedPages) {
     project_type: projectType,
     expected_pages: expectedPages,
   })
+}
+
+export function deleteRun(runId) {
+  return api.delete(v3WorkspacePath(runId))
 }
 
 export function fetchLlmSettings() {
@@ -179,6 +187,27 @@ export function chatV3(runId, message) {
   return api.post(v3WorkspacePath(runId, 'chat/turn'), { message }, { timeout: 120000 })
 }
 
+/** Workspace-level chat (pipeline / project studio). Not chapter-scoped. */
+export function fetchChapterChatHistory(runId, chapterId, limit = 40) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}/chat/history`), {
+    params: { limit },
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+/** Isolated per-chapter dialogue; history never mixes across chapters. */
+export function chatChapterV3(runId, chapterId, message) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.post(
+    v3WorkspacePath(runId, `chapters/${id}/chat/turn`),
+    { message },
+    { timeout: 120000 },
+  )
+}
+
 export function downloadV3Final(runId) {
   window.open(`/api${v3WorkspacePath(runId, 'exports/final')}`, '_blank')
 }
@@ -197,6 +226,42 @@ export function fetchChapter(runId, chapterId) {
     headers: { 'Cache-Control': 'no-cache' },
   })
 }
+
+export async function streamChapterDraft(runId, chapterId, payload = {}, options = {}) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  const headers = {
+    Accept: 'application/x-ndjson, text/event-stream',
+    'Content-Type': 'application/json',
+  }
+  const token = csrfToken()
+  if (token) headers['X-CSRF-Token'] = token
+  const response = await fetch(`/api${v3WorkspacePath(runId, `chapters/${id}/draft/stream`)}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers,
+    body: JSON.stringify(payload || {}),
+    signal: options.signal,
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = body?.error?.message || body?.message || ''
+    } catch (_) {
+      detail = await response.text().catch(() => '')
+    }
+    if (response.status === 405) {
+      detail = '当前后端尚未加载流式写作接口，请重启 api.v3_app 服务后重试。'
+    }
+    const error = new Error(detail || `流式生成失败（HTTP ${response.status}）`)
+    error.status = response.status
+    throw error
+  }
+  await readNdjsonStream(response, options.onEvent)
+}
+
+export { readNdjsonStream }
 
 export function fetchChapterRevisions(runId, chapterId, limit = 100) {
   const id = encodeURIComponent(String(chapterId || '').trim())
@@ -226,6 +291,41 @@ export function submitV3Command(runId, command) {
     idempotency_key: command.idempotency_key || newCommandId(),
   }
   return api.post(v3WorkspacePath(runId, 'commands'), body, { timeout: 300000 })
+}
+
+export async function createChapter(runId, chapterId, title = '') {
+  const snapshot = await fetchV3WorkspaceSnapshot(runId)
+  const commandId = newCommandId()
+  const command = buildCreateChapterCommand(
+    commandId,
+    workspaceRevisionFromV3Payload(snapshot?.data),
+    chapterId,
+    title,
+  )
+  return submitV3Command(runId, command)
+}
+
+export async function saveChapterMetadata(runId, chapterId, metadata) {
+  const snapshot = await fetchV3WorkspaceSnapshot(runId)
+  const commandId = newCommandId()
+  const command = buildSaveChapterMetadataCommand(
+    commandId,
+    workspaceRevisionFromV3Payload(snapshot?.data),
+    chapterId,
+    metadata,
+  )
+  return submitV3Command(runId, command)
+}
+
+export async function archiveChapter(runId, chapterId) {
+  const snapshot = await fetchV3WorkspaceSnapshot(runId)
+  const commandId = newCommandId()
+  const command = buildArchiveChapterCommand(
+    commandId,
+    workspaceRevisionFromV3Payload(snapshot?.data),
+    chapterId,
+  )
+  return submitV3Command(runId, command)
 }
 
 export default api

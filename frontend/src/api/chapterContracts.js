@@ -16,6 +16,14 @@ export function chapterContentRevisionsPath(workspaceId, chapterId) {
   return `${chapterPath(workspaceId, chapterId)}/revisions`
 }
 
+export function chapterChatHistoryPath(workspaceId, chapterId) {
+  return `${chapterPath(workspaceId, chapterId)}/chat/history`
+}
+
+export function chapterChatTurnPath(workspaceId, chapterId) {
+  return `${chapterPath(workspaceId, chapterId)}/chat/turn`
+}
+
 export function chapterComparePath(workspaceId, chapterId, fromRev, toRev) {
   return `${chapterContentRevisionsPath(workspaceId, chapterId)}/compare?from=${fromRev}&to=${toRev}`
 }
