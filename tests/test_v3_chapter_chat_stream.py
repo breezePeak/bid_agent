@@ -138,12 +138,28 @@ class ChapterChatStreamTests(unittest.TestCase):
             service = ChapterChatService(context)
 
             def fake_stream(messages, temperature=0.2):
+                payload = json.loads(messages[1]["content"])
+                # Progressive: default outline has no peer bodies; only inspected.
+                outline = payload["chapter_context"]["document_outline_context"]
+                self.assertEqual(outline.get("disclosure"), "titles_first")
+                self.assertEqual(outline.get("related_summaries"), [])
                 yield ("reasoning", "先看目录位置与评分要求。")
                 yield ("reasoning", "再给可执行建议。")
                 yield ("content", "建议强调阶段划分")
                 yield ("content", "与质控节点。")
 
-            with mock.patch("llm_client.chat_stream_chunks", side_effect=fake_stream):
+            with (
+                mock.patch(
+                    "document_pipeline.document_outline_context.DocumentOutlineContextService.plan_and_load_inspections",
+                    return_value={
+                        "inspect_ids": [],
+                        "reason": "标题树足够",
+                        "views": [],
+                        "decision_source": "chapter_agent",
+                    },
+                ),
+                mock.patch("llm_client.chat_stream_chunks", side_effect=fake_stream),
+            ):
                 events = list(
                     service.iter_answer_events(
                         "ch-a",
@@ -154,6 +170,8 @@ class ChapterChatStreamTests(unittest.TestCase):
 
             types = [item["type"] for item in events]
             self.assertEqual(types[0], "meta")
+            self.assertIn("inspect_planning", types)
+            self.assertIn("inspect_skipped", types)
             self.assertIn("thinking_delta", types)
             self.assertIn("content_delta", types)
             self.assertEqual(types[-1], "done")

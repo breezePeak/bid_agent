@@ -1051,9 +1051,13 @@ def _chapter_draft_messages(
     scoring_requirements: list[dict[str, Any]] | None = None,
     sibling_context: dict[str, Any] | None = None,
     outline_context: dict[str, Any] | None = None,
+    inspected_chapters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     from document_pipeline.content_grounding import chapter_opening_policy
-    from document_pipeline.document_outline_context import compact_outline_for_prompt
+    from document_pipeline.document_outline_context import (
+        compact_outline_for_prompt,
+        compact_sibling_for_prompt,
+    )
     from document_pipeline.sibling_chapter_context import _chapter_role
 
     node = chapter.get("blueprint_node")
@@ -1070,8 +1074,9 @@ def _chapter_draft_messages(
         for item in (chapter_context.get("items") or [])
         if isinstance(item, dict)
     ]
-    sibling_payload = dict(sibling_context or {})
+    sibling_payload = compact_sibling_for_prompt(dict(sibling_context or {}))
     outline_payload = compact_outline_for_prompt(dict(outline_context or {}))
+    inspected = list(inspected_chapters or [])
     title = str(chapter.get("title") or node.get("title") or "")
     purpose = str(node.get("purpose") or "")
     chapter_role = str(
@@ -1091,10 +1096,10 @@ def _chapter_draft_messages(
         "chapter_context": context_items,
         "global_project_context": dict(project_context or {}),
         "chapter_grounding_context": dict(chapter_grounding_context or {}),
-        # Full outline + bounded related chapter read-only summaries.
+        # Titles-first outline; peer bodies only appear in inspected_chapters.
         "document_outline_context": outline_payload,
-        # Kept for compatibility with older visual policies.
         "sibling_chapter_context": sibling_payload,
+        "inspected_chapters": inspected,
         "user_instruction": instruction,
         "verified_public_sources": list(research_sources or []),
         "opening_policy": chapter_opening_policy(chapter),
@@ -1122,12 +1127,12 @@ def _chapter_draft_messages(
             "固定输出顺序（不要输出章节标题本身）："
             "1) 一句话图题（说明本图展示什么阶段/节点关系）；"
             "2) 用 Mermaid flowchart 或清晰 ASCII/文本流程图画出阶段、先后/并行、"
-            "关键质控节点与主要输入输出（节点命名对齐目录中上游总体技术路线骨架）；"
+            "关键质控节点与主要输入输出（节点命名对齐已 inspect 的上游总体技术路线骨架）；"
             "3) 图注不超过 5 条短要点（每条一行，只解释读图，不展开方法细则）。"
             "不得虚构企业资质、业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，"
             "不要使用 Markdown 代码围栏包裹全文（Mermaid 代码块本身除外）。"
             "若提供已核验公开资料，仅可补充通用阶段命名或质控节点习惯，不得改写项目事实。"
-            "document_outline_context 提供整份目录与他章只读摘要，用于定位本章边界；"
+            "document_outline_context 默认只有目录标题树；只有 inspected_chapters 才有他章只读详情。"
             "不得修改或搬空其他章节主责内容。"
             + structure_rules
         )
@@ -1147,8 +1152,9 @@ def _chapter_draft_messages(
             "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
             "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
             "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
-            "document_outline_context 给出整份目录位置与他章只读摘要：用它判断本章处境与边界，"
-            "可做交叉引用，但不得改写或整段复制其他章节主责正文。"
+            "document_outline_context 默认只有目录标题与状态；"
+            "只有 inspected_chapters 中的章节才提供只读详情。"
+            "可据此判断处境与交叉引用，但不得改写或整段复制其他章节主责正文。"
             + structure_rules
         )
     return [
@@ -1511,9 +1517,8 @@ async def stream_chapter_draft(
                 DocumentOutlineContextService,
             )
 
-            outline_context = DocumentOutlineContextService(
-                context
-            ).build_for_chapter(chapter)
+            outline_service = DocumentOutlineContextService(context)
+            outline_context = outline_service.build_for_chapter(chapter)
             if (
                 sibling_context.get("chapter_role") == "visual"
                 and sibling_context.get("missing_upstream")
@@ -1528,8 +1533,50 @@ async def stream_chapter_draft(
                     chapter_id=normalized_chapter_id,
                     status="sibling_hint",
                     message=(
-                        f"根据整份目录位置，本章依赖上游章节骨架。建议先完成：{titles}。"
-                        "将以目录中相关章节只读摘要作为图示骨架继续生成，不展开方法细节。"
+                        f"根据目录标题位置，本章可能依赖上游：{titles}。"
+                        "将先按需打开必要章节详情，再成图，不展开方法细则。"
+                    ),
+                    sources=[],
+                )
+
+            # Progressive outline: titles first, then inspect only selected peers.
+            yield _ndjson_event(
+                "research",
+                chapter_id=normalized_chapter_id,
+                status="inspect_planning",
+                message="先看目录标题，判断是否需要打开他章只读详情…",
+            )
+            inspection = outline_service.plan_and_load_inspections(
+                viewer_chapter_id=normalized_chapter_id,
+                outline_context=outline_context,
+                task=(
+                    f"撰写章节《{chapter.get('title') or normalized_chapter_id}》草稿。"
+                    f" 章节目的：{(chapter.get('blueprint_node') or {}).get('purpose') or ''}。"
+                    f" 用户补充：{instruction or '无'}"
+                ),
+            )
+            inspected_chapters = list(inspection.get("views") or [])
+            if inspection.get("inspect_ids"):
+                yield _ndjson_event(
+                    "research",
+                    chapter_id=normalized_chapter_id,
+                    status="inspecting",
+                    message=(
+                        "按需打开只读详情："
+                        + "、".join(
+                            str(item.get("title") or item.get("chapter_id") or "")
+                            for item in inspected_chapters
+                        )
+                    ),
+                    sources=[],
+                )
+            else:
+                yield _ndjson_event(
+                    "research",
+                    chapter_id=normalized_chapter_id,
+                    status="inspect_skipped",
+                    message=str(
+                        inspection.get("reason") or "仅依据目录标题与本章上下文写作。"
                     ),
                     sources=[],
                 )
@@ -1662,6 +1709,7 @@ async def stream_chapter_draft(
                     scoring_requirements=scoring_requirements,
                     sibling_context=sibling_context,
                     outline_context=outline_context,
+                    inspected_chapters=inspected_chapters,
                 ),
                 temperature=0.25,
             ):

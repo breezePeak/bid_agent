@@ -192,11 +192,16 @@ class ChapterChatService:
             except Exception:
                 outline_payload = {}
         try:
-            from .document_outline_context import compact_outline_for_prompt
+            from .document_outline_context import (
+                compact_outline_for_prompt,
+                compact_sibling_for_prompt,
+            )
 
             outline_for_agent = compact_outline_for_prompt(outline_payload)
+            sibling_for_agent = compact_sibling_for_prompt(sibling_payload)
         except Exception:
             outline_for_agent = outline_payload
+            sibling_for_agent = sibling_payload
 
         return {
             "chapter_id": str(chapter.get("chapter_id") or ""),
@@ -213,7 +218,8 @@ class ChapterChatService:
             "scoring_requirements": list(scoring_requirements or []),
             "shared_project_facts": shared_facts,
             "document_outline_context": outline_for_agent,
-            "sibling_chapter_context": sibling_payload,
+            "sibling_chapter_context": sibling_for_agent,
+            "inspected_chapters": [],
             "draft_preview": draft_preview,
             "head_content_revision": int(chapter.get("head_content_revision") or 0),
             "formal_content_revision": int(chapter.get("formal_content_revision") or 0),
@@ -248,6 +254,12 @@ class ChapterChatService:
             sibling_context=sibling_context,
             outline_context=outline_context,
         )
+        inspection = self._resolve_inspections(
+            chapter_id=chapter_id,
+            outline_context=outline_context or chat_context.get("document_outline_context"),
+            task=text,
+        )
+        chat_context["inspected_chapters"] = list(inspection.get("views") or [])
         messages = self._build_messages(chat_context, history, text)
         thinking = ""
         try:
@@ -273,6 +285,7 @@ class ChapterChatService:
             "reply": answer,
             "thinking": thinking,
             "chapter_id": _safe_chapter_id(chapter_id),
+            "inspected_chapter_ids": list(inspection.get("inspect_ids") or []),
             "user_turn": user_record,
             "assistant_turn": assistant_record,
             "history_tail": self.load_history(chapter_id, limit=HISTORY_TAIL),
@@ -290,7 +303,7 @@ class ChapterChatService:
         sibling_context: dict[str, Any] | None = None,
         outline_context: dict[str, Any] | None = None,
     ):
-        """Yield NDJSON-ready events: thinking_delta / content_delta / done."""
+        """Yield NDJSON-ready events: inspect / thinking_delta / content_delta / done."""
         text = str(message or "").strip()
         if not text:
             raise ControlPlaneError(
@@ -308,7 +321,6 @@ class ChapterChatService:
             sibling_context=sibling_context,
             outline_context=outline_context,
         )
-        messages = self._build_messages(chat_context, history, text)
         safe_id = _safe_chapter_id(chapter_id)
         user_record = self.append_turn(chapter_id, role="user", content=text)
         yield {
@@ -316,8 +328,47 @@ class ChapterChatService:
             "chapter_id": safe_id,
             "title": str(chat_context.get("title") or ""),
             "user_turn": user_record,
+            "disclosure": "titles_first",
         }
 
+        yield {
+            "type": "inspect_planning",
+            "chapter_id": safe_id,
+            "message": "先看目录标题，判断是否需要打开他章详情…",
+        }
+        inspection = self._resolve_inspections(
+            chapter_id=chapter_id,
+            outline_context=outline_context or chat_context.get("document_outline_context"),
+            task=text,
+        )
+        chat_context["inspected_chapters"] = list(inspection.get("views") or [])
+        if inspection.get("inspect_ids"):
+            yield {
+                "type": "inspecting",
+                "chapter_id": safe_id,
+                "inspect_ids": list(inspection.get("inspect_ids") or []),
+                "titles": [
+                    str(item.get("title") or item.get("chapter_id") or "")
+                    for item in (inspection.get("views") or [])
+                ],
+                "reason": str(inspection.get("reason") or ""),
+                "message": (
+                    "按需打开只读详情："
+                    + "、".join(
+                        str(item.get("title") or item.get("chapter_id") or "")
+                        for item in (inspection.get("views") or [])
+                    )
+                ),
+            }
+        else:
+            yield {
+                "type": "inspect_skipped",
+                "chapter_id": safe_id,
+                "reason": str(inspection.get("reason") or "标题树已足够"),
+                "message": str(inspection.get("reason") or "仅依据目录标题继续回答。"),
+            }
+
+        messages = self._build_messages(chat_context, history, text)
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
         try:
@@ -342,7 +393,6 @@ class ChapterChatService:
                         "delta": chunk,
                     }
         except Exception as exc:
-            # Fall back to non-stream path so the user still gets an answer.
             try:
                 from llm_client import chat_with_meta
 
@@ -381,10 +431,34 @@ class ChapterChatService:
             "chapter_id": safe_id,
             "reply": answer,
             "thinking": thinking,
+            "inspected_chapter_ids": list(inspection.get("inspect_ids") or []),
             "user_turn": user_record,
             "assistant_turn": assistant_record,
             "turns": self.load_history(chapter_id, limit=HISTORY_TAIL),
         }
+
+    def _resolve_inspections(
+        self,
+        *,
+        chapter_id: str,
+        outline_context: dict[str, Any] | None,
+        task: str,
+    ) -> dict[str, Any]:
+        try:
+            from .document_outline_context import DocumentOutlineContextService
+
+            return DocumentOutlineContextService(self.context).plan_and_load_inspections(
+                viewer_chapter_id=chapter_id,
+                outline_context=outline_context,
+                task=task,
+            )
+        except Exception:
+            return {
+                "inspect_ids": [],
+                "reason": "目录检查失败，仅使用标题树。",
+                "views": [],
+                "decision_source": "error",
+            }
 
     @staticmethod
     def _build_messages(
@@ -395,15 +469,15 @@ class ChapterChatService:
         system_prompt = (
             "你是正在编制标书的协作 Agent，当前对话只针对「这一章」。"
             "用自然、直接的中文回答，不复述问题，不说套话。"
-            "你可以看到整份目录结构与其他章节只读摘要（document_outline_context），"
-            "据此理解本章在全书中的位置、上下游与边界；"
-            "但不得改写其他章节，也不得把其他章节全文搬进本章。"
-            "若图示章缺少上游总体路线等内容，应建议先完成对应目录章节。"
+            "document_outline_context 默认只有目录标题树与状态（titles_first），"
+            "不是他章全文；只有 inspected_chapters 中的章节才提供只读详情。"
+            "据此理解本章位置与边界；不得改写其他章节，也不得把未 inspect 的章节当成已读正文。"
+            "若仍缺关键上游内容，应明确指出还需要哪些目录章节。"
             "不确定就明确缺什么证据或材料。不得把外部信息当企业资质。"
             "你不能直接修改正文或晋级 Artifact，只能给出写作建议与下一步。"
-            "请先在模型思考通道中分析目录位置、本章边界与证据缺口，再给出面向用户的最终建议。"
+            "请先在模型思考通道中分析目录位置、是否还缺详情、本章边界与证据缺口，"
+            "再给出面向用户的最终建议。"
         )
-        # Do not re-inject prior thinking into the model prompt (token bloat / leakage).
         recent = [
             {
                 "role": item.get("role"),
@@ -417,6 +491,7 @@ class ChapterChatService:
             "chapter_title": chat_context.get("title"),
             "recent_chapter_dialogue": recent,
             "chapter_context": chat_context,
+            "inspected_chapters": list(chat_context.get("inspected_chapters") or []),
             "user_message": user_message,
         }
         return [
@@ -436,9 +511,9 @@ class ChapterChatService:
         outline = chat_context.get("document_outline_context")
         outline = outline if isinstance(outline, dict) else {}
         outline_nodes = outline.get("outline") if isinstance(outline.get("outline"), list) else []
-        related = (
-            outline.get("related_summaries")
-            if isinstance(outline.get("related_summaries"), list)
+        inspected = (
+            chat_context.get("inspected_chapters")
+            if isinstance(chat_context.get("inspected_chapters"), list)
             else []
         )
         path_label = str((outline.get("position") or {}).get("path_label") or "").strip()
@@ -452,10 +527,17 @@ class ChapterChatService:
         parts = [
             f"这是章节「{title}」的专属对话。",
             f"本章已挂接招标要求 {req_n} 条、评分要求 {score_n} 条、专属上下文 {ctx_n} 条。",
-            f"整份目录共 {len(outline_nodes)} 个节点。",
+            f"整份目录共 {len(outline_nodes)} 个标题节点（默认不预载他章正文）。",
         ]
         if path_label:
             parts.append(f"当前位置：{path_label}。")
+        if inspected:
+            names = "、".join(
+                str(item.get("title") or item.get("chapter_id") or "")
+                for item in inspected
+                if isinstance(item, dict)
+            )
+            parts.append(f"已按需打开只读详情：{names}。")
         if missing:
             names = "、".join(
                 str(item.get("title") or item.get("chapter_id") or "")
@@ -465,14 +547,6 @@ class ChapterChatService:
             parts.append(
                 f"图示/依赖章建议先完成：{names}，再按目录中相关章节骨架写本章。"
             )
-        elif related:
-            ready = [
-                str(item.get("title") or "")
-                for item in related
-                if isinstance(item, dict) and item.get("summary")
-            ]
-            if ready:
-                parts.append("可参考他章只读摘要：" + "、".join(ready[:4]) + "。")
         if not chat_context.get("is_leaf"):
             parts.append("当前节点是目录父节点，正文应写在下级叶子章节。")
         elif not chat_context.get("draft_preview"):

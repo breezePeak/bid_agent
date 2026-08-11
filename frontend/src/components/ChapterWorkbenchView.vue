@@ -289,7 +289,7 @@
           <header class="context-section-header">
             <div>
               <strong>整份目录</strong>
-              <small>只读 · 定位本章处境</small>
+              <small>默认标题 · 点开才看详情</small>
             </div>
             <span class="context-version">{{ outlineRoleLabel }}</span>
           </header>
@@ -400,7 +400,7 @@
           <div v-else-if="chatLoading" class="empty-hint">正在加载本章对话…</div>
           <div v-else-if="!chatTurns.length" class="empty-hint">
             这是「{{ selectedChapter?.title || selectedId }}」的专属对话。
-            Agent 知道整份目录位置，可参考他章只读信息，但只改本章建议。
+            Agent 默认只看目录标题；需要时再按需打开他章只读详情。
           </div>
           <article
             v-for="turn in chatTurns"
@@ -1375,7 +1375,18 @@ async function sendChat() {
     await streamChapterChat(props.workspaceId, chapterId, text, {
       onEvent: async (event) => {
         const type = String(event?.type || '').toLowerCase()
-        if (type === 'thinking_delta') {
+        if (type === 'inspect_planning' || type === 'inspecting' || type === 'inspect_skipped') {
+          const note = String(event.message || event.reason || '').trim()
+          if (!note) return
+          patchAssistant((turn) => {
+            turn.thinking = turn.thinking
+              ? `${turn.thinking}\n${note}`
+              : note
+            turn.thinkingOpen = true
+            turn.streaming = true
+          })
+          if (selectedId.value === chapterId) await scrollChatToBottom()
+        } else if (type === 'thinking_delta') {
           const delta = String(event.delta || '')
           if (!delta) return
           patchAssistant((turn) => {

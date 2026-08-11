@@ -1,4 +1,4 @@
-"""Full outline awareness and read-only peer chapter views."""
+"""Title-first outline + on-demand chapter inspection."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -162,7 +163,7 @@ def _nodes() -> list[BlueprintNode]:
 
 
 class DocumentOutlineContextTests(unittest.TestCase):
-    def test_outline_includes_full_tree_and_current_position(self) -> None:
+    def test_default_outline_is_titles_first_without_peer_bodies(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))
             _seed_blueprint(context, _nodes())
@@ -200,18 +201,78 @@ class DocumentOutlineContextTests(unittest.TestCase):
             current = next(item for item in payload["outline"] if item["is_current"])
             self.assertEqual(current["chapter_id"], "ch-diagram")
             self.assertEqual(payload["position"]["path_label"], "技术路线 / 技术路线图")
-            self.assertFalse(payload["access"]["can_edit_other_chapters"])
-            related_ids = [item["chapter_id"] for item in payload["related_summaries"]]
-            self.assertIn("ch-overview", related_ids)
-            self.assertIn("parent-route", related_ids)
-            overview_related = next(
-                item for item in payload["related_summaries"] if item["chapter_id"] == "ch-overview"
-            )
-            self.assertIn("核查准备", overview_related["summary"])
+            self.assertEqual(payload["disclosure"], "titles_first")
+            self.assertEqual(payload["access"]["detail_policy"], "on_demand")
+            self.assertEqual(payload["related_summaries"], [])
 
             compact = compact_outline_for_prompt(payload)
             self.assertEqual(compact["current_chapter_id"], "ch-diagram")
             self.assertEqual(len(compact["outline"]), 6)
+            self.assertEqual(compact["related_summaries"], [])
+            # Titles-first: no purpose / summary dump in agent outline.
+            for node in compact["outline"]:
+                self.assertNotIn("purpose", node)
+                self.assertNotIn("summary", node)
+                self.assertIn("title", node)
+                self.assertIn("status", node)
+
+            overview_row = next(
+                item for item in payload["outline"] if item["chapter_id"] == "ch-overview"
+            )
+            self.assertTrue(overview_row["has_content"])
+            self.assertEqual(overview_row["content_status"], "draft")
+
+    def test_inspection_loads_details_only_for_selected_ids(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            service = ChapterWorkspaceService(context)
+            overview = service.create(chapter_id="ch-overview", expected_chapter_revision=0)
+            service.store.append_chapter_content_revision(
+                chapter_id="ch-overview",
+                expected_chapter_revision=overview["chapter_revision"],
+                blocks=[
+                    {
+                        "block_id": "b1",
+                        "target_node_id": "ch-overview",
+                        "type": "paragraph",
+                        "content": "总体四阶段路线",
+                        "confidence": 0.9,
+                    }
+                ],
+                source="ai_draft",
+            )
+            outline = DocumentOutlineContextService(context)
+            diagram = service.get_chapter("ch-diagram")
+            outline_ctx = outline.build_for_chapter(diagram)
+
+            def fake_chat(messages, **_kwargs):
+                return json.dumps(
+                    {
+                        "inspect_ids": ["ch-overview", "ch-other", "missing"],
+                        "reason": "需要总体技术路线阶段骨架",
+                    },
+                    ensure_ascii=False,
+                )
+
+            with mock.patch("llm_client.chat", side_effect=fake_chat):
+                result = outline.plan_and_load_inspections(
+                    viewer_chapter_id="ch-diagram",
+                    outline_context=outline_ctx,
+                    task="写技术路线图",
+                )
+
+            self.assertEqual(result["decision_source"], "chapter_agent")
+            self.assertEqual(result["inspect_ids"], ["ch-overview", "ch-other"])
+            self.assertEqual(len(result["views"]), 2)
+            overview_view = next(
+                item for item in result["views"] if item["chapter_id"] == "ch-overview"
+            )
+            self.assertIn("四阶段", overview_view["summary"])
+            other_view = next(
+                item for item in result["views"] if item["chapter_id"] == "ch-other"
+            )
+            self.assertEqual(other_view["summary"], "")
 
     def test_readonly_view_is_not_editable(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -241,7 +302,6 @@ class DocumentOutlineContextTests(unittest.TestCase):
             self.assertEqual(view["access"]["mode"], "read_only")
             self.assertEqual(view["chapter_id"], "ch-overview")
             self.assertIn("四阶段", view["summary"])
-            self.assertEqual(view["access"]["viewer_chapter_id"], "ch-diagram")
 
 
 if __name__ == "__main__":
