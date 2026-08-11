@@ -285,6 +285,46 @@
           </template>
         </section>
 
+        <section class="context-section sibling-context">
+          <header class="context-section-header">
+            <div>
+              <strong>同级兄弟章</strong>
+              <small>同父叶子 · 只读摘要</small>
+            </div>
+            <span class="context-version">{{ siblingRoleLabel }}</span>
+          </header>
+          <div v-if="siblingMissingUpstream.length" class="context-warning">
+            本章依赖上游兄弟章骨架。建议先完成：
+            {{ siblingMissingUpstream.map(item => item.title || item.chapter_id).join('、') }}
+          </div>
+          <p v-else-if="siblingGuidance" class="context-note">{{ siblingGuidance }}</p>
+          <div v-if="!siblingRows.length" class="empty-hint">
+            当前章节没有同级兄弟章，或 Blueprint 尚未提供父级分组。
+          </div>
+          <article
+            v-for="item in siblingRows"
+            :key="item.chapter_id"
+            class="context-card sibling-card"
+            :class="{ empty: !item.has_content, upstream: item.relation === 'upstream' }"
+          >
+            <div class="context-kind">
+              {{ siblingRelationLabel(item) }} · {{ siblingContentLabel(item) }}
+            </div>
+            <div class="context-title">{{ item.title || item.chapter_id }}</div>
+            <div v-if="item.purpose" class="context-body">目的：{{ item.purpose }}</div>
+            <div v-if="item.summary" class="context-body sibling-summary">{{ item.summary }}</div>
+            <div v-else class="context-src">尚无正文摘要</div>
+            <button
+              v-if="item.chapter_id"
+              type="button"
+              class="context-project-link"
+              @click="selectChapter(item.chapter_id)"
+            >
+              打开兄弟章
+            </button>
+          </article>
+        </section>
+
         <section class="context-section chapter-only-context">
           <header class="context-section-header">
             <div>
@@ -322,7 +362,7 @@
           <div v-else-if="chatLoading" class="empty-hint">正在加载本章对话…</div>
           <div v-else-if="!chatTurns.length" class="empty-hint">
             这是「{{ selectedChapter?.title || selectedId }}」的专属对话。
-            可询问本章怎么写、还缺什么材料；Agent 只结合本章上下文与公共项目事实回答。
+            可询问本章怎么写、还缺什么材料；Agent 会结合本章上下文、公共项目事实与同级兄弟章摘要回答。
           </div>
           <article
             v-for="turn in chatTurns"
@@ -674,6 +714,26 @@ const contextItems = computed(() => chapterDetail.value?.context?.items || [])
 const chapterRequirements = computed(() => chapterDetail.value?.chapter_requirements || [])
 const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_scoring_requirements || [])
 const chapterContextRef = computed(() => chapterDetail.value?.chapter_context_ref || {})
+const siblingChapterContext = computed(() => chapterDetail.value?.sibling_chapter_context || null)
+const siblingRows = computed(() => {
+  const rows = siblingChapterContext.value?.siblings
+  return Array.isArray(rows) ? rows : []
+})
+const siblingMissingUpstream = computed(() => {
+  const rows = siblingChapterContext.value?.missing_upstream
+  return Array.isArray(rows) ? rows : []
+})
+const siblingGuidance = computed(() => {
+  const policy = siblingChapterContext.value?.writing_policy
+  return String(policy?.guidance || '').trim()
+})
+const siblingRoleLabel = computed(() => {
+  const role = String(siblingChapterContext.value?.chapter_role || '')
+  if (role === 'visual') return '图示/路线图'
+  if (role === 'method') return '方法细则'
+  if (role === 'overview') return '总体骨架'
+  return role || '普通'
+})
 const globalContextReady = computed(() => Boolean(
   globalProjectContext.value?.global_context_id
   && Number(globalProjectContext.value?.global_context_revision || 0) > 0
@@ -847,6 +907,31 @@ async function reloadAll() {
   } finally {
     busy.value = false
   }
+}
+
+function siblingRelationLabel(item) {
+  const relation = String(item?.relation || '')
+  const role = String(item?.role || '')
+  const relationText = relation === 'upstream'
+    ? '上游'
+    : relation === 'downstream'
+      ? '下游'
+      : '同级'
+  const roleText = role === 'overview'
+    ? '总体'
+    : role === 'method'
+      ? '方法'
+      : role === 'visual'
+        ? '图示'
+        : '兄弟'
+  return `${relationText}·${roleText}`
+}
+
+function siblingContentLabel(item) {
+  const status = String(item?.content_status || '')
+  if (status === 'formal') return '正式版'
+  if (status === 'draft') return `草稿 r${item?.content_revision || 0}`
+  return '无正文'
 }
 
 function selectChapter(chapterId) {
@@ -1651,6 +1736,15 @@ onUnmounted(() => {
 }
 .requirement-card { border-left: 3px solid #2563eb; }
 .scoring-card { border-left: 3px solid #f59e0b; }
+.sibling-card { border-left: 3px solid #0f766e; }
+.sibling-card.upstream { border-left-color: #2563eb; }
+.sibling-card.empty { opacity: 0.88; background: #fff7ed; border-color: #fed7aa; }
+.sibling-summary {
+  max-height: 7.5em;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.5;
+}
 .context-card {
   border: 1px solid #e2e8f0;
   border-radius: 8px;

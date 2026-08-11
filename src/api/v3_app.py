@@ -774,6 +774,21 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
         except (ControlPlaneError, ValueError):
             chapter["chapter_requirements"] = []
             chapter["chapter_scoring_requirements"] = []
+        try:
+            from document_pipeline.sibling_chapter_context import (
+                SiblingChapterContextService,
+            )
+
+            chapter["sibling_chapter_context"] = SiblingChapterContextService(
+                context
+            ).build_for_chapter(chapter)
+        except Exception:
+            chapter["sibling_chapter_context"] = {
+                "siblings": [],
+                "missing_upstream": [],
+                "ready_for_dependent_writing": True,
+                "writing_policy": {"rules": [], "guidance": ""},
+            }
         return JSONResponse({"ok": True, "chapter": chapter})
     except ControlPlaneError as exc:
         return _error(exc)
@@ -839,6 +854,16 @@ async def chapter_chat_turn(
         except ControlPlaneError:
             global_project_context = None
 
+        try:
+            from document_pipeline.sibling_chapter_context import (
+                SiblingChapterContextService,
+            )
+
+            sibling_context = SiblingChapterContextService(
+                context
+            ).build_for_chapter(chapter)
+        except Exception:
+            sibling_context = None
         result = ChapterChatService(context).answer(
             chapter_id,
             message,
@@ -846,6 +871,7 @@ async def chapter_chat_turn(
             global_project_context=global_project_context,
             tender_requirements=requirements,
             scoring_requirements=scoring,
+            sibling_context=sibling_context,
         )
         snapshot_data = V3WorkspaceSnapshotBuilder(context).build()
         return JSONResponse(
@@ -881,6 +907,7 @@ def _chapter_draft_messages(
     chapter_grounding_context: dict[str, Any] | None = None,
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
+    sibling_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     from document_pipeline.content_grounding import chapter_opening_policy
 
@@ -898,6 +925,7 @@ def _chapter_draft_messages(
         for item in (chapter_context.get("items") or [])
         if isinstance(item, dict)
     ]
+    sibling_payload = dict(sibling_context or {})
     writing_input = {
         "chapter_id": str(chapter.get("chapter_id") or ""),
         "chapter_title": str(chapter.get("title") or ""),
@@ -908,10 +936,24 @@ def _chapter_draft_messages(
         "chapter_context": context_items,
         "global_project_context": dict(project_context or {}),
         "chapter_grounding_context": dict(chapter_grounding_context or {}),
+        # Same-parent sibling leaves only (not parent body, not whole workspace).
+        "sibling_chapter_context": sibling_payload,
         "user_instruction": instruction,
         "verified_public_sources": list(research_sources or []),
         "opening_policy": chapter_opening_policy(chapter),
     }
+    sibling_rules = ""
+    policy = sibling_payload.get("writing_policy") if isinstance(sibling_payload, dict) else None
+    if isinstance(policy, dict):
+        rules = [str(item).strip() for item in (policy.get("rules") or []) if str(item).strip()]
+        guidance = str(policy.get("guidance") or "").strip()
+        if rules or guidance:
+            sibling_rules = (
+                "同级兄弟章约束："
+                + "；".join(rules)
+                + (f"。补充说明：{guidance}" if guidance else "")
+                + "。"
+            )
     return [
         {
             "role": "system",
@@ -930,6 +972,9 @@ def _chapter_draft_messages(
                 "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
                 "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
                 "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
+                "若提供 sibling_chapter_context，只能引用同级兄弟章的 purpose/summary 作为阶段骨架"
+                "与职责边界；不得把兄弟章全文搬进本章，不得替兄弟章写主责内容。"
+                + sibling_rules
             ),
         },
         {
@@ -1355,6 +1400,33 @@ async def stream_chapter_draft(
                             for row in research_sources
                         ],
                     )
+            from document_pipeline.sibling_chapter_context import (
+                SiblingChapterContextService,
+            )
+
+            sibling_context = SiblingChapterContextService(
+                context
+            ).build_for_chapter(chapter)
+            if (
+                sibling_context.get("chapter_role") == "visual"
+                and sibling_context.get("missing_upstream")
+            ):
+                missing = sibling_context["missing_upstream"]
+                titles = "、".join(
+                    str(item.get("title") or item.get("chapter_id") or "")
+                    for item in missing
+                )
+                yield _ndjson_event(
+                    "research",
+                    chapter_id=normalized_chapter_id,
+                    status="sibling_hint",
+                    message=(
+                        f"本章依赖同级兄弟章骨架。建议先写完：{titles}。"
+                        "将以兄弟章已有摘要/目的作为图示骨架继续生成，不展开方法细节。"
+                    ),
+                    sources=[],
+                )
+
             text_parts: list[str] = []
             for kind, value in chat_stream_chunks(
                 _chapter_draft_messages(
@@ -1365,6 +1437,7 @@ async def stream_chapter_draft(
                     chapter_grounding_context=chapter_grounding_context,
                     tender_requirements=tender_requirements,
                     scoring_requirements=scoring_requirements,
+                    sibling_context=sibling_context,
                 ),
                 temperature=0.25,
             ):
