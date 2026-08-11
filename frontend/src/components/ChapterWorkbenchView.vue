@@ -285,44 +285,82 @@
           </template>
         </section>
 
-        <section class="context-section sibling-context">
+        <section class="context-section outline-context">
           <header class="context-section-header">
             <div>
-              <strong>同级兄弟章</strong>
-              <small>同父叶子 · 只读摘要</small>
+              <strong>整份目录</strong>
+              <small>只读 · 定位本章处境</small>
             </div>
-            <span class="context-version">{{ siblingRoleLabel }}</span>
+            <span class="context-version">{{ outlineRoleLabel }}</span>
           </header>
-          <div v-if="siblingMissingUpstream.length" class="context-warning">
-            本章依赖上游兄弟章骨架。建议先完成：
-            {{ siblingMissingUpstream.map(item => item.title || item.chapter_id).join('、') }}
+          <p v-if="outlinePathLabel" class="context-note outline-path">
+            当前位置：{{ outlinePathLabel }}
+          </p>
+          <p v-if="outlineGuidance" class="context-note">{{ outlineGuidance }}</p>
+          <div v-if="!outlineFlat.length" class="empty-hint">
+            目录尚未就绪。
           </div>
-          <p v-else-if="siblingGuidance" class="context-note">{{ siblingGuidance }}</p>
-          <div v-if="!siblingRows.length" class="empty-hint">
-            当前章节没有同级兄弟章，或 Blueprint 尚未提供父级分组。
-          </div>
-          <article
-            v-for="item in siblingRows"
-            :key="item.chapter_id"
-            class="context-card sibling-card"
-            :class="{ empty: !item.has_content, upstream: item.relation === 'upstream' }"
-          >
-            <div class="context-kind">
-              {{ siblingRelationLabel(item) }} · {{ siblingContentLabel(item) }}
-            </div>
-            <div class="context-title">{{ item.title || item.chapter_id }}</div>
-            <div v-if="item.purpose" class="context-body">目的：{{ item.purpose }}</div>
-            <div v-if="item.summary" class="context-body sibling-summary">{{ item.summary }}</div>
-            <div v-else class="context-src">尚无正文摘要</div>
+          <div v-else class="outline-readonly-list" role="tree">
             <button
-              v-if="item.chapter_id"
+              v-for="item in outlineFlat"
+              :key="item.chapter_id"
               type="button"
-              class="context-project-link"
-              @click="selectChapter(item.chapter_id)"
+              class="outline-readonly-item"
+              :class="{
+                current: item.is_current,
+                empty: !item.has_content,
+                leaf: item.is_leaf,
+              }"
+              :style="{ paddingLeft: `${10 + (item.depth || 0) * 14}px` }"
+              :title="item.is_current ? '当前正在编辑的章节' : '点击只读查看（不可修改）'"
+              @click="inspectOutlineChapter(item)"
             >
-              打开兄弟章
+              <span class="outline-readonly-title">{{ item.title || item.chapter_id }}</span>
+              <span class="outline-readonly-meta">
+                <em v-if="item.is_current">本章</em>
+                <em v-else>{{ outlineContentLabel(item) }}</em>
+              </span>
             </button>
-          </article>
+          </div>
+
+          <div v-if="readonlyView" class="readonly-chapter-panel">
+            <header class="context-section-header">
+              <div>
+                <strong>他章只读</strong>
+                <small>不可修改</small>
+              </div>
+              <button type="button" class="btn btn-ghost btn-tiny" @click="closeReadonlyView">关闭</button>
+            </header>
+            <div v-if="readonlyLoading" class="empty-hint">加载只读信息…</div>
+            <template v-else>
+              <div class="context-kind">
+                {{ readonlyView.title || readonlyView.chapter_id }}
+                · {{ outlineContentLabel(readonlyView) }}
+                · 只读
+              </div>
+              <div v-if="readonlyView.purpose" class="context-body">目的：{{ readonlyView.purpose }}</div>
+              <div
+                v-if="readonlyView.writing_objectives?.length"
+                class="context-body"
+              >
+                写作目标：{{ readonlyView.writing_objectives.join('；') }}
+              </div>
+              <div v-if="readonlyView.summary" class="context-body sibling-summary">
+                {{ readonlyView.summary }}
+              </div>
+              <div v-else class="context-src">该章尚无正文摘要</div>
+              <article
+                v-for="(item, index) in (readonlyView.context_items || [])"
+                :key="`${item.kind}-${index}`"
+                class="context-card"
+              >
+                <div class="context-kind">{{ item.kind || '上下文' }}</div>
+                <div class="context-title">{{ item.title }}</div>
+                <div class="context-body">{{ item.body }}</div>
+              </article>
+              <p class="context-note">查看不会切换当前编辑章节，也不能在这里修改他章内容。</p>
+            </template>
+          </div>
         </section>
 
         <section class="context-section chapter-only-context">
@@ -362,7 +400,7 @@
           <div v-else-if="chatLoading" class="empty-hint">正在加载本章对话…</div>
           <div v-else-if="!chatTurns.length" class="empty-hint">
             这是「{{ selectedChapter?.title || selectedId }}」的专属对话。
-            可询问本章怎么写、还缺什么材料；Agent 会结合本章上下文、公共项目事实与同级兄弟章摘要回答。
+            Agent 知道整份目录位置，可参考他章只读信息，但只改本章建议。
           </div>
           <article
             v-for="turn in chatTurns"
@@ -442,6 +480,7 @@ import { useRouter } from 'vue-router'
 import {
   chatChapterV3,
   fetchChapterChatHistory,
+  fetchChapterReadonlyView,
   fetchChapter,
   fetchChapterRevisions,
   fetchChapters,
@@ -714,26 +753,26 @@ const contextItems = computed(() => chapterDetail.value?.context?.items || [])
 const chapterRequirements = computed(() => chapterDetail.value?.chapter_requirements || [])
 const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_scoring_requirements || [])
 const chapterContextRef = computed(() => chapterDetail.value?.chapter_context_ref || {})
-const siblingChapterContext = computed(() => chapterDetail.value?.sibling_chapter_context || null)
-const siblingRows = computed(() => {
-  const rows = siblingChapterContext.value?.siblings
+const documentOutlineContext = computed(() => chapterDetail.value?.document_outline_context || null)
+const outlineFlat = computed(() => {
+  const rows = documentOutlineContext.value?.outline
   return Array.isArray(rows) ? rows : []
 })
-const siblingMissingUpstream = computed(() => {
-  const rows = siblingChapterContext.value?.missing_upstream
-  return Array.isArray(rows) ? rows : []
-})
-const siblingGuidance = computed(() => {
-  const policy = siblingChapterContext.value?.writing_policy
+const outlinePathLabel = computed(() => String(documentOutlineContext.value?.position?.path_label || '').trim())
+const outlineGuidance = computed(() => {
+  const policy = documentOutlineContext.value?.writing_policy
   return String(policy?.guidance || '').trim()
 })
-const siblingRoleLabel = computed(() => {
-  const role = String(siblingChapterContext.value?.chapter_role || '')
+const outlineRoleLabel = computed(() => {
+  const role = String(documentOutlineContext.value?.current_role || '')
   if (role === 'visual') return '图示/路线图'
   if (role === 'method') return '方法细则'
   if (role === 'overview') return '总体骨架'
-  return role || '普通'
+  return role || '目录'
 })
+const readonlyView = ref(null)
+const readonlyLoading = ref(false)
+const readonlyTargetId = ref('')
 const globalContextReady = computed(() => Boolean(
   globalProjectContext.value?.global_context_id
   && Number(globalProjectContext.value?.global_context_revision || 0) > 0
@@ -909,29 +948,45 @@ async function reloadAll() {
   }
 }
 
-function siblingRelationLabel(item) {
-  const relation = String(item?.relation || '')
-  const role = String(item?.role || '')
-  const relationText = relation === 'upstream'
-    ? '上游'
-    : relation === 'downstream'
-      ? '下游'
-      : '同级'
-  const roleText = role === 'overview'
-    ? '总体'
-    : role === 'method'
-      ? '方法'
-      : role === 'visual'
-        ? '图示'
-        : '兄弟'
-  return `${relationText}·${roleText}`
+function outlineContentLabel(item) {
+  const status = String(item?.content_status || '')
+  if (status === 'formal') return '正式'
+  if (status === 'draft') return `草稿 r${item?.content_revision || 0}`
+  if (item?.is_leaf === false) return '结构'
+  return '无正文'
 }
 
-function siblingContentLabel(item) {
-  const status = String(item?.content_status || '')
-  if (status === 'formal') return '正式版'
-  if (status === 'draft') return `草稿 r${item?.content_revision || 0}`
-  return '无正文'
+async function inspectOutlineChapter(item) {
+  const targetId = String(item?.chapter_id || '').trim()
+  const viewerId = String(selectedId.value || '').trim()
+  if (!targetId || !viewerId) return
+  if (item?.is_current || targetId === viewerId) {
+    readonlyView.value = null
+    readonlyTargetId.value = ''
+    return
+  }
+  readonlyLoading.value = true
+  readonlyTargetId.value = targetId
+  actionError.value = ''
+  try {
+    const { data } = await fetchChapterReadonlyView(props.workspaceId, viewerId, targetId)
+    if (readonlyTargetId.value !== targetId) return
+    if (!data?.ok) throw new Error(data?.message || '加载他章只读信息失败')
+    readonlyView.value = data.chapter_view || null
+    rightTab.value = 'context'
+  } catch (e) {
+    if (readonlyTargetId.value !== targetId) return
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+    readonlyView.value = null
+  } finally {
+    if (readonlyTargetId.value === targetId) readonlyLoading.value = false
+  }
+}
+
+function closeReadonlyView() {
+  readonlyView.value = null
+  readonlyTargetId.value = ''
+  readonlyLoading.value = false
 }
 
 function selectChapter(chapterId) {
@@ -1309,6 +1364,7 @@ watch(
   async (id, prev) => {
     if (!id || id === prev) return
     chatInput.value = ''
+    closeReadonlyView()
     await Promise.all([
       loadChapterDetail({ force: true }),
       loadChapterChat(id),
@@ -1736,9 +1792,59 @@ onUnmounted(() => {
 }
 .requirement-card { border-left: 3px solid #2563eb; }
 .scoring-card { border-left: 3px solid #f59e0b; }
-.sibling-card { border-left: 3px solid #0f766e; }
-.sibling-card.upstream { border-left-color: #2563eb; }
-.sibling-card.empty { opacity: 0.88; background: #fff7ed; border-color: #fed7aa; }
+.outline-path { color: #0f766e; font-weight: 600; }
+.outline-readonly-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 280px;
+  overflow: auto;
+  margin-top: 8px;
+  padding-right: 2px;
+}
+.outline-readonly-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #0f172a;
+  padding: 7px 10px;
+  text-align: left;
+  cursor: pointer;
+}
+.outline-readonly-item:hover { border-color: #93c5fd; background: #eff6ff; }
+.outline-readonly-item.current {
+  border-color: #2563eb;
+  background: #dbeafe;
+  cursor: default;
+}
+.outline-readonly-item.empty { opacity: 0.85; }
+.outline-readonly-title {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  word-break: break-word;
+}
+.outline-readonly-meta em {
+  font-style: normal;
+  font-size: 10px;
+  color: #64748b;
+  white-space: nowrap;
+}
+.outline-readonly-item.current .outline-readonly-meta em { color: #1d4ed8; font-weight: 700; }
+.readonly-chapter-panel {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #cbd5e1;
+}
+.btn-tiny {
+  padding: 2px 8px;
+  font-size: 11px;
+}
 .sibling-summary {
   max-height: 7.5em;
   overflow: auto;

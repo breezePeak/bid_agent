@@ -24,6 +24,10 @@ export function chapterChatTurnPath(workspaceId, chapterId) {
   return `${chapterPath(workspaceId, chapterId)}/chat/turn`
 }
 
+export function chapterReadonlyPath(workspaceId, viewerChapterId, targetChapterId) {
+  return `${chapterPath(workspaceId, viewerChapterId)}/readonly/${encodeURIComponent(targetChapterId)}`
+}
+
 export function chapterComparePath(workspaceId, chapterId, fromRev, toRev) {
   return `${chapterContentRevisionsPath(workspaceId, chapterId)}/compare?from=${fromRev}&to=${toRev}`
 }

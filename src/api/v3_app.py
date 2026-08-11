@@ -789,7 +789,54 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
                 "ready_for_dependent_writing": True,
                 "writing_policy": {"rules": [], "guidance": ""},
             }
+        try:
+            from document_pipeline.document_outline_context import (
+                DocumentOutlineContextService,
+            )
+
+            chapter["document_outline_context"] = DocumentOutlineContextService(
+                context
+            ).build_for_chapter(chapter)
+        except Exception:
+            chapter["document_outline_context"] = {
+                "outline": [],
+                "outline_tree": [],
+                "related_summaries": [],
+                "position": {},
+                "access": {
+                    "mode": "read_only_outline",
+                    "can_edit_other_chapters": False,
+                },
+            }
         return JSONResponse({"ok": True, "chapter": chapter})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get(
+    "/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/readonly/{target_chapter_id}"
+)
+def chapter_readonly_view(
+    workspace_id: str,
+    chapter_id: str,
+    target_chapter_id: str,
+) -> JSONResponse:
+    """Read-only inspection of another chapter from the active chapter's workbench."""
+    try:
+        from document_pipeline.document_outline_context import (
+            DocumentOutlineContextService,
+        )
+
+        context = _context(workspace_id)
+        # Ensure the viewer chapter exists in the blueprint/workspace chain.
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        ChapterWorkspaceService(context).get_chapter(chapter_id)
+        view = DocumentOutlineContextService(context).readonly_chapter_view(
+            target_chapter_id,
+            viewer_chapter_id=chapter_id,
+        )
+        return JSONResponse({"ok": True, "chapter_view": view})
     except ControlPlaneError as exc:
         return _error(exc)
 
@@ -864,6 +911,16 @@ async def chapter_chat_turn(
             ).build_for_chapter(chapter)
         except Exception:
             sibling_context = None
+        try:
+            from document_pipeline.document_outline_context import (
+                DocumentOutlineContextService,
+            )
+
+            outline_context = DocumentOutlineContextService(
+                context
+            ).build_for_chapter(chapter)
+        except Exception:
+            outline_context = None
         result = ChapterChatService(context).answer(
             chapter_id,
             message,
@@ -872,6 +929,7 @@ async def chapter_chat_turn(
             tender_requirements=requirements,
             scoring_requirements=scoring,
             sibling_context=sibling_context,
+            outline_context=outline_context,
         )
         snapshot_data = V3WorkspaceSnapshotBuilder(context).build()
         return JSONResponse(
@@ -908,8 +966,10 @@ def _chapter_draft_messages(
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
     sibling_context: dict[str, Any] | None = None,
+    outline_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     from document_pipeline.content_grounding import chapter_opening_policy
+    from document_pipeline.document_outline_context import compact_outline_for_prompt
     from document_pipeline.sibling_chapter_context import _chapter_role
 
     node = chapter.get("blueprint_node")
@@ -927,10 +987,13 @@ def _chapter_draft_messages(
         if isinstance(item, dict)
     ]
     sibling_payload = dict(sibling_context or {})
+    outline_payload = compact_outline_for_prompt(dict(outline_context or {}))
     title = str(chapter.get("title") or node.get("title") or "")
     purpose = str(node.get("purpose") or "")
     chapter_role = str(
-        sibling_payload.get("chapter_role") or _chapter_role(title, purpose)
+        outline_payload.get("current_role")
+        or sibling_payload.get("chapter_role")
+        or _chapter_role(title, purpose)
     )
     is_visual = chapter_role == "visual"
     writing_input = {
@@ -944,20 +1007,25 @@ def _chapter_draft_messages(
         "chapter_context": context_items,
         "global_project_context": dict(project_context or {}),
         "chapter_grounding_context": dict(chapter_grounding_context or {}),
-        # Same-parent sibling leaves only (not parent body, not whole workspace).
+        # Full outline + bounded related chapter read-only summaries.
+        "document_outline_context": outline_payload,
+        # Kept for compatibility with older visual policies.
         "sibling_chapter_context": sibling_payload,
         "user_instruction": instruction,
         "verified_public_sources": list(research_sources or []),
         "opening_policy": chapter_opening_policy(chapter),
     }
-    sibling_rules = ""
-    policy = sibling_payload.get("writing_policy") if isinstance(sibling_payload, dict) else None
+    structure_rules = ""
+    policy = (
+        (outline_payload.get("writing_policy") if isinstance(outline_payload, dict) else None)
+        or (sibling_payload.get("writing_policy") if isinstance(sibling_payload, dict) else None)
+    )
     if isinstance(policy, dict):
         rules = [str(item).strip() for item in (policy.get("rules") or []) if str(item).strip()]
         guidance = str(policy.get("guidance") or "").strip()
         if rules or guidance:
-            sibling_rules = (
-                "同级兄弟章约束："
+            structure_rules = (
+                "目录处境约束："
                 + "；".join(rules)
                 + (f"。补充说明：{guidance}" if guidance else "")
                 + "。"
@@ -970,14 +1038,14 @@ def _chapter_draft_messages(
             "固定输出顺序（不要输出章节标题本身）："
             "1) 一句话图题（说明本图展示什么阶段/节点关系）；"
             "2) 用 Mermaid flowchart 或清晰 ASCII/文本流程图画出阶段、先后/并行、"
-            "关键质控节点与主要输入输出（节点命名对齐 sibling 中总体技术路线骨架）；"
+            "关键质控节点与主要输入输出（节点命名对齐目录中上游总体技术路线骨架）；"
             "3) 图注不超过 5 条短要点（每条一行，只解释读图，不展开方法细则）。"
             "不得虚构企业资质、业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，"
             "不要使用 Markdown 代码围栏包裹全文（Mermaid 代码块本身除外）。"
             "若提供已核验公开资料，仅可补充通用阶段命名或质控节点习惯，不得改写项目事实。"
-            "若提供 sibling_chapter_context，阶段划分必须优先对齐兄弟章 summary/purpose；"
-            "关键技术方法兄弟章只用来排除细节，不把方法正文搬进图中。"
-            + sibling_rules
+            "document_outline_context 提供整份目录与他章只读摘要，用于定位本章边界；"
+            "不得修改或搬空其他章节主责内容。"
+            + structure_rules
         )
     else:
         system = (
@@ -995,9 +1063,9 @@ def _chapter_draft_messages(
             "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
             "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
             "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
-            "若提供 sibling_chapter_context，只能引用同级兄弟章的 purpose/summary 作为阶段骨架"
-            "与职责边界；不得把兄弟章全文搬进本章，不得替兄弟章写主责内容。"
-            + sibling_rules
+            "document_outline_context 给出整份目录位置与他章只读摘要：用它判断本章处境与边界，"
+            "可做交叉引用，但不得改写或整段复制其他章节主责正文。"
+            + structure_rules
         )
     return [
         {"role": "system", "content": system},
@@ -1355,6 +1423,13 @@ async def stream_chapter_draft(
             sibling_context = SiblingChapterContextService(
                 context
             ).build_for_chapter(chapter)
+            from document_pipeline.document_outline_context import (
+                DocumentOutlineContextService,
+            )
+
+            outline_context = DocumentOutlineContextService(
+                context
+            ).build_for_chapter(chapter)
             if (
                 sibling_context.get("chapter_role") == "visual"
                 and sibling_context.get("missing_upstream")
@@ -1369,8 +1444,8 @@ async def stream_chapter_draft(
                     chapter_id=normalized_chapter_id,
                     status="sibling_hint",
                     message=(
-                        f"本章依赖同级兄弟章骨架。建议先写完：{titles}。"
-                        "将以兄弟章已有摘要/目的作为图示骨架继续生成，不展开方法细节。"
+                        f"根据整份目录位置，本章依赖上游章节骨架。建议先完成：{titles}。"
+                        "将以目录中相关章节只读摘要作为图示骨架继续生成，不展开方法细节。"
                     ),
                     sources=[],
                 )
@@ -1502,6 +1577,7 @@ async def stream_chapter_draft(
                     tender_requirements=tender_requirements,
                     scoring_requirements=scoring_requirements,
                     sibling_context=sibling_context,
+                    outline_context=outline_context,
                 ),
                 temperature=0.25,
             ):

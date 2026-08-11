@@ -208,6 +208,16 @@ export function chatChapterV3(runId, chapterId, message) {
   )
 }
 
+/** Read-only inspection of another chapter from the current chapter workbench. */
+export function fetchChapterReadonlyView(runId, viewerChapterId, targetChapterId) {
+  const viewer = encodeURIComponent(String(viewerChapterId || '').trim())
+  const target = encodeURIComponent(String(targetChapterId || '').trim())
+  if (!viewer || !target) throw new TypeError('viewerChapterId and targetChapterId are required')
+  return api.get(v3WorkspacePath(runId, `chapters/${viewer}/readonly/${target}`), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
 export function downloadV3Final(runId) {
   window.open(`/api${v3WorkspacePath(runId, 'exports/final')}`, '_blank')
 }

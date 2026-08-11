@@ -116,6 +116,7 @@ class ChapterChatService:
         tender_requirements: list[dict[str, Any]] | None = None,
         scoring_requirements: list[dict[str, Any]] | None = None,
         sibling_context: dict[str, Any] | None = None,
+        outline_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         node = chapter.get("blueprint_node")
         node = node if isinstance(node, dict) else {}
@@ -174,6 +175,23 @@ class ChapterChatService:
             except Exception:
                 sibling_payload = {}
 
+        outline_payload = outline_context if isinstance(outline_context, dict) else {}
+        if not outline_payload:
+            try:
+                from .document_outline_context import DocumentOutlineContextService
+
+                outline_payload = DocumentOutlineContextService(
+                    self.context
+                ).build_for_chapter(chapter)
+            except Exception:
+                outline_payload = {}
+        try:
+            from .document_outline_context import compact_outline_for_prompt
+
+            outline_for_agent = compact_outline_for_prompt(outline_payload)
+        except Exception:
+            outline_for_agent = outline_payload
+
         return {
             "chapter_id": str(chapter.get("chapter_id") or ""),
             "title": str(chapter.get("title") or node.get("title") or ""),
@@ -188,6 +206,7 @@ class ChapterChatService:
             "tender_requirements": list(tender_requirements or []),
             "scoring_requirements": list(scoring_requirements or []),
             "shared_project_facts": shared_facts,
+            "document_outline_context": outline_for_agent,
             "sibling_chapter_context": sibling_payload,
             "draft_preview": draft_preview,
             "head_content_revision": int(chapter.get("head_content_revision") or 0),
@@ -204,6 +223,7 @@ class ChapterChatService:
         tender_requirements: list[dict[str, Any]] | None = None,
         scoring_requirements: list[dict[str, Any]] | None = None,
         sibling_context: dict[str, Any] | None = None,
+        outline_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         text = str(message or "").strip()
         if not text:
@@ -220,14 +240,15 @@ class ChapterChatService:
             tender_requirements=tender_requirements,
             scoring_requirements=scoring_requirements,
             sibling_context=sibling_context,
+            outline_context=outline_context,
         )
         system_prompt = (
             "你是正在编制标书的协作 Agent，当前对话只针对「这一章」。"
             "用自然、直接的中文回答，不复述问题，不说套话。"
-            "只基于本章上下文、公共项目事实、同级兄弟章摘要与本章草稿回答；"
-            "不要越权改写其他章节，也不要把兄弟章全文搬进本章。"
-            "若 sibling_chapter_context 显示图示章缺少总体技术路线等上游兄弟正文，"
-            "应明确建议先写完上游兄弟章再画图。"
+            "你可以看到整份目录结构与其他章节只读摘要（document_outline_context），"
+            "据此理解本章在全书中的位置、上下游与边界；"
+            "但不得改写其他章节，也不得把其他章节全文搬进本章。"
+            "若图示章缺少上游总体路线等内容，应建议先完成对应目录章节。"
             "不确定就明确缺什么证据或材料。不得把外部信息当企业资质。"
             "你不能直接修改正文或晋级 Artifact，只能给出写作建议与下一步。"
         )
@@ -272,9 +293,17 @@ class ChapterChatService:
         req_n = len(chat_context.get("tender_requirements") or [])
         score_n = len(chat_context.get("scoring_requirements") or [])
         ctx_n = len(chat_context.get("chapter_context_items") or [])
+        outline = chat_context.get("document_outline_context")
+        outline = outline if isinstance(outline, dict) else {}
+        outline_nodes = outline.get("outline") if isinstance(outline.get("outline"), list) else []
+        related = (
+            outline.get("related_summaries")
+            if isinstance(outline.get("related_summaries"), list)
+            else []
+        )
+        path_label = str((outline.get("position") or {}).get("path_label") or "").strip()
         sibling = chat_context.get("sibling_chapter_context")
         sibling = sibling if isinstance(sibling, dict) else {}
-        siblings = sibling.get("siblings") if isinstance(sibling.get("siblings"), list) else []
         missing = (
             sibling.get("missing_upstream")
             if isinstance(sibling.get("missing_upstream"), list)
@@ -283,8 +312,10 @@ class ChapterChatService:
         parts = [
             f"这是章节「{title}」的专属对话。",
             f"本章已挂接招标要求 {req_n} 条、评分要求 {score_n} 条、专属上下文 {ctx_n} 条。",
-            f"同级兄弟章 {len(siblings)} 个。",
+            f"整份目录共 {len(outline_nodes)} 个节点。",
         ]
+        if path_label:
+            parts.append(f"当前位置：{path_label}。")
         if missing:
             names = "、".join(
                 str(item.get("title") or item.get("chapter_id") or "")
@@ -292,16 +323,16 @@ class ChapterChatService:
                 if isinstance(item, dict)
             )
             parts.append(
-                f"图示/依赖章建议先完成兄弟章：{names}，再按其中的阶段骨架画本章内容。"
+                f"图示/依赖章建议先完成：{names}，再按目录中相关章节骨架写本章。"
             )
-        elif siblings:
+        elif related:
             ready = [
                 str(item.get("title") or "")
-                for item in siblings
-                if isinstance(item, dict) and item.get("has_content")
+                for item in related
+                if isinstance(item, dict) and item.get("summary")
             ]
             if ready:
-                parts.append("可引用已有兄弟章摘要：" + "、".join(ready[:4]) + "。")
+                parts.append("可参考他章只读摘要：" + "、".join(ready[:4]) + "。")
         if not chat_context.get("is_leaf"):
             parts.append("当前节点是目录父节点，正文应写在下级叶子章节。")
         elif not chat_context.get("draft_preview"):
