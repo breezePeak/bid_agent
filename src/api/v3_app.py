@@ -910,6 +910,7 @@ def _chapter_draft_messages(
     sibling_context: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     from document_pipeline.content_grounding import chapter_opening_policy
+    from document_pipeline.sibling_chapter_context import _chapter_role
 
     node = chapter.get("blueprint_node")
     node = node if isinstance(node, dict) else {}
@@ -926,11 +927,18 @@ def _chapter_draft_messages(
         if isinstance(item, dict)
     ]
     sibling_payload = dict(sibling_context or {})
+    title = str(chapter.get("title") or node.get("title") or "")
+    purpose = str(node.get("purpose") or "")
+    chapter_role = str(
+        sibling_payload.get("chapter_role") or _chapter_role(title, purpose)
+    )
+    is_visual = chapter_role == "visual"
     writing_input = {
         "chapter_id": str(chapter.get("chapter_id") or ""),
-        "chapter_title": str(chapter.get("title") or ""),
-        "purpose": str(node.get("purpose") or ""),
+        "chapter_title": title,
+        "purpose": purpose,
         "writing_objectives": list(node.get("writing_objectives") or []),
+        "content_format": "technical_roadmap_diagram" if is_visual else "prose",
         "tender_requirements": list(tender_requirements or []),
         "scoring_requirements": list(scoring_requirements or []),
         "chapter_context": context_items,
@@ -954,29 +962,45 @@ def _chapter_draft_messages(
                 + (f"。补充说明：{guidance}" if guidance else "")
                 + "。"
             )
+    if is_visual:
+        system = (
+            "你是技术标书中的「技术路线图/流程图」撰写器，不是普通论述写作器。"
+            "本章 content_format=technical_roadmap_diagram：输出必须以图示结构为主，"
+            "禁止写成总体技术路线或关键技术方法的长文复述。"
+            "固定输出顺序（不要输出章节标题本身）："
+            "1) 一句话图题（说明本图展示什么阶段/节点关系）；"
+            "2) 用 Mermaid flowchart 或清晰 ASCII/文本流程图画出阶段、先后/并行、"
+            "关键质控节点与主要输入输出（节点命名对齐 sibling 中总体技术路线骨架）；"
+            "3) 图注不超过 5 条短要点（每条一行，只解释读图，不展开方法细则）。"
+            "不得虚构企业资质、业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，"
+            "不要使用 Markdown 代码围栏包裹全文（Mermaid 代码块本身除外）。"
+            "若提供已核验公开资料，仅可补充通用阶段命名或质控节点习惯，不得改写项目事实。"
+            "若提供 sibling_chapter_context，阶段划分必须优先对齐兄弟章 summary/purpose；"
+            "关键技术方法兄弟章只用来排除细节，不把方法正文搬进图中。"
+            + sibling_rules
+        )
+    else:
+        system = (
+            "你是技术标书正文写作器。请直接撰写当前章节的完整中文正文。"
+            "内容必须具体、专业、可执行，只使用输入中提供的事实，不得虚构企业资质、"
+            "业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，不要使用 Markdown"
+            "代码围栏，也不要输出章节标题；只输出可直接保存的正文。若提供了“已核验公开资料”，"
+            "只能依据其中的原文摘要归纳政策、标准或通用方法；资料不足时使用条件化表述，"
+            "不得把公开资料推断成项目或投标人的既有事实。项目背景、任务范围、建设目标、"
+            "标记为同类项目资料或行业标准的来源只能支持方法、质量、风险和验收思路，"
+            "不得改写当前项目的采购人、范围、任务或成果。"
+            "成果和约束必须优先取自 global_project_context 与 chapter_context；尤其是“项目背景/"
+            "任务背景”章节，开篇必须先说明本招标项目的具体对象、任务和需求，再补充与其"
+            "直接相关的政策、标准或行业依据。禁止用泛化政策介绍替代项目事实。"
+            "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
+            "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
+            "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
+            "若提供 sibling_chapter_context，只能引用同级兄弟章的 purpose/summary 作为阶段骨架"
+            "与职责边界；不得把兄弟章全文搬进本章，不得替兄弟章写主责内容。"
+            + sibling_rules
+        )
     return [
-        {
-            "role": "system",
-            "content": (
-                "你是技术标书正文写作器。请直接撰写当前章节的完整中文正文。"
-                "内容必须具体、专业、可执行，只使用输入中提供的事实，不得虚构企业资质、"
-                "业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，不要使用 Markdown"
-                "代码围栏，也不要输出章节标题；只输出可直接保存的正文。若提供了“已核验公开资料”，"
-                "只能依据其中的原文摘要归纳政策、标准或通用方法；资料不足时使用条件化表述，"
-                "不得把公开资料推断成项目或投标人的既有事实。项目背景、任务范围、建设目标、"
-                "标记为同类项目资料或行业标准的来源只能支持方法、质量、风险和验收思路，"
-                "不得改写当前项目的采购人、范围、任务或成果。"
-                "成果和约束必须优先取自 global_project_context 与 chapter_context；尤其是“项目背景/"
-                "任务背景”章节，开篇必须先说明本招标项目的具体对象、任务和需求，再补充与其"
-                "直接相关的政策、标准或行业依据。禁止用泛化政策介绍替代项目事实。"
-                "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
-                "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
-                "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
-                "若提供 sibling_chapter_context，只能引用同级兄弟章的 purpose/summary 作为阶段骨架"
-                "与职责边界；不得把兄弟章全文搬进本章，不得替兄弟章写主责内容。"
-                + sibling_rules
-            ),
-        },
+        {"role": "system", "content": system},
         {
             "role": "user",
             "content": json.dumps(writing_input, ensure_ascii=False),
@@ -984,47 +1008,45 @@ def _chapter_draft_messages(
     ]
 
 
-_DRAFT_RESEARCH_CUES = re.compile(
-    r"项目背景|任务背景|行业现状|发展现状|政策|法律|法规|标准|规范|"
-    r"专业方法|技术方法|技术路线|工艺|风险控制"
-)
-_DRAFT_ENTERPRISE_ONLY_CUES = re.compile(
-    r"资质|资格|业绩|案例|人员|证书|社保|财务|报价|投标函|法定代表人|"
-    r"授权委托|保证金|企业实力|公司简介"
-)
-
-
 def _chapter_research_question(
     chapter: dict[str, Any],
     instruction: str,
     project_context: dict[str, Any] | None = None,
+    *,
+    sibling_context: dict[str, Any] | None = None,
+    tender_requirements: list[dict[str, Any]] | None = None,
+    scoring_requirements: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Return a bounded public-research brief, or an empty string when irrelevant."""
-    node = chapter.get("blueprint_node") if isinstance(chapter.get("blueprint_node"), dict) else {}
-    context = chapter.get("context") if isinstance(chapter.get("context"), dict) else {}
-    raw = " ".join(
-        str(value or "")
-        for value in (
-            chapter.get("title"), node.get("purpose"),
-            " ".join(str(item.get("body") or "") for item in context.get("items") or [] if isinstance(item, dict)),
-            instruction,
-        )
+    """Return model-decided search query from distilled chapter-relevant facts."""
+    plan = _chapter_research_plan(
+        chapter,
+        instruction=instruction,
+        project_context=project_context,
+        sibling_context=sibling_context,
+        tender_requirements=tender_requirements,
+        scoring_requirements=scoring_requirements,
     )
-    if not _DRAFT_RESEARCH_CUES.search(raw) or _DRAFT_ENTERPRISE_ONLY_CUES.search(raw):
-        return ""
-    title = str(chapter.get("title") or "当前章节").strip()
-    purpose = str(node.get("purpose") or "").strip()
-    project_text = json.dumps(project_context or {}, ensure_ascii=False)
-    project_text = re.sub(r"\s+", " ", project_text).strip()[:4000]
-    return (
-        f"本招标项目已知信息：{project_text or '未提供'}。\n"
-        f"为上述招标项目的章节《{title}》检索可核验的公开依据。"
-        f"章节目标：{purpose or title}。优先检索与该项目名称、采购范围、建设对象或交付要求"
-        "直接相关的招标公告、采购公告或采购人公开信息；如不存在，先检索任务对象和工作内容"
-        "相同或高度相似的项目资料，再检索与具体任务直接相关的现行标准、规范和专业方法。"
-        "同类项目只能支持实施方法、质量控制、风险和验收思路，不能写成当前项目事实。"
-        "不得只返回通用招投标政策。"
-        "不要检索或推断任何企业资质、业绩、人员、报价或承诺事实。"
+    return str(plan.get("search_query") or "")
+
+
+def _chapter_research_plan(
+    chapter: dict[str, Any],
+    *,
+    instruction: str = "",
+    project_context: dict[str, Any] | None = None,
+    sibling_context: dict[str, Any] | None = None,
+    tender_requirements: list[dict[str, Any]] | None = None,
+    scoring_requirements: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    from document_pipeline.chapter_research_planner import plan_chapter_research
+
+    return plan_chapter_research(
+        chapter,
+        project_context=project_context,
+        sibling_context=sibling_context,
+        tender_requirements=tender_requirements,
+        scoring_requirements=scoring_requirements,
+        instruction=instruction,
     )
 
 
@@ -1326,15 +1348,83 @@ async def stream_chapter_draft(
                 project_context,
                 chapter_grounding_context,
             )
-            research_question = _chapter_research_question(
-                chapter, instruction, prompt_project_context
+            from document_pipeline.sibling_chapter_context import (
+                SiblingChapterContextService,
             )
-            if research_question:
+
+            sibling_context = SiblingChapterContextService(
+                context
+            ).build_for_chapter(chapter)
+            if (
+                sibling_context.get("chapter_role") == "visual"
+                and sibling_context.get("missing_upstream")
+            ):
+                missing = sibling_context["missing_upstream"]
+                titles = "、".join(
+                    str(item.get("title") or item.get("chapter_id") or "")
+                    for item in missing
+                )
+                yield _ndjson_event(
+                    "research",
+                    chapter_id=normalized_chapter_id,
+                    status="sibling_hint",
+                    message=(
+                        f"本章依赖同级兄弟章骨架。建议先写完：{titles}。"
+                        "将以兄弟章已有摘要/目的作为图示骨架继续生成，不展开方法细节。"
+                    ),
+                    sources=[],
+                )
+
+            # Chapter agent plans research from distilled relevant facts only —
+            # never paste the full tender / raw project_context dump into search.
+            yield _ndjson_event(
+                "research",
+                chapter_id=normalized_chapter_id,
+                status="planning",
+                message="章节 Agent 正在整理本章相关要点并判断是否需要公开检索…",
+            )
+            research_plan = _chapter_research_plan(
+                chapter,
+                instruction=instruction,
+                project_context=prompt_project_context,
+                sibling_context=sibling_context,
+                tender_requirements=tender_requirements,
+                scoring_requirements=scoring_requirements,
+            )
+            research_question = str(research_plan.get("search_query") or "").strip()
+            if not research_plan.get("need_research") or not research_question:
+                yield _ndjson_event(
+                    "research",
+                    chapter_id=normalized_chapter_id,
+                    status="skipped",
+                    message=(
+                        str(research_plan.get("reason") or "").strip()
+                        or "本章已有足够要点，跳过公开检索，直接写作。"
+                    ),
+                    sources=[],
+                    decision_source=str(
+                        research_plan.get("decision_source") or ""
+                    ),
+                )
+            else:
+                brief = research_plan.get("brief") if isinstance(research_plan.get("brief"), dict) else {}
                 yield _ndjson_event(
                     "research",
                     chapter_id=normalized_chapter_id,
                     status="searching",
-                    message="正在检索可核验的公开资料…",
+                    message=(
+                        "已整理本章相关要点，开始检索："
+                        + str(research_plan.get("reason") or "补充公开依据")
+                    ),
+                    brief={
+                        "project_name": brief.get("project_name"),
+                        "related_tasks": list(brief.get("related_tasks") or [])[:4],
+                        "chapter_title": brief.get("chapter_title"),
+                        "focus_keywords": list(brief.get("focus_keywords") or [])[:8],
+                    },
+                    decision_source=str(
+                        research_plan.get("decision_source") or ""
+                    ),
                 )
                 project_anchors, task_anchors = _research_anchors(
                     project_context
@@ -1379,7 +1469,7 @@ async def stream_chapter_draft(
                         status="gap",
                         message=(
                             "未发现满足项目相关性要求的公开资料；"
-                            "将以招标文件中的全局项目事实继续写作。"
+                            "将以已整理的项目要点与本章上下文继续写作。"
                         ),
                         sources=[],
                     )
@@ -1400,32 +1490,6 @@ async def stream_chapter_draft(
                             for row in research_sources
                         ],
                     )
-            from document_pipeline.sibling_chapter_context import (
-                SiblingChapterContextService,
-            )
-
-            sibling_context = SiblingChapterContextService(
-                context
-            ).build_for_chapter(chapter)
-            if (
-                sibling_context.get("chapter_role") == "visual"
-                and sibling_context.get("missing_upstream")
-            ):
-                missing = sibling_context["missing_upstream"]
-                titles = "、".join(
-                    str(item.get("title") or item.get("chapter_id") or "")
-                    for item in missing
-                )
-                yield _ndjson_event(
-                    "research",
-                    chapter_id=normalized_chapter_id,
-                    status="sibling_hint",
-                    message=(
-                        f"本章依赖同级兄弟章骨架。建议先写完：{titles}。"
-                        "将以兄弟章已有摘要/目的作为图示骨架继续生成，不展开方法细节。"
-                    ),
-                    sources=[],
-                )
 
             text_parts: list[str] = []
             for kind, value in chat_stream_chunks(
