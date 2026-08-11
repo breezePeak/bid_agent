@@ -75,12 +75,16 @@ class ChapterChatService:
                 continue
             role = str(item.get("role") or "").strip()
             content = str(item.get("content") or "")
-            if role not in {"user", "assistant"} or not content:
+            thinking = str(item.get("thinking") or item.get("reasoning") or "")
+            if role not in {"user", "assistant"}:
+                continue
+            if not content and not thinking:
                 continue
             turns.append(
                 {
                     "role": role,
                     "content": content,
+                    "thinking": thinking,
                     "created_at": str(item.get("created_at") or ""),
                 }
             )
@@ -94,6 +98,7 @@ class ChapterChatService:
         *,
         role: str,
         content: str,
+        thinking: str = "",
         created_at: str | None = None,
     ) -> dict[str, Any]:
         path = self.history_path(chapter_id)
@@ -101,6 +106,7 @@ class ChapterChatService:
         record = {
             "role": str(role).strip(),
             "content": str(content),
+            "thinking": str(thinking or ""),
             "created_at": created_at or _utc_now(),
             "chapter_id": _safe_chapter_id(chapter_id),
         }
@@ -242,6 +248,150 @@ class ChapterChatService:
             sibling_context=sibling_context,
             outline_context=outline_context,
         )
+        messages = self._build_messages(chat_context, history, text)
+        thinking = ""
+        try:
+            from llm_client import chat_with_meta
+
+            meta = chat_with_meta(messages, temperature=0.2)
+            answer = str(meta.get("content") or "").strip()
+            thinking = str(meta.get("reasoning") or "").strip()
+        except Exception:
+            answer = self._fallback_answer(chat_context, text)
+
+        if not answer:
+            answer = "（无回复）"
+
+        user_record = self.append_turn(chapter_id, role="user", content=text)
+        assistant_record = self.append_turn(
+            chapter_id,
+            role="assistant",
+            content=answer,
+            thinking=thinking,
+        )
+        return {
+            "reply": answer,
+            "thinking": thinking,
+            "chapter_id": _safe_chapter_id(chapter_id),
+            "user_turn": user_record,
+            "assistant_turn": assistant_record,
+            "history_tail": self.load_history(chapter_id, limit=HISTORY_TAIL),
+        }
+
+    def iter_answer_events(
+        self,
+        chapter_id: str,
+        message: str,
+        *,
+        chapter: dict[str, Any],
+        global_project_context: dict[str, Any] | None = None,
+        tender_requirements: list[dict[str, Any]] | None = None,
+        scoring_requirements: list[dict[str, Any]] | None = None,
+        sibling_context: dict[str, Any] | None = None,
+        outline_context: dict[str, Any] | None = None,
+    ):
+        """Yield NDJSON-ready events: thinking_delta / content_delta / done."""
+        text = str(message or "").strip()
+        if not text:
+            raise ControlPlaneError(
+                "CHAT_MESSAGE_REQUIRED",
+                "请输入要处理的问题。",
+                status_code=400,
+            )
+
+        history = self.load_history(chapter_id, limit=PROMPT_HISTORY_TAIL)
+        chat_context = self.build_chapter_chat_context(
+            chapter,
+            global_project_context=global_project_context,
+            tender_requirements=tender_requirements,
+            scoring_requirements=scoring_requirements,
+            sibling_context=sibling_context,
+            outline_context=outline_context,
+        )
+        messages = self._build_messages(chat_context, history, text)
+        safe_id = _safe_chapter_id(chapter_id)
+        user_record = self.append_turn(chapter_id, role="user", content=text)
+        yield {
+            "type": "meta",
+            "chapter_id": safe_id,
+            "title": str(chat_context.get("title") or ""),
+            "user_turn": user_record,
+        }
+
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+        try:
+            from llm_client import chat_stream_chunks
+
+            for kind, value in chat_stream_chunks(messages, temperature=0.2):
+                chunk = str(value or "")
+                if not chunk:
+                    continue
+                if kind == "reasoning":
+                    reasoning_parts.append(chunk)
+                    yield {
+                        "type": "thinking_delta",
+                        "chapter_id": safe_id,
+                        "delta": chunk,
+                    }
+                elif kind == "content":
+                    content_parts.append(chunk)
+                    yield {
+                        "type": "content_delta",
+                        "chapter_id": safe_id,
+                        "delta": chunk,
+                    }
+        except Exception as exc:
+            # Fall back to non-stream path so the user still gets an answer.
+            try:
+                from llm_client import chat_with_meta
+
+                meta = chat_with_meta(messages, temperature=0.2)
+                answer = str(meta.get("content") or "").strip()
+                thinking = str(meta.get("reasoning") or "").strip()
+            except Exception:
+                answer = self._fallback_answer(chat_context, text)
+                thinking = ""
+            if thinking:
+                reasoning_parts = [thinking]
+                yield {
+                    "type": "thinking_delta",
+                    "chapter_id": safe_id,
+                    "delta": thinking,
+                }
+            if not answer:
+                answer = f"请求失败后的降级回复：{exc}"[:500]
+            content_parts = [answer]
+            yield {
+                "type": "content_delta",
+                "chapter_id": safe_id,
+                "delta": answer,
+            }
+
+        answer = "".join(content_parts).strip() or "（无回复）"
+        thinking = "".join(reasoning_parts).strip()
+        assistant_record = self.append_turn(
+            chapter_id,
+            role="assistant",
+            content=answer,
+            thinking=thinking,
+        )
+        yield {
+            "type": "done",
+            "chapter_id": safe_id,
+            "reply": answer,
+            "thinking": thinking,
+            "user_turn": user_record,
+            "assistant_turn": assistant_record,
+            "turns": self.load_history(chapter_id, limit=HISTORY_TAIL),
+        }
+
+    @staticmethod
+    def _build_messages(
+        chat_context: dict[str, Any],
+        history: list[dict[str, Any]],
+        user_message: str,
+    ) -> list[dict[str, str]]:
         system_prompt = (
             "你是正在编制标书的协作 Agent，当前对话只针对「这一章」。"
             "用自然、直接的中文回答，不复述问题，不说套话。"
@@ -251,41 +401,31 @@ class ChapterChatService:
             "若图示章缺少上游总体路线等内容，应建议先完成对应目录章节。"
             "不确定就明确缺什么证据或材料。不得把外部信息当企业资质。"
             "你不能直接修改正文或晋级 Artifact，只能给出写作建议与下一步。"
+            "请先在模型思考通道中分析目录位置、本章边界与证据缺口，再给出面向用户的最终建议。"
         )
+        # Do not re-inject prior thinking into the model prompt (token bloat / leakage).
+        recent = [
+            {
+                "role": item.get("role"),
+                "content": item.get("content"),
+            }
+            for item in history
+            if isinstance(item, dict) and item.get("content")
+        ]
         user_payload = {
-            "chapter_id": chat_context["chapter_id"],
-            "chapter_title": chat_context["title"],
-            "recent_chapter_dialogue": history,
+            "chapter_id": chat_context.get("chapter_id"),
+            "chapter_title": chat_context.get("title"),
+            "recent_chapter_dialogue": recent,
             "chapter_context": chat_context,
-            "user_message": text,
+            "user_message": user_message,
         }
-        try:
-            from llm_client import chat
-
-            answer = chat(
-                [
-                    {"role": "system", "content": system_prompt},
-                    {
-                        "role": "user",
-                        "content": json.dumps(user_payload, ensure_ascii=False),
-                    },
-                ]
-            ).strip()
-        except Exception:
-            answer = self._fallback_answer(chat_context, text)
-
-        if not answer:
-            answer = "（无回复）"
-
-        user_record = self.append_turn(chapter_id, role="user", content=text)
-        assistant_record = self.append_turn(chapter_id, role="assistant", content=answer)
-        return {
-            "reply": answer,
-            "chapter_id": _safe_chapter_id(chapter_id),
-            "user_turn": user_record,
-            "assistant_turn": assistant_record,
-            "history_tail": self.load_history(chapter_id, limit=HISTORY_TAIL),
-        }
+        return [
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "user",
+                "content": json.dumps(user_payload, ensure_ascii=False),
+            },
+        ]
 
     @staticmethod
     def _fallback_answer(chat_context: dict[str, Any], message: str) -> str:

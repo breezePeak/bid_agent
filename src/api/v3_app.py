@@ -868,6 +868,53 @@ def chapter_chat_history(
         return _error(exc)
 
 
+def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
+    """Load chapter-scoped chat inputs shared by turn and stream endpoints."""
+    from document_pipeline.chapter_chat import ChapterChatService
+    from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+    context = _context(workspace_id)
+    chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
+    try:
+        requirements, scoring = _chapter_semantic_requirements(context, chapter)
+    except (ControlPlaneError, ValueError):
+        requirements, scoring = [], []
+    try:
+        global_project_context = _chapter_project_context(context)
+    except ControlPlaneError:
+        global_project_context = None
+    try:
+        from document_pipeline.sibling_chapter_context import (
+            SiblingChapterContextService,
+        )
+
+        sibling_context = SiblingChapterContextService(context).build_for_chapter(
+            chapter
+        )
+    except Exception:
+        sibling_context = None
+    try:
+        from document_pipeline.document_outline_context import (
+            DocumentOutlineContextService,
+        )
+
+        outline_context = DocumentOutlineContextService(context).build_for_chapter(
+            chapter
+        )
+    except Exception:
+        outline_context = None
+    return {
+        "context": context,
+        "chapter": chapter,
+        "service": ChapterChatService(context),
+        "requirements": requirements,
+        "scoring": scoring,
+        "global_project_context": global_project_context,
+        "sibling_context": sibling_context,
+        "outline_context": outline_context,
+    }
+
+
 @app.post("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/turn")
 async def chapter_chat_turn(
     workspace_id: str,
@@ -886,56 +933,23 @@ async def chapter_chat_turn(
             status_code=400,
         )
     try:
-        from document_pipeline.chapter_chat import ChapterChatService
-        from document_pipeline.chapter_workspace import ChapterWorkspaceService
-
-        context = _context(workspace_id)
-        chapter_service = ChapterWorkspaceService(context)
-        chapter = chapter_service.get_chapter(chapter_id)
-        try:
-            requirements, scoring = _chapter_semantic_requirements(context, chapter)
-        except (ControlPlaneError, ValueError):
-            requirements, scoring = [], []
-        try:
-            global_project_context = _chapter_project_context(context)
-        except ControlPlaneError:
-            global_project_context = None
-
-        try:
-            from document_pipeline.sibling_chapter_context import (
-                SiblingChapterContextService,
-            )
-
-            sibling_context = SiblingChapterContextService(
-                context
-            ).build_for_chapter(chapter)
-        except Exception:
-            sibling_context = None
-        try:
-            from document_pipeline.document_outline_context import (
-                DocumentOutlineContextService,
-            )
-
-            outline_context = DocumentOutlineContextService(
-                context
-            ).build_for_chapter(chapter)
-        except Exception:
-            outline_context = None
-        result = ChapterChatService(context).answer(
+        runtime = _chapter_chat_runtime(workspace_id, chapter_id)
+        result = runtime["service"].answer(
             chapter_id,
             message,
-            chapter=chapter,
-            global_project_context=global_project_context,
-            tender_requirements=requirements,
-            scoring_requirements=scoring,
-            sibling_context=sibling_context,
-            outline_context=outline_context,
+            chapter=runtime["chapter"],
+            global_project_context=runtime["global_project_context"],
+            tender_requirements=runtime["requirements"],
+            scoring_requirements=runtime["scoring"],
+            sibling_context=runtime["sibling_context"],
+            outline_context=runtime["outline_context"],
         )
-        snapshot_data = V3WorkspaceSnapshotBuilder(context).build()
+        snapshot_data = V3WorkspaceSnapshotBuilder(runtime["context"]).build()
         return JSONResponse(
             {
                 "ok": True,
                 "reply": result["reply"],
+                "thinking": result.get("thinking") or "",
                 "chapter_id": result["chapter_id"],
                 "turns": result.get("history_tail") or [],
                 "workspace_revision": snapshot_data.get("workspace_revision", 0),
@@ -943,6 +957,76 @@ async def chapter_chat_turn(
         )
     except ControlPlaneError as exc:
         return _error(exc)
+
+
+@app.post("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/stream")
+async def chapter_chat_stream(
+    workspace_id: str,
+    chapter_id: str,
+    request: Request,
+) -> StreamingResponse:
+    """Stream chapter chat thinking + answer deltas as NDJSON events."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    message = str((body or {}).get("message") or "").strip()
+    if not message:
+        return JSONResponse(
+            {"ok": False, "message": "请输入要处理的问题。"},
+            status_code=400,
+        )
+
+    def generate():
+        try:
+            runtime = _chapter_chat_runtime(workspace_id, chapter_id)
+            for event in runtime["service"].iter_answer_events(
+                chapter_id,
+                message,
+                chapter=runtime["chapter"],
+                global_project_context=runtime["global_project_context"],
+                tender_requirements=runtime["requirements"],
+                scoring_requirements=runtime["scoring"],
+                sibling_context=runtime["sibling_context"],
+                outline_context=runtime["outline_context"],
+            ):
+                event_type = str(event.get("type") or "delta")
+                payload = {key: value for key, value in event.items() if key != "type"}
+                if event_type == "done":
+                    try:
+                        snapshot_data = V3WorkspaceSnapshotBuilder(
+                            runtime["context"]
+                        ).build()
+                        payload["workspace_revision"] = snapshot_data.get(
+                            "workspace_revision", 0
+                        )
+                    except Exception:
+                        payload["workspace_revision"] = 0
+                yield _ndjson_event(event_type, **payload)
+        except ControlPlaneError as exc:
+            yield _ndjson_event(
+                "error",
+                chapter_id=str(chapter_id or ""),
+                code=str(exc.code or "CHAPTER_CHAT_FAILED"),
+                message=str(exc.message or "章节对话失败"),
+                details=dict(exc.details or {}),
+            )
+        except Exception as exc:
+            yield _ndjson_event(
+                "error",
+                chapter_id=str(chapter_id or ""),
+                code="CHAPTER_CHAT_STREAM_FAILED",
+                message=str(exc) or "章节对话流式失败",
+            )
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _ndjson_event(event_type: str, **payload: Any) -> bytes:

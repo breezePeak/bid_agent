@@ -406,10 +406,22 @@
             v-for="turn in chatTurns"
             :key="turn.id"
             class="chat-bubble"
-            :class="turn.role"
+            :class="[turn.role, { streaming: turn.streaming }]"
           >
             <strong>{{ turn.role === 'user' ? '你' : 'Agent' }}</strong>
-            <p>{{ turn.content }}</p>
+            <details
+              v-if="turn.thinking || turn.streaming"
+              class="chat-thinking"
+              :open="turn.streaming || turn.thinkingOpen"
+            >
+              <summary>
+                {{ turn.streaming && !turn.content ? '正在思考…' : '思考过程' }}
+                <span v-if="turn.streaming && turn.thinking" class="thinking-live">实时</span>
+              </summary>
+              <pre class="thinking-body">{{ turn.thinking || '（等待模型思考输出…）' }}</pre>
+            </details>
+            <p v-if="turn.content">{{ turn.content }}</p>
+            <p v-else-if="turn.streaming" class="chat-streaming-hint">正在生成回复…</p>
           </article>
         </div>
         <div class="chat-compose">
@@ -478,7 +490,6 @@ defineOptions({ name: 'ChapterWorkbenchView' })
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  chatChapterV3,
   fetchChapterChatHistory,
   fetchChapterReadonlyView,
   fetchChapter,
@@ -491,6 +502,7 @@ import {
   saveChapterMetadata,
   archiveChapter,
   streamChapterDraft,
+  streamChapterChat,
 } from '../api'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
@@ -1262,8 +1274,16 @@ function mapChatTurns(turns) {
     id: `${turn.role || 'turn'}-${turn.created_at || index}-${index}`,
     role: turn.role === 'user' ? 'user' : 'assistant',
     content: String(turn.content || ''),
+    thinking: String(turn.thinking || ''),
+    thinkingOpen: false,
+    streaming: false,
     created_at: turn.created_at || '',
   }))
+}
+
+async function scrollChatToBottom() {
+  await nextTick()
+  if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
 }
 
 function rememberChapterChat(chapterId, turns) {
@@ -1313,47 +1333,121 @@ async function sendChat() {
   if (!text || asking.value || !chapterId) return
   asking.value = true
   actionError.value = ''
-  const userTurn = { id: `u-${Date.now()}`, role: 'user', content: text }
-  const nextTurns = [...chatTurns.value, userTurn]
-  chatTurns.value = nextTurns
-  rememberChapterChat(chapterId, nextTurns)
+  const userTurn = {
+    id: `u-${Date.now()}`,
+    role: 'user',
+    content: text,
+    thinking: '',
+    thinkingOpen: false,
+    streaming: false,
+  }
+  const assistantId = `a-${Date.now()}`
+  const assistantTurn = {
+    id: assistantId,
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    thinkingOpen: true,
+    streaming: true,
+  }
+  const seedTurns = [...chatTurns.value, userTurn, assistantTurn]
+  chatTurns.value = seedTurns
+  rememberChapterChat(chapterId, seedTurns)
   chatInput.value = ''
-  await nextTick()
-  if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
+  await scrollChatToBottom()
+
+  const patchAssistant = (mutator) => {
+    const source = selectedId.value === chapterId
+      ? chatTurns.value
+      : (chatByChapter.get(chapterId) || [])
+    const next = source.map((turn) => {
+      if (turn.id !== assistantId) return turn
+      const copy = { ...turn }
+      mutator(copy)
+      return copy
+    })
+    rememberChapterChat(chapterId, next)
+    if (selectedId.value === chapterId) chatTurns.value = next
+  }
+
   try {
-    const { data } = await chatChapterV3(props.workspaceId, chapterId, text)
-    if (!data.ok) throw new Error(data.message || '对话失败')
-    // If user switched chapter mid-flight, do not pollute the visible thread.
-    if (selectedId.value !== chapterId) {
-      const cached = chatByChapter.get(chapterId) || []
-      const synced = data.turns?.length
-        ? mapChatTurns(data.turns)
-        : [...cached, { id: `a-${Date.now()}`, role: 'assistant', content: data.reply || '（无回复）' }]
-      rememberChapterChat(chapterId, synced)
-      return
+    let completedTurns = null
+    await streamChapterChat(props.workspaceId, chapterId, text, {
+      onEvent: async (event) => {
+        const type = String(event?.type || '').toLowerCase()
+        if (type === 'thinking_delta') {
+          const delta = String(event.delta || '')
+          if (!delta) return
+          patchAssistant((turn) => {
+            turn.thinking = `${turn.thinking || ''}${delta}`
+            turn.thinkingOpen = true
+            turn.streaming = true
+          })
+          if (selectedId.value === chapterId) await scrollChatToBottom()
+        } else if (type === 'content_delta') {
+          const delta = String(event.delta || '')
+          if (!delta) return
+          patchAssistant((turn) => {
+            turn.content = `${turn.content || ''}${delta}`
+            turn.streaming = true
+          })
+          if (selectedId.value === chapterId) await scrollChatToBottom()
+        } else if (type === 'done') {
+          if (Array.isArray(event.turns) && event.turns.length) {
+            completedTurns = mapChatTurns(event.turns)
+          } else {
+            patchAssistant((turn) => {
+              turn.content = String(event.reply || turn.content || '（无回复）')
+              turn.thinking = String(event.thinking || turn.thinking || '')
+              turn.streaming = false
+              turn.thinkingOpen = false
+            })
+          }
+          if (event.workspace_revision != null && selectedId.value === chapterId) {
+            workspaceRevision.value = Number(event.workspace_revision)
+          }
+        } else if (type === 'error') {
+          throw new Error(event.message || '章节对话失败')
+        }
+      },
+    })
+
+    if (completedTurns) {
+      rememberChapterChat(chapterId, completedTurns)
+      if (selectedId.value === chapterId) {
+        chatTurns.value = completedTurns
+        await scrollChatToBottom()
+      }
+    } else {
+      patchAssistant((turn) => {
+        turn.streaming = false
+        if (!turn.content) turn.content = '（无回复）'
+      })
     }
-    const turns = data.turns?.length
-      ? mapChatTurns(data.turns)
-      : [
-          ...chatTurns.value,
-          { id: `a-${Date.now()}`, role: 'assistant', content: data.reply || '（无回复）' },
-        ]
-    chatTurns.value = turns
-    rememberChapterChat(chapterId, turns)
-    if (data.workspace_revision != null) {
-      workspaceRevision.value = Number(data.workspace_revision)
-    }
-    await nextTick()
-    if (chatHistoryEl.value) chatHistoryEl.value.scrollTop = chatHistoryEl.value.scrollHeight
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
-    if (selectedId.value !== chapterId) return
-    const failed = [
-      ...chatTurns.value,
-      { id: `e-${Date.now()}`, role: 'assistant', content: `请求失败：${actionError.value}` },
-    ]
-    chatTurns.value = failed
-    rememberChapterChat(chapterId, failed)
+    if (selectedId.value !== chapterId) {
+      const cached = chatByChapter.get(chapterId) || []
+      rememberChapterChat(
+        chapterId,
+        cached.map((turn) => (
+          turn.id === assistantId
+            ? {
+                ...turn,
+                streaming: false,
+                content: turn.content || `请求失败：${actionError.value}`,
+              }
+            : turn
+        )),
+      )
+      return
+    }
+    patchAssistant((turn) => {
+      turn.streaming = false
+      turn.content = turn.content
+        ? `${turn.content}\n\n请求失败：${actionError.value}`
+        : `请求失败：${actionError.value}`
+    })
   } finally {
     asking.value = false
   }
@@ -1915,6 +2009,53 @@ onUnmounted(() => {
   margin: 0;
   white-space: pre-wrap;
   color: #0f172a;
+}
+.chat-bubble.streaming {
+  border-color: #93c5fd;
+  box-shadow: 0 0 0 1px rgb(147 197 253 / 35%);
+}
+.chat-thinking {
+  margin: 6px 0 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 6px 8px;
+}
+.chat-thinking summary {
+  cursor: pointer;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.chat-thinking summary::-webkit-details-marker { display: none; }
+.thinking-live {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-size: 10px;
+  padding: 1px 6px;
+  font-weight: 700;
+}
+.thinking-body {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 180px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.chat-streaming-hint {
+  color: #64748b !important;
+  font-style: italic;
 }
 .chat-compose {
   border-top: 1px solid #e2e8f0;

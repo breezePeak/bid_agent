@@ -146,7 +146,10 @@ class ChapterChatServiceTests(unittest.TestCase):
             chapter_b = chapter_service.get_chapter("ch-b")
             chat = ChapterChatService(context)
 
-            with mock.patch("llm_client.chat", side_effect=RuntimeError("offline")):
+            with mock.patch(
+                "llm_client.chat_with_meta",
+                side_effect=RuntimeError("offline"),
+            ):
                 result_a = chat.answer(
                     "ch-a",
                     "这一章写什么？",
@@ -207,7 +210,10 @@ class ChapterChatApiTests(unittest.TestCase):
                 mock.patch.dict(os.environ, environment, clear=False),
                 mock.patch.object(v3_app, "RUNS_DIR", runs),
                 mock.patch.object(v3_app, "SETTINGS", settings),
-                mock.patch("llm_client.chat", side_effect=RuntimeError("offline")),
+                mock.patch(
+                    "llm_client.chat_with_meta",
+                    side_effect=RuntimeError("offline"),
+                ),
                 TestClient(v3_app.app) as client,
             ):
                 login = client.post(

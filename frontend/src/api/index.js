@@ -208,6 +208,38 @@ export function chatChapterV3(runId, chapterId, message) {
   )
 }
 
+/** Stream chapter chat thinking + answer as NDJSON events. */
+export async function streamChapterChat(runId, chapterId, message, options = {}) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  const headers = {
+    Accept: 'application/x-ndjson, text/event-stream',
+    'Content-Type': 'application/json',
+  }
+  const token = csrfToken()
+  if (token) headers['X-CSRF-Token'] = token
+  const response = await fetch(`/api${v3WorkspacePath(runId, `chapters/${id}/chat/stream`)}`, {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers,
+    body: JSON.stringify({ message }),
+    signal: options.signal,
+  })
+  if (!response.ok) {
+    let detail = ''
+    try {
+      const body = await response.json()
+      detail = body?.error?.message || body?.message || ''
+    } catch (_) {
+      detail = await response.text().catch(() => '')
+    }
+    const error = new Error(detail || `章节对话流式失败（HTTP ${response.status}）`)
+    error.status = response.status
+    throw error
+  }
+  await readNdjsonStream(response, options.onEvent)
+}
+
 /** Read-only inspection of another chapter from the current chapter workbench. */
 export function fetchChapterReadonlyView(runId, viewerChapterId, targetChapterId) {
   const viewer = encodeURIComponent(String(viewerChapterId || '').trim())

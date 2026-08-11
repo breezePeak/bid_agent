@@ -4,6 +4,7 @@ import test from 'node:test'
 import {
   chapterChatHistoryPath,
   chapterChatTurnPath,
+  chapterChatStreamPath,
   chapterReadonlyPath,
   chapterPath,
   chapterStatusLabel,
@@ -23,6 +24,10 @@ test('chapter paths are rooted under v3 workspaces', () => {
   assert.equal(
     chapterChatTurnPath('ws-1', 'ch-a'),
     '/v3/workspaces/ws-1/chapters/ch-a/chat/turn',
+  )
+  assert.equal(
+    chapterChatStreamPath('ws-1', 'ch-a'),
+    '/v3/workspaces/ws-1/chapters/ch-a/chat/stream',
   )
   assert.equal(
     chapterReadonlyPath('ws-1', 'ch-a', 'ch-b'),
