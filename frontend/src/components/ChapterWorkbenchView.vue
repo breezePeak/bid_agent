@@ -1598,7 +1598,6 @@ watch(
       loadChapterDetail({ force: true }),
       loadChapterChat(id),
     ])
-    rightTab.value = (globalContextReady.value || contextItems.value.length) ? 'context' : 'chat'
   },
 )
 

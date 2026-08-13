@@ -90,6 +90,14 @@ test('only leaf chapters expose body generation and approval', () => {
   assert.match(workbench, /if \(!selectedIsLeaf\.value\)/)
 })
 
+test('chapter workbench defaults to the chapter chat tab', () => {
+  assert.match(workbench, /const rightTab = ref\('chat'\)/)
+  assert.doesNotMatch(
+    workbench,
+    /rightTab\.value = \(globalContextReady\.value \|\| contextItems\.value\.length\) \? 'context' : 'chat'/,
+  )
+})
+
 test('chapter chat shows thinking, sends on enter, and lets history be edited', () => {
   assert.match(workbench, /class="chat-thinking"/)
   assert.match(workbench, /思考过程/)
