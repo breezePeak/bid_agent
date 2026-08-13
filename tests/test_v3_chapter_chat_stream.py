@@ -136,6 +136,7 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
+            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             def fake_stream(messages, temperature=0.2):
                 payload = json.loads(messages[1]["content"])

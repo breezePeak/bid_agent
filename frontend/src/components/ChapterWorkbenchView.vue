@@ -232,6 +232,20 @@
         <button type="button" class="tab" :class="{ active: rightTab === 'chat' }" @click="rightTab = 'chat'">本章对话</button>
         <button type="button" class="tab" :class="{ active: rightTab === 'context' }" @click="rightTab = 'context'">上下文</button>
       </div>
+      <div v-show="rightTab === 'chat'" class="chat-authority">
+        <span>权限</span>
+        <button
+          v-for="item in authorityModes"
+          :key="item.id"
+          type="button"
+          class="authority-chip"
+          :class="{ active: chatAuthority.mode === item.id }"
+          :disabled="!selectedId || asking"
+          @click="setChatAuthority(item.id)"
+        >
+          {{ item.label }}
+        </button>
+      </div>
 
       <div v-show="rightTab === 'context'" class="context-panel">
         <section class="context-section shared-context">
@@ -473,6 +487,10 @@
             <p v-else class="chat-streaming-hint">正在生成回复…</p>
             <small v-if="canEditChatTurn(turn)" class="chat-edit-hint">点击可编辑，失焦后保存</small>
           </article>
+          <div v-if="chatAuthority.review_status === 'pending' && chatAuthority.mode === 'human_review'" class="chat-review-actions">
+            <button type="button" class="btn btn-primary" :disabled="asking" @click="confirmChapterOutline">确认提纲，开始写</button>
+            <button type="button" class="btn" :disabled="asking" @click="rejectChapterOutline">退回重列</button>
+          </div>
         </div>
         <div class="chat-compose">
           <textarea
@@ -554,6 +572,7 @@ import {
   streamChapterDraft,
   streamChapterChat,
   saveChapterChatTurn,
+  saveChapterChatAuthority,
 } from '../api'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
@@ -794,6 +813,25 @@ const chatInput = ref('')
 const chatTurns = ref([])
 const chatLoading = ref(false)
 const asking = ref(false)
+const authorityModes = [
+  { id: 'human_review', label: '用户审核' },
+  { id: 'delegate_review', label: '替我审核' },
+  { id: 'full_authority', label: '完全权限' },
+]
+const chatAuthority = ref({
+  mode: 'human_review',
+  review_status: 'idle',
+  mode_label: '用户审核',
+})
+function applyChatAuthority(payload) {
+  const next = payload && typeof payload === 'object' ? payload : {}
+  chatAuthority.value = {
+    mode: String(next.mode || 'human_review'),
+    review_status: String(next.review_status || 'idle'),
+    mode_label: String(next.mode_label || '用户审核'),
+    outline_hash: String(next.outline_hash || ''),
+  }
+}
 const chatHistoryEl = ref(null)
 const editorRef = ref(null)
 /** In-session cache of chapter dialogue; server history remains source of truth. */
@@ -1305,6 +1343,11 @@ async function generateDraft() {
           if (String(payload?.code || '') === 'CHAPTER_RESEARCH_UNAVAILABLE') {
             researchStatus.value = reason ? `公开资料检索失败：${reason}` : message
           }
+          if (String(payload?.code || '') === 'CHAPTER_OUTLINE_REVIEW_REQUIRED') {
+            rightTab.value = 'chat'
+            applyChatAuthority(payload.authority || { mode: 'human_review', review_status: 'pending' })
+            chatInput.value = chatInput.value || '先列出本章要写的内容'
+          }
           throw new Error(reason ? `${message}（${reason}）` : message)
         }
       },
@@ -1516,6 +1559,7 @@ async function loadChapterChat(chapterId, { force = false } = {}) {
     const { data } = await fetchChapterChatHistory(props.workspaceId, id)
     if (token !== chatLoadToken || selectedId.value !== id) return
     if (!data?.ok) throw new Error(data?.message || '加载本章对话失败')
+    applyChatAuthority(data.authority)
     const turns = mapChatTurns(data.turns)
     rememberChapterChat(id, turns)
     chatTurns.value = turns
@@ -1531,6 +1575,31 @@ async function loadChapterChat(chapterId, { force = false } = {}) {
   } finally {
     if (token === chatLoadToken) chatLoading.value = false
   }
+}
+
+async function setChatAuthority(mode) {
+  const chapterId = String(selectedId.value || '').trim()
+  if (!chapterId || asking.value) return
+  try {
+    const { data } = await saveChapterChatAuthority(props.workspaceId, chapterId, {
+      mode,
+      scope: 'chapter',
+    })
+    if (!data?.ok) throw new Error(data?.message || '设置权限失败')
+    applyChatAuthority(data.authority)
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  }
+}
+
+async function confirmChapterOutline() {
+  chatInput.value = '确认'
+  await sendChat()
+}
+
+async function rejectChapterOutline() {
+  chatInput.value = '不通过，请重列提纲'
+  await sendChat()
 }
 
 async function sendChat() {
@@ -1596,6 +1665,8 @@ async function sendChat() {
             turn.streaming = true
           })
           if (selectedId.value === chapterId) await scrollChatToBottom()
+        } else if (type === 'authority') {
+          applyChatAuthority(event)
         } else if (type === 'thinking_delta') {
           const delta = String(event.delta || '')
           if (!delta) return
@@ -2062,6 +2133,35 @@ onUnmounted(() => {
   color: #1d4ed8;
   border-color: rgba(37, 99, 235, 0.2);
   font-weight: 600;
+}
+.chat-authority {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px 0;
+  color: #64748b;
+  font-size: 11px;
+}
+.authority-chip {
+  border: 1px solid #cbd5e1;
+  background: #fff;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #334155;
+  cursor: pointer;
+}
+.authority-chip.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 700;
+}
+.chat-review-actions {
+  display: flex;
+  gap: 8px;
+  padding: 4px 2px 8px;
 }
 .context-panel,
 .chat-panel {

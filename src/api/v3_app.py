@@ -897,8 +897,67 @@ def chapter_chat_history(
                 "chapter_id": str(chapter.get("chapter_id") or chapter_id),
                 "title": str(chapter.get("title") or ""),
                 "turns": turns,
+                "authority": service.load_authority(chapter_id),
             }
         )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/authority")
+def chapter_chat_authority_get(workspace_id: str, chapter_id: str) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_chat import ChapterChatService
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = _context(workspace_id)
+        ChapterWorkspaceService(context).get_chapter(chapter_id)
+        authority = ChapterChatService(context).load_authority(chapter_id)
+        return JSONResponse({"ok": True, "authority": authority})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.put("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/authority")
+async def chapter_chat_authority_put(
+    workspace_id: str,
+    chapter_id: str,
+    request: Request,
+) -> JSONResponse:
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from document_pipeline.chapter_chat import AUTHORITY_MODES, ChapterChatService
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = _context(workspace_id)
+        ChapterWorkspaceService(context).get_chapter(chapter_id)
+        service = ChapterChatService(context)
+        mode = str((body or {}).get("mode") or "").strip()
+        if mode:
+            if mode not in AUTHORITY_MODES:
+                raise ControlPlaneError(
+                    "CHAT_AUTHORITY_INVALID",
+                    "权限模式只能是 用户审核、替我审核 或 完全权限。",
+                    status_code=400,
+                )
+            authority = service.set_authority(
+                mode=mode,
+                chapter_id=chapter_id,
+                scope=str((body or {}).get("scope") or "chapter"),
+            )
+        else:
+            authority = service.load_authority(chapter_id)
+        decision = str((body or {}).get("decision") or "").strip()
+        if decision:
+            authority = service.decide_outline_review(
+                chapter_id,
+                decision=decision,
+                outline_hash=str((body or {}).get("outline_hash") or ""),
+            )
+        return JSONResponse({"ok": True, "authority": authority})
     except ControlPlaneError as exc:
         return _error(exc)
 
@@ -1675,6 +1734,32 @@ async def stream_chapter_draft(
                 message=str(orientation_view.get("summary_text") or "本章写作处境已确认。"),
                 orientation=orientation_view,
             )
+            from document_pipeline.chapter_chat import ChapterChatService
+            from document_pipeline.chapter_writing_outline import (
+                compile_chapter_writing_outline,
+            )
+
+            writing_outline = compile_chapter_writing_outline(
+                chapter,
+                tender_requirements=tender_requirements,
+                scoring_requirements=scoring_requirements,
+                writing_orientation=writing_orientation,
+            )
+            write_gate = ChapterChatService(context).require_write_ready(
+                normalized_chapter_id,
+                outline=writing_outline,
+            )
+            if not write_gate.get("ready"):
+                yield _ndjson_event(
+                    "error",
+                    chapter_id=normalized_chapter_id,
+                    code="CHAPTER_OUTLINE_REVIEW_REQUIRED",
+                    message=(
+                        str(write_gate.get("reason") or "请先在右侧对话确认本章写作提纲。")
+                    ),
+                    authority=write_gate,
+                )
+                return
             if (
                 sibling_context.get("chapter_role") == "visual"
                 and sibling_context.get("missing_upstream")

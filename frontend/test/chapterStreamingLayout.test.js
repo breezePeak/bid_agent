@@ -113,6 +113,14 @@ test('draft thinking is routed to the right chat pane instead of the Word page',
   assert.match(workbench, /turn\.thinking = `\$\{turn\.thinking \|\| ''\}\$\{delta\}`/)
 })
 
+test('chapter chat exposes three authority modes', () => {
+  assert.match(workbench, /用户审核/)
+  assert.match(workbench, /替我审核/)
+  assert.match(workbench, /完全权限/)
+  assert.match(workbench, /setChatAuthority/)
+  assert.match(workbench, /confirmChapterOutline/)
+})
+
 test('chapter chat shows thinking, sends on enter, and lets history be edited', () => {
   assert.match(workbench, /class="chat-thinking"/)
   assert.match(workbench, /思考过程/)

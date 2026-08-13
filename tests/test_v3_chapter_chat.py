@@ -212,6 +212,38 @@ class ChapterChatServiceTests(unittest.TestCase):
             self.assertEqual(updated[1]["content"], "先写阶段划分。")
             self.assertEqual(updated[1]["thinking"], "用户改了问题，回复也一起改。")
 
+    def test_human_review_lists_outline_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat = ChapterChatService(context)
+            chat.set_authority(mode="human_review", chapter_id="ch-a")
+            with mock.patch("llm_client.chat_with_meta") as writer:
+                first = chat.answer("ch-a", "这一章怎么写？", chapter=chapter)
+                self.assertIn("准备这样写", first["reply"])
+                self.assertIn("确认", first["reply"])
+                writer.return_value = {
+                    "content": "总体技术路线分四步实施。",
+                    "reasoning": "",
+                }
+                second = chat.answer("ch-a", "确认", chapter=chapter)
+            self.assertIn("四步", second["reply"])
+
+    def test_full_authority_skips_review_wait(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat = ChapterChatService(context)
+            chat.set_authority(mode="full_authority", chapter_id="ch-a")
+            with mock.patch(
+                "llm_client.chat_with_meta",
+                return_value={"content": "总体技术路线分四步实施。", "reasoning": ""},
+            ):
+                result = chat.answer("ch-a", "写正文", chapter=chapter)
+            self.assertIn("四步", result["reply"])
+
     def test_chat_prompt_identifies_as_chapter_writer(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))

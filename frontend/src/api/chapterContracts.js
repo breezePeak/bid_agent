@@ -28,6 +28,10 @@ export function chapterChatStreamPath(workspaceId, chapterId) {
   return `${chapterPath(workspaceId, chapterId)}/chat/stream`
 }
 
+export function chapterChatAuthorityPath(workspaceId, chapterId) {
+  return `${chapterPath(workspaceId, chapterId)}/chat/authority`
+}
+
 export function chapterReadonlyPath(workspaceId, viewerChapterId, targetChapterId) {
   return `${chapterPath(workspaceId, viewerChapterId)}/readonly/${encodeURIComponent(targetChapterId)}`
 }

@@ -62,6 +62,14 @@ async def _events(response) -> list[dict]:
 
 
 class V3ChapterDraftStreamTests(TestCase):
+    def setUp(self) -> None:
+        self._authority_ready = mock.patch(
+            "document_pipeline.chapter_chat.ChapterChatService.require_write_ready",
+            return_value={"ready": True, "mode": "full_authority", "write_phase": "write_body"},
+        )
+        self._authority_ready.start()
+        self.addCleanup(self._authority_ready.stop)
+
     def _context(self, root: Path) -> WorkspaceContext:
         runs = root / "runs"
         (runs / "alpha").mkdir(parents=True)
