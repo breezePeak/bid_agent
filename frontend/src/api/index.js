@@ -197,6 +197,13 @@ export function fetchChapterChatHistory(runId, chapterId, limit = 40) {
   })
 }
 
+/** Persist an in-place edit of one chapter-chat turn. */
+export function saveChapterChatTurn(runId, chapterId, payload) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.put(v3WorkspacePath(runId, `chapters/${id}/chat/history`), payload || {})
+}
+
 /** Isolated per-chapter dialogue; history never mixes across chapters. */
 export function chatChapterV3(runId, chapterId, message) {
   const id = encodeURIComponent(String(chapterId || '').trim())

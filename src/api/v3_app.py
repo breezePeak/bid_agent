@@ -885,6 +885,50 @@ def chapter_chat_history(
         return _error(exc)
 
 
+@app.put("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/history")
+async def chapter_chat_history_update(
+    workspace_id: str,
+    chapter_id: str,
+    request: Request,
+) -> JSONResponse:
+    """Edit one persisted chapter-chat turn. Collaboration log only."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from document_pipeline.chapter_chat import ChapterChatService
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = _context(workspace_id)
+        chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
+        updated = ChapterChatService(context).update_turn(
+            chapter_id,
+            turn_id=str((body or {}).get("turn_id") or ""),
+            created_at=str((body or {}).get("created_at") or ""),
+            role=str((body or {}).get("role") or ""),
+            content=(
+                None
+                if not isinstance(body, dict) or "content" not in body
+                else body.get("content")
+            ),
+            thinking=(
+                None
+                if not isinstance(body, dict) or "thinking" not in body
+                else body.get("thinking")
+            ),
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "chapter_id": str(chapter.get("chapter_id") or chapter_id),
+                "turn": updated,
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
     """Load chapter-scoped chat inputs shared by turn and stream endpoints."""
     from document_pipeline.chapter_chat import ChapterChatService

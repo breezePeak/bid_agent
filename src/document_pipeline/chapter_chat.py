@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ CHAPTER_CHAT_DIR = V3_ROOT / "chapter_chats"
 HISTORY_TAIL = 40
 PROMPT_HISTORY_TAIL = 12
 DRAFT_PREVIEW_CHARS = 1200
+MAX_TURN_CHARS = 20_000
 
 
 def _utc_now() -> str:
@@ -76,16 +78,21 @@ class ChapterChatService:
             role = str(item.get("role") or "").strip()
             content = str(item.get("content") or "")
             thinking = str(item.get("thinking") or item.get("reasoning") or "")
+            created_at = str(item.get("created_at") or "")
             if role not in {"user", "assistant"}:
                 continue
             if not content and not thinking:
                 continue
+            turn_id = str(item.get("turn_id") or "").strip()
+            if not turn_id:
+                turn_id = f"legacy:{len(turns)}:{role}:{created_at}"
             turns.append(
                 {
+                    "turn_id": turn_id,
                     "role": role,
                     "content": content,
                     "thinking": thinking,
-                    "created_at": str(item.get("created_at") or ""),
+                    "created_at": created_at,
                 }
             )
         if limit > 0:
@@ -104,6 +111,7 @@ class ChapterChatService:
         path = self.history_path(chapter_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {
+            "turn_id": str(uuid.uuid4()),
             "role": str(role).strip(),
             "content": str(content),
             "thinking": str(thinking or ""),
@@ -113,6 +121,104 @@ class ChapterChatService:
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
         return record
+
+    def update_turn(
+        self,
+        chapter_id: str,
+        *,
+        turn_id: str = "",
+        created_at: str = "",
+        role: str = "",
+        content: str | None = None,
+        thinking: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit a persisted collaboration turn. Not a canonical Artifact write."""
+        wanted_id = str(turn_id or "").strip()
+        wanted_created = str(created_at or "").strip()
+        wanted_role = str(role or "").strip()
+        if wanted_role and wanted_role not in {"user", "assistant"}:
+            raise ControlPlaneError(
+                "CHAT_TURN_INVALID",
+                "只能编辑 user 或 assistant 消息。",
+                status_code=400,
+            )
+        if content is None and thinking is None:
+            raise ControlPlaneError(
+                "CHAT_TURN_INVALID",
+                "请提供要修改的正文或思考过程。",
+                status_code=400,
+            )
+        next_content = None if content is None else str(content)
+        next_thinking = None if thinking is None else str(thinking)
+        if next_content is not None and len(next_content) > MAX_TURN_CHARS:
+            raise ControlPlaneError(
+                "CHAT_TURN_TOO_LONG",
+                f"消息正文不能超过 {MAX_TURN_CHARS} 字。",
+                status_code=400,
+            )
+        if next_thinking is not None and len(next_thinking) > MAX_TURN_CHARS:
+            raise ControlPlaneError(
+                "CHAT_TURN_TOO_LONG",
+                f"思考过程不能超过 {MAX_TURN_CHARS} 字。",
+                status_code=400,
+            )
+
+        turns = self.load_history(chapter_id, limit=0)
+        match_index = -1
+        for index, item in enumerate(turns):
+            if wanted_id and str(item.get("turn_id") or "") == wanted_id:
+                match_index = index
+                break
+            if (
+                not wanted_id
+                and wanted_created
+                and wanted_role
+                and str(item.get("created_at") or "") == wanted_created
+                and str(item.get("role") or "") == wanted_role
+            ):
+                match_index = index
+        if match_index < 0:
+            raise ControlPlaneError(
+                "CHAT_TURN_NOT_FOUND",
+                "未找到要编辑的历史消息。",
+                status_code=404,
+            )
+        updated = dict(turns[match_index])
+        if next_content is not None:
+            updated["content"] = next_content
+        if next_thinking is not None:
+            updated["thinking"] = next_thinking
+        if not str(updated.get("content") or "").strip() and not str(
+            updated.get("thinking") or ""
+        ).strip():
+            raise ControlPlaneError(
+                "CHAT_TURN_INVALID",
+                "正文和思考过程不能同时为空。",
+                status_code=400,
+            )
+        turns[match_index] = updated
+        self._write_history(chapter_id, turns)
+        return updated
+
+    def _write_history(self, chapter_id: str, turns: list[dict[str, Any]]) -> None:
+        path = self.history_path(chapter_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        safe_id = _safe_chapter_id(chapter_id)
+        lines: list[str] = []
+        for item in turns:
+            role = str(item.get("role") or "").strip()
+            if role not in {"user", "assistant"}:
+                continue
+            record = {
+                "turn_id": str(item.get("turn_id") or uuid.uuid4()),
+                "role": role,
+                "content": str(item.get("content") or ""),
+                "thinking": str(item.get("thinking") or ""),
+                "created_at": str(item.get("created_at") or _utc_now()),
+                "chapter_id": safe_id,
+            }
+            lines.append(json.dumps(record, ensure_ascii=False))
+        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
 
     def build_chapter_chat_context(
         self,

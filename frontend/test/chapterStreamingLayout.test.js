@@ -90,6 +90,22 @@ test('only leaf chapters expose body generation and approval', () => {
   assert.match(workbench, /if \(!selectedIsLeaf\.value\)/)
 })
 
+test('chapter chat shows thinking, sends on enter, and lets history be edited', () => {
+  assert.match(workbench, /class="chat-thinking"/)
+  assert.match(workbench, /思考过程/)
+  assert.match(workbench, /<div\s+v-if="turn.role === 'assistant' \|\| turn.thinking"\s+class="chat-thinking"/)
+  assert.doesNotMatch(workbench, /<details[^>]*class="chat-thinking"/)
+  assert.match(workbench, /@keydown="onChatComposeKeydown"/)
+  assert.match(workbench, /function onChatComposeKeydown/)
+  assert.match(workbench, /event\.key !== 'Enter'/)
+  assert.match(workbench, /event\.shiftKey/)
+  assert.match(workbench, /sendChat\(\)/)
+  assert.match(workbench, /:contenteditable="canEditChatTurn\(turn\)"/)
+  assert.match(workbench, /onChatTurnBlur/)
+  assert.match(workbench, /saveChapterChatTurn/)
+  assert.match(workbench, /回车发送，Shift\+回车换行/)
+})
+
 test('research results expose project, similar-project, and standard labels', () => {
   assert.match(workbench, /本项目资料/)
   assert.match(workbench, /同类项目资料/)

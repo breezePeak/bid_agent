@@ -440,22 +440,37 @@
             v-for="turn in chatTurns"
             :key="turn.id"
             class="chat-bubble"
-            :class="[turn.role, { streaming: turn.streaming }]"
+            :class="[turn.role, { streaming: turn.streaming, editing: turn.editing }]"
           >
             <strong>{{ turn.role === 'user' ? '你' : 'Agent' }}</strong>
-            <details
-              v-if="turn.thinking || turn.streaming"
+            <div
+              v-if="turn.role === 'assistant' || turn.thinking"
               class="chat-thinking"
-              :open="turn.streaming || turn.thinkingOpen"
             >
-              <summary>
+              <div class="thinking-label">
                 {{ turn.streaming && !turn.content ? '正在思考…' : '思考过程' }}
                 <span v-if="turn.streaming && turn.thinking" class="thinking-live">实时</span>
-              </summary>
-              <pre class="thinking-body">{{ turn.thinking || '（等待模型思考输出…）' }}</pre>
-            </details>
-            <p v-if="turn.content">{{ turn.content }}</p>
-            <p v-else-if="turn.streaming" class="chat-streaming-hint">正在生成回复…</p>
+              </div>
+              <div
+                class="thinking-body"
+                :contenteditable="canEditChatTurn(turn)"
+                :data-field="`thinking:${turn.id}`"
+                spellcheck="false"
+                @focus="onChatTurnFocus(turn)"
+                @blur="onChatTurnBlur(turn, 'thinking', $event)"
+              >{{ turn.thinking || (turn.streaming ? '（等待模型思考输出…）' : '') }}</div>
+            </div>
+            <div
+              v-if="turn.content || !turn.streaming"
+              class="chat-content"
+              :contenteditable="canEditChatTurn(turn)"
+              :data-field="`content:${turn.id}`"
+              spellcheck="false"
+              @focus="onChatTurnFocus(turn)"
+              @blur="onChatTurnBlur(turn, 'content', $event)"
+            >{{ turn.content }}</div>
+            <p v-else class="chat-streaming-hint">正在生成回复…</p>
+            <small v-if="canEditChatTurn(turn)" class="chat-edit-hint">点击可编辑，失焦后保存</small>
           </article>
         </div>
         <div class="chat-compose">
@@ -464,9 +479,9 @@
             rows="3"
             :disabled="!selectedId || asking"
             :placeholder="selectedId
-              ? '例如：结合评分要求，这一章应强调哪些交付物？'
+              ? '回车发送，Shift+回车换行。例如：结合评分要求，这一章应强调哪些交付物？'
               : '请先选择章节'"
-            @keydown.ctrl.enter.prevent="sendChat"
+            @keydown="onChatComposeKeydown"
           />
           <button
             type="button"
@@ -537,6 +552,7 @@ import {
   archiveChapter,
   streamChapterDraft,
   streamChapterChat,
+  saveChapterChatTurn,
 } from '../api'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
@@ -1317,14 +1333,72 @@ watch(showRevisions, (open) => {
 
 function mapChatTurns(turns) {
   return (Array.isArray(turns) ? turns : []).map((turn, index) => ({
-    id: `${turn.role || 'turn'}-${turn.created_at || index}-${index}`,
+    id: String(turn.turn_id || `${turn.role || 'turn'}-${turn.created_at || index}-${index}`),
+    turn_id: String(turn.turn_id || ''),
     role: turn.role === 'user' ? 'user' : 'assistant',
     content: String(turn.content || ''),
     thinking: String(turn.thinking || ''),
-    thinkingOpen: false,
+    thinkingOpen: true,
     streaming: false,
+    editing: false,
     created_at: turn.created_at || '',
   }))
+}
+
+function canEditChatTurn(turn) {
+  return Boolean(selectedId.value && turn && !turn.streaming && !asking.value)
+}
+
+function onChatComposeKeydown(event) {
+  if (event.key !== 'Enter' || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) {
+    return
+  }
+  if (event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  sendChat()
+}
+
+function onChatTurnFocus(turn) {
+  if (!turn || turn.streaming) return
+  turn.editing = true
+}
+
+async function onChatTurnBlur(turn, field, event) {
+  if (!turn) return
+  turn.editing = false
+  const chapterId = String(selectedId.value || '').trim()
+  if (!chapterId || turn.streaming || asking.value) return
+  const next = String(event?.target?.innerText || '').replace(/\u00a0/g, ' ')
+  const current = field === 'thinking' ? String(turn.thinking || '') : String(turn.content || '')
+  if (next === current) return
+  const previous = { content: turn.content, thinking: turn.thinking }
+  if (field === 'thinking') turn.thinking = next
+  else turn.content = next
+  if (!String(turn.content || '').trim() && !String(turn.thinking || '').trim()) {
+    turn.content = previous.content
+    turn.thinking = previous.thinking
+    if (event?.target) event.target.innerText = current
+    actionError.value = '正文和思考过程不能同时为空。'
+    return
+  }
+  rememberChapterChat(chapterId, chatTurns.value)
+  try {
+    const { data } = await saveChapterChatTurn(props.workspaceId, chapterId, {
+      turn_id: turn.turn_id || turn.id,
+      created_at: turn.created_at || '',
+      role: turn.role,
+      content: turn.content,
+      thinking: turn.thinking,
+    })
+    if (!data?.ok) throw new Error(data?.message || '保存对话失败')
+    if (data.turn?.turn_id) turn.turn_id = String(data.turn.turn_id)
+    rememberChapterChat(chapterId, chatTurns.value)
+  } catch (e) {
+    turn.content = previous.content
+    turn.thinking = previous.thinking
+    if (event?.target) event.target.innerText = current
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  }
 }
 
 async function scrollChatToBottom() {
@@ -1381,20 +1455,24 @@ async function sendChat() {
   actionError.value = ''
   const userTurn = {
     id: `u-${Date.now()}`,
+    turn_id: '',
     role: 'user',
     content: text,
     thinking: '',
-    thinkingOpen: false,
+    thinkingOpen: true,
     streaming: false,
+    editing: false,
   }
   const assistantId = `a-${Date.now()}`
   const assistantTurn = {
     id: assistantId,
+    turn_id: '',
     role: 'assistant',
     content: '',
     thinking: '',
     thinkingOpen: true,
     streaming: true,
+    editing: false,
   }
   const seedTurns = [...chatTurns.value, userTurn, assistantTurn]
   chatTurns.value = seedTurns
@@ -1457,7 +1535,7 @@ async function sendChat() {
               turn.content = String(event.reply || turn.content || '（无回复）')
               turn.thinking = String(event.thinking || turn.thinking || '')
               turn.streaming = false
-              turn.thinkingOpen = false
+              turn.thinkingOpen = true
             })
           }
           if (event.workspace_revision != null && selectedId.value === chapterId) {
@@ -2074,10 +2152,22 @@ onUnmounted(() => {
   color: #64748b;
   margin-bottom: 2px;
 }
-.chat-bubble p {
+.chat-bubble p,
+.chat-content {
   margin: 0;
   white-space: pre-wrap;
   color: #0f172a;
+  outline: none;
+}
+.chat-content[contenteditable="true"],
+.thinking-body[contenteditable="true"] {
+  cursor: text;
+  border-radius: 6px;
+}
+.chat-content[contenteditable="true"]:focus,
+.thinking-body[contenteditable="true"]:focus {
+  box-shadow: inset 0 0 0 1px #93c5fd;
+  background: #fff;
 }
 .chat-bubble.streaming {
   border-color: #93c5fd;
@@ -2087,20 +2177,17 @@ onUnmounted(() => {
   margin: 6px 0 8px;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
-  background: #f8fafc;
+  background: #eef2ff;
   padding: 6px 8px;
 }
-.chat-thinking summary {
-  cursor: pointer;
-  color: #475569;
+.thinking-label {
+  color: #4338ca;
   font-size: 12px;
   font-weight: 600;
-  list-style: none;
   display: flex;
   align-items: center;
   gap: 6px;
 }
-.chat-thinking summary::-webkit-details-marker { display: none; }
 .thinking-live {
   display: inline-flex;
   align-items: center;
@@ -2115,12 +2202,19 @@ onUnmounted(() => {
   margin: 6px 0 0;
   white-space: pre-wrap;
   word-break: break-word;
-  color: #64748b;
+  color: #334155;
   font-size: 12px;
   line-height: 1.55;
-  max-height: 180px;
+  max-height: 280px;
   overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  outline: none;
+}
+.chat-edit-hint {
+  display: block;
+  margin-top: 6px;
+  color: #94a3b8;
+  font-size: 11px;
 }
 .chat-streaming-hint {
   color: #64748b !important;

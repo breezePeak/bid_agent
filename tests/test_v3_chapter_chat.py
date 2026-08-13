@@ -173,12 +173,44 @@ class ChapterChatServiceTests(unittest.TestCase):
             self.assertEqual(history_a[0]["content"], "这一章写什么？")
             self.assertEqual(history_b[0]["content"], "里程碑怎么排？")
             self.assertNotEqual(history_a[0]["content"], history_b[0]["content"])
+            self.assertTrue(history_a[0].get("turn_id"))
+            self.assertTrue(history_a[1].get("turn_id"))
 
             path_a = context.root / CHAPTER_CHAT_DIR / "ch-a.jsonl"
             path_b = context.root / CHAPTER_CHAT_DIR / "ch-b.jsonl"
             self.assertTrue(path_a.is_file())
             self.assertTrue(path_b.is_file())
             self.assertNotEqual(path_a.read_text(encoding="utf-8"), path_b.read_text(encoding="utf-8"))
+
+    def test_history_turns_can_be_edited_in_place(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat = ChapterChatService(context)
+            with mock.patch(
+                "llm_client.chat_with_meta",
+                side_effect=RuntimeError("offline"),
+            ):
+                chat.answer("ch-a", "初稿怎么写？", chapter=chapter)
+            history = chat.load_history("ch-a")
+            user_id = history[0]["turn_id"]
+            assistant_id = history[1]["turn_id"]
+            chat.update_turn(
+                "ch-a",
+                turn_id=user_id,
+                content="改成：实施方案怎么写？",
+            )
+            chat.update_turn(
+                "ch-a",
+                turn_id=assistant_id,
+                content="先写阶段划分。",
+                thinking="用户改了问题，回复也一起改。",
+            )
+            updated = chat.load_history("ch-a")
+            self.assertEqual(updated[0]["content"], "改成：实施方案怎么写？")
+            self.assertEqual(updated[1]["content"], "先写阶段划分。")
+            self.assertEqual(updated[1]["thinking"], "用户改了问题，回复也一起改。")
 
     def test_empty_message_rejected(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -238,21 +270,38 @@ class ChapterChatApiTests(unittest.TestCase):
                 hist_b = client.get(
                     "/api/v3/workspaces/alpha/chapters/ch-b/chat/history"
                 )
+                self.assertEqual(turn_a.status_code, 200, turn_a.text)
+                self.assertEqual(turn_b.status_code, 200, turn_b.text)
+                self.assertTrue(turn_a.json()["ok"])
+                self.assertEqual(turn_a.json()["chapter_id"], "ch-a")
+                self.assertEqual(turn_b.json()["chapter_id"], "ch-b")
 
-            self.assertEqual(turn_a.status_code, 200, turn_a.text)
-            self.assertEqual(turn_b.status_code, 200, turn_b.text)
-            self.assertTrue(turn_a.json()["ok"])
-            self.assertEqual(turn_a.json()["chapter_id"], "ch-a")
-            self.assertEqual(turn_b.json()["chapter_id"], "ch-b")
-
-            self.assertEqual(hist_a.status_code, 200)
-            self.assertEqual(hist_b.status_code, 200)
-            turns_a = hist_a.json()["turns"]
-            turns_b = hist_b.json()["turns"]
-            self.assertEqual(turns_a[0]["content"], "A 章问题")
-            self.assertEqual(turns_b[0]["content"], "B 章问题")
-            self.assertEqual(len(turns_a), 2)
-            self.assertEqual(len(turns_b), 2)
+                self.assertEqual(hist_a.status_code, 200)
+                self.assertEqual(hist_b.status_code, 200)
+                turns_a = hist_a.json()["turns"]
+                turns_b = hist_b.json()["turns"]
+                self.assertEqual(turns_a[0]["content"], "A 章问题")
+                self.assertEqual(turns_b[0]["content"], "B 章问题")
+                self.assertEqual(len(turns_a), 2)
+                self.assertEqual(len(turns_b), 2)
+                edited = client.put(
+                    "/api/v3/workspaces/alpha/chapters/ch-a/chat/history",
+                    json={
+                        "turn_id": turns_a[0]["turn_id"],
+                        "content": "A 章已改问题",
+                    },
+                    headers=headers,
+                )
+                self.assertEqual(edited.status_code, 200, edited.text)
+                self.assertEqual(edited.json()["turn"]["content"], "A 章已改问题")
+                hist_a_again = client.get(
+                    "/api/v3/workspaces/alpha/chapters/ch-a/chat/history"
+                )
+                self.assertEqual(hist_a_again.json()["turns"][0]["content"], "A 章已改问题")
+                hist_b_again = client.get(
+                    "/api/v3/workspaces/alpha/chapters/ch-b/chat/history"
+                )
+                self.assertEqual(hist_b_again.json()["turns"][0]["content"], "B 章问题")
 
     def test_unknown_chapter_returns_error(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
