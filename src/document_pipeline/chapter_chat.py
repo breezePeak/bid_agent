@@ -123,6 +123,7 @@ class ChapterChatService:
         scoring_requirements: list[dict[str, Any]] | None = None,
         sibling_context: dict[str, Any] | None = None,
         outline_context: dict[str, Any] | None = None,
+        writing_orientation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         node = chapter.get("blueprint_node")
         node = node if isinstance(node, dict) else {}
@@ -203,13 +204,41 @@ class ChapterChatService:
             outline_for_agent = outline_payload
             sibling_for_agent = sibling_payload
 
+        orientation_payload = writing_orientation if isinstance(writing_orientation, dict) else {}
+        if not orientation_payload:
+            try:
+                from .writing_orientation import WritingOrientationService
+
+                orientation_payload = WritingOrientationService(
+                    self.context
+                ).build_for_chapter(
+                    chapter,
+                    outline_context=outline_payload,
+                    sibling_context=sibling_payload,
+                    tender_requirements=tender_requirements,
+                    scoring_requirements=scoring_requirements,
+                )
+            except Exception:
+                orientation_payload = {}
+        try:
+            from .writing_orientation import compact_orientation_for_prompt
+
+            orientation_for_agent = compact_orientation_for_prompt(orientation_payload)
+        except Exception:
+            orientation_for_agent = orientation_payload
+
         return {
             "chapter_id": str(chapter.get("chapter_id") or ""),
             "title": str(chapter.get("title") or node.get("title") or ""),
             "is_leaf": bool(chapter.get("is_leaf")),
             "status": str(chapter.get("status") or ""),
             "approval_status": str(chapter.get("approval_status") or ""),
-            "purpose": str(node.get("purpose") or node.get("response_purpose") or ""),
+            "purpose": str(
+                (orientation_for_agent.get("writing_purpose") or {}).get("purpose")
+                or node.get("purpose")
+                or node.get("response_purpose")
+                or ""
+            ),
             "level": node.get("level"),
             "order": chapter.get("order") or node.get("order"),
             "chapter_context_revision": int(chapter_context.get("context_revision") or 0),
@@ -217,6 +246,7 @@ class ChapterChatService:
             "tender_requirements": list(tender_requirements or []),
             "scoring_requirements": list(scoring_requirements or []),
             "shared_project_facts": shared_facts,
+            "writing_orientation": orientation_for_agent,
             "document_outline_context": outline_for_agent,
             "sibling_chapter_context": sibling_for_agent,
             "inspected_chapters": [],
@@ -236,6 +266,7 @@ class ChapterChatService:
         scoring_requirements: list[dict[str, Any]] | None = None,
         sibling_context: dict[str, Any] | None = None,
         outline_context: dict[str, Any] | None = None,
+        writing_orientation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         text = str(message or "").strip()
         if not text:
@@ -253,6 +284,7 @@ class ChapterChatService:
             scoring_requirements=scoring_requirements,
             sibling_context=sibling_context,
             outline_context=outline_context,
+            writing_orientation=writing_orientation,
         )
         inspection = self._resolve_inspections(
             chapter_id=chapter_id,
@@ -302,6 +334,7 @@ class ChapterChatService:
         scoring_requirements: list[dict[str, Any]] | None = None,
         sibling_context: dict[str, Any] | None = None,
         outline_context: dict[str, Any] | None = None,
+        writing_orientation: dict[str, Any] | None = None,
     ):
         """Yield NDJSON-ready events: inspect / thinking_delta / content_delta / done."""
         text = str(message or "").strip()
@@ -320,6 +353,7 @@ class ChapterChatService:
             scoring_requirements=scoring_requirements,
             sibling_context=sibling_context,
             outline_context=outline_context,
+            writing_orientation=writing_orientation,
         )
         safe_id = _safe_chapter_id(chapter_id)
         user_record = self.append_turn(chapter_id, role="user", content=text)
@@ -469,13 +503,15 @@ class ChapterChatService:
         system_prompt = (
             "你是正在编制标书的协作 Agent，当前对话只针对「这一章」。"
             "用自然、直接的中文回答，不复述问题，不说套话。"
+            "先根据 writing_orientation 确认：本章写作目的、在整份标书中的位置、"
+            "以及与其他章节的关系；回答必须落在本章职责内。"
             "document_outline_context 默认只有目录标题树与状态（titles_first），"
             "不是他章全文；只有 inspected_chapters 中的章节才提供只读详情。"
             "据此理解本章位置与边界；不得改写其他章节，也不得把未 inspect 的章节当成已读正文。"
             "若仍缺关键上游内容，应明确指出还需要哪些目录章节。"
             "不确定就明确缺什么证据或材料。不得把外部信息当企业资质。"
             "你不能直接修改正文或晋级 Artifact，只能给出写作建议与下一步。"
-            "请先在模型思考通道中分析目录位置、是否还缺详情、本章边界与证据缺口，"
+            "请先在模型思考通道中分析写作目的、目录位置、章节关系、是否还缺详情与证据缺口，"
             "再给出面向用户的最终建议。"
         )
         recent = [

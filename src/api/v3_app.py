@@ -808,6 +808,23 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
                     "can_edit_other_chapters": False,
                 },
             }
+        try:
+            from document_pipeline.writing_orientation import (
+                WritingOrientationService,
+            )
+
+            chapter["writing_orientation"] = WritingOrientationService(
+                context
+            ).build_for_chapter(
+                chapter,
+                outline_context=chapter.get("document_outline_context"),
+                sibling_context=chapter.get("sibling_chapter_context"),
+                tender_requirements=chapter.get("chapter_requirements") or [],
+                scoring_requirements=chapter.get("chapter_scoring_requirements")
+                or [],
+            )
+        except Exception:
+            chapter["writing_orientation"] = None
         return JSONResponse({"ok": True, "chapter": chapter})
     except ControlPlaneError as exc:
         return _error(exc)
@@ -903,6 +920,18 @@ def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
         )
     except Exception:
         outline_context = None
+    try:
+        from document_pipeline.writing_orientation import WritingOrientationService
+
+        writing_orientation = WritingOrientationService(context).build_for_chapter(
+            chapter,
+            outline_context=outline_context,
+            sibling_context=sibling_context,
+            tender_requirements=requirements,
+            scoring_requirements=scoring,
+        )
+    except Exception:
+        writing_orientation = None
     return {
         "context": context,
         "chapter": chapter,
@@ -912,6 +941,7 @@ def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
         "global_project_context": global_project_context,
         "sibling_context": sibling_context,
         "outline_context": outline_context,
+        "writing_orientation": writing_orientation,
     }
 
 
@@ -943,6 +973,7 @@ async def chapter_chat_turn(
             scoring_requirements=runtime["scoring"],
             sibling_context=runtime["sibling_context"],
             outline_context=runtime["outline_context"],
+            writing_orientation=runtime["writing_orientation"],
         )
         snapshot_data = V3WorkspaceSnapshotBuilder(runtime["context"]).build()
         return JSONResponse(
@@ -989,6 +1020,7 @@ async def chapter_chat_stream(
                 scoring_requirements=runtime["scoring"],
                 sibling_context=runtime["sibling_context"],
                 outline_context=runtime["outline_context"],
+                writing_orientation=runtime["writing_orientation"],
             ):
                 event_type = str(event.get("type") or "delta")
                 payload = {key: value for key, value in event.items() if key != "type"}
@@ -1051,6 +1083,7 @@ def _chapter_draft_messages(
     scoring_requirements: list[dict[str, Any]] | None = None,
     sibling_context: dict[str, Any] | None = None,
     outline_context: dict[str, Any] | None = None,
+    writing_orientation: dict[str, Any] | None = None,
     inspected_chapters: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
     from document_pipeline.content_grounding import chapter_opening_policy
@@ -1059,6 +1092,7 @@ def _chapter_draft_messages(
         compact_sibling_for_prompt,
     )
     from document_pipeline.sibling_chapter_context import _chapter_role
+    from document_pipeline.writing_orientation import compact_orientation_for_prompt
 
     node = chapter.get("blueprint_node")
     node = node if isinstance(node, dict) else {}
@@ -1076,11 +1110,17 @@ def _chapter_draft_messages(
     ]
     sibling_payload = compact_sibling_for_prompt(dict(sibling_context or {}))
     outline_payload = compact_outline_for_prompt(dict(outline_context or {}))
+    orientation_payload = compact_orientation_for_prompt(writing_orientation)
     inspected = list(inspected_chapters or [])
     title = str(chapter.get("title") or node.get("title") or "")
-    purpose = str(node.get("purpose") or "")
+    purpose = str(
+        (orientation_payload.get("writing_purpose") or {}).get("purpose")
+        or node.get("purpose")
+        or ""
+    )
     chapter_role = str(
-        outline_payload.get("current_role")
+        (orientation_payload.get("writing_purpose") or {}).get("role")
+        or outline_payload.get("current_role")
         or sibling_payload.get("chapter_role")
         or _chapter_role(title, purpose)
     )
@@ -1089,13 +1129,18 @@ def _chapter_draft_messages(
         "chapter_id": str(chapter.get("chapter_id") or ""),
         "chapter_title": title,
         "purpose": purpose,
-        "writing_objectives": list(node.get("writing_objectives") or []),
+        "writing_objectives": list(
+            (orientation_payload.get("writing_purpose") or {}).get("writing_objectives")
+            or node.get("writing_objectives")
+            or []
+        ),
         "content_format": "technical_roadmap_diagram" if is_visual else "prose",
         "tender_requirements": list(tender_requirements or []),
         "scoring_requirements": list(scoring_requirements or []),
         "chapter_context": context_items,
         "global_project_context": dict(project_context or {}),
         "chapter_grounding_context": dict(chapter_grounding_context or {}),
+        "writing_orientation": orientation_payload,
         # Titles-first outline; peer bodies only appear in inspected_chapters.
         "document_outline_context": outline_payload,
         "sibling_chapter_context": sibling_payload,
@@ -1119,12 +1164,17 @@ def _chapter_draft_messages(
                 + (f"。补充说明：{guidance}" if guidance else "")
                 + "。"
             )
+    orientation_rules = (
+        "必须先按 writing_orientation 确认：本章写作目的、在整份标书中的目录位置、"
+        "以及与其他章节的关系；只完成本章职责，不要越权写他章主责。"
+    )
     if is_visual:
         system = (
             "你是技术标书中的「技术路线图/流程图」撰写器，不是普通论述写作器。"
             "本章 content_format=technical_roadmap_diagram：输出必须以图示结构为主，"
             "禁止写成总体技术路线或关键技术方法的长文复述。"
-            "固定输出顺序（不要输出章节标题本身）："
+            + orientation_rules
+            + "固定输出顺序（不要输出章节标题本身）："
             "1) 一句话图题（说明本图展示什么阶段/节点关系）；"
             "2) 用 Mermaid flowchart 或清晰 ASCII/文本流程图画出阶段、先后/并行、"
             "关键质控节点与主要输入输出（节点命名对齐已 inspect 的上游总体技术路线骨架）；"
@@ -1139,7 +1189,8 @@ def _chapter_draft_messages(
     else:
         system = (
             "你是技术标书正文写作器。请直接撰写当前章节的完整中文正文。"
-            "内容必须具体、专业、可执行，只使用输入中提供的事实，不得虚构企业资质、"
+            + orientation_rules
+            + "内容必须具体、专业、可执行，只使用输入中提供的事实，不得虚构企业资质、"
             "业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，不要使用 Markdown"
             "代码围栏，也不要输出章节标题；只输出可直接保存的正文。若提供了“已核验公开资料”，"
             "只能依据其中的原文摘要归纳政策、标准或通用方法；资料不足时使用条件化表述，"
@@ -1193,6 +1244,8 @@ def _chapter_research_plan(
     instruction: str = "",
     project_context: dict[str, Any] | None = None,
     sibling_context: dict[str, Any] | None = None,
+    writing_orientation: dict[str, Any] | None = None,
+    inspected_chapters: list[dict[str, Any]] | None = None,
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
@@ -1202,6 +1255,8 @@ def _chapter_research_plan(
         chapter,
         project_context=project_context,
         sibling_context=sibling_context,
+        writing_orientation=writing_orientation,
+        inspected_chapters=inspected_chapters,
         tender_requirements=tender_requirements,
         scoring_requirements=scoring_requirements,
         instruction=instruction,
@@ -1519,6 +1574,32 @@ async def stream_chapter_draft(
 
             outline_service = DocumentOutlineContextService(context)
             outline_context = outline_service.build_for_chapter(chapter)
+            from document_pipeline.writing_orientation import (
+                WritingOrientationService,
+                public_orientation_view,
+            )
+
+            yield _ndjson_event(
+                "research",
+                chapter_id=normalized_chapter_id,
+                status="orienting",
+                message="先确认本章写作目的、在整份标书中的位置，以及与其他章节的关系…",
+            )
+            writing_orientation = WritingOrientationService(context).build_for_chapter(
+                chapter,
+                outline_context=outline_context,
+                sibling_context=sibling_context,
+                tender_requirements=tender_requirements,
+                scoring_requirements=scoring_requirements,
+            )
+            orientation_view = public_orientation_view(writing_orientation)
+            yield _ndjson_event(
+                "research",
+                chapter_id=normalized_chapter_id,
+                status="oriented",
+                message=str(orientation_view.get("summary_text") or "本章写作处境已确认。"),
+                orientation=orientation_view,
+            )
             if (
                 sibling_context.get("chapter_role") == "visual"
                 and sibling_context.get("missing_upstream")
@@ -1544,14 +1625,14 @@ async def stream_chapter_draft(
                 "research",
                 chapter_id=normalized_chapter_id,
                 status="inspect_planning",
-                message="先看目录标题，判断是否需要打开他章只读详情…",
+                message="写作处境已确认。再看目录标题，判断是否需要打开他章只读详情…",
             )
             inspection = outline_service.plan_and_load_inspections(
                 viewer_chapter_id=normalized_chapter_id,
                 outline_context=outline_context,
                 task=(
                     f"撰写章节《{chapter.get('title') or normalized_chapter_id}》草稿。"
-                    f" 章节目的：{(chapter.get('blueprint_node') or {}).get('purpose') or ''}。"
+                    f" 已确认写作处境：{orientation_view.get('summary_text') or ''}。"
                     f" 用户补充：{instruction or '无'}"
                 ),
             )
@@ -1581,19 +1662,29 @@ async def stream_chapter_draft(
                     sources=[],
                 )
 
-            # Chapter agent plans research from distilled relevant facts only —
-            # never paste the full tender / raw project_context dump into search.
+            writing_orientation = WritingOrientationService(context).build_for_chapter(
+                chapter,
+                outline_context=outline_context,
+                sibling_context=sibling_context,
+                tender_requirements=tender_requirements,
+                scoring_requirements=scoring_requirements,
+                inspected_chapters=inspected_chapters,
+            )
+
+            # After orientation is confirmed, decide search from existing materials.
             yield _ndjson_event(
                 "research",
                 chapter_id=normalized_chapter_id,
                 status="planning",
-                message="章节 Agent 正在整理本章相关要点并判断是否需要公开检索…",
+                message="写作处境已确认，正在根据已有资料判断是否需要公开检索…",
             )
             research_plan = _chapter_research_plan(
                 chapter,
                 instruction=instruction,
                 project_context=prompt_project_context,
                 sibling_context=sibling_context,
+                writing_orientation=writing_orientation,
+                inspected_chapters=inspected_chapters,
                 tender_requirements=tender_requirements,
                 scoring_requirements=scoring_requirements,
             )
@@ -1709,6 +1800,7 @@ async def stream_chapter_draft(
                     scoring_requirements=scoring_requirements,
                     sibling_context=sibling_context,
                     outline_context=outline_context,
+                    writing_orientation=writing_orientation,
                     inspected_chapters=inspected_chapters,
                 ),
                 temperature=0.25,

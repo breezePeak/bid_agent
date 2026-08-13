@@ -285,6 +285,40 @@
           </template>
         </section>
 
+        <section v-if="writingOrientation" class="context-section writing-orientation">
+          <header class="context-section-header">
+            <div>
+              <strong>本章写作处境</strong>
+              <small>目的 · 全书位置 · 章节关系</small>
+            </div>
+            <span class="context-version">{{ writingOrientation.writing_purpose?.role_label || outlineRoleLabel }}</span>
+          </header>
+          <p v-if="writingOrientation.writing_purpose?.purpose" class="context-note">
+            写作目的：{{ writingOrientation.writing_purpose.purpose }}
+          </p>
+          <p
+            v-if="writingOrientation.writing_purpose?.writing_objectives?.length"
+            class="context-note"
+          >
+            写作目标：{{ writingOrientation.writing_purpose.writing_objectives.join('；') }}
+          </p>
+          <p v-if="orientationPathLabel" class="context-note outline-path">
+            全书位置：{{ orientationPathLabel }}
+          </p>
+          <ul v-if="orientationRelations.length" class="orientation-relations">
+            <li v-for="item in orientationRelations" :key="item.chapter_id || item.title">
+              <em>{{ item.relation_label || item.relation }}</em>
+              {{ item.title }}
+              <span v-if="item.content_status && item.content_status !== 'unknown'">
+                · {{ outlineContentLabel(item) }}
+              </span>
+            </li>
+          </ul>
+          <p v-if="orientationMaterials" class="context-note">
+            已有资料：{{ orientationMaterials }}
+          </p>
+        </section>
+
         <section class="context-section outline-context">
           <header class="context-section-header">
             <div>
@@ -766,6 +800,18 @@ const chapterRequirements = computed(() => chapterDetail.value?.chapter_requirem
 const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_scoring_requirements || [])
 const chapterContextRef = computed(() => chapterDetail.value?.chapter_context_ref || {})
 const documentOutlineContext = computed(() => chapterDetail.value?.document_outline_context || null)
+const writingOrientation = computed(() => chapterDetail.value?.writing_orientation || null)
+const orientationPathLabel = computed(() => String(
+  writingOrientation.value?.document_position?.path_label || outlinePathLabel.value || '',
+).trim())
+const orientationRelations = computed(() => {
+  const rows = writingOrientation.value?.chapter_relations?.items
+  return Array.isArray(rows) ? rows : []
+})
+const orientationMaterials = computed(() => {
+  const notes = writingOrientation.value?.existing_materials?.notes
+  return Array.isArray(notes) && notes.length ? notes.join('；') : ''
+})
 const outlineFlat = computed(() => {
   const rows = documentOutlineContext.value?.outline
   return Array.isArray(rows) ? rows : []
@@ -1743,6 +1789,18 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 .research-status ul { margin: 8px 0 0; padding-left: 18px; }
+.orientation-relations {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.orientation-relations em {
+  font-style: normal;
+  color: #0f766e;
+  font-weight: 700;
+}
 .research-status a { color: #0f766e; text-decoration: underline; }
 .source-tier {
   display: inline-flex;

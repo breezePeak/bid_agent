@@ -247,6 +247,12 @@ class V3ChapterDraftStreamTests(TestCase):
             self.assertEqual(types[0], "meta")
             self.assertIn("delta", types)
             self.assertEqual(types[-1], "done")
+            research_events = [event for event in events if event["type"] == "research"]
+            statuses = [event.get("status") for event in research_events]
+            self.assertIn("orienting", statuses)
+            self.assertIn("oriented", statuses)
+            self.assertIn("planning", statuses)
+            self.assertLess(statuses.index("oriented"), statuses.index("planning"))
             self.assertEqual("".join(event["delta"] for event in events if event["type"] == "delta"), "项目实施方案")
             self.assertEqual(events[-1]["text"], "项目实施方案")
             self.assertNotIn("不得发送给浏览器", json.dumps(events, ensure_ascii=False))

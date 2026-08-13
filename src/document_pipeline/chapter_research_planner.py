@@ -1,14 +1,14 @@
 """Plan public research for a chapter draft by model decision.
 
 Flow:
-1. Deterministically distill a short, chapter-relevant brief (project name,
-   related tasks, chapter purpose, sibling summaries, score/requirement focus).
-2. The chapter agent model decides whether external search is needed and writes
-   the search query from that brief only.
+1. Deterministically compile writing orientation (purpose, document position,
+   relations) plus a short materials inventory.
+2. The chapter agent first confirms that orientation, then decides whether
+   existing materials are enough, and only then whether to web_search.
 3. Never paste the full tender or a raw project_context JSON dump into search.
 
-Search need is model-owned.  There is no keyword heuristic that auto-triggers
-or auto-skips research.
+Search need is model-owned after orientation is confirmed.  There is no
+keyword heuristic that auto-triggers or auto-skips research.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import re
 from typing import Any
 
 from .sibling_chapter_context import _chapter_role
+from .writing_orientation import compact_orientation_for_prompt
 
 MAX_BRIEF_CHARS = 700
 MAX_QUERY_CHARS = 420
@@ -67,21 +68,36 @@ def distill_chapter_research_brief(
     *,
     project_context: dict[str, Any] | None = None,
     sibling_context: dict[str, Any] | None = None,
+    writing_orientation: dict[str, Any] | None = None,
+    inspected_chapters: list[dict[str, Any]] | None = None,
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
     instruction: str = "",
 ) -> dict[str, Any]:
     """Build a compact, chapter-relevant brief for the model to decide on research."""
+    orientation = compact_orientation_for_prompt(writing_orientation)
+    purpose_block = orientation.get("writing_purpose") or {}
+    position_block = orientation.get("document_position") or {}
+    relations_block = orientation.get("chapter_relations") or {}
+    materials_block = orientation.get("existing_materials") or {}
     node = chapter.get("blueprint_node") if isinstance(chapter.get("blueprint_node"), dict) else {}
-    title = _clean(chapter.get("title") or node.get("title") or "当前章节", 80)
-    purpose = _clean(node.get("purpose") or "", 160)
+    title = _clean(
+        purpose_block.get("title") or chapter.get("title") or node.get("title") or "当前章节",
+        80,
+    )
+    purpose = _clean(purpose_block.get("purpose") or node.get("purpose") or "", 160)
     objectives = [
         _clean(item, 80)
-        for item in (node.get("writing_objectives") or [])
+        for item in (
+            purpose_block.get("writing_objectives")
+            or node.get("writing_objectives")
+            or []
+        )
         if str(item or "").strip()
     ][:4]
     chapter_role = str(
-        (sibling_context or {}).get("chapter_role")
+        purpose_block.get("role")
+        or (sibling_context or {}).get("chapter_role")
         or _chapter_role(title, purpose)
     )
     ctx = project_context if isinstance(project_context, dict) else {}
@@ -118,23 +134,58 @@ def distill_chapter_research_brief(
 
     sibling = sibling_context if isinstance(sibling_context, dict) else {}
     sibling_ready: list[str] = []
-    for item in sibling.get("siblings") or []:
-        if not isinstance(item, dict) or not item.get("has_content"):
+    for item in inspected_chapters or []:
+        if not isinstance(item, dict):
             continue
-        sibling_ready.append(
-            _clean(
-                f"{item.get('title') or item.get('chapter_id')}: "
-                f"{item.get('summary') or item.get('purpose') or ''}",
-                140,
-            )
+        snippet = _clean(
+            f"{item.get('title') or item.get('chapter_id')}: "
+            f"{item.get('summary') or item.get('purpose') or ''}",
+            140,
         )
+        if snippet:
+            sibling_ready.append(snippet)
         if len(sibling_ready) >= MAX_SIBLING_SNIPPETS:
             break
+    if not sibling_ready:
+        for item in sibling.get("siblings") or []:
+            if not isinstance(item, dict) or not item.get("has_content"):
+                continue
+            sibling_ready.append(
+                _clean(
+                    f"{item.get('title') or item.get('chapter_id')}: "
+                    f"{item.get('purpose') or ''}",
+                    140,
+                )
+            )
+            if len(sibling_ready) >= MAX_SIBLING_SNIPPETS:
+                break
     missing_upstream = [
         _clean(item.get("title") or item.get("chapter_id") or "", 40)
-        for item in (sibling.get("missing_upstream") or [])
+        for item in (
+            relations_block.get("missing_upstream")
+            or sibling.get("missing_upstream")
+            or []
+        )
         if isinstance(item, dict)
     ][:4]
+    relation_lines = []
+    for item in relations_block.get("items") or []:
+        if not isinstance(item, dict):
+            continue
+        relation_lines.append(
+            _clean(
+                f"{item.get('relation_label') or item.get('relation')}:"
+                f"{item.get('title') or item.get('chapter_id')}",
+                60,
+            )
+        )
+        if len(relation_lines) >= 6:
+            break
+    materials_notes = [
+        _clean(item, 80)
+        for item in (materials_block.get("notes") or [])
+        if str(item or "").strip()
+    ][:6]
 
     focus_text = " ".join(
         [
@@ -157,6 +208,10 @@ def distill_chapter_research_brief(
         "chapter_role": chapter_role,
         "chapter_purpose": purpose,
         "writing_objectives": objectives,
+        "document_path": _clean(position_block.get("path_label") or title, 120),
+        "chapter_relations": relation_lines,
+        "existing_materials": materials_notes,
+        "orientation_summary": _clean(orientation.get("summary_text") or "", 400),
         "chapter_focus_notes": local_focus,
         "requirement_focus": req_focus,
         "scoring_focus": score_focus,
@@ -197,8 +252,16 @@ def _render_brief_text(brief: dict[str, Any]) -> str:
         f"本章：《{brief.get('chapter_title') or ''}》"
         f"（角色提示={brief.get('chapter_role') or 'general'}，仅供参考）"
     )
+    if brief.get("orientation_summary"):
+        lines.append(f"写作处境：{brief['orientation_summary']}")
     if brief.get("chapter_purpose"):
-        lines.append(f"章节目的：{brief['chapter_purpose']}")
+        lines.append(f"写作目的：{brief['chapter_purpose']}")
+    if brief.get("document_path"):
+        lines.append(f"全书位置：{brief['document_path']}")
+    if brief.get("chapter_relations"):
+        lines.append("章节关系：" + "；".join(brief["chapter_relations"]))
+    if brief.get("existing_materials"):
+        lines.append("已有资料：" + "；".join(brief["existing_materials"]))
     if brief.get("writing_objectives"):
         lines.append("写作目标：" + "；".join(brief["writing_objectives"]))
     if brief.get("requirement_focus"):
@@ -253,19 +316,24 @@ def plan_chapter_research(
     *,
     project_context: dict[str, Any] | None = None,
     sibling_context: dict[str, Any] | None = None,
+    writing_orientation: dict[str, Any] | None = None,
+    inspected_chapters: list[dict[str, Any]] | None = None,
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
     instruction: str = "",
 ) -> dict[str, Any]:
-    """Model decides whether to search; brief is only the decision input.
+    """Confirm orientation, then decide search from existing materials.
 
     Returns:
-        need_research, reason, search_query, brief, decision_source
+        need_research, reason, search_query, brief, decision_source,
+        orientation_confirmed, orientation_summary
     """
     brief = distill_chapter_research_brief(
         chapter,
         project_context=project_context,
         sibling_context=sibling_context,
+        writing_orientation=writing_orientation,
+        inspected_chapters=inspected_chapters,
         tender_requirements=tender_requirements,
         scoring_requirements=scoring_requirements,
         instruction=instruction,
@@ -278,9 +346,18 @@ def plan_chapter_research(
             "search_query": "",
             "brief": brief,
             "decision_source": "agent_unavailable",
+            "orientation_confirmed": False,
+            "orientation_summary": str(brief.get("orientation_summary") or ""),
+            "existing_materials_sufficient": True,
         }
 
+    confirmed = bool(decision.get("orientation_confirmed", True))
+    materials_enough = bool(decision.get("existing_materials_sufficient"))
     need = bool(decision.get("need_research"))
+    # Confirm orientation first. If materials already cover the chapter purpose,
+    # do not search even if the model also asked for a query.
+    if not confirmed or materials_enough:
+        need = False
     reason = str(decision.get("reason") or "").strip()
     query = _sanitize_search_query(str(decision.get("search_query") or ""), brief)
     if need and not query:
@@ -302,34 +379,52 @@ def plan_chapter_research(
 
     return {
         "need_research": bool(need and query),
-        "reason": reason or ("需要公开资料补充" if need else "已有要点足够，无需公开检索"),
+        "reason": reason
+        or (
+            "已有资料足够，无需公开检索"
+            if materials_enough or not need
+            else "需要公开资料补充"
+        ),
         "search_query": query if need else "",
         "brief": brief,
         "decision_source": "chapter_agent",
+        "orientation_confirmed": confirmed,
+        "orientation_summary": str(
+            decision.get("orientation_summary") or brief.get("orientation_summary") or ""
+        ).strip(),
+        "existing_materials_sufficient": materials_enough,
     }
 
 
 def _model_decide(brief: dict[str, Any]) -> dict[str, Any] | None:
-    """Chapter agent autonomously decides research need from distilled brief only."""
+    """Confirm writing orientation, then decide research from existing materials."""
     system = (
-        "你是标书章节写作 Agent 的检索规划器，由你自主决定是否联网检索。"
+        "你是标书章节写作 Agent 的检索规划器。"
+        "必须先确认写作处境，再根据已有资料决定是否联网检索。"
         "唯一输入是「已整理的本章相关要点」，不是整份招标文件。"
-        "\n决策要求："
-        "1) 自主判断：本章现有要点是否足够写正文；缺什么再检索什么。"
-        "2) 需要检索时，search_query 必须短、具体，只含项目名、相关任务要点、本章焦点；"
+        "\n决策顺序："
+        "1) 先确认写作目的、本章在整份标书中的位置、与其他章节的关系；"
+        "orientation_summary 用一两句中文复述这三点。"
+        "2) 再盘点已有资料（物化上下文、招标/评分要点、已读他章）是否足够支撑本章目的。"
+        "3) 只有已有资料仍缺公开政策、标准或通用方法时，才 need_research=true。"
+        "4) 需要检索时，search_query 必须短、具体，只含项目名、相关任务要点、本章焦点；"
         "禁止粘贴长文、JSON、整标原文。"
-        "3) 公开检索只能补政策/标准/同类专业方法等可核验资料，"
+        "5) 公开检索只能补政策/标准/同类专业方法等可核验资料，"
         "不能证明本企业资质、业绩、人员、报价或承诺。"
-        "4) 图示/路线图类章节若兄弟章已给出阶段骨架，优先直接成图；"
-        "仅当公开参考对成图确有必要时才检索。"
-        "5) 不要为了“显得全面”而每次都检索。"
+        "6) 图示/路线图类章节若兄弟章已给出阶段骨架，优先直接成图。"
+        "7) 不要为了“显得全面”而每次都检索。"
         "\n只输出 JSON 对象，不要 Markdown："
-        '{"need_research":true/false,"reason":"简短中文理由","search_query":"需要时填写，否则空字符串"}'
+        '{"orientation_confirmed":true,'
+        '"orientation_summary":"本章写什么、在全书何处、与何章何关系",'
+        '"existing_materials_sufficient":true/false,'
+        '"need_research":true/false,'
+        '"reason":"简短中文理由",'
+        '"search_query":"需要时填写，否则空字符串"}'
     )
     user = (
         "已整理要点（唯一决策输入）：\n"
         f"{brief.get('brief_text') or ''}\n\n"
-        "请自主判断是否检索，并给出 JSON。"
+        "请先确认写作处境，再判断已有资料是否足够，最后给出是否检索的 JSON。"
     )
     try:
         from llm_client import chat
@@ -359,6 +454,11 @@ def _model_decide(brief: dict[str, Any]) -> dict[str, Any] | None:
     if "need_research" not in payload:
         return None
     return {
+        "orientation_confirmed": bool(payload.get("orientation_confirmed", True)),
+        "orientation_summary": _clean(payload.get("orientation_summary") or "", 240),
+        "existing_materials_sufficient": bool(
+            payload.get("existing_materials_sufficient")
+        ),
         "need_research": bool(payload.get("need_research")),
         "reason": _clean(payload.get("reason") or "", 200),
         "search_query": str(payload.get("search_query") or "").strip(),

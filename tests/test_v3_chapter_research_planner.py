@@ -56,9 +56,67 @@ class ChapterResearchPlannerTests(unittest.TestCase):
         text = brief["brief_text"]
         self.assertIn("城市地下管网普查项目", text)
         self.assertIn("技术路线图", text)
-        self.assertIn("核查准备", text)
+        self.assertIn("总体技术路线", text)
         self.assertNotIn("confirmed_facts", text)
         self.assertLess(len(text), 800)
+
+    def test_orientation_and_existing_materials_block_search(self) -> None:
+        chapter = {
+            "chapter_id": "ch-diagram",
+            "title": "技术路线图",
+            "blueprint_node": {"purpose": "画技术路线图"},
+        }
+
+        def fake_chat(messages, **_kwargs):
+            user = messages[1]["content"]
+            self.assertIn("写作目的", user)
+            self.assertIn("全书位置", user)
+            return json.dumps(
+                {
+                    "orientation_confirmed": True,
+                    "orientation_summary": "本章画技术路线图，位于技术路线下，上游是总体技术路线。",
+                    "existing_materials_sufficient": True,
+                    "need_research": True,
+                    "reason": "资料已够，但模型仍写了检索",
+                    "search_query": "不该被采用的检索",
+                },
+                ensure_ascii=False,
+            )
+
+        with mock.patch("llm_client.chat", side_effect=fake_chat):
+            plan = plan_chapter_research(
+                chapter,
+                writing_orientation={
+                    "writing_purpose": {
+                        "title": "技术路线图",
+                        "purpose": "以图呈现总体技术路线",
+                        "role": "visual",
+                        "role_label": "图示/路线图",
+                        "is_leaf": True,
+                    },
+                    "document_position": {"path_label": "技术路线 / 技术路线图"},
+                    "chapter_relations": {
+                        "items": [
+                            {
+                                "title": "总体技术路线",
+                                "relation": "upstream",
+                                "relation_label": "上游同级",
+                            }
+                        ]
+                    },
+                    "existing_materials": {
+                        "notes": ["已物化章节目的/写作目标 2 条"],
+                        "has_local_materials": True,
+                    },
+                    "summary_text": "写作目的：画图。全书位置：技术路线 / 技术路线图。",
+                },
+            )
+        self.assertFalse(plan["need_research"])
+        self.assertEqual(plan["search_query"], "")
+        self.assertTrue(plan["orientation_confirmed"])
+        self.assertTrue(plan["existing_materials_sufficient"])
+        self.assertIn("技术路线图", plan["brief"]["brief_text"])
+        self.assertIn("全书位置", plan["brief"]["brief_text"])
 
     def test_model_can_skip_research(self) -> None:
         chapter = {
