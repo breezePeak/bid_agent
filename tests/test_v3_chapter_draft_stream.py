@@ -155,6 +155,8 @@ class V3ChapterDraftStreamTests(TestCase):
         self.assertEqual(diagram_payload["content_format"], "technical_roadmap_diagram")
         self.assertIn("技术路线图/流程图", diagram_messages[0]["content"])
         self.assertIn("Mermaid", diagram_messages[0]["content"])
+        self.assertIn("writing_outline.blocks", background_messages[0]["content"])
+        self.assertGreaterEqual(len(background_payload["writing_outline"]["blocks"]), 1)
 
     def test_think_tags_go_to_thinking_channel_not_saved_body(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

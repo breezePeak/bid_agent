@@ -303,6 +303,23 @@
           </p>
         </section>
 
+        <section v-if="writingOutlineBlocks.length" class="context-section writing-outline-section">
+          <header class="context-section-header">
+            <div>
+              <strong>本章写作提纲</strong>
+              <small>按满分条件展开，不写评分术语</small>
+            </div>
+            <span class="context-version">{{ writingOutlineBlocks.length }} 块</span>
+          </header>
+          <ol class="writing-outline">
+            <li v-for="block in writingOutlineBlocks" :key="block.block_id">
+              <em>{{ outlineKindLabel(block.kind) }}</em>
+              {{ block.heading }}
+              <span>{{ block.must_answer }}</span>
+            </li>
+          </ol>
+        </section>
+
         <section class="context-section outline-context">
           <header class="context-section-header">
             <div>
@@ -801,6 +818,18 @@ const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_s
 const chapterContextRef = computed(() => chapterDetail.value?.chapter_context_ref || {})
 const documentOutlineContext = computed(() => chapterDetail.value?.document_outline_context || null)
 const writingOrientation = computed(() => chapterDetail.value?.writing_orientation || null)
+const writingOutlineBlocks = computed(() => {
+  const rows = chapterDetail.value?.writing_outline?.blocks
+  return Array.isArray(rows) ? rows : []
+})
+function outlineKindLabel(kind) {
+  return {
+    response: '做法',
+    evidence: '证据',
+    constraint: '约束',
+    quality: '质控',
+  }[String(kind || '')] || '要点'
+}
 const orientationPathLabel = computed(() => String(
   writingOrientation.value?.document_position?.path_label || outlinePathLabel.value || '',
 ).trim())
@@ -1934,6 +1963,24 @@ onUnmounted(() => {
   font-style: normal;
   color: #0f766e;
   font-weight: 700;
+}
+.writing-outline {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.writing-outline em {
+  font-style: normal;
+  color: #7c3aed;
+  font-weight: 700;
+  margin-right: 4px;
+}
+.writing-outline span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
 }
 .research-status a { color: #0f766e; text-decoration: underline; }
 .source-tier {

@@ -825,6 +825,24 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
             )
         except Exception:
             chapter["writing_orientation"] = None
+        try:
+            from document_pipeline.chapter_writing_outline import (
+                compile_chapter_writing_outline,
+            )
+
+            context_items = []
+            if isinstance(chapter.get("context"), dict):
+                context_items = list(chapter["context"].get("items") or [])
+            chapter["writing_outline"] = compile_chapter_writing_outline(
+                chapter,
+                tender_requirements=chapter.get("chapter_requirements") or [],
+                scoring_requirements=chapter.get("chapter_scoring_requirements")
+                or [],
+                writing_orientation=chapter.get("writing_orientation"),
+                chapter_context_items=context_items,
+            )
+        except Exception:
+            chapter["writing_outline"] = None
         return JSONResponse({"ok": True, "chapter": chapter})
     except ControlPlaneError as exc:
         return _error(exc)
@@ -1137,6 +1155,7 @@ def _chapter_draft_messages(
     )
     from document_pipeline.sibling_chapter_context import _chapter_role
     from document_pipeline.writing_orientation import compact_orientation_for_prompt
+    from document_pipeline.chapter_writing_outline import compile_chapter_writing_outline
 
     node = chapter.get("blueprint_node")
     node = node if isinstance(node, dict) else {}
@@ -1155,6 +1174,13 @@ def _chapter_draft_messages(
     sibling_payload = compact_sibling_for_prompt(dict(sibling_context or {}))
     outline_payload = compact_outline_for_prompt(dict(outline_context or {}))
     orientation_payload = compact_orientation_for_prompt(writing_orientation)
+    writing_outline = compile_chapter_writing_outline(
+        chapter,
+        tender_requirements=tender_requirements,
+        scoring_requirements=scoring_requirements,
+        writing_orientation=orientation_payload,
+        chapter_context_items=context_items,
+    )
     inspected = list(inspected_chapters or [])
     title = str(chapter.get("title") or node.get("title") or "")
     purpose = str(
@@ -1185,6 +1211,7 @@ def _chapter_draft_messages(
         "global_project_context": dict(project_context or {}),
         "chapter_grounding_context": dict(chapter_grounding_context or {}),
         "writing_orientation": orientation_payload,
+        "writing_outline": writing_outline,
         # Titles-first outline; peer bodies only appear in inspected_chapters.
         "document_outline_context": outline_payload,
         "sibling_chapter_context": sibling_payload,
@@ -1211,6 +1238,10 @@ def _chapter_draft_messages(
     orientation_rules = (
         "必须先按 writing_orientation 确认：本章写作目的、在整份标书中的目录位置、"
         "以及与其他章节的关系；只完成本章职责，不要越权写他章主责。"
+        "必须按 writing_outline.blocks 的顺序写正文，一块至少一段；"
+        "每段写清做法或检查口径，并给出本章交付物或验收点。"
+        "不要输出提纲小标题本身，不要出现“满分条件、得分点、评分要求、本节用于”等词。"
+        "supporting 块只点到为止，不要写成他章主责的完整方案。"
     )
     if is_visual:
         system = (

@@ -57,6 +57,12 @@ test('switching or unmounting aborts an active draft stream', () => {
   assert.match(workbench, /onUnmounted\(\(\) => \{[\s\S]*draftAbortController\?\.abort\(\)/)
 })
 
+test('chapter workbench shows compiled writing outline from score conditions', () => {
+  assert.match(workbench, />本章写作提纲</)
+  assert.match(workbench, /writingOutlineBlocks/)
+  assert.match(workbench, /outlineKindLabel/)
+})
+
 test('chapter workbench shows writing purpose, document position and chapter relations', () => {
   assert.match(workbench, />本章写作处境</)
   assert.match(workbench, />目的 · 全书位置 · 章节关系</)
