@@ -156,6 +156,52 @@ class V3ChapterDraftStreamTests(TestCase):
         self.assertIn("技术路线图/流程图", diagram_messages[0]["content"])
         self.assertIn("Mermaid", diagram_messages[0]["content"])
 
+    def test_think_tags_go_to_thinking_channel_not_saved_body(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+            submitted = []
+            receipt = SimpleNamespace(
+                status="accepted",
+                error=None,
+                message="saved",
+                result={"chapter": {"chapter_revision": 8}, "content": {"content_revision": 1}},
+                as_dict=lambda: {"status": "accepted"},
+            )
+            gateway = SimpleNamespace(submit=lambda envelope: submitted.append(envelope) or receipt)
+
+            def chunks(*_args, **_kwargs):
+                yield "content", "<think>先确认章节目的"
+                yield "content", "再写正文</think>"
+                yield "content", "项目实施方案"
+
+            with (
+                mock.patch.object(v3_app, "_context", return_value=context),
+                mock.patch("document_pipeline.chapter_workspace.ChapterWorkspaceService.get_chapter", return_value=self._chapter()),
+                mock.patch.object(v3_app, "_chapter_project_context", return_value=self._project_context()),
+                mock.patch.object(v3_app, "_chapter_semantic_requirements", return_value=([], [])),
+                mock.patch("document_pipeline.global_project_context.GlobalProjectContextService.build_chapter_context", return_value=self._chapter_context()),
+                mock.patch("document_pipeline.content_grounding.ContentGroundingGate.evaluate", return_value=self._grounding_report()),
+                mock.patch.object(v3_app, "_chapter_research_plan", side_effect=self._skip_research_plan),
+                mock.patch("llm_client.chat_stream_chunks", side_effect=chunks),
+                mock.patch.object(v3_app, "_gateway", return_value=gateway),
+            ):
+                response = asyncio.run(v3_app.stream_chapter_draft(
+                    "alpha", "chapter-1", _request({"expected_revision": 3, "expected_chapter_revision": 7})
+                ))
+                events = asyncio.run(_events(response))
+
+            thinking = "".join(
+                event.get("delta") or ""
+                for event in events
+                if event["type"] == "thinking_delta"
+            )
+            body = "".join(event.get("delta") or "" for event in events if event["type"] == "delta")
+            self.assertIn("先确认章节目的", thinking)
+            self.assertIn("再写正文", thinking)
+            self.assertEqual(body, "项目实施方案")
+            self.assertNotIn("<think>", body)
+            self.assertEqual(submitted[0].payload["text"], "项目实施方案")
+
     def test_parent_chapter_is_rejected_before_model_streaming(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context = self._context(Path(temporary))
@@ -255,7 +301,16 @@ class V3ChapterDraftStreamTests(TestCase):
             self.assertLess(statuses.index("oriented"), statuses.index("planning"))
             self.assertEqual("".join(event["delta"] for event in events if event["type"] == "delta"), "项目实施方案")
             self.assertEqual(events[-1]["text"], "项目实施方案")
-            self.assertNotIn("不得发送给浏览器", json.dumps(events, ensure_ascii=False))
+            thinking = "".join(
+                event.get("delta") or ""
+                for event in events
+                if event["type"] == "thinking_delta"
+            )
+            self.assertEqual(thinking, "不得发送给浏览器")
+            self.assertNotIn(
+                "不得发送给浏览器",
+                "".join(event.get("delta") or "" for event in events if event["type"] == "delta"),
+            )
             self.assertEqual(len(submitted), 1)
             self.assertEqual(submitted[0].payload["text"], "项目实施方案")
 

@@ -199,18 +199,6 @@
               <button type="button" class="btn btn-primary" :disabled="busy" @click="materializeSelected">打开/物化</button>
             </div>
             <template v-else>
-              <section v-if="researchStatus" class="research-status" aria-live="polite">
-                <strong>{{ researchStatus }}</strong>
-                <ul v-if="researchSources.length">
-                  <li v-for="source in researchSources" :key="source.evidence_id || source.source_url">
-                    <span class="source-tier" :class="source.relevance_tier || 'general_reference'">
-                      {{ relevanceTierLabel(source.relevance_tier) }}
-                    </span>
-                    <a :href="source.source_url" target="_blank" rel="noreferrer">{{ source.title || source.source_url }}</a>
-                    <span v-if="source.publisher"> · {{ source.publisher }}</span>
-                  </li>
-                </ul>
-              </section>
               <ContentBlockEditor
                 ref="editorRef"
                 :blocks="editorBlocks"
@@ -1182,6 +1170,31 @@ async function generateDraft() {
   busyAction.value = 'draft'
   actionError.value = ''
   actionMessage.value = ''
+  rightTab.value = 'chat'
+  const draftTurnId = `draft-${operationId}`
+  const draftTurn = {
+    id: draftTurnId,
+    turn_id: '',
+    role: 'assistant',
+    content: '',
+    thinking: '',
+    thinkingOpen: true,
+    streaming: true,
+    editing: false,
+  }
+  chatTurns.value = [...chatTurns.value, draftTurn]
+  rememberChapterChat(chapterId, chatTurns.value)
+  await scrollChatToBottom()
+  const patchDraftTurn = (mutator) => {
+    if (selectedId.value !== chapterId) return
+    chatTurns.value = chatTurns.value.map((turn) => {
+      if (turn.id !== draftTurnId) return turn
+      const copy = { ...turn }
+      mutator(copy)
+      return copy
+    })
+    rememberChapterChat(chapterId, chatTurns.value)
+  }
   let streamCompleted = false
   let completedChapter = null
   let completedContent = null
@@ -1215,8 +1228,26 @@ async function generateDraft() {
           streamOperationId.value = String(event.operation_id || event?.data?.operation_id || operationId)
         } else if (type === 'research') {
           const payload = event?.data && typeof event.data === 'object' ? event.data : event
-          researchStatus.value = String(payload.message || '正在检索公开资料…')
+          const note = String(payload.message || '正在检索公开资料…').trim()
+          researchStatus.value = note
           researchSources.value = Array.isArray(payload.sources) ? payload.sources : []
+          if (note) {
+            patchDraftTurn((turn) => {
+              turn.thinking = turn.thinking ? `${turn.thinking}\n${note}` : note
+              turn.thinkingOpen = true
+              turn.streaming = true
+            })
+            scrollChatToBottom()
+          }
+        } else if (type === 'thinking_delta') {
+          const delta = String(event.delta || event?.data?.delta || '')
+          if (!delta) return
+          patchDraftTurn((turn) => {
+            turn.thinking = `${turn.thinking || ''}${delta}`
+            turn.thinkingOpen = true
+            turn.streaming = true
+          })
+          scrollChatToBottom()
         } else if (['delta', 'content_delta', 'token'].includes(type)) {
           appendDraftDelta(streamDeltaText(event))
         } else if (type === 'done') {
@@ -1255,6 +1286,11 @@ async function generateDraft() {
     researchSources.value = []
     remoteHint.value = ''
     actionMessage.value = '草稿已生成'
+    patchDraftTurn((turn) => {
+      turn.streaming = false
+      turn.thinkingOpen = true
+      if (!turn.content) turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
+    })
     await loadChapterList()
     await loadChapterDetail({ force: true, background: true })
   } catch (e) {
@@ -1268,6 +1304,17 @@ async function generateDraft() {
       streamingDraft.value = false
       busy.value = false
       busyAction.value = ''
+      patchDraftTurn((turn) => {
+        turn.streaming = false
+        if (turn.content) return
+        if (controller.signal.aborted) {
+          turn.content = '草稿生成已中断。思考过程保留在本条对话中。'
+        } else if (actionError.value) {
+          turn.content = `草稿未完成：${actionError.value}`
+        } else if (turn.thinking) {
+          turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
+        }
+      })
     }
   }
 }

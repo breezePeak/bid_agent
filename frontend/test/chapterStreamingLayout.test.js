@@ -98,6 +98,14 @@ test('chapter workbench defaults to the chapter chat tab', () => {
   )
 })
 
+test('draft thinking is routed to the right chat pane instead of the Word page', () => {
+  assert.doesNotMatch(workbench, /class="document-paper"[\s\S]*class="research-status"/)
+  assert.match(workbench, /rightTab\.value = 'chat'/)
+  assert.match(workbench, /type === 'thinking_delta'/)
+  assert.match(workbench, /patchDraftTurn/)
+  assert.match(workbench, /turn\.thinking = `\$\{turn\.thinking \|\| ''\}\$\{delta\}`/)
+})
+
 test('chapter chat shows thinking, sends on enter, and lets history be edited', () => {
   assert.match(workbench, /class="chat-thinking"/)
   assert.match(workbench, /思考过程/)

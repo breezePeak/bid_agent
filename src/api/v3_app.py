@@ -1832,7 +1832,11 @@ async def stream_chapter_draft(
                         ],
                     )
 
+            from document_pipeline.stream_think import StreamThinkSplitter, strip_think_tags
+
+            splitter = StreamThinkSplitter()
             text_parts: list[str] = []
+            thinking_parts: list[str] = []
             for kind, value in chat_stream_chunks(
                 _chapter_draft_messages(
                     chapter,
@@ -1849,18 +1853,52 @@ async def stream_chapter_draft(
                 ),
                 temperature=0.25,
             ):
-                # Provider reasoning is intentionally neither persisted nor exposed.
-                if kind != "content" or not value:
+                if not value:
                     continue
-                delta = str(value)
-                text_parts.append(delta)
+                if kind == "reasoning":
+                    thinking = str(value)
+                    thinking_parts.append(thinking)
+                    yield _ndjson_event(
+                        "thinking_delta",
+                        chapter_id=normalized_chapter_id,
+                        delta=thinking,
+                    )
+                    continue
+                if kind != "content":
+                    continue
+                think_delta, body_delta = splitter.feed(str(value))
+                if think_delta:
+                    thinking_parts.append(think_delta)
+                    yield _ndjson_event(
+                        "thinking_delta",
+                        chapter_id=normalized_chapter_id,
+                        delta=think_delta,
+                    )
+                if not body_delta:
+                    continue
+                text_parts.append(body_delta)
                 yield _ndjson_event(
                     "delta",
                     chapter_id=normalized_chapter_id,
-                    delta=delta,
+                    delta=body_delta,
                 )
 
-            complete_text = "".join(text_parts).strip()
+            complete_text = strip_think_tags("".join(text_parts))
+            thinking_text = "".join(thinking_parts).strip()
+            if thinking_text:
+                try:
+                    from document_pipeline.chapter_chat import ChapterChatService
+
+                    ChapterChatService(context).append_turn(
+                        normalized_chapter_id,
+                        role="assistant",
+                        content=(
+                            f"已撰写章节「{chapter.get('title') or normalized_chapter_id}」草稿。"
+                        ),
+                        thinking=thinking_text,
+                    )
+                except Exception:
+                    pass
             if not complete_text:
                 raise ControlPlaneError(
                     "CHAPTER_DRAFT_EMPTY",
