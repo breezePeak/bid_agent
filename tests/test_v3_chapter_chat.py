@@ -212,6 +212,27 @@ class ChapterChatServiceTests(unittest.TestCase):
             self.assertEqual(updated[1]["content"], "先写阶段划分。")
             self.assertEqual(updated[1]["thinking"], "用户改了问题，回复也一起改。")
 
+    def test_chat_prompt_identifies_as_chapter_writer(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat = ChapterChatService(context)
+            chat_context = chat.build_chapter_chat_context(chapter)
+            messages = ChapterChatService._build_messages(
+                chat_context,
+                [],
+                "这一章怎么写？",
+            )
+            system = messages[0]["content"]
+            payload = json.loads(messages[1]["content"])
+            self.assertIn("写作 Agent", system)
+            self.assertIn("禁止反问", system)
+            self.assertNotIn("只能给出写作建议", system)
+            self.assertEqual(payload["role"], "bid_chapter_writer")
+            self.assertIn("writing_outline", payload)
+            self.assertIn("直接输出本章标书正文", payload["instruction"])
+
     def test_empty_message_rejected(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))
