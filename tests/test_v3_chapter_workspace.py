@@ -162,6 +162,43 @@ def _envelope(
 
 
 class ChapterWorkspacePhase1Tests(unittest.TestCase):
+    def test_parent_is_structural_and_only_leaf_is_writable(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(
+                context,
+                [
+                    BlueprintNode(
+                        chapter_id="parent",
+                        order=0,
+                        title="目标任务",
+                        purpose="组织目标任务子章节",
+                    ),
+                    BlueprintNode(
+                        chapter_id="leaf",
+                        parent_chapter_id="parent",
+                        order=1,
+                        title="工作内容",
+                        purpose="撰写具体工作内容",
+                    ),
+                ],
+            )
+            service = ChapterWorkspaceService(context)
+            listed = {
+                item["chapter_id"]: item
+                for item in service.list_chapters()["items"]
+            }
+
+            self.assertFalse(listed["parent"]["is_leaf"])
+            self.assertTrue(listed["leaf"]["is_leaf"])
+            with self.assertRaises(ControlPlaneError) as blocked:
+                service.require_leaf_chapter("parent")
+            self.assertEqual(blocked.exception.code, "CHAPTER_BODY_REQUIRES_LEAF")
+            self.assertEqual(
+                service.require_leaf_chapter("leaf")["chapter_id"],
+                "leaf",
+            )
+
     def test_materialize_list_and_isolation(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))
@@ -204,6 +241,21 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
             self.assertEqual(b_after["state_hash"], hash_b_before)
             self.assertEqual(b_after["chapter_revision"], rev_b_before)
             self.assertEqual(b_after.get("metadata") or {}, {})
+
+    def test_ensure_all_materializes_projected_chapters(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            service = ChapterWorkspaceService(context)
+            first = service.ensure_all(actor={"type": "test", "id": "tester"})
+            self.assertEqual(first["created"], 2)
+            self.assertGreaterEqual(first["seeded"], 1)
+            listed = service.list_chapters()
+            self.assertEqual(listed["materialized"], 2)
+            self.assertTrue(all(item["materialized"] for item in listed["items"]))
+            second = service.ensure_all()
+            self.assertEqual(second["created"], 0)
+            self.assertEqual(second["unchanged"], 2)
 
     def test_idempotent_create_and_cas_conflict(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

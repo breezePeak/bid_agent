@@ -13,13 +13,10 @@
         </div>
       </div>
       <div class="actions">
-        <button type="button" class="btn" :disabled="busy" @click="materialize">
-          {{ chapter?.materialized ? '刷新物化' : '打开/物化' }}
-        </button>
-        <button type="button" class="btn" :disabled="busy || !chapter?.materialized" @click="generateDraft">
+        <button type="button" class="btn" :disabled="busy || !chapter" @click="generateDraft">
           生成草稿
         </button>
-        <button type="button" class="btn" :disabled="busy || !chapter?.materialized" @click="loadRevisions">
+        <button type="button" class="btn" :disabled="busy || !chapter" @click="loadRevisions">
           版本
         </button>
         <button type="button" class="btn btn-primary" :disabled="busy || !canApprove" @click="approveHead">
@@ -34,7 +31,7 @@
     <div class="body">
       <div class="editor-pane">
         <div v-if="!chapter?.materialized" class="placeholder">
-          <p>章节尚未物化。点击「打开/物化」从已晋级 Blueprint 创建章节 Workspace。</p>
+          <p>正在准备章节工作台，目录确认后会自动打开本章。</p>
         </div>
         <ContentBlockEditor
           v-else
@@ -132,9 +129,21 @@ async function refresh(options = {}) {
       content: chapter.value?.content,
     }
   }
-  const snap = await fetchSnapshot(props.workspaceId)
-  if (snap.data?.ok) {
-    workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
+  if (!chapter.value?.materialized) {
+    const snap = await fetchSnapshot(props.workspaceId)
+    if (snap.data?.ok) {
+      workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
+    }
+    const ensured = await submitV3Command(props.workspaceId, {
+      kind: 'chapter.workspace.ensure_all',
+      payload: {},
+      expected_revision: workspaceRevision.value,
+      idempotency_key: `chapter.workspace.ensure_all-${Date.now()}`,
+    })
+    if (ensured.data?.ok) {
+      const latest = await fetchChapter(props.workspaceId, props.chapterId)
+      if (latest.data?.ok) chapter.value = latest.data.chapter
+    }
   }
 }
 
@@ -196,13 +205,6 @@ async function runCommand(kind, payload, successText = '') {
   } finally {
     busy.value = false
   }
-}
-
-function materialize() {
-  return runCommand('chapter.workspace.create', {
-    chapter_id: props.chapterId,
-    expected_chapter_revision: Number(chapter.value?.chapter_revision || 0),
-  }, '章节 Workspace 已就绪')
 }
 
 function generateDraft() {

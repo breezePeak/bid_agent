@@ -72,6 +72,40 @@ class ChapterWorkspaceService:
         )
 
     @staticmethod
+    def _leaf_ids(nodes: list[dict[str, Any]]) -> set[str]:
+        node_ids = {
+            str(node.get("chapter_id") or "").strip()
+            for node in nodes
+            if str(node.get("chapter_id") or "").strip()
+        }
+        parent_ids = {
+            str(node.get("parent_chapter_id") or "").strip()
+            for node in nodes
+            if str(node.get("parent_chapter_id") or "").strip()
+        }
+        return node_ids - parent_ids
+
+    def require_leaf_chapter(self, chapter_id: str) -> dict[str, Any]:
+        blueprint, node = self._node_by_id(chapter_id)
+        normalized = ControlStore._normalize_chapter_id(chapter_id)
+        children = [
+            {
+                "chapter_id": str(item.get("chapter_id") or ""),
+                "title": str(item.get("title") or ""),
+            }
+            for item in blueprint["nodes"]
+            if str(item.get("parent_chapter_id") or "") == normalized
+        ]
+        if children:
+            raise ControlPlaneError(
+                "CHAPTER_BODY_REQUIRES_LEAF",
+                "目录父节点只作为结构标题，不生成或编辑正文；请选择其下级叶子章节。",
+                status_code=409,
+                details={"chapter_id": normalized, "children": children},
+            )
+        return node
+
+    @staticmethod
     def _expected_chapter_revision(payload: dict[str, Any]) -> int:
         raw = payload.get("expected_chapter_revision", 0)
         try:
@@ -88,6 +122,7 @@ class ChapterWorkspaceService:
         try:
             blueprint = self._require_blueprint()
             nodes = blueprint["nodes"]
+            leaf_ids = self._leaf_ids(nodes)
             blueprint_revision = int(blueprint["revision"])
             blueprint_hash = str(blueprint["artifact_hash"])
         except ControlPlaneError as exc:
@@ -134,6 +169,7 @@ class ChapterWorkspaceService:
                             if node.get("parent_chapter_id") is not None
                             else None
                         ),
+                        "is_leaf": chapter_id in leaf_ids,
                         "order": int(node.get("order") or 0),
                         "materialized": False,
                         "status": "projected",
@@ -152,7 +188,11 @@ class ChapterWorkspaceService:
                 continue
             if not include_archived and str(row.get("status") or "") == "archived":
                 continue
-            items.append({**row, "materialized": True})
+            items.append({
+                **row,
+                "materialized": True,
+                "is_leaf": chapter_id in leaf_ids,
+            })
 
         if include_archived:
             for chapter_id, row in materializations.items():
@@ -177,6 +217,9 @@ class ChapterWorkspaceService:
 
     def get_chapter(self, chapter_id: str) -> dict[str, Any]:
         blueprint, node = self._node_by_id(chapter_id)
+        is_leaf = str(node.get("chapter_id") or "") in self._leaf_ids(
+            blueprint["nodes"]
+        )
         row = self.store.chapter_workspace(chapter_id)
         if row is None:
             return {
@@ -187,6 +230,7 @@ class ChapterWorkspaceService:
                     if node.get("parent_chapter_id") is not None
                     else None
                 ),
+                "is_leaf": is_leaf,
                 "order": int(node.get("order") or 0),
                 "materialized": False,
                 "status": "projected",
@@ -209,6 +253,7 @@ class ChapterWorkspaceService:
         return {
             **row,
             "materialized": True,
+            "is_leaf": is_leaf,
             "blueprint_node": node,
             "blueprint_revision_active": int(blueprint["revision"]),
             "blueprint_hash_active": str(blueprint["artifact_hash"]),
@@ -391,6 +436,60 @@ class ChapterWorkspaceService:
             # Empty seed still leaves head at 0; first user save becomes rev 1.
         return ChapterWorkspaceRecord.model_validate(record).model_dump(mode="json")
 
+    def ensure_all(self, *, actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Idempotently materialize every Blueprint node after planning.
+
+        This is a control-plane projection, not a second Artifact write path.
+        Existing workspaces are left unchanged; only missing rows and empty
+        context heads are created.
+        """
+        try:
+            blueprint = self._require_blueprint()
+        except ControlPlaneError as exc:
+            if exc.code == "CHAPTER_BLUEPRINT_REQUIRED":
+                return {
+                    "created": 0,
+                    "seeded": 0,
+                    "unchanged": 0,
+                    "total": 0,
+                    "blueprint_revision": 0,
+                }
+            raise
+        created = 0
+        seeded = 0
+        unchanged = 0
+        for node in blueprint["nodes"]:
+            chapter_id = str(node.get("chapter_id") or "").strip()
+            if not chapter_id:
+                continue
+            try:
+                chapter_id = ControlStore._normalize_chapter_id(chapter_id)
+            except ControlPlaneError:
+                continue
+            existing = self.store.chapter_workspace(chapter_id)
+            before_ctx = int((existing or {}).get("head_context_revision") or 0)
+            record = self.create(
+                chapter_id=chapter_id,
+                expected_chapter_revision=int((existing or {}).get("chapter_revision") or 0),
+                actor=actor,
+            )
+            after_ctx = int(record.get("head_context_revision") or 0)
+            if existing is None:
+                created += 1
+                if after_ctx > before_ctx:
+                    seeded += 1
+            elif after_ctx > before_ctx:
+                seeded += 1
+            else:
+                unchanged += 1
+        return {
+            "created": created,
+            "seeded": seeded,
+            "unchanged": unchanged,
+            "total": created + unchanged,
+            "blueprint_revision": int(blueprint["revision"]),
+        }
+
     def archive(
         self,
         *,
@@ -434,6 +533,15 @@ class ChapterWorkspaceService:
         items: list[dict[str, Any]],
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        # Chapter context may add local instructions, but it is never allowed
+        # to redefine workspace-wide project facts.
+        from .global_project_context import GlobalProjectContextService
+
+        shared_context = GlobalProjectContextService(self.context).load_model()
+        GlobalProjectContextService.assert_no_conflicts(
+            [dict(item) for item in items if isinstance(item, dict)],
+            global_context=shared_context,
+        )
         # User saves never mark seeded_from_blueprint; seed is first materialize only.
         result = self.store.append_chapter_context_revision(
             chapter_id=chapter_id,
@@ -519,6 +627,27 @@ class ChapterWorkspaceService:
             "operation_status": "succeeded",
             "message": f"章节 Workspace 已就绪: {chapter['chapter_id']}",
             "chapter": chapter,
+        }
+
+    def handle_ensure_all(
+        self,
+        context: WorkspaceContext,
+        envelope: CommandEnvelope,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        del context, operation_id
+        summary = self.ensure_all(
+            actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+        )
+        return {
+            "accepted": True,
+            "operation_status": "succeeded",
+            "message": (
+                f"章节工作台已就绪：{summary['total']} 章"
+                if summary["total"]
+                else "尚无目录，未创建章节工作台。"
+            ),
+            **summary,
         }
 
     def handle_archive(

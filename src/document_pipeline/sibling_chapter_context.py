@@ -87,7 +87,12 @@ class SiblingChapterContextService:
         self.context = context
         self.store = ControlStore(context)
 
-    def build_for_chapter(self, chapter: dict[str, Any]) -> dict[str, Any]:
+    def build_for_chapter(
+        self,
+        chapter: dict[str, Any],
+        *,
+        include_bodies: bool = False,
+    ) -> dict[str, Any]:
         node = chapter.get("blueprint_node")
         node = node if isinstance(node, dict) else {}
         chapter_id = ControlStore._normalize_chapter_id(
@@ -121,6 +126,7 @@ class SiblingChapterContextService:
                 self._project_sibling(
                     sibling_node,
                     current_order=current_order,
+                    include_bodies=include_bodies,
                 )
             )
 
@@ -237,6 +243,7 @@ class SiblingChapterContextService:
         node: dict[str, Any],
         *,
         current_order: int,
+        include_bodies: bool = False,
     ) -> dict[str, Any]:
         chapter_id = ControlStore._normalize_chapter_id(
             str(node.get("chapter_id") or "")
@@ -259,21 +266,34 @@ class SiblingChapterContextService:
         )
 
         row = self.store.chapter_workspace(chapter_id)
-        formal = self.store.chapter_formal_content(chapter_id) if row else None
-        head = self.store.chapter_content_head(chapter_id) if row else None
-        source = formal if isinstance(formal, dict) else head if isinstance(head, dict) else None
-        content_revision = int((source or {}).get("content_revision") or 0)
-        content_hash = str((source or {}).get("content_hash") or "")
-        full_text = _blocks_to_text(source)
-        summary = _truncate(full_text) if full_text else ""
-        has_content = bool(summary)
+        formal_rev = int((row or {}).get("formal_content_revision") or 0)
+        head_rev = int((row or {}).get("head_content_revision") or 0)
         content_status = (
             "formal"
-            if formal and _blocks_to_text(formal)
+            if formal_rev > 0
             else "draft"
-            if head and _blocks_to_text(head)
+            if head_rev > 0
             else "empty"
         )
+        content_revision = formal_rev or head_rev
+        content_hash = ""
+        summary = ""
+        if include_bodies and row:
+            formal = self.store.chapter_formal_content(chapter_id)
+            head = self.store.chapter_content_head(chapter_id)
+            source = formal if isinstance(formal, dict) else head if isinstance(head, dict) else None
+            content_revision = int((source or {}).get("content_revision") or content_revision)
+            content_hash = str((source or {}).get("content_hash") or "")
+            full_text = _blocks_to_text(source)
+            summary = _truncate(full_text) if full_text else ""
+            content_status = (
+                "formal"
+                if formal and _blocks_to_text(formal)
+                else "draft"
+                if head and _blocks_to_text(head)
+                else "empty"
+            )
+        has_content = bool(summary) if include_bodies else (formal_rev > 0 or head_rev > 0)
 
         return {
             "chapter_id": chapter_id,

@@ -1611,7 +1611,7 @@ async def stream_chapter_draft(
 
             sibling_context = SiblingChapterContextService(
                 context
-            ).build_for_chapter(chapter)
+            ).build_for_chapter(chapter, include_bodies=True)
             from document_pipeline.document_outline_context import (
                 DocumentOutlineContextService,
             )

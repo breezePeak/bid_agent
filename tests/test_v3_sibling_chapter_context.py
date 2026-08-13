@@ -185,7 +185,10 @@ class SiblingChapterContextTests(unittest.TestCase):
                 source="ai_draft",
             )
             diagram = service.get_chapter("ch-diagram")
-            payload = SiblingChapterContextService(context).build_for_chapter(diagram)
+            payload = SiblingChapterContextService(context).build_for_chapter(
+                diagram,
+                include_bodies=True,
+            )
 
             self.assertEqual(payload["chapter_role"], "visual")
             self.assertEqual(payload["parent_chapter_id"], "parent-route")

@@ -14,9 +14,6 @@
         <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="openCreateModal">
           + 新建章节
         </button>
-        <button type="button" class="btn btn-sm" :disabled="busy || !selectedId" @click="materializeSelected">
-          打开/物化
-        </button>
         <button type="button" class="btn btn-sm" :disabled="busy" @click="composeCheck">检查组装</button>
         <button type="button" class="btn btn-sm" :disabled="busy || !treeItems.length" @click="exportMarkdownOutline">
           导出 MD
@@ -136,7 +133,7 @@
           <button
             type="button"
             class="btn btn-primary"
-            :disabled="busy || !selectedId || !chapterDetail?.materialized || !selectedIsLeaf"
+            :disabled="busy || !selectedId || !selectedIsLeaf"
             :title="selectedIsLeaf ? '生成当前叶子章节正文' : '目录父节点只保留标题，不生成正文'"
             @click="generateDraft"
           >
@@ -194,9 +191,8 @@
               <p>父节点只保留标题和层级，不写正文。请从左侧选择其下级叶子章节生成内容。</p>
             </div>
             <div v-else-if="!chapterDetail?.materialized" class="document-state">
-              <h4>章节尚未物化</h4>
-              <p>点击左上角「打开/物化」，从 Blueprint 创建章节 Workspace。</p>
-              <button type="button" class="btn btn-primary" :disabled="busy" @click="materializeSelected">打开/物化</button>
+              <h4>正在准备章节工作台</h4>
+              <p>目录确认后会自动打开本章，无需手动物化。</p>
             </div>
             <template v-else>
               <ContentBlockEditor
@@ -394,7 +390,7 @@
             <span class="context-version">r{{ chapterContextRef.chapter_context_revision || 0 }}</span>
           </header>
           <div v-if="!chapterRequirements.length && !chapterScoringRequirements.length && !contextItems.length" class="empty-hint">
-            当前章节暂无专属要求。物化后会从 Blueprint 生成。
+            当前章节暂无专属要求。目录确认后会从 Blueprint 自动带入。
           </div>
           <article v-for="item in chapterRequirements" :key="item.requirement_id" class="context-card requirement-card">
             <div class="context-kind">招标要求 · {{ item.requirement_id }}</div>
@@ -881,7 +877,7 @@ const canApprove = computed(() => {
   const head = Number(chapterDetail.value?.head_content_revision || 0)
   const formal = Number(chapterDetail.value?.formal_content_revision || 0)
   return selectedIsLeaf.value
-    && Boolean(chapterDetail.value?.materialized)
+    && Boolean(chapterDetail.value)
     && head > 0
     && head !== formal
 })
@@ -945,6 +941,7 @@ async function loadChapterList() {
     const { data } = await fetchChapters(props.workspaceId)
     if (!data.ok) throw new Error(data.message || '加载目录失败')
     items.value = data.chapters?.items || []
+    await ensureChaptersReady()
     if (!selectedId.value) {
       const prefer = props.initialChapterId
         || items.value.find(item => item.materialized)?.chapter_id
@@ -955,6 +952,25 @@ async function loadChapterList() {
   } catch (e) {
     listError.value = e?.response?.data?.message || e.message || String(e)
   }
+}
+
+async function ensureChaptersReady() {
+  const pending = items.value.filter(item => !item.materialized && item.status === 'projected')
+  if (!pending.length) return
+  await refreshSnapshotRevision()
+  const { data } = await submitV3Command(props.workspaceId, {
+    kind: 'chapter.workspace.ensure_all',
+    payload: {},
+    expected_revision: workspaceRevision.value,
+    idempotency_key: `chapter.workspace.ensure_all-${Date.now()}`,
+  })
+  if (!data?.ok) {
+    throw new Error(
+      data?.receipt?.error?.message || data?.message || '自动打开章节工作台失败',
+    )
+  }
+  const refreshed = await fetchChapters(props.workspaceId)
+  if (refreshed.data?.ok) items.value = refreshed.data.chapters?.items || items.value
 }
 
 async function loadChapterDetail(options = {}) {
@@ -989,7 +1005,9 @@ async function loadChapterDetail(options = {}) {
       : data.chapter
     detailError.value = ''
     remoteHint.value = ''
-    await refreshSnapshotRevision()
+    if (!globalProjectContext.value?.global_context_id) {
+      await refreshSnapshotRevision()
+    }
   } catch (e) {
     if (!background) detailError.value = e?.response?.data?.message || e.message || String(e)
   } finally {
@@ -1114,14 +1132,6 @@ async function runCommand(kind, payload, successText = '', action = '') {
     busy.value = false
     busyAction.value = ''
   }
-}
-
-function materializeSelected() {
-  if (!selectedId.value) return
-  return runCommand('chapter.workspace.create', {
-    chapter_id: selectedId.value,
-    expected_chapter_revision: Number(chapterDetail.value?.chapter_revision || 0),
-  }, '章节已物化')
 }
 
 function streamDeltaText(event) {
@@ -1660,12 +1670,12 @@ onMounted(async () => {
   await reloadAll()
   pollTimer = setInterval(async () => {
     try {
-      await loadChapterList()
-      if (!streamingDraft.value) await loadChapterDetail({ force: false, background: true })
+      const { data } = await fetchChapters(props.workspaceId)
+      if (data?.ok) items.value = data.chapters?.items || items.value
     } catch (_) {
       /* ignore */
     }
-  }, 6000)
+  }, 15000)
 })
 
 onUnmounted(() => {

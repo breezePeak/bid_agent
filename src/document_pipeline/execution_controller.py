@@ -93,6 +93,7 @@ class V3ExecutionController:
             "document.confirm_planning": self.confirm_planning,
             "research.resolve": self.resolve_research,
             "chapter.workspace.create": chapters.handle_create,
+            "chapter.workspace.ensure_all": chapters.handle_ensure_all,
             "chapter.workspace.archive": chapters.handle_archive,
             "chapter.workspace.save_metadata": chapters.handle_save_metadata,
             "chapter.context.save": chapters.handle_save_context,
@@ -530,6 +531,9 @@ class V3ExecutionController:
                 reused.append(stage)
             completed.append(stage)
         planning_snapshot = HumanGateService(self.context).planning_snapshot()
+        workspaces = ChapterWorkspaceService(self.context).ensure_all(
+            actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+        )
         self.store.record_stage_run(
             operation_id,
             "confirm_planning",
@@ -543,6 +547,7 @@ class V3ExecutionController:
             "completed_stages": completed,
             "reused_stages": reused,
             "planning_snapshot": planning_snapshot,
+            "chapter_workspaces": workspaces,
         }
 
     def confirm_planning(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
@@ -564,9 +569,11 @@ class V3ExecutionController:
             nonce=envelope.command_id,
         )
         self.store.record_stage_run(operation_id, "confirm_planning", "succeeded", disposition="explicit_human_confirmation")
+        workspaces = ChapterWorkspaceService(self.context).ensure_all(actor=actor)
         return {
             "accepted": True,
             "operation_status": "succeeded",
             "message": "规划已由认证用户确认，H1 Receipt 已签发。",
             "planning_receipt": receipt.model_dump(mode="json"),
+            "chapter_workspaces": workspaces,
         }

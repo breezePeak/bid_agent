@@ -48,8 +48,7 @@ test('draft completion applies returned content before clearing the live preview
 test('background polling does not replace the editor with a loading placeholder', () => {
   assert.match(workbench, /const \{ force = true, background = false \} = options/)
   assert.match(workbench, /if \(!background \|\| !chapterDetail\.value\) detailLoading\.value = true/)
-  assert.match(workbench, /loadChapterDetail\(\{ force: false, background: true \}\)/)
-  assert.match(workbench, /if \(!streamingDraft\.value\) await loadChapterDetail/)
+  assert.match(workbench, /const \{ data \} = await fetchChapters\(props\.workspaceId\)/)
   assert.match(workbench, /currentSignature === nextSignature[\s\S]*content: currentContent/)
 })
 
@@ -85,7 +84,9 @@ test('draft stream carries both global and chapter context versions', () => {
 
 test('only leaf chapters expose body generation and approval', () => {
   assert.match(workbench, /const selectedIsLeaf = computed/)
-  assert.match(workbench, /!chapterDetail\?\.materialized \|\| !selectedIsLeaf/)
+  assert.match(workbench, /:disabled="busy \|\| !selectedId \|\| !selectedIsLeaf"/)
+  assert.match(workbench, /ensureChaptersReady/)
+  assert.match(workbench, /chapter.workspace.ensure_all/)
   assert.match(workbench, /父节点只保留标题和层级，不写正文/)
   assert.match(workbench, /if \(!selectedIsLeaf\.value\)/)
 })
