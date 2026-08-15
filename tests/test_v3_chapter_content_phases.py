@@ -49,8 +49,11 @@ def _sha(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def _seed_blueprint(context: WorkspaceContext) -> None:
-    nodes = [
+def _seed_blueprint(
+    context: WorkspaceContext,
+    nodes: list[BlueprintNode] | None = None,
+) -> None:
+    nodes = nodes or [
         BlueprintNode(
             chapter_id="ch-a",
             order=0,
@@ -156,6 +159,85 @@ def _envelope(context, store, kind, payload):
 
 
 class ChapterContentPhasesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._grounding_patch = mock.patch.object(
+            ChapterEditingService,
+            "_evaluate_grounding",
+            side_effect=lambda **kwargs: {
+                "verdict": "pass",
+                "global_context_id": "PM-TEST",
+                "global_context_revision": 1,
+                "global_context_hash": "g" * 64,
+                "chapter_context_id": (
+                    f"chapter-context:{kwargs.get('chapter_id') or 'unknown'}"
+                ),
+                "chapter_context_revision": 0,
+                "chapter_context_hash": "c" * 64,
+                "paragraph_fact_bindings": {},
+            },
+        )
+        self._grounding_patch.start()
+
+    def tearDown(self) -> None:
+        self._grounding_patch.stop()
+
+    def test_only_leaf_chapter_can_write_and_parent_does_not_block_compose(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(
+                context,
+                [
+                    BlueprintNode(
+                        chapter_id="parent",
+                        order=0,
+                        title="目标任务",
+                        purpose="组织目标任务子章节",
+                    ),
+                    BlueprintNode(
+                        chapter_id="leaf",
+                        parent_chapter_id="parent",
+                        order=1,
+                        title="工作内容",
+                        purpose="撰写具体工作内容",
+                    ),
+                ],
+            )
+            chapters = ChapterWorkspaceService(context)
+            editing = ChapterEditingService(context)
+            parent = chapters.create(
+                chapter_id="parent",
+                expected_chapter_revision=0,
+            )
+            leaf = chapters.create(
+                chapter_id="leaf",
+                expected_chapter_revision=0,
+            )
+
+            with self.assertRaises(ControlPlaneError) as blocked:
+                editing.generate_draft(
+                    chapter_id="parent",
+                    expected_chapter_revision=parent["chapter_revision"],
+                    text="父节点不应生成正文",
+                )
+            self.assertEqual(blocked.exception.code, "CHAPTER_BODY_REQUIRES_LEAF")
+
+            with mock.patch.object(
+                ChapterEditingService,
+                "_confirmation_required",
+                return_value=False,
+            ):
+                editing.generate_draft(
+                    chapter_id="leaf",
+                    expected_chapter_revision=leaf["chapter_revision"],
+                    text="叶子章节正文",
+                )
+            composed = editing.compose_formal_document()
+            self.assertTrue(composed["export_allowed"])
+            self.assertEqual(
+                [item["chapter_id"] for item in composed["chapter_manifest"]],
+                ["leaf"],
+            )
+
     def test_content_block_legacy_defaults_to_ai_generated(self) -> None:
         block = ContentBlock(
             block_id="b1",
@@ -445,6 +527,12 @@ class ChapterContentPhasesTests(unittest.TestCase):
                             "chapter_id": "ch-a",
                             "expected_chapter_revision": chapter_rev,
                             "text": "网关草稿",
+                            "global_context_id": "PM-TEST",
+                            "global_context_revision": 1,
+                            "global_context_hash": "g" * 64,
+                            "chapter_context_id": "chapter-context:ch-a",
+                            "chapter_context_revision": 0,
+                            "chapter_context_hash": "c" * 64,
                         },
                     )
                 )

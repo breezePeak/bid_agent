@@ -987,7 +987,9 @@ class ContentWriter:
                 "allowed_research_evidence": research_evidence or [],
                 "writing_rule": (
                     "按 writing_outline.blocks 顺序写正文，一块至少一段；"
-                    "每段写清做法或检查口径，并给出本章交付物或验收点。"
+                    "每段按对应 block 的 write_as 写清做法或检查口径；"
+                    "只有 outcome_kind=deliverable/acceptance 的 block，才能写招标文件明确要求的"
+                    "交付成果或验收内容，其他 block 不得机械添加“本章交付物”。"
                     "不要输出提纲标题，不要出现评分术语。"
                 ),
                 "prohibited_visible_text": [
@@ -1013,7 +1015,9 @@ class ContentWriter:
                         "role": "system",
                         "content": (
                             "你是技术标书正文写作器。按 writing_outline.blocks 顺序输出项目化正文，"
-                            "一块至少一段，写清做法或检查口径与交付物。"
+                            "一块至少一段，并按各 block 的 write_as 写清做法或检查口径。"
+                            "只有 outcome_kind=deliverable/acceptance 的 block，才能写招标文件明确要求的"
+                            "交付成果或验收内容；其他 block 不得机械添加“本章交付物”。"
                             "不得复述评分条件、招标写作指令或生成占位话术。"
                             "需求与评分信息只用于内部覆盖检查，不能写成“本节用于、"
                             "围绕要求、满分条件、得分任务”等正文。"

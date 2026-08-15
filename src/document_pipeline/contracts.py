@@ -3,7 +3,15 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 V3_SCHEMA_VERSION = "v3"
@@ -531,10 +539,7 @@ class ProjectFact(BaseModel):
     statement: str = Field(min_length=1)
     source_anchor: SourceAnchor | None = None
     requirement_ids: list[str] = Field(default_factory=list)
-    upstream_refs: list[str] = Field(
-        default_factory=list,
-        exclude_if=lambda value: not value,
-    )
+    upstream_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def references_are_unique(self) -> "ProjectFact":
@@ -543,6 +548,22 @@ class ProjectFact(BaseModel):
         if len(self.upstream_refs) != len(set(self.upstream_refs)):
             raise ValueError("ProjectFact 不允许重复 upstream_refs")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_model(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("upstream_refs"):
+            data.pop("upstream_refs", None)
+        return data
+
+
+class EvidenceRelevanceTier(str, Enum):
+    """How a public source may be used for the current procurement."""
+
+    PROJECT_DIRECT = "project_direct"
+    SIMILAR_PROJECT = "similar_project"
+    INDUSTRY_STANDARD = "industry_standard"
+    GENERAL_REFERENCE = "general_reference"
 
 
 class EvidenceNeed(BaseModel):
@@ -556,6 +577,28 @@ class EvidenceNeed(BaseModel):
     deadline_stage: str = Field(min_length=1)
     query_budget: int = Field(ge=0, le=20)
     status: Literal["open", "researching", "satisfied", "gap", "cancelled"] = "open"
+    project_anchors: list[str] = Field(default_factory=list)
+    task_anchors: list[str] = Field(default_factory=list)
+    allowed_relevance_tiers: list[EvidenceRelevanceTier] = Field(
+        default_factory=lambda: [
+            EvidenceRelevanceTier.PROJECT_DIRECT,
+            EvidenceRelevanceTier.SIMILAR_PROJECT,
+            EvidenceRelevanceTier.INDUSTRY_STANDARD,
+        ]
+    )
+    max_adopted_items: int = Field(default=3, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def research_anchors_are_unique(self) -> "EvidenceNeed":
+        if len(self.project_anchors) != len(set(self.project_anchors)):
+            raise ValueError("EvidenceNeed 不允许重复 project_anchors")
+        if len(self.task_anchors) != len(set(self.task_anchors)):
+            raise ValueError("EvidenceNeed 不允许重复 task_anchors")
+        if len(self.allowed_relevance_tiers) != len(
+            set(self.allowed_relevance_tiers)
+        ):
+            raise ValueError("EvidenceNeed 不允许重复 allowed_relevance_tiers")
+        return self
 
 
 class ResearchQuery(BaseModel):
@@ -643,6 +686,13 @@ class EvidenceItem(BaseModel):
     content: str = Field(min_length=1)
     claim_types: list[Literal["project_context", "standard", "method", "enterprise_capability"]] = Field(default_factory=list)
     retrieved_at: str = Field(min_length=1)
+    relevance_tier: EvidenceRelevanceTier = (
+        EvidenceRelevanceTier.GENERAL_REFERENCE
+    )
+    matched_project_anchors: list[str] = Field(default_factory=list)
+    matched_task_anchors: list[str] = Field(default_factory=list)
+    supporting_excerpt: str = ""
+    usage_constraints: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def enterprise_claims_require_company_evidence(self) -> "EvidenceItem":
@@ -690,14 +740,88 @@ class ProjectModel(ContractModel):
 
     @model_validator(mode="after")
     def unique_project_references(self) -> "ProjectModel":
-        fact_ids = [fact.fact_id for group in (self.confirmed_facts, self.inferences, self.conflicts) for fact in group]
+        fact_ids = [
+            fact.fact_id
+            for group in (self.confirmed_facts, self.inferences, self.conflicts)
+            for fact in group
+        ]
         need_ids = [need.need_id for need in self.evidence_needs]
         if len(fact_ids) != len(set(fact_ids)) or len(need_ids) != len(set(need_ids)):
             raise ValueError("ProjectModel 不允许重复事实或 EvidenceNeed ID")
-        if len(self.semantic_upstream_refs) != len(
-            set(self.semantic_upstream_refs)
-        ):
+        if len(self.semantic_upstream_refs) != len(set(self.semantic_upstream_refs)):
             raise ValueError("ProjectModel 不允许重复 semantic_upstream_refs")
+        return self
+
+
+class GlobalProjectContext(BaseModel):
+    """One immutable project fact view inherited by every chapter."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    global_context_id: str = Field(min_length=1)
+    global_context_revision: int = Field(ge=1)
+    global_context_hash: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    identity: dict[str, str] = Field(default_factory=dict)
+    background: list[str] = Field(default_factory=list)
+    goals: list[str] = Field(default_factory=list)
+    scope: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    work_packages: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
+    processing: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    acceptance_conditions: list[str] = Field(default_factory=list)
+    milestones: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    terminology: dict[str, str] = Field(default_factory=dict)
+    confirmed_facts: list[ProjectFact] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def has_shared_project_identity(self) -> "GlobalProjectContext":
+        identity = {str(key).casefold(): str(value) for key, value in self.identity.items()}
+        project_name = next(
+            (
+                identity[key]
+                for key in ("project_name", "项目名称", "project", "项目")
+                if identity.get(key)
+            ),
+            "",
+        )
+        if not project_name:
+            raise ValueError("全局项目上下文必须包含项目名称")
+        fact_ids = [fact.fact_id for fact in self.confirmed_facts]
+        if len(fact_ids) != len(set(fact_ids)):
+            raise ValueError("全局项目上下文不允许重复 fact_id")
+        return self
+
+
+class ChapterGroundingContext(BaseModel):
+    """Chapter-local additions referencing, never copying, global facts."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    global_context_id: str = Field(min_length=1)
+    global_context_revision: int = Field(ge=1)
+    global_context_hash: str = Field(min_length=1)
+    chapter_context_id: str = Field(min_length=1)
+    chapter_context_revision: int = Field(default=0, ge=0)
+    chapter_context_hash: str = Field(min_length=1)
+    requirement_excerpts: list[dict[str, Any]] = Field(default_factory=list)
+    score_obligations: list[dict[str, Any]] = Field(default_factory=list)
+    chapter_context_items: list[dict[str, Any]] = Field(default_factory=list)
+    highlighted_fact_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def highlighted_facts_are_unique(self) -> "ChapterGroundingContext":
+        if len(self.highlighted_fact_ids) != len(set(self.highlighted_fact_ids)):
+            raise ValueError("章节上下文不允许重复 highlighted_fact_ids")
         return self
 
 
@@ -1252,6 +1376,9 @@ class WriterInputBundle(ContractModel):
     evidence_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     research_decisions: list[dict[str, Any]] = Field(default_factory=list)
     project_context: dict[str, Any] = Field(default_factory=dict)
+    global_project_context: dict[str, Any] = Field(default_factory=dict)
+    chapter_grounding_context: dict[str, Any] = Field(default_factory=dict)
+    chapter_grounding_contexts: dict[str, dict[str, Any]] = Field(default_factory=dict)
     project_constraints: list[str] = Field(default_factory=list)
     terminology: dict[str, str] = Field(default_factory=dict)
     document_target_constraints: list[dict[str, Any]] = Field(min_length=1)

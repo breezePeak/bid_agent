@@ -281,8 +281,17 @@ def build_deterministic_outline_candidate(
                 condition = conditions_by_id[condition_id]
                 title = _condition_title(condition, index)
                 # Do not manufacture a duplicate child whose only topic is the
-                # already existing primary title.
-                if outline_subject(title) == primary_subject:
+                # already existing primary title — but only when the primary node
+                # does not yet carry any other sectionable condition. If two or
+                # more sectionable conditions share the primary title they must
+                # each get an independently keyed child node to satisfy the
+                # constraint that every substantive condition occupies its own
+                # checkable chapter node.
+                primary_has_sectionable = any(
+                    cid in sectionable_ids
+                    for cid in nodes[primary_index].score_condition_ids
+                )
+                if outline_subject(title) == primary_subject and not primary_has_sectionable:
                     nodes[primary_index] = nodes[primary_index].model_copy(
                         update={
                             "score_condition_ids": [

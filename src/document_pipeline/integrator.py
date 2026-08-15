@@ -17,14 +17,20 @@ REWRITE_TRACE_PATH = V3_ROOT / "reports" / "rewrite_trace.json"
 class DocumentIntegrator:
     """Perform deterministic in-unit, adjacent, and document-wide de-duplication."""
 
-    def __init__(self, context: WorkspaceContext) -> None:
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        *,
+        deterministic_test: bool = False,
+    ) -> None:
         self.context = context
         self.root = context.root
         self.store = ControlStore(context)
+        self.deterministic_test = bool(deterministic_test)
 
     def integrate(self, *, contract_revision: int, plan_revision: int) -> IntegratedDocument:
         locked = {item["block_id"] for item in self.store.content_locks()}
-        blocks = self._load_blocks()
+        blocks, content_hashes = self._load_blocks()
         kept: list[ContentBlock] = []
         trace: list[dict[str, str]] = []
         seen_requirement: dict[str, ContentBlock] = {}
@@ -44,7 +50,12 @@ class DocumentIntegrator:
             seen_content[self._content_key(block)] = block
         document = IntegratedDocument(
             revision=max(contract_revision, plan_revision),
-            source_hashes={"content_blocks": hashlib.sha256("|".join(block.block_id for block in kept).encode("utf-8")).hexdigest()},
+            source_hashes={
+                "content_blocks": hashlib.sha256(
+                    "|".join(block.block_id for block in kept).encode("utf-8")
+                ).hexdigest(),
+                **content_hashes,
+            },
             contract_revision=contract_revision,
             plan_revision=plan_revision,
             blocks=kept,
@@ -53,15 +64,39 @@ class DocumentIntegrator:
         write_json(self.root / REWRITE_TRACE_PATH, {"schema_version": "v3", "revision": document.revision, "actions": trace})
         return document
 
-    def _load_blocks(self) -> list[ContentBlock]:
+    def _load_blocks(self) -> tuple[list[ContentBlock], dict[str, str]]:
+        from .writer_policy import (
+            require_all_content_units_fresh,
+            require_content_quality,
+        )
+
         blocks: list[ContentBlock] = []
-        for path in sorted((self.root / V3_ROOT / "content_units").glob("*.json")):
-            if path.name == "index.json":
-                continue
-            data = read_json(path)
+        source_hashes: dict[str, str] = {}
+        checked = require_all_content_units_fresh(
+            self.context,
+            deterministic_test=self.deterministic_test,
+            code="INTEGRATION_BLOCKED_STALE_CONTENT",
+        )
+        for item in checked:
+            path = item["path"]
+            data = item["payload"]
+            unit_id = str(item["unit"].get("unit_id") or "")
             rows = data.get("blocks") if isinstance(data, dict) else []
-            blocks.extend(ContentBlock.model_validate(item) for item in rows if isinstance(item, dict))
-        return blocks
+            unit_blocks = [
+                ContentBlock.model_validate(row)
+                for row in rows
+                if isinstance(row, dict)
+            ]
+            for block in unit_blocks:
+                require_content_quality(block.content)
+            blocks.extend(unit_blocks)
+            source_hashes[f"content_unit:{unit_id}"] = hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            source_hashes[f"writer:{unit_id}"] = str(
+                item["state"].get("writer_fingerprint") or ""
+            )
+        return blocks, source_hashes
 
     @staticmethod
     def _content_key(block: ContentBlock) -> str:

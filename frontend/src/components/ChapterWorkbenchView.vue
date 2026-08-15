@@ -5,9 +5,17 @@
       <header class="pane-header">
         <div>
           <p class="kicker">目录结构</p>
-          <h3>测试 / 章节目录</h3>
+          <h3>章节目录</h3>
         </div>
-        <button type="button" class="btn btn-sm" :disabled="busy" @click="reloadAll">刷新</button>
+        <div class="pane-header-actions">
+          <button type="button" class="btn btn-sm back-assistant-btn" @click="backToAssistant">
+            <svg aria-hidden="true" viewBox="0 0 24 24">
+              <path d="m15 18-6-6 6-6M9 12h10" />
+            </svg>
+            返回助手
+          </button>
+          <button type="button" class="btn btn-sm" :disabled="busy" @click="reloadAll">刷新</button>
+        </div>
       </header>
 
       <div class="tree-toolbar">
@@ -38,9 +46,10 @@
             archived: item.status === 'archived',
             editing: editingChapterId === item.chapter_id
           }"
-          :style="{ paddingLeft: `${12 + (item.depth || 0) * 14}px` }"
+          :style="{ '--tree-depth': item.depth || 0 }"
           @click="selectChapter(item.chapter_id)"
         >
+          <span class="tree-indent" aria-hidden="true" />
           <span class="tree-dot" :class="statusClass(item)" />
 
           <template v-if="editingChapterId === item.chapter_id">
@@ -66,7 +75,7 @@
                 title="修改标题"
                 @click="startRenameChapter(item, $event)"
               >
-                ✏️
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m4 20 4.5-1 10-10a2.1 2.1 0 0 0-3-3l-10 10zM14 7l3 3" /></svg>
               </button>
               <button
                 type="button"
@@ -75,7 +84,7 @@
                 :disabled="idx === 0"
                 @click="handleMoveChapter(item, 'up', $event)"
               >
-                ⬆️
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 11 5-5 5 5M12 6v12" /></svg>
               </button>
               <button
                 type="button"
@@ -84,7 +93,7 @@
                 :disabled="idx === treeItems.length - 1"
                 @click="handleMoveChapter(item, 'down', $event)"
               >
-                ⬇️
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 13 5 5 5-5M12 18V6" /></svg>
               </button>
               <button
                 type="button"
@@ -92,7 +101,7 @@
                 title="归档/删除章节"
                 @click="handleArchiveChapter(item, $event)"
               >
-                🗑️
+                <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5" /></svg>
               </button>
             </div>
           </template>
@@ -951,17 +960,46 @@ const canApprove = computed(() => {
 
 const treeItems = computed(() => {
   const byId = new Map(items.value.map(item => [item.chapter_id, item]))
-  return items.value.map(item => {
-    let depth = 0
-    let parent = item.parent_chapter_id
-    const seen = new Set()
-    while (parent && byId.has(parent) && !seen.has(parent)) {
-      seen.add(parent)
-      depth += 1
-      parent = byId.get(parent)?.parent_chapter_id
+  const childrenByParent = new Map()
+  const roots = []
+  const compareChapter = (left, right) => {
+    const leftOrder = Number(left.order)
+    const rightOrder = Number(right.order)
+    if (Number.isFinite(leftOrder) && Number.isFinite(rightOrder) && leftOrder !== rightOrder) {
+      return leftOrder - rightOrder
     }
-    return { ...item, depth: Math.min(depth, 6) }
-  })
+    return String(left.title || left.chapter_id).localeCompare(
+      String(right.title || right.chapter_id),
+      'zh-CN',
+      { numeric: true },
+    )
+  }
+
+  for (const item of items.value) {
+    const parentId = String(item.parent_chapter_id || '')
+    if (!parentId || !byId.has(parentId) || parentId === item.chapter_id) {
+      roots.push(item)
+      continue
+    }
+    const children = childrenByParent.get(parentId) || []
+    children.push(item)
+    childrenByParent.set(parentId, children)
+  }
+
+  const ordered = []
+  const visited = new Set()
+  const appendBranch = (item, depth) => {
+    if (!item || visited.has(item.chapter_id)) return
+    visited.add(item.chapter_id)
+    const children = [...(childrenByParent.get(item.chapter_id) || [])].sort(compareChapter)
+    ordered.push({ ...item, depth: Math.min(depth, 8), has_children: children.length > 0 })
+    children.forEach(child => appendBranch(child, depth + 1))
+  }
+
+  roots.sort(compareChapter).forEach(root => appendBranch(root, 0))
+  items.value.filter(item => !visited.has(item.chapter_id)).sort(compareChapter)
+    .forEach(item => appendBranch(item, 0))
+  return ordered
 })
 
 function shortStatus(item) {
@@ -991,6 +1029,10 @@ function relevanceTierLabel(tier) {
 }
 
 function openProjectContextSource() {
+  router.push(`/business/${encodeURIComponent(props.workspaceId)}/pipeline`).catch(() => {})
+}
+
+function backToAssistant() {
   router.push(`/business/${encodeURIComponent(props.workspaceId)}/pipeline`).catch(() => {})
 }
 
@@ -1899,6 +1941,27 @@ onUnmounted(() => {
   overflow: auto;
   padding: 8px;
 }
+.pane-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.back-assistant-btn {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.back-assistant-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 .tree-item {
   width: 100%;
   display: flex;
@@ -1911,6 +1974,11 @@ onUnmounted(() => {
   text-align: left;
   cursor: pointer;
   margin-bottom: 2px;
+}
+.tree-indent {
+  width: calc(var(--tree-depth) * 20px);
+  height: 1px;
+  flex: 0 0 auto;
 }
 .tree-item:hover { background: #f8fafc; }
 .tree-item.active {
@@ -2451,7 +2519,8 @@ onUnmounted(() => {
 /* 侧边栏菜单手动修改样式扩展 */
 .tree-item {
   position: relative;
-  display: flex;
+  display: grid;
+  grid-template-columns: calc(var(--tree-depth) * 20px) 10px minmax(0, 1fr) auto;
   align-items: center;
   gap: 6px;
   width: 100%;
@@ -2465,6 +2534,12 @@ onUnmounted(() => {
   color: #334155;
   transition: all 0.15s ease;
 }
+.tree-item > .tree-indent { width: auto; grid-column: 1; }
+.tree-item > .tree-dot { grid-column: 2; }
+.tree-item > .tree-title,
+.tree-item > .tree-item-input { grid-column: 3; }
+.tree-item > .tree-meta,
+.tree-item > .tree-item-actions { grid-column: 4; justify-self: end; }
 .tree-item:hover {
   background: #f1f5f9;
 }
@@ -2504,6 +2579,15 @@ onUnmounted(() => {
   cursor: pointer;
   opacity: 0.7;
   transition: opacity 0.15s, background 0.15s;
+}
+.icon-action-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .icon-action-btn:hover:not(:disabled) {
   opacity: 1;

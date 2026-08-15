@@ -126,7 +126,7 @@ def _writer_batch_retries() -> int:
 def _writer_fallback_enabled() -> bool:
     import os
 
-    value = str(os.environ.get("BID_AGENT_WRITE_FAILURE_FALLBACK", "1")).strip().lower()
+    value = str(os.environ.get("BID_AGENT_WRITE_FAILURE_FALLBACK", "0")).strip().lower()
     return value not in {"0", "false", "no", "off"}
 
 

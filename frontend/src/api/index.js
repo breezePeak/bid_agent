@@ -16,7 +16,10 @@ import {
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 30000,
+  // Snapshot refreshes can overlap model-side persistence and may briefly take
+  // longer than the old 30 second browser limit. Long-running commands still
+  // supply their own, larger limits below.
+  timeout: 120000,
 })
 
 api.interceptors.request.use(config => {
@@ -103,6 +106,13 @@ function newCommandId() {
 
 export function fetchV3WorkspaceSnapshot(runId) {
   return api.get(v3WorkspacePath(runId, 'snapshot'), { headers: { 'Cache-Control': 'no-cache' } })
+}
+
+/** Read the exact frozen snapshot required for the H1 planning confirmation. */
+export function fetchV3PlanningConfirmation(runId) {
+  return api.get(v3WorkspacePath(runId, 'planning/confirmation'), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
 }
 
 export function fetchV3ContentUnit(runId, unitId) {

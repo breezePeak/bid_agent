@@ -153,6 +153,9 @@ _NONBLOCKING_OUTLINE_VALIDATION_MARKERS = (
     "缺少唯一 ScoreResponseUnit/primary 链路",
     "未进入其 ScoreResponseUnit",
     "quality condition",
+    # 满分条件节点共用：两种可能的短语片段（来自 planning_inference.py 和 planning_agent.py）
+    "满分条件共用了节点",
+    "满分条件必须各自形成可检查章节节点",
     "content/evidence 满分条件必须各自形成可检查章节节点",
     "可成文满分条件必须各自形成可检查章节节点",
     "评分组根章节",

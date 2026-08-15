@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import ssl
 import sys
 import tempfile
 import unittest
@@ -45,7 +46,7 @@ def _response_cookie(response, name: str) -> str:
 
 
 class V3SettingsAndUploadTests(unittest.TestCase):
-    def test_validation_failure_gate_defaults_off_and_persists(self) -> None:
+    def test_validation_failure_gate_defaults_on_and_persists(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
             settings = SettingsService(root)
@@ -58,7 +59,7 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                     "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
                     None,
                 )
-                self.assertFalse(
+                self.assertTrue(
                     settings.flow_settings()[
                         "validation_failure_blocks_pipeline"
                     ]
@@ -640,6 +641,7 @@ class V3SettingsAndUploadTests(unittest.TestCase):
             def fake_urlopen(request, timeout=0, context=None):  # noqa: ANN001
                 del timeout, context
                 captured["headers"] = dict(request.header_items())
+                captured["payload"] = json.loads(request.data.decode("utf-8"))
                 raise _FakeHTTPError()
 
             with mock.patch(
@@ -662,6 +664,10 @@ class V3SettingsAndUploadTests(unittest.TestCase):
             )
             self.assertIn("Mozilla/5.0", header_blob)
             self.assertIn("Chrome/137", header_blob)
+            self.assertEqual(
+                captured["payload"]["messages"],
+                [{"role": "user", "content": "1+1="}],
+            )
 
             # Endpoint must return structured JSON, never bubble as 500.
             with (
@@ -690,6 +696,55 @@ class V3SettingsAndUploadTests(unittest.TestCase):
             body = _payload(response)
             self.assertFalse(body["ok"])
             self.assertIn("boom", str(body["message"]))
+
+    def test_probe_retries_ssl_failure_without_verify(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            settings = SettingsService(Path(temporary))
+            calls: list[int] = []
+
+            class _OkResponse:
+                status = 200
+
+                def read(self, n: int = -1) -> bytes:
+                    del n
+                    return json.dumps(
+                        {
+                            "choices": [
+                                {"message": {"content": "pong"}}
+                            ]
+                        }
+                    ).encode("utf-8")
+
+                def __enter__(self) -> "_OkResponse":
+                    return self
+
+                def __exit__(self, *args: object) -> None:
+                    return None
+
+            def fake_urlopen(request, timeout=0, context=None):  # noqa: ANN001
+                del request, timeout, context
+                calls.append(len(calls) + 1)
+                if len(calls) == 1:
+                    raise ssl.SSLError("[ASN1: NOT_ENOUGH_DATA] not enough data")
+                return _OkResponse()
+
+            with mock.patch(
+                "api.settings_service.urllib.request.urlopen",
+                side_effect=fake_urlopen,
+            ):
+                result = settings.probe_model(
+                    {
+                        "name": "mid",
+                        "base_url": "https://gateway.example/v1",
+                        "api_key": "secret",
+                        "model": "glm-test",
+                        "verify_ssl": True,
+                    }
+                )
+            self.assertTrue(result["ok"], result)
+            self.assertTrue(result.get("verify_ssl_bypassed"))
+            self.assertIn("跳过 TLS", result["message"])
+            self.assertEqual(len(calls), 2)
 
     def test_upload_rejects_invalid_role_or_type_before_registration(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

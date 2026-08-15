@@ -20,9 +20,11 @@ class V3WorkspaceSnapshotBuilder:
     _ANALYSIS_INPUT_ROLES = frozenset(
         {"tender", "score", "amendment", "template"}
     )
-    _ANALYSIS_COMMAND_KINDS = frozenset(
-        {"document.prepare_outline", "document.run_pipeline"}
-    )
+    # The outline and full-document runs are two independent user-visible
+    # phases.  Keep the analysis projection pinned to the latest outline run;
+    # generation has its own snapshot below.  Mixing both command kinds here
+    # made generation stage runs appear inside the phase-2 activity stream.
+    _ANALYSIS_COMMAND_KINDS = frozenset({"document.prepare_outline"})
     _ANALYSIS_CHAIN = (
         "InputManifest",
         "SourceIndex",
@@ -50,9 +52,9 @@ class V3WorkspaceSnapshotBuilder:
         "analyze_scores": "评分理解",
         "compile_chapter_blueprint": "目录生成",
         "confirm_planning": "目录确认",
-        "sync_material_requirements": "材料同步",
-        "compile_document_contract": "文档结构编译",
-        "plan_document": "写作计划",
+        "sync_material_requirements": "检查材料与证据缺口",
+        "compile_document_contract": "锁定确认后的文档结构",
+        "plan_document": "生成逐章写作任务",
         "execute_content_plan": "章节写作",
         "integrate_document": "全文整合",
         "verify_document": "质量审核",
@@ -297,10 +299,17 @@ class V3WorkspaceSnapshotBuilder:
                 previous.get("attempt") or 0
             ):
                 runs_by_stage[stage_id] = item
+        llm_requests_by_stage: dict[str, list[dict[str, Any]]] = {}
+        for request in control.llm_requests(operation_id) if operation_id else []:
+            llm_requests_by_stage.setdefault(
+                str(request.get("stage_id") or ""),
+                [],
+            ).append(request)
 
         stages: list[dict[str, Any]] = []
         for stage_id, label in self._GENERATION_STAGE_LABELS.items():
             run = runs_by_stage.get(stage_id) or {}
+            llm_requests = llm_requests_by_stage.get(stage_id, [])
             output = run.get("output")
             output_value = output if isinstance(output, dict) else {}
             summary = output_value.get("summary")
@@ -317,6 +326,8 @@ class V3WorkspaceSnapshotBuilder:
                     "attempt": int(run.get("attempt") or 0),
                     "started_at": str(run.get("started_at") or ""),
                     "completed_at": str(run.get("completed_at") or ""),
+                    "llm_request_count": len(llm_requests),
+                    "llm_requests": llm_requests,
                     "summary": summary if isinstance(summary, dict) else {},
                     "warnings": warnings,
                     "warning_count": int(

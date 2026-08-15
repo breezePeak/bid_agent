@@ -214,7 +214,7 @@ class PlanningAgent:
             unknowns.append("尚未提供可核验的企业资质、人员或业绩材料")
             evidence_needs.append(EvidenceNeed(need_id="EN-company-qualification", question="请补充与资格要求对应的企业资质、人员和业绩材料。", topic_id="company_qualification", priority="blocking", blocking_scope="content_unit", deadline_stage="write_content", query_budget=0))
         for candidate in scores.evidence_need_candidates:
-            evidence_needs.append(EvidenceNeed(need_id=candidate.need_id, question=candidate.question, topic_id=f"score:{candidate.score_point_id}", priority=candidate.priority, blocking_scope="content_unit" if candidate.priority == "blocking" else "none", deadline_stage="resolve_evidence", query_budget=0))
+            evidence_needs.append(EvidenceNeed(need_id=candidate.need_id, question=candidate.question, topic_id=f"score:{candidate.score_point_id}", priority=candidate.priority, blocking_scope="content_unit" if candidate.priority == "blocking" else "none", deadline_stage="execute_content_plan", query_budget=0))
         deliverables = [item.normalized_requirement for item in ledger.requirements if item.kind is RequirementKind.DELIVERABLE]
         acceptance = [item.normalized_requirement for item in ledger.requirements if item.kind is RequirementKind.ACCEPTANCE]
         if not deliverables:
@@ -500,7 +500,7 @@ class PlanningAgent:
                 blocking_scope=(
                     "content_unit" if item.priority == "blocking" else "none"
                 ),
-                deadline_stage="resolve_evidence",
+                deadline_stage="execute_content_plan",
                 query_budget=0,
             )
             for item in scores.evidence_need_candidates
@@ -1503,11 +1503,34 @@ class PlanningAgent:
                     sorted(covered_nodes)
                 )
         for unit_id, bound_node_ids in substantive_nodes_by_unit.items():
-            if len(bound_node_ids) != len(set(bound_node_ids)):
-                raise PlanningCandidateCompilationError(
-                    f"ScoreResponseUnit {unit_id} 的可成文满分条件 "
-                    "满分条件必须各自形成可检查章节节点"
-                )
+            seen_nodes: set[str] = set()
+            for node_id in bound_node_ids:
+                if node_id in seen_nodes:
+                    # 诊断：找出哪些 condition 共用了该节点
+                    primary_nid = primary_node_by_unit.get(unit_id, "")
+                    conflicting = [
+                        cid
+                        for cid in visible_condition_ids
+                        if (
+                            condition_owner_unit.get(cid) == unit_id
+                            and node_id
+                            in {
+                                n
+                                for n in subtree_ids(primary_nid)
+                                if cid in local_nodes[n].score_condition_ids
+                            }
+                        )
+                    ]
+                    raise PlanningCandidateCompilationError(
+                        f"ScoreResponseUnit {unit_id} 的可成文满分条件共用了节点 "
+                        f"{node_id!r}"
+                        f"（标题: {local_nodes[node_id].title!r}）；"
+                        f"冲突的 condition_id: {conflicting}。"
+                        "满分条件必须各自形成可检查章节节点，"
+                        "不得将多项实质性条件塞回同一个节点"
+                    )
+                seen_nodes.add(node_id)
+
 
         template_node_by_local: dict[str, ContractNode] = {}
         if template_structure is None:

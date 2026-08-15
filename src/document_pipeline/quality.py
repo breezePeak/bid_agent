@@ -11,6 +11,7 @@ from .input_manifest import V3_ROOT
 from .integrator import INTEGRATED_DOCUMENT_PATH
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
+from .writer_policy import content_quality_findings
 
 
 FINAL_COVERAGE_PATH = V3_ROOT / "reports" / "final_coverage.json"
@@ -89,6 +90,38 @@ class QualityGate:
         for block in document.blocks:
             if block.critical_claims and not (block.evidence_ids or block.fact_ids):
                 findings.append({"code": "CLAIM_UNSOURCED", "severity": "blocking", "block_id": block.block_id})
+            bound_sources = [
+                str(
+                    requirement.normalized_requirement
+                    or ""
+                )
+                for requirement in ledger.requirements
+                if requirement.requirement_id in block.requirement_ids
+            ]
+            for issue in content_quality_findings(
+                block.content,
+                source_texts=bound_sources,
+            ):
+                findings.append(
+                    {
+                        **issue,
+                        "severity": "blocking",
+                        "block_id": block.block_id,
+                    }
+                )
+        if len(document.blocks) > 1:
+            for issue in content_quality_findings(
+                "\n\n".join(block.content for block in document.blocks)
+            ):
+                if issue["code"] != "DUPLICATE_PARAGRAPH":
+                    continue
+                findings.append(
+                    {
+                        **issue,
+                        "severity": "blocking",
+                        "block_id": "document",
+                    }
+                )
         verdict = "fail" if any(item["severity"] == "blocking" for item in findings) else ("warn" if findings else "pass")
         report = QualityReport(
             revision=document.revision,

@@ -228,7 +228,8 @@ class ChapterChatServiceTests(unittest.TestCase):
                     "reasoning": "",
                 }
                 second = chat.answer("ch-a", "确认", chapter=chapter)
-            self.assertIn("四步", second["reply"])
+            self.assertTrue(second["document_write_requested"])
+            self.assertIn("中间文档", second["reply"])
 
     def test_full_authority_skips_review_wait(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -242,7 +243,8 @@ class ChapterChatServiceTests(unittest.TestCase):
                 return_value={"content": "总体技术路线分四步实施。", "reasoning": ""},
             ):
                 result = chat.answer("ch-a", "写正文", chapter=chapter)
-            self.assertIn("四步", result["reply"])
+            self.assertTrue(result["document_write_requested"])
+            self.assertIn("中间文档", result["reply"])
 
     def test_chat_prompt_identifies_as_chapter_writer(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

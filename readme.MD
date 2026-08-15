@@ -50,13 +50,13 @@ python -m uvicorn api.v3_app:app --app-dir src --host 127.0.0.1 --port 7860
 
 打开 [http://127.0.0.1:7860](http://127.0.0.1:7860)
 
-Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V3 API 请求都会校验会话及工作区权限；旧 V1/V2 API 统一返回 `410 LEGACY_API_RETIRED`。
+Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V3 API 请求都会校验会话及工作区权限；V1/V2 API 已物理移除，旧路径返回 404。
 
 ### DeepSeek 联网研究
 
-V3 会在已声明的 `EvidenceNeed` 需要外部资料时调用 `deepseek_web`。首次使用运行 `python scripts/deepseek_login.py`，它会打开 Playwright 自带的可见 Chromium；请在其中登录 DeepSeek。登录会话只保存在本机 `.runtime/deepseek-playwright`，不会保存账号或密码。检索必须启用“联网搜索”并取得可核验的公开来源 URL，否则不会写入证据库。配置项见 `.env.example`。
+V3 的写作 Agent 会在编写当前章节时自行判断是否需要调用 `deepseek_web`。首次使用运行 `scripts\deepseek_login.bat`，它会使用与后端一致的 Python 打开 Playwright 自带的可见 Chromium；请在其中登录 DeepSeek。登录会话只保存在本机 `.runtime/deepseek-playwright`，不会保存账号或密码。检索必须启用“联网搜索”并取得可核验的公开来源 URL，否则不会写入证据库。配置项见 `.env.example`。
 
-生成完整标书时，V3 默认会在正文写作前，根据当前已确认章节、对应招标要求和评分响应目标，自动选择最多 3 个高价值技术主题调用 DeepSeek。结果经来源校验后冻结进对应章节的 `WriterInputBundle.evidence_snapshot`，只能用于方案方法、公开标准和风险控制，不能证明企业资质、业绩、人员或产品实绩。自动流程不会上传任何附件；附件仍只能由用户逐次显式勾选。可通过 `BID_AGENT_AUTO_RESEARCH_ENABLED`、`BID_AGENT_AUTO_RESEARCH_MAX_QUERIES`、`BID_AGENT_AUTO_RESEARCH_SOURCES_PER_QUERY` 和 `BID_AGENT_AUTO_RESEARCH_REQUIRED` 调整。
+DeepSeek 不是独立的前置阶段。每个章节开始写作时，Agent 会记录“是否调用、原因和查询内容”；需要时才执行检索，并在页面展示请求、重试、来源校验、证据批次和正文使用情况。结果只能用于方案方法、公开标准和风险控制，不能证明企业资质、业绩、人员或产品实绩。自动调用绝不会上传附件；附件仍只能由用户逐次显式勾选。若 Agent 已判断检索必需但 DeepSeek 环境、登录或来源校验失败，任务将暂停在当前章节，处理后重新生成即可继续。
 
 研究命令可通过 `attachment_input_ids` 显式选择已经上传到 V3 输入清单的招标文件、评分文件、参考资料等。只有列出的活动输入会发送给 DeepSeek；服务会在上传前校验清单状态、文件路径与 SHA-256，不会默认把工作区文件上传到外部服务。示例 payload：
 
@@ -170,13 +170,10 @@ Web 页面可直接下载。
 ## 命令行用法
 
 ```bash
-python src/main.py init
-python src/main.py prepare-inputs
-python src/main.py validate
-python src/main.py graph-run --workers 2
+python src/main.py control --help
 ```
 
-V2 控制面 CLI 不直接调用阶段 runner，而是经过与聊天和页面按钮相同的认证、CommandGateway、确认和工作区 lease：
+V3 控制面 CLI 与聊天和页面按钮使用同一认证、CommandGateway、确认和工作区 lease：
 
 ```bash
 set BID_AGENT_AUTH_PASSWORD=your-password
@@ -195,7 +192,8 @@ python src/main.py control snapshot --workspace demo
 ## 进一步说明
 
 - 流程版本导航：[docs/current_logic_flow.md](docs/current_logic_flow.md)  
-- 当前控制架构 V2：[docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)
+- 当前控制架构 V3：[docs/current_logic_flow_v3.md](docs/current_logic_flow_v3.md)
+- V2 历史归档（非运行时依据）：[docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)
 - V1 历史归档：[docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)
 - 开发演进：[docs/bid_agent_development_plan.md](docs/bid_agent_development_plan.md)  
 - 历史 Agent 化阶段记录：[docs/agentization_development_plan.md](docs/agentization_development_plan.md)  

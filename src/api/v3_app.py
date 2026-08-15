@@ -1104,6 +1104,9 @@ async def chapter_chat_turn(
                 "thinking": result.get("thinking") or "",
                 "chapter_id": result["chapter_id"],
                 "turns": result.get("history_tail") or [],
+                "document_write_requested": bool(
+                    result.get("document_write_requested")
+                ),
                 "workspace_revision": snapshot_data.get("workspace_revision", 0),
             }
         )
@@ -1191,6 +1194,73 @@ def _ndjson_event(event_type: str, **payload: Any) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+_GROUNDING_REPAIRABLE_CODES = frozenset(
+    {
+        "PROJECT_IDENTITY_MISSING",
+        "PROJECT_SPECIFICITY_MISSING",
+        "CHAPTER_REQUIREMENT_MISSING",
+        "PUBLIC_EVIDENCE_NOT_USED",
+        "PROJECT_BACKGROUND_MISSING",
+    }
+)
+
+
+def _chapter_repair_messages(
+    *,
+    chapter: dict[str, Any],
+    content: str,
+    project_context: dict[str, Any],
+    grounding_details: dict[str, Any],
+    tender_requirements: list[dict[str, Any]],
+    scoring_requirements: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    """Build one bounded repair request without turning the chapter into a preamble."""
+    node = chapter.get("blueprint_node")
+    node = node if isinstance(node, dict) else {}
+    title = str(chapter.get("title") or node.get("title") or "当前章节")
+    from document_pipeline.content_grounding import chapter_opening_policy
+
+    opening_policy = chapter_opening_policy(chapter)
+    fields = (
+        "background", "scope", "work_packages", "processing", "inputs",
+        "outputs", "deliverables", "acceptance_conditions", "constraints",
+    )
+    project_facts = {
+        field: [str(item) for item in (project_context.get(field) or [])[:5]]
+        for field in fields
+        if project_context.get(field)
+    }
+    requirements = [
+        str(item.get("text") or item.get("normalized_requirement") or item.get("statement") or "")
+        for item in [*(tender_requirements or []), *(scoring_requirements or [])]
+        if isinstance(item, dict)
+    ]
+    payload = {
+        "chapter_title": title,
+        "chapter_purpose": str(node.get("purpose") or ""),
+        "writing_objectives": list(node.get("writing_objectives") or []),
+        "opening_policy": opening_policy,
+        "current_draft": content,
+        "grounding_findings": grounding_details,
+        "project_facts": project_facts,
+        "requirements": [item for item in requirements if item][:16],
+    }
+    return [
+        {
+            "role": "system",
+            "content": (
+                "你是技术标书正文修复器。只修复当前章节项目关联不足的问题，保留原文中"
+                "已经正确的结构、步骤和技术内容。只能使用输入提供的项目事实。"
+                "普通技术章节不得机械添加项目全称、统一项目总述或‘本项目’套话；"
+                "应将本章相关的对象、范围、输入、处理、输出、交付物或验收口径自然融入"
+                "相应段落。项目概况类章节才需要在开篇明确项目身份。"
+                "只输出修复后的完整正文，不要解释修改过程，不要输出 JSON 或 Markdown 代码围栏。"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
 
 
 def _chapter_draft_messages(
@@ -1298,7 +1368,9 @@ def _chapter_draft_messages(
         "必须先按 writing_orientation 确认：本章写作目的、在整份标书中的目录位置、"
         "以及与其他章节的关系；只完成本章职责，不要越权写他章主责。"
         "必须按 writing_outline.blocks 的顺序写正文，一块至少一段；"
-        "每段写清做法或检查口径，并给出本章交付物或验收点。"
+        "每段按对应 block 的 write_as 写清做法或检查口径；"
+        "只有 outcome_kind=deliverable 或 acceptance 的 block，才能写招标文件明确要求的"
+        "交付成果或验收内容，其他 block 不得机械添加“本章交付物”。"
         "不要输出提纲小标题本身，不要出现“满分条件、得分点、评分要求、本节用于”等词。"
         "supporting 块只点到为止，不要写成他章主责的完整方案。"
     )
@@ -1621,7 +1693,7 @@ async def stream_chapter_draft(
             from document_pipeline.contracts import EvidenceNeed
             from document_pipeline.research_adapters import create_research_adapter
             from document_pipeline.research_service import ResearchService
-            from llm_client import chat_stream_chunks
+            from llm_client import chat, chat_stream_chunks
 
             chapter = ChapterWorkspaceService(context).get_chapter(
                 normalized_chapter_id
@@ -2024,30 +2096,91 @@ async def stream_chapter_draft(
 
             from document_pipeline.content_grounding import ContentGroundingGate
 
-            grounding_report = ContentGroundingGate.evaluate(
-                global_context=project_context,
-                chapter=chapter,
-                content=complete_text,
-                requirement_texts=[
-                    *(
-                        str(item.get("text") or "")
-                        for item in tender_requirements
-                    ),
-                    *(
-                        str(item.get("response_expectation") or "")
-                        for item in scoring_requirements
-                    ),
-                    *(
-                        str(condition.get("text") or "")
-                        for item in scoring_requirements
-                        for condition in item.get("conditions") or []
-                        if isinstance(condition, dict)
-                    ),
-                ],
-                chapter_grounding_context=chapter_grounding_context,
-                evidence_sources=research_sources,
-                require_evidence_use=bool(research_sources),
-            )
+            requirement_texts = [
+                *(
+                    str(item.get("text") or "")
+                    for item in tender_requirements
+                ),
+                *(
+                    str(item.get("response_expectation") or "")
+                    for item in scoring_requirements
+                ),
+                *(
+                    str(condition.get("text") or "")
+                    for item in scoring_requirements
+                    for condition in item.get("conditions") or []
+                    if isinstance(condition, dict)
+                ),
+            ]
+
+            def evaluate_grounding(text: str) -> dict[str, Any]:
+                return ContentGroundingGate.evaluate(
+                    global_context=project_context,
+                    chapter=chapter,
+                    content=text,
+                    requirement_texts=requirement_texts,
+                    chapter_grounding_context=chapter_grounding_context,
+                    evidence_sources=research_sources,
+                    require_evidence_use=bool(research_sources),
+                )
+
+            try:
+                grounding_report = evaluate_grounding(complete_text)
+            except ControlPlaneError as first_error:
+                if first_error.code not in _GROUNDING_REPAIRABLE_CODES:
+                    raise
+                repair_details = first_error.details if isinstance(first_error.details, dict) else {}
+                yield _ndjson_event(
+                    "repair_started",
+                    chapter_id=normalized_chapter_id,
+                    message="初稿未充分体现本章项目事实，正在自动补充相关任务内容。",
+                    code=first_error.code,
+                    findings=repair_details.get("findings") or [],
+                )
+                yield _ndjson_event(
+                    "draft_reset",
+                    chapter_id=normalized_chapter_id,
+                    reason="grounding_repair",
+                )
+                try:
+                    repaired_text = strip_think_tags(str(
+                        chat(
+                            _chapter_repair_messages(
+                                chapter=chapter,
+                                content=complete_text,
+                                project_context=project_context,
+                                grounding_details=repair_details,
+                                tender_requirements=tender_requirements,
+                                scoring_requirements=scoring_requirements,
+                            ),
+                            temperature=0.1,
+                        )
+                        or ""
+                    )).strip()
+                except Exception as exc:
+                    raise ControlPlaneError(
+                        "CHAPTER_DRAFT_REPAIR_UNAVAILABLE",
+                        "正文自动修复暂不可用，请稍后重试。",
+                        status_code=503,
+                        details={"error": f"{type(exc).__name__}: {exc}"[:500]},
+                    ) from exc
+                if not repaired_text:
+                    raise ControlPlaneError(
+                        "CHAPTER_DRAFT_REPAIR_UNAVAILABLE",
+                        "正文自动修复未返回有效内容，请稍后重试。",
+                        status_code=503,
+                    )
+                complete_text = repaired_text
+                yield _ndjson_event(
+                    "delta",
+                    chapter_id=normalized_chapter_id,
+                    delta=complete_text,
+                    repair=True,
+                )
+                grounding_report = evaluate_grounding(complete_text)
+                grounding_report["repair_attempted"] = True
+                grounding_report["repair_succeeded"] = True
+                grounding_report["repair_initial_code"] = first_error.code
 
             envelope = CommandEnvelope.from_mapping(
                 {
@@ -2325,7 +2458,7 @@ def export(workspace_id: str):
         return _error(exc)
     report = read_json(context.root / RENDER_QUALITY_PATH) if (context.root / RENDER_QUALITY_PATH).is_file() else {}
     artifact = context.root / RENDER_OUTPUT_PATH
-    if report.get("status") not in {"ready", "ready_with_warnings"} or not artifact.is_file(): return JSONResponse({"ok": False, "message": "V3 交付门禁未通过。"}, status_code=409)
+    if report.get("status") != "ready" or not artifact.is_file(): return JSONResponse({"ok": False, "message": "V3 交付门禁未通过：存在未解决校验错误。"}, status_code=409)
     return FileResponse(artifact, filename="final.docx")
 
 

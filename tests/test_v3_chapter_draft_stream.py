@@ -212,6 +212,73 @@ class V3ChapterDraftStreamTests(TestCase):
             self.assertNotIn("<think>", body)
             self.assertEqual(submitted[0].payload["text"], "项目实施方案")
 
+    def test_grounding_failure_triggers_one_repair_and_replaces_stream(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+            submitted = []
+            receipt = SimpleNamespace(
+                status="accepted",
+                error=None,
+                message="saved",
+                result={"chapter": {"chapter_revision": 8}, "content": {"content_revision": 1}},
+                as_dict=lambda: {"status": "accepted"},
+            )
+            gateway = SimpleNamespace(
+                submit=lambda envelope: submitted.append(envelope) or receipt
+            )
+            first_error = v3_app.ControlPlaneError(
+                "PROJECT_SPECIFICITY_MISSING",
+                "正文与本章项目任务的语义关联不足。",
+                status_code=409,
+                details={"findings": [{"code": "PROJECT_SPECIFICITY_MISSING"}]},
+            )
+            evaluate = mock.Mock(side_effect=[first_error, self._grounding_report()])
+
+            def chunks(*_args, **_kwargs):
+                yield "content", "通用初稿"
+
+            with (
+                mock.patch.object(v3_app, "_context", return_value=context),
+                mock.patch(
+                    "document_pipeline.chapter_workspace.ChapterWorkspaceService.get_chapter",
+                    return_value=self._chapter(),
+                ),
+                mock.patch.object(v3_app, "_chapter_project_context", return_value=self._project_context()),
+                mock.patch.object(v3_app, "_chapter_semantic_requirements", return_value=([], [])),
+                mock.patch(
+                    "document_pipeline.global_project_context.GlobalProjectContextService.build_chapter_context",
+                    return_value=self._chapter_context(),
+                ),
+                mock.patch(
+                    "document_pipeline.content_grounding.ContentGroundingGate.evaluate",
+                    side_effect=evaluate,
+                ),
+                mock.patch.object(v3_app, "_chapter_research_plan", side_effect=self._skip_research_plan),
+                mock.patch("llm_client.chat_stream_chunks", side_effect=chunks),
+                mock.patch("llm_client.chat", return_value="修复后正文：管网数据采集与成果复核。"),
+                mock.patch.object(v3_app, "_gateway", return_value=gateway),
+            ):
+                response = asyncio.run(
+                    v3_app.stream_chapter_draft(
+                        "alpha",
+                        "chapter-1",
+                        _request({"expected_revision": 3, "expected_chapter_revision": 7}),
+                    )
+                )
+                events = asyncio.run(_events(response))
+
+            event_types = [event["type"] for event in events]
+            self.assertIn("repair_started", event_types)
+            self.assertIn("draft_reset", event_types)
+            self.assertEqual(
+                "".join(event.get("delta") or "" for event in events if event["type"] == "delta"),
+                "通用初稿修复后正文：管网数据采集与成果复核。",
+            )
+            self.assertEqual(submitted[0].payload["text"], "修复后正文：管网数据采集与成果复核。")
+            self.assertTrue(submitted[0].payload["grounding_report"]["repair_attempted"])
+            self.assertTrue(submitted[0].payload["grounding_report"]["repair_succeeded"])
+            self.assertEqual(evaluate.call_count, 2)
+
     def test_parent_chapter_is_rejected_before_model_streaming(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context = self._context(Path(temporary))

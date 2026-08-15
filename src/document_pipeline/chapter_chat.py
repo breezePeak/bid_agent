@@ -30,10 +30,18 @@ DRAFT_PREVIEW_CHARS = 1200
 MAX_TURN_CHARS = 20_000
 AUTHORITY_MODES = ("human_review", "delegate_review", "full_authority")
 DEFAULT_AUTHORITY_MODE = "human_review"
+MAX_DELEGATE_ROUNDS = 2
 _CONFIRM_RE = re.compile(
     r"^(确认|通过|同意|可以写|按这个写|按此提纲|开始写|审核通过|写吧)([，,。.\s].*)?$"
 )
 _REJECT_RE = re.compile(r"(不通过|重列|改提纲|提纲不对|重新列)")
+_DOCUMENT_WRITE_RE = re.compile(
+    r"(写|撰写|生成|开始|填入|写入|放到).{0,16}"
+    r"(正文|本章|章节内容|中间文档|屏幕中间文档|文档中|文档里)"
+    r"|(中间文档|屏幕中间文档).{0,8}(写|撰写|生成|填入|写入|放到)"
+    r"|^(写正文|生成正文)$"
+)
+_DOCUMENT_WRITE_NOTICE = "提纲已确认，正文将写入中间文档；对话区只保留进度与结果。"
 
 
 def _utc_now() -> str:
@@ -239,21 +247,47 @@ class ChapterChatService:
             }
 
         # delegate_review
-        review = _delegate_review_outline(outline)
-        status = "delegated" if review["passed"] else "rejected"
+        pre_check = _delegate_review_outline(outline)
+        if not pre_check["passed"]:
+            # 快速预检不通过，不消耗 LLM token
+            self._update_chapter_review(
+                chapter_id,
+                review_status="rejected",
+                outline_hash=outline_hash,
+                mode=mode,
+            )
+            return {
+                **authority,
+                "write_phase": "list_for_review",
+                "review_status": "rejected",
+                "outline_hash": outline_hash,
+                "delegate_review": pre_check,
+                "reason": pre_check["reason"],
+            }
+        # LLM 深度审核放到流式路径中执行（resolve_write_phase 本身只做快速判断）
+        # 如果预检通过且之前有 delegated 状态，直接走 write_body
+        if review_status in {"delegated", "approved"}:
+            return {
+                **authority,
+                "write_phase": "write_body",
+                "review_status": "delegated",
+                "outline_hash": outline_hash,
+                "delegate_review": {"passed": True, "reason": "已通过代审。"},
+                "reason": "已通过代审，按提纲写正文。",
+            }
+        # 首次进入 delegate_review：标记为 pending_delegate，在流式路径中触发 LLM 审核
         self._update_chapter_review(
             chapter_id,
-            review_status=status,
+            review_status="pending_delegate",
             outline_hash=outline_hash,
             mode=mode,
         )
         return {
             **authority,
-            "write_phase": "write_body" if review["passed"] else "list_for_review",
-            "review_status": status,
+            "write_phase": "list_for_review",
+            "review_status": "pending_delegate",
             "outline_hash": outline_hash,
-            "delegate_review": review,
-            "reason": review["reason"],
+            "reason": "提纲预检通过，正在进行 AI 深度审核…",
         }
 
     def render_outline_review(self, chat_context: dict[str, Any]) -> str:
@@ -284,6 +318,16 @@ class ChapterChatService:
                 lines.append(f"代审结果：通过。{review.get('reason') or ''}下面按提纲写正文。")
             else:
                 lines.append(f"代审结果：未通过。{review.get('reason') or '请先补提纲。'}")
+                issues = review.get("issues") or []
+                if issues:
+                    lines.append("\n问题清单：")
+                    for i, issue in enumerate(issues, 1):
+                        heading = str(issue.get("heading") or f"第{issue.get('block_index', '?')}块")
+                        problem = str(issue.get("issue") or "")
+                        suggestion = str(issue.get("suggestion") or "")
+                        lines.append(f"  {i}. {heading}：{problem}")
+                        if suggestion:
+                            lines.append(f"     建议：{suggestion}")
         return "\n".join(lines)
 
     def require_write_ready(
@@ -706,7 +750,45 @@ class ChapterChatService:
         )
         chat_context["authority"] = phase
         thinking = ""
-        if phase.get("write_phase") == "list_for_review":
+        # delegate_review: 同步 LLM 审核 + 定向修改
+        if phase.get("review_status") == "pending_delegate":
+            current_outline = chat_context.get("writing_outline") or {}
+            for delegate_round in range(1, MAX_DELEGATE_ROUNDS + 1):
+                review_result = _llm_delegate_review_outline(current_outline, chat_context)
+                if review_result.get("passed"):
+                    self._update_chapter_review(
+                        chapter_id,
+                        review_status="delegated",
+                        outline_hash=_outline_hash(current_outline),
+                        mode="delegate_review",
+                    )
+                    phase["review_status"] = "delegated"
+                    phase["write_phase"] = "write_body"
+                    phase["delegate_review"] = review_result
+                    chat_context["authority"] = phase
+                    break
+                issues = review_result.get("issues") or []
+                if not issues or delegate_round >= MAX_DELEGATE_ROUNDS:
+                    self._update_chapter_review(
+                        chapter_id,
+                        review_status="rejected",
+                        outline_hash=_outline_hash(current_outline),
+                        mode="delegate_review",
+                    )
+                    phase["review_status"] = "rejected"
+                    phase["delegate_review"] = review_result
+                    chat_context["authority"] = phase
+                    break
+                fixed = self._apply_delegate_fixes(
+                    chapter_id, current_outline, issues, chat_context
+                )
+                current_outline = fixed
+                chat_context["writing_outline"] = current_outline
+
+        document_write_requested = _requests_document_write(text, phase)
+        if document_write_requested:
+            answer = _DOCUMENT_WRITE_NOTICE
+        elif phase.get("write_phase") == "list_for_review":
             answer = self.render_outline_review(chat_context)
         else:
             messages = self._build_messages(chat_context, history, text)
@@ -739,6 +821,7 @@ class ChapterChatService:
             "user_turn": user_record,
             "assistant_turn": assistant_record,
             "history_tail": self.load_history(chapter_id, limit=HISTORY_TAIL),
+            "document_write_requested": document_write_requested,
         }
 
     def iter_answer_events(
@@ -783,10 +866,19 @@ class ChapterChatService:
             "disclosure": "titles_first",
         }
 
+        # Keep every progress message that is shown in the UI in the persisted
+        # assistant turn as well.  The client replaces its temporary streamed
+        # turn with `turns` from the done event, so omitting these notes here
+        # made the just-displayed reasoning disappear at completion.
+        reasoning_parts: list[str] = []
+        content_parts: list[str] = []
+
+        inspection_planning_note = "先看目录标题，判断是否需要打开他章详情…"
+        reasoning_parts.append(f"{inspection_planning_note}\n")
         yield {
             "type": "inspect_planning",
             "chapter_id": safe_id,
-            "message": "先看目录标题，判断是否需要打开他章详情…",
+            "message": inspection_planning_note,
         }
         inspection = self._resolve_inspections(
             chapter_id=chapter_id,
@@ -795,6 +887,14 @@ class ChapterChatService:
         )
         chat_context["inspected_chapters"] = list(inspection.get("views") or [])
         if inspection.get("inspect_ids"):
+            inspection_note = (
+                "按需打开只读详情："
+                + "、".join(
+                    str(item.get("title") or item.get("chapter_id") or "")
+                    for item in (inspection.get("views") or [])
+                )
+            )
+            reasoning_parts.append(f"{inspection_note}\n")
             yield {
                 "type": "inspecting",
                 "chapter_id": safe_id,
@@ -804,20 +904,16 @@ class ChapterChatService:
                     for item in (inspection.get("views") or [])
                 ],
                 "reason": str(inspection.get("reason") or ""),
-                "message": (
-                    "按需打开只读详情："
-                    + "、".join(
-                        str(item.get("title") or item.get("chapter_id") or "")
-                        for item in (inspection.get("views") or [])
-                    )
-                ),
+                "message": inspection_note,
             }
         else:
+            inspection_note = str(inspection.get("reason") or "仅依据目录标题继续回答。")
+            reasoning_parts.append(f"{inspection_note}\n")
             yield {
                 "type": "inspect_skipped",
                 "chapter_id": safe_id,
                 "reason": str(inspection.get("reason") or "标题树已足够"),
-                "message": str(inspection.get("reason") or "仅依据目录标题继续回答。"),
+                "message": inspection_note,
             }
 
         phase = self.resolve_write_phase(
@@ -833,10 +929,129 @@ class ChapterChatService:
             "write_phase": phase.get("write_phase"),
             "review_status": phase.get("review_status"),
             "message": str(phase.get("reason") or ""),
+            "document_write_requested": _requests_document_write(text, phase),
         }
-        reasoning_parts: list[str] = []
-        content_parts: list[str] = []
-        if phase.get("write_phase") == "list_for_review":
+        # delegate review: LLM 深度审核 + 定向修改循环
+        if phase.get("review_status") == "pending_delegate":
+            delegate_round = 0
+            current_outline = chat_context.get("writing_outline") or {}
+            while delegate_round < MAX_DELEGATE_ROUNDS:
+                delegate_round += 1
+                review_note = f"审核 Agent 正在审核提纲（第 {delegate_round} 轮）…"
+                reasoning_parts.append(f"{review_note}\n")
+                yield {
+                    "type": "delegate_reviewing",
+                    "chapter_id": safe_id,
+                    "round": delegate_round,
+                    "message": review_note,
+                }
+                review_result = None
+                for kind, data in _llm_delegate_review_outline_stream(
+                    current_outline, chat_context,
+                ):
+                    if kind == "thinking_delta":
+                        reasoning_parts.append(str(data))
+                        yield {
+                            "type": "thinking_delta",
+                            "chapter_id": safe_id,
+                            "delta": data,
+                        }
+                    elif kind == "result":
+                        review_result = data
+                if review_result is None:
+                    review_result = {"passed": True, "reason": "审核完成，未发现问题。"}
+                
+                if review_result.get("passed"):
+                    # 审核通过
+                    self._update_chapter_review(
+                        chapter_id,
+                        review_status="delegated",
+                        outline_hash=_outline_hash(current_outline),
+                        mode="delegate_review",
+                    )
+                    phase["review_status"] = "delegated"
+                    phase["write_phase"] = "write_body"
+                    phase["delegate_review"] = review_result
+                    chat_context["authority"] = phase
+                    yield {
+                        "type": "authority",
+                        "chapter_id": safe_id,
+                        "mode": "delegate_review",
+                        "write_phase": "write_body",
+                        "review_status": "delegated",
+                        "message": f"代审通过：{review_result.get('reason', '')}",
+                        "document_write_requested": _requests_document_write(text, phase),
+                    }
+                    break
+                else:
+                    # 审核不通过，尝试定向修改
+                    issues = review_result.get("issues") or []
+                    issues_note = f"发现 {len(issues)} 个问题，正在定向修改…"
+                    reasoning_parts.append(f"{issues_note}\n")
+                    yield {
+                        "type": "delegate_reviewing",
+                        "chapter_id": safe_id,
+                        "round": delegate_round,
+                        "status": "issues_found",
+                        "issues": issues,
+                        "message": issues_note,
+                    }
+                    if not issues or delegate_round >= MAX_DELEGATE_ROUNDS:
+                        # 没有具体 issues 或已达上限，降级为人工审核
+                        self._update_chapter_review(
+                            chapter_id,
+                            review_status="rejected",
+                            outline_hash=_outline_hash(current_outline),
+                            mode="delegate_review",
+                        )
+                        phase["review_status"] = "rejected"
+                        phase["write_phase"] = "list_for_review"
+                        phase["delegate_review"] = review_result
+                        chat_context["authority"] = phase
+                        yield {
+                            "type": "authority",
+                            "chapter_id": safe_id,
+                            "mode": "delegate_review",
+                            "write_phase": "list_for_review",
+                            "review_status": "rejected",
+                            "message": f"代审未通过（{delegate_round} 轮后）：{review_result.get('reason', '')}。请人工处理。",
+                        }
+                        break
+                    # 定向修改
+                    fixing_note = f"正在根据审核意见修改提纲（第 {delegate_round} 轮）…"
+                    reasoning_parts.append(f"{fixing_note}\n")
+                    yield {
+                        "type": "delegate_fixing",
+                        "chapter_id": safe_id,
+                        "round": delegate_round,
+                        "message": fixing_note,
+                    }
+                    for kind, data in self._apply_delegate_fixes_stream(
+                        chapter_id, current_outline, issues, chat_context,
+                    ):
+                        if kind == "thinking_delta":
+                            reasoning_parts.append(str(data))
+                            yield {
+                                "type": "thinking_delta",
+                                "chapter_id": safe_id,
+                                "delta": data,
+                            }
+                        elif kind == "result":
+                            current_outline = data
+                            chat_context["writing_outline"] = current_outline
+
+        document_write_requested = _requests_document_write(text, phase)
+        if document_write_requested:
+            answer = _DOCUMENT_WRITE_NOTICE
+            content_parts.append(answer)
+            yield {
+                "type": "content_delta",
+                "chapter_id": safe_id,
+                "delta": answer,
+                "content_kind": "status",
+            }
+            messages = None
+        elif phase.get("write_phase") == "list_for_review":
             answer = self.render_outline_review(chat_context)
             content_parts.append(answer)
             yield {
@@ -920,7 +1135,117 @@ class ChapterChatService:
             "user_turn": user_record,
             "assistant_turn": assistant_record,
             "turns": self.load_history(chapter_id, limit=HISTORY_TAIL),
+            "document_write_requested": document_write_requested,
         }
+
+    def _apply_delegate_fixes(
+        self,
+        chapter_id: str,
+        outline: dict[str, Any],
+        issues: list[dict[str, Any]],
+        chat_context: dict[str, Any],
+    ) -> dict[str, Any]:
+        """根据审核 agent 的建议，定向修改提纲中有问题的 block。
+        返回修改后的 outline。
+        """
+        system_prompt = (
+            "你是投标写作 Agent。当前正根据审核专家的意见修改提纲中的特定块。\n"
+            "以下是目前的提纲和需要修改的问题清单（issues）。\n"
+            "请仔细阅读，并**只针对有问题清单的 block** 提出修改。其余 block 原样保留。\n"
+            "输出请返回一个只包含修改后的 blocks 数组的 JSON，比如：\n"
+            "{\"blocks\": [ ... ]}"
+        )
+        user_message = json.dumps(
+            {
+                "outline": outline,
+                "issues": issues,
+                "tender_requirements": chat_context.get("tender_requirements"),
+                "scoring_requirements": chat_context.get("scoring_requirements"),
+            },
+            ensure_ascii=False
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        try:
+            from llm_client import chat_with_meta
+            meta = chat_with_meta(messages, temperature=0.2)
+            content = str(meta.get("content") or "").strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            if content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            parsed = json.loads(content.strip())
+            new_blocks = parsed.get("blocks")
+            if isinstance(new_blocks, list):
+                new_outline = dict(outline)
+                new_outline["blocks"] = new_blocks
+                return new_outline
+        except Exception:
+            pass
+        return outline
+
+    def _apply_delegate_fixes_stream(
+        self,
+        chapter_id: str,
+        outline: dict[str, Any],
+        issues: list[dict[str, Any]],
+        chat_context: dict[str, Any],
+    ):
+        """流式版本，yield (kind, data) tuples。"""
+        system_prompt = (
+            "你是投标写作 Agent。当前正根据审核专家的意见修改提纲中的特定块。\n"
+            "以下是目前的提纲和需要修改的问题清单（issues）。\n"
+            "请仔细阅读，并**只针对有问题清单的 block** 提出修改。其余 block 可以在保持原样的前提下加入返回结果中。\n"
+            "必须返回包含所有 blocks (修改的及未修改的) 的 JSON 格式，如下：\n"
+            "{\"blocks\": [ ... ]}\n"
+            "不要输出多余解释。"
+        )
+        user_message = json.dumps(
+            {
+                "outline": outline,
+                "issues": issues,
+                "tender_requirements": chat_context.get("tender_requirements"),
+                "scoring_requirements": chat_context.get("scoring_requirements"),
+            },
+            ensure_ascii=False
+        )
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+        content_parts = []
+        try:
+            from llm_client import chat_stream_chunks
+            for kind, value in chat_stream_chunks(messages, temperature=0.2):
+                chunk = str(value or "")
+                if not chunk:
+                    continue
+                if kind == "reasoning":
+                    yield "thinking_delta", chunk
+                elif kind == "content":
+                    content_parts.append(chunk)
+            
+            content = "".join(content_parts).strip()
+            if content.startswith("```json"):
+                content = content[7:]
+            elif content.startswith("```"):
+                content = content[3:]
+            if content.endswith("```"):
+                content = content[:-3]
+            parsed = json.loads(content.strip())
+            new_blocks = parsed.get("blocks")
+            if isinstance(new_blocks, list):
+                new_outline = dict(outline)
+                new_outline["blocks"] = new_blocks
+                yield "result", new_outline
+                return
+        except Exception:
+            pass
+        yield "result", outline
 
     def _resolve_inspections(
         self,
@@ -973,7 +1298,7 @@ class ChapterChatService:
             "不要输出满分条件、得分点、评分要求等内部术语。"
             "document_outline_context 只有目录标题；只有 inspected_chapters 才是他章只读详情。"
             "不得改写其他章节，不得把外部网页写成企业资质、业绩或人员。"
-            "你在对话里输出的是本章文稿，不会自动写入中间 Word；用户要点「生成草稿」才会落盘。"
+            "提纲确认或用户明确要求写正文时，正文必须交给中间文档写作流落盘；对话区只回复进度和结果，不粘贴完整正文。"
             "思考通道里分析本章提纲和材料缺口，面向用户只出标书正文或针对性改稿。"
         )
         recent = [
@@ -1133,6 +1458,14 @@ def _user_review_intent(message: str) -> str:
     return ""
 
 
+def _requests_document_write(message: str, phase: dict[str, Any]) -> bool:
+    """Route explicit body-writing requests to the document writer, not chat."""
+    if str(phase.get("write_phase") or "") != "write_body":
+        return False
+    text = str(message or "").strip()
+    return _user_review_intent(text) == "confirm" or bool(_DOCUMENT_WRITE_RE.search(text))
+
+
 def _delegate_review_outline(outline: dict[str, Any]) -> dict[str, Any]:
     blocks = [item for item in (outline.get("blocks") or []) if isinstance(item, dict)]
     if not blocks:
@@ -1151,3 +1484,118 @@ def _delegate_review_outline(outline: dict[str, Any]) -> dict[str, Any]:
         "passed": True,
         "reason": f"提纲完整，共 {len(blocks)} 块，职责落在本章。",
     }
+
+
+def _llm_delegate_review_outline(
+    outline: dict[str, Any],
+    chat_context: dict[str, Any],
+) -> dict[str, Any]:
+    """用 LLM agent 替用户审核提纲，返回审核结果与修改建议。"""
+    pre_check = _delegate_review_outline(outline)
+    if not pre_check["passed"]:
+        return pre_check
+    
+    system_prompt = (
+        "你是投标文件的审核专家。你要替用户审核本章写作提纲，判断提纲是否可以直接写正文。\n"
+        "审核维度：\n"
+        "1. 提纲是否完整覆盖了招标要求和评分要求中与本章相关的内容\n"
+        "2. 各要点块的 must_answer 是否准确、具体，不空泛\n"
+        "3. 各要点块之间是否有逻辑连贯性，不重复、不遗漏\n"
+        "4. write_as 写法建议是否合理\n\n"
+        "只输出 JSON，不要输出其他内容。如果提纲整体没问题，passed=true。\n"
+        "如果存在需要修改的问题，passed=false，并在 issues 数组中列出每个有问题的块。\n"
+        "返回格式要求：\n"
+        "{\"passed\": bool, \"reason\": str, \"issues\": [{\"block_index\": int, \"heading\": str, \"issue\": str, \"suggestion\": str}]}"
+    )
+    user_message = json.dumps(
+        {
+            "outline_blocks": outline.get("blocks"),
+            "tender_requirements": chat_context.get("tender_requirements"),
+            "scoring_requirements": chat_context.get("scoring_requirements"),
+        },
+        ensure_ascii=False
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    try:
+        from llm_client import chat_with_meta
+        meta = chat_with_meta(messages, temperature=0.2)
+        content = str(meta.get("content") or "").strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        parsed = json.loads(content.strip())
+        if "passed" in parsed:
+            return parsed
+    except Exception:
+        pass
+    return pre_check
+
+
+def _llm_delegate_review_outline_stream(
+    outline: dict[str, Any],
+    chat_context: dict[str, Any],
+):
+    """流式版本：yield (kind, data) tuples。
+    kind: 'thinking_delta' | 'result'
+    """
+    pre_check = _delegate_review_outline(outline)
+    if not pre_check["passed"]:
+        yield "result", pre_check
+        return
+
+    system_prompt = (
+        "你是投标文件的审核专家。你要替用户审核本章写作提纲，判断提纲是否可以直接写正文。\n"
+        "审核维度：\n"
+        "1. 提纲是否完整覆盖了招标要求和评分要求中与本章相关的内容\n"
+        "2. 各要点块的 must_answer 是否准确、具体，不空泛\n"
+        "3. 各要点块之间是否有逻辑连贯性，不重复、不遗漏\n"
+        "4. write_as 写法建议是否合理\n\n"
+        "只输出 JSON，不要输出其他内容。如果提纲整体没问题，passed=true。\n"
+        "如果存在需要修改的问题，passed=false，并在 issues 数组中列出每个有问题的块。\n"
+        "返回格式要求：\n"
+        "{\"passed\": bool, \"reason\": str, \"issues\": [{\"block_index\": int, \"heading\": str, \"issue\": str, \"suggestion\": str}]}"
+    )
+    user_message = json.dumps(
+        {
+            "outline_blocks": outline.get("blocks"),
+            "tender_requirements": chat_context.get("tender_requirements"),
+            "scoring_requirements": chat_context.get("scoring_requirements"),
+        },
+        ensure_ascii=False
+    )
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ]
+    content_parts = []
+    try:
+        from llm_client import chat_stream_chunks
+        for kind, value in chat_stream_chunks(messages, temperature=0.2):
+            chunk = str(value or "")
+            if not chunk:
+                continue
+            if kind == "reasoning":
+                yield "thinking_delta", chunk
+            elif kind == "content":
+                content_parts.append(chunk)
+        
+        content = "".join(content_parts).strip()
+        if content.startswith("```json"):
+            content = content[7:]
+        elif content.startswith("```"):
+            content = content[3:]
+        if content.endswith("```"):
+            content = content[:-3]
+        parsed = json.loads(content.strip())
+        if "passed" in parsed:
+            yield "result", parsed
+            return
+    except Exception:
+        pass
+    yield "result", pre_check

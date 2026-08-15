@@ -654,6 +654,28 @@ class _StructuredLLMProvider(Generic[CandidateT]):
             )
         self.prompt_hash = planning_prompt_hash(self.prompt_file)
 
+    @staticmethod
+    def _is_truncated_json_error(error: BaseException) -> bool:
+        current: BaseException | None = error
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            if isinstance(current, json.JSONDecodeError):
+                message = str(current).lower()
+                return any(
+                    marker in message
+                    for marker in (
+                        "unterminated",
+                        "expecting value",
+                        "expecting ',' delimiter",
+                        "expecting property name",
+                    )
+                )
+            if isinstance(current, PlanningInferenceOutputTruncatedError):
+                return True
+            current = current.__cause__
+        return False
+
     def _invoke(
         self,
         request: BaseModel,
@@ -763,7 +785,10 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                 self._validate_candidate(candidate, request)
             except (ValidationError, ValueError) as exc:
                 last_error = exc
-                if attempt_index >= allowed_repair_attempts:
+                if (
+                    attempt_index >= allowed_repair_attempts
+                    or self._is_truncated_json_error(exc)
+                ):
                     break
                 messages.extend(
                     [
@@ -2234,10 +2259,11 @@ class LLMOutlineDecompositionProvider(
     prompt_version = OUTLINE_PROMPT_VERSION
     schema_version = OUTLINE_SCHEMA_VERSION
     candidate_model = ChapterOutlineCandidate
-    # A single, smallest batch receives one controlled repair. Larger truncated
-    # batches are split instead of asking the model to repeat already completed
-    # work.
-    max_repair_attempts = 0
+    # All code paths inside split() pass repair_attempts=1 explicitly.
+    # The class-level value aligns with MAX_REPAIR_ATTEMPTS so that any
+    # future code path that forgets to pass the argument also gets one
+    # controlled-repair attempt instead of silently skipping it.
+    max_repair_attempts = MAX_REPAIR_ATTEMPTS
 
     def __init__(
         self,
@@ -2256,6 +2282,43 @@ class LLMOutlineDecompositionProvider(
         )
         self.batch_cache = batch_cache
         self.last_batch_summary: dict[str, int] = {}
+
+    def _repair_feedback(
+        self,
+        error: Exception,
+        candidate: BaseModel | None,
+        request: BaseModel,
+    ) -> str:
+        base = super()._repair_feedback(error, candidate, request)
+        error_text = str(error)
+        hints: list[str] = []
+        if (
+            "满分条件必须各自形成可检查章节节点" in error_text
+            or "可成文满分条件共用了节点" in error_text
+            or "满分条件共用了节点" in error_text
+        ):
+            hints.append(
+                "节点共用修复：每个 content/evidence 类型的 condition_id 必须"
+                "在其所属 ScoreResponseUnit 的 primary 子树中绑定到唯一的章节节点，"
+                "不得让多个不同的 condition_id 的 score_condition_ids 指向同一节点。"
+                "请为每个 condition 创建或指定独立的子节点，"
+                "确保同一 Unit 下的各个可成文满分条件所覆盖的节点集合互不相交。"
+            )
+        if "未进入其 ScoreResponseUnit" in error_text or "未进入其主责章节子树" in error_text:
+            hints.append(
+                "Requirement 绑定修复：ScoreResponseUnit 关联的所有 linked_requirement_ids"
+                "必须出现在该 Unit 唯一 primary 章节的子树内（该节点或其任意子节点的"
+                "requirement_ids 字段中），不得挂到无关章节。"
+            )
+        if "未保留 outline_path" in error_text:
+            hints.append(
+                "outline_path 修复：当 ScoreResponseUnit 携带 outline_path 时，必须按照"
+                "原路径依次建立或复用同标题的祖先节点，不得在路径末级与条件节点之间插入"
+                "改写标题或省略路径节点。"
+            )
+        if hints:
+            return base + "\n\n" + "\n".join(hints)
+        return base
 
     def split(
         self,
@@ -2281,7 +2344,8 @@ class LLMOutlineDecompositionProvider(
                 logical_batch_id=(
                     specs[0].batch_id if specs else self.capability_id
                 ),
-                repair_attempts=0,
+                # 与 template_strict 和单点批次保持一致：给予一次受控修复机会
+                repair_attempts=1,
             )
             self.last_batch_summary = {
                 "outline_batch_count": 1,
@@ -2311,7 +2375,7 @@ class LLMOutlineDecompositionProvider(
                 result = self._invoke(
                     spec.request,
                     logical_batch_id=spec.batch_id,
-                    repair_attempts=1 if len(spec.point_ids) == 1 else 0,
+                    repair_attempts=1,
                 )
             except PlanningInferenceValidationError as exc:
                 if self._is_truncated_json_error(exc) and len(spec.point_ids) > 1:
@@ -2631,7 +2695,67 @@ class LLMOutlineDecompositionProvider(
     ) -> ChapterOutlineCandidate:
         nodes_by_group: dict[str, list[ChapterOutlineNodeCandidate]] = defaultdict(list)
         root_id_by_group: dict[str, str] = {}
+        shared_node_id_by_group_path: dict[
+            str, dict[tuple[str, str], str]
+        ] = defaultdict(dict)
+        outline_titles_by_group: dict[str, set[str]] = defaultdict(set)
+        for point in request.score_model.get("points", []):
+            group_id = str(point.get("group_id") or "")
+            outline_paths = [
+                point.get("outline_path") or [],
+                *(
+                    unit.get("outline_path") or []
+                    for unit in point.get("response_units", [])
+                ),
+            ]
+            for outline_path in outline_paths:
+                outline_titles_by_group[group_id].update(
+                    re.sub(r"\s+", " ", str(title)).strip()
+                    for title in outline_path
+                    if str(title).strip()
+                )
         statuses: list[str] = []
+
+        def merge_node_bindings(
+            existing: ChapterOutlineNodeCandidate,
+            incoming: ChapterOutlineNodeCandidate,
+        ) -> ChapterOutlineNodeCandidate:
+            list_updates = {
+                field_name: list(
+                    dict.fromkeys(
+                        [
+                            *getattr(existing, field_name),
+                            *getattr(incoming, field_name),
+                        ]
+                    )
+                )
+                for field_name in (
+                    "writing_objectives",
+                    "primary_response_unit_ids",
+                    "supporting_response_unit_ids",
+                    "score_condition_ids",
+                    "requirement_ids",
+                    "required_mentions",
+                    "planned_tables",
+                    "planned_figures",
+                    "template_slot_ids",
+                )
+            }
+            primary_ids = set(list_updates["primary_response_unit_ids"])
+            list_updates["supporting_response_unit_ids"] = [
+                unit_id
+                for unit_id in list_updates["supporting_response_unit_ids"]
+                if unit_id not in primary_ids
+            ]
+            return existing.model_copy(
+                update={
+                    **list_updates,
+                    "target_size": max(existing.target_size, incoming.target_size),
+                    "confidence": min(existing.confidence, incoming.confidence),
+                    "needs_human": existing.needs_human or incoming.needs_human,
+                }
+            )
+
         for spec, result in completed:
             statuses.append(result.candidate.review_status)
             ordered = sorted(result.candidate.nodes, key=lambda node: node.order)
@@ -2655,28 +2779,9 @@ class LLMOutlineDecompositionProvider(
                 )
             else:
                 existing_root = nodes_by_group[spec.group_id][0]
-                nodes_by_group[spec.group_id][0] = existing_root.model_copy(
-                    update={
-                        field_name: list(
-                            dict.fromkeys(
-                                [
-                                    *getattr(existing_root, field_name),
-                                    *getattr(source_root, field_name),
-                                ]
-                            )
-                        )
-                        for field_name in (
-                            "writing_objectives",
-                            "primary_response_unit_ids",
-                            "supporting_response_unit_ids",
-                            "score_condition_ids",
-                            "requirement_ids",
-                            "required_mentions",
-                            "planned_tables",
-                            "planned_figures",
-                            "template_slot_ids",
-                        )
-                    }
+                nodes_by_group[spec.group_id][0] = merge_node_bindings(
+                    existing_root,
+                    source_root,
                 )
             remap = {
                 node.local_id: (
@@ -2689,18 +2794,42 @@ class LLMOutlineDecompositionProvider(
             for node in ordered:
                 if node.local_id == source_root.local_id:
                     continue
-                nodes_by_group[spec.group_id].append(
-                    node.model_copy(
-                        update={
-                            "local_id": remap[node.local_id],
-                            "parent_local_id": (
-                                remap.get(node.parent_local_id)
-                                if node.parent_local_id is not None
-                                else canonical_root
-                            ),
-                        }
-                    )
+                parent_id = (
+                    remap.get(node.parent_local_id)
+                    if node.parent_local_id is not None
+                    else canonical_root
                 )
+                normalized_title = re.sub(r"\s+", " ", node.title).strip()
+                shared_key = (str(parent_id or ""), normalized_title)
+                existing_id = (
+                    shared_node_id_by_group_path[spec.group_id].get(shared_key)
+                    if normalized_title in outline_titles_by_group[spec.group_id]
+                    else None
+                )
+                if existing_id is not None:
+                    existing_index = next(
+                        index
+                        for index, existing in enumerate(nodes_by_group[spec.group_id])
+                        if existing.local_id == existing_id
+                    )
+                    nodes_by_group[spec.group_id][existing_index] = merge_node_bindings(
+                        nodes_by_group[spec.group_id][existing_index],
+                        node,
+                    )
+                    remap[node.local_id] = existing_id
+                    continue
+
+                merged_node = node.model_copy(
+                    update={
+                        "local_id": remap[node.local_id],
+                        "parent_local_id": parent_id,
+                    }
+                )
+                nodes_by_group[spec.group_id].append(merged_node)
+                if normalized_title in outline_titles_by_group[spec.group_id]:
+                    shared_node_id_by_group_path[spec.group_id][shared_key] = (
+                        merged_node.local_id
+                    )
 
         merged_nodes: list[ChapterOutlineNodeCandidate] = []
         for group in request.score_model.get("groups", []):
@@ -3320,9 +3449,9 @@ class LLMOutlineDecompositionProvider(
                             break
                         cursor = parent_id
                     actual_path = list(reversed(chain))[1:]
-                    if [group_subject(title) for title in actual_path][
-                        : len(compact_path)
-                    ] != [group_subject(title) for title in compact_path]:
+                    if [group_subject(title) for title in actual_path] != [
+                        group_subject(title) for title in compact_path
+                    ]:
                         raise ValueError(
                             f"ScoreResponseUnit {unit_id} 未保留 outline_path: {compact_path}"
                         )
@@ -3412,11 +3541,34 @@ class LLMOutlineDecompositionProvider(
                     [],
                 ).extend(sorted(covered_nodes))
         for unit_id, bound_node_ids in substantive_nodes_by_unit.items():
-            if len(bound_node_ids) != len(set(bound_node_ids)):
-                raise ValueError(
-                    f"ScoreResponseUnit {unit_id} 的可成文满分条件 "
-                    "满分条件必须各自形成可检查章节节点"
-                )
+            seen_nodes: set[str] = set()
+            for node_id in bound_node_ids:
+                if node_id in seen_nodes:
+                    # 诊断：找出哪些 condition 共用了该节点
+                    conflicting = [
+                        cid
+                        for cid in catalog["visible_condition_ids"]
+                        if (
+                            catalog["condition_owner_unit"].get(cid) == unit_id
+                            and node_id
+                            in {
+                                n
+                                for n in subtree(
+                                    primary_by_unit.get(unit_id, "")
+                                )
+                                if cid in node_by_id[n].score_condition_ids
+                            }
+                        )
+                    ]
+                    raise ValueError(
+                        f"ScoreResponseUnit {unit_id} 的可成文满分条件共用了节点 "
+                        f"{node_id!r}"
+                        f"（标题: {node_by_id[node_id].title!r}）；"
+                        f"冲突的 condition_id: {conflicting}。"
+                        "满分条件必须各自形成可检查章节节点，"
+                        "不得将多项实质性条件塞回同一个节点"
+                    )
+                seen_nodes.add(node_id)
         template = request.template_structure
         if request.document_mode == "template_strict" and template is None:
             raise ValueError(

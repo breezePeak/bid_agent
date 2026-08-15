@@ -257,6 +257,39 @@ class ChapterWorkspacePhase1Tests(unittest.TestCase):
             self.assertEqual(second["created"], 0)
             self.assertEqual(second["unchanged"], 2)
 
+    def test_ensure_all_skips_structural_parent_nodes(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(
+                context,
+                [
+                    BlueprintNode(
+                        chapter_id="parent",
+                        order=0,
+                        title="目录节点",
+                        purpose="组织下级章节",
+                    ),
+                    BlueprintNode(
+                        chapter_id="leaf",
+                        parent_chapter_id="parent",
+                        order=1,
+                        title="叶子章节",
+                        purpose="撰写具体正文",
+                    ),
+                ],
+            )
+            service = ChapterWorkspaceService(context)
+
+            summary = service.ensure_all()
+            listed = {
+                item["chapter_id"]: item
+                for item in service.list_chapters()["items"]
+            }
+
+            self.assertEqual(summary["created"], 1)
+            self.assertFalse(listed["parent"]["materialized"])
+            self.assertTrue(listed["leaf"]["materialized"])
+
     def test_idempotent_create_and_cas_conflict(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))

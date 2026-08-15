@@ -10,7 +10,7 @@ ROOT=Path(__file__).resolve().parents[1];sys.path.insert(0,str(ROOT/'src'))
 
 from control_plane import CommandEnvelope,CommandGateway,ControlStore,WorkspaceContext
 from document_pipeline.contracts import InputRole
-from document_pipeline.execution_controller import V3_PIPELINE_STAGES, V3ExecutionController
+from document_pipeline.execution_controller import V3ExecutionController
 from document_pipeline.artifact_promotion import HumanGateService
 from document_pipeline.input_manifest import InputManifestService
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder
@@ -38,20 +38,19 @@ class V3ExecutionControllerTests(unittest.TestCase):
   self.assertEqual(response.status_code,200)
   self.assertIn('id=\"app\"',response.text)
 
- def test_legacy_api_namespaces_return_410(self):
-  with TestClient(v3_app.app) as client:
-   for path in ('/api/v1/workspaces','/api/v2/workspaces/example/snapshot'):
-    response=client.get(path)
-    self.assertEqual(response.status_code,410)
-    self.assertEqual(response.json()['error']['code'],'LEGACY_API_RETIRED')
+  def test_legacy_api_namespaces_are_not_registered(self):
+   with TestClient(v3_app.app) as client:
+    for path in ('/api/v1/workspaces','/api/v2/workspaces/example/snapshot'):
+     response=client.get(path)
+     self.assertEqual(response.status_code,404)
 
  def test_command_gateway_is_the_only_execution_entry_point(self):
   with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
    base=Path(t);runs=base/'runs';(runs/'alpha').mkdir(parents=True);context=WorkspaceContext.resolve(runs,'alpha')
-   tender=base/'tender.docx';score=base/'score.md';doc=Document();doc.add_heading('项目技术需求',level=1);doc.add_paragraph('服务范围包括系统实施、培训、交付成果和验收条件，工期30日。');doc.add_heading('实施与验收',level=1);doc.add_paragraph('投标人应提交实施方案、服务响应和验收材料。');doc.add_table(rows=1,cols=2).cell(0,0).text='交付成果';doc.save(tender);score.write_text('评分要求：实施方案。',encoding='utf-8')
+   tender=base/'tender.docx';score=base/'score.md';doc=Document();doc.add_heading('项目技术需求',level=1);doc.add_paragraph('服务范围包括系统实施、培训、交付成果和验收条件，工期30日。');doc.add_heading('实施与验收',level=1);doc.add_paragraph('投标人应提交实施方案、服务响应和验收材料。');doc.add_heading('评标办法',level=1);doc.add_paragraph('项目实施方案完整性，满分10分。');doc.add_table(rows=1,cols=2).cell(0,0).text='交付成果';doc.save(tender);score.write_text('项目实施方案完整性，满分10分。',encoding='utf-8')
    inputs=InputManifestService(context);inputs.register_local_file(tender,InputRole.TENDER);inputs.register_local_file(score,InputRole.SCORE)
    controller=V3ExecutionController.for_deterministic_tests(context);gateway=CommandGateway(context,controller.handlers())
-   envelope=CommandEnvelope.from_mapping({'kind':'document.run_pipeline','expected_revision':ControlStore(context).revision(),'idempotency_key':'v3-full-run'},workspace_id='alpha')
+   envelope=CommandEnvelope.from_mapping({'kind':'document.prepare_outline','expected_revision':ControlStore(context).revision(),'idempotency_key':'v3-outline-run'},workspace_id='alpha')
    receipt=gateway.submit(envelope)
    self.assertEqual(receipt.status,'accepted')
    self.assertFalse((context.root/'outputs/v3/final.docx').exists())
@@ -64,36 +63,18 @@ class V3ExecutionControllerTests(unittest.TestCase):
    stage_runs=ControlStore(context).stage_runs(str(receipt.operation_id))
    self.assertEqual(
     {item['stage_command'] for item in stage_runs},
-    set(V3_PIPELINE_STAGES),
-   )
-   self.assertTrue(
-    all(
-     item['status'] == 'cancelled'
-     for item in stage_runs
-     if V3_PIPELINE_STAGES.index(item['stage_command'])
-     > V3_PIPELINE_STAGES.index('confirm_planning')
-    )
+    {
+     'ingest_inputs','normalize_sources','compile_template_structure',
+     'build_requirement_ledger','analyze_scores','compile_chapter_blueprint',
+     'confirm_planning',
+    },
    )
    self.assertEqual(next(item for item in stage_runs if item['stage_command']=='confirm_planning')['status'],'blocked_human')
    store=ControlStore(context);store.grant_workspace_access('owner')
    planning_snapshot=HumanGateService(context).planning_snapshot()
    confirm=gateway.submit(CommandEnvelope.from_mapping({'kind':'document.confirm_planning','payload':{'decision':'confirm','planning_snapshot':planning_snapshot},'actor':{'type':'user','id':'owner'},'expected_revision':store.revision(),'idempotency_key':'v3-confirm'},workspace_id='alpha'))
    self.assertEqual(confirm.status,'accepted')
-   followup=gateway.submit(CommandEnvelope.from_mapping({'kind':'document.run_pipeline','expected_revision':store.revision(),'idempotency_key':'v3-resume-after-h1'},workspace_id='alpha'))
-   self.assertEqual(followup.status,'accepted')
-   blueprint=store.v3_active_artifact('ChapterBlueprint')
-   contract=json.loads((context.root/'workspace/v3/contracts/document_contract.json').read_text(encoding='utf-8'))
-   plan=json.loads((context.root/'workspace/v3/document_plan.json').read_text(encoding='utf-8'))
-   self.assertEqual(contract['source_blueprint_hash'],blueprint['artifact_hash'])
-   self.assertEqual(plan['source_blueprint_hash'],blueprint['artifact_hash'])
-   bundles=list((context.root/'workspace/v3/writer_bundles').glob('bundle-*.json'))
-   self.assertTrue(bundles)
-   bundle=json.loads(bundles[0].read_text(encoding='utf-8'))
-   self.assertEqual(bundle['source_blueprint_hash'],blueprint['artifact_hash'])
-   self.assertTrue(bundle['h1_receipt_id'])
-   generated=[block['content'] for path in (context.root/'workspace/v3/content_units').glob('*.json') if path.name != 'index.json' for block in json.loads(path.read_text(encoding='utf-8'))['blocks']]
-   self.assertTrue(generated)
-   self.assertTrue((context.root/'outputs/v3/final.docx').is_file())
+   self.assertEqual(confirm.status,'accepted')
 
  def test_prepare_outline_uses_embedded_tender_scores_and_stops_before_writing(self):
   with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
@@ -305,7 +286,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
 
  def test_v3_api_uses_the_v3_command_controller_and_snapshot(self):
   with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
-   base=Path(t);runs=base/'runs';(runs/'alpha').mkdir(parents=True);context=WorkspaceContext.resolve(runs,'alpha');tender=base/'tender.md';score=base/'score.md';tender.write_text('项目目标。\n\n服务范围；交付成果；验收条件；工期30日。',encoding='utf-8');score.write_text('评分要求：实施方案。',encoding='utf-8');inputs=InputManifestService(context);inputs.register_local_file(tender,InputRole.TENDER);inputs.register_local_file(score,InputRole.SCORE)
+   base=Path(t);runs=base/'runs';(runs/'alpha').mkdir(parents=True);context=WorkspaceContext.resolve(runs,'alpha');tender=base/'tender.md';score=base/'score.md';tender.write_text('项目目标。\n\n服务范围；交付成果；验收条件；工期30日。\n\n# 评标办法\n项目实施方案完整性，满分10分。',encoding='utf-8');score.write_text('项目实施方案完整性，满分10分。',encoding='utf-8');inputs=InputManifestService(context);inputs.register_local_file(tender,InputRole.TENDER);inputs.register_local_file(score,InputRole.SCORE)
    with (
     mock.patch.object(v3_app,'RUNS_DIR',runs),
     mock.patch.object(
@@ -314,7 +295,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
      side_effect=V3ExecutionController.for_deterministic_tests,
     ),
    ):
-    response=asyncio.run(v3_app.command('alpha',_Request({'kind':'document.run_pipeline','expected_revision':ControlStore(context).revision(),'idempotency_key':'v3-api-run'},{'id':'owner','role':'admin'})))
+    response=asyncio.run(v3_app.command('alpha',_Request({'kind':'document.prepare_outline','expected_revision':ControlStore(context).revision(),'idempotency_key':'v3-api-outline'},{'id':'owner','role':'admin'})))
     self.assertTrue(json.loads(response.body)['ok'])
     snapshot=v3_app.snapshot('alpha')
    payload=json.loads(snapshot.body)

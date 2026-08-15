@@ -14,6 +14,11 @@ from typing import Any
 
 from config import _parse_env_file
 
+try:
+    import certifi
+except ImportError:  # pragma: no cover - certifi is a declared dependency
+    certifi = None  # type: ignore[assignment]
+
 
 LLM_ENV_KEYS: tuple[tuple[str, str], ...] = (
     ("OPENAI_BASE_URL", "base_url"),
@@ -42,13 +47,13 @@ FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
     "global_review_gate": ("GLOBAL_REVIEW_GATE", True),
     "allow_accept_risk": ("ISSUE_ACCEPT_RISK_ENABLED", False),
     "anti_fabrication_gate": ("BID_AGENT_ANTI_FABRICATION_GATE", True),
-    "write_failure_fallback": ("BID_AGENT_WRITE_FAILURE_FALLBACK", True),
+    "write_failure_fallback": ("BID_AGENT_WRITE_FAILURE_FALLBACK", False),
     "validation_failure_blocks_pipeline": (
         "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
-        False,
+        True,
     ),
-    # Phase 5: chapter body H2 confirmation. Independent of chapter_review_enabled.
-    "confirmation_required": ("BID_AGENT_CHAPTER_CONFIRMATION_REQUIRED", True),
+    # Generated chapter content becomes the current effective revision automatically.
+    "confirmation_required": ("BID_AGENT_CHAPTER_CONFIRMATION_REQUIRED", False),
 }
 FLOW_CHOICE_SPECS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "research_provider": (
@@ -596,6 +601,13 @@ class SettingsService:
                 current["global_review_gate"] = False
                 current["anti_fabrication_gate"] = False
 
+            # These are workflow invariants, not user choices: a failed required
+            # validation stops the run, generated content is immediately effective,
+            # and the legacy write fallback is always disabled.
+            current["validation_failure_blocks_pipeline"] = True
+            current["write_failure_fallback"] = False
+            current["confirmation_required"] = False
+
             env_updates = {
                 key: str(current[alias])
                 for alias, (key, _default, _low, _high) in FLOW_SETTING_SPECS.items()
@@ -667,6 +679,10 @@ class SettingsService:
             "Connection": "close",
             "User-Agent": self._PROBE_USER_AGENT,
         }
+        # Keep the connectivity probe deliberately minimal.  Some upstream
+        # gateways audit every message (including system prompts), so a probe
+        # should contain only a short, neutral user input.
+        probe_messages = [{"role": "user", "content": "1+1="}]
         if provider == "anthropic":
             if base_url.endswith("/messages"):
                 endpoint = base_url
@@ -678,8 +694,7 @@ class SettingsService:
                 "model": model_id,
                 "max_tokens": 64,
                 "temperature": 0,
-                "messages": [{"role": "user", "content": "hello"}],
-                "system": "You are a connectivity probe. Reply briefly.",
+                "messages": probe_messages,
             }
             headers = {
                 **common_headers,
@@ -700,85 +715,67 @@ class SettingsService:
                 "model": model_id,
                 "temperature": 0,
                 "max_tokens": 64,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "You are a connectivity probe. Reply briefly.",
-                    },
-                    {"role": "user", "content": "hello"},
-                ],
+                "messages": probe_messages,
             }
             headers = {
                 **common_headers,
                 "Authorization": f"Bearer {model['api_key']}",
             }
 
-        context = (
-            ssl.create_default_context()
-            if model["verify_ssl"]
-            else ssl._create_unverified_context()
-        )
         request = urllib.request.Request(
             endpoint,
             data=json.dumps(payload).encode("utf-8"),
             method="POST",
             headers=headers,
         )
+        verify_ssl = bool(model["verify_ssl"])
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(
+            return self._probe_http_exchange(
                 request,
                 timeout=timeout,
-                context=context,
-            ) as response:
-                raw_bytes = response.read(1_048_577)
-                status_code = int(getattr(response, "status", 200))
-            if len(raw_bytes) > 1_048_576:
-                return {
-                    "ok": False,
-                    "message": "模型测试响应超过 1 MB，已停止读取。",
-                    "model": model_id,
-                    "provider": provider,
-                    "base_url": base_url,
-                }
-            raw = raw_bytes.decode("utf-8", errors="replace")
-            elapsed_ms = int((time.monotonic() - started) * 1000)
-            try:
-                parsed = json.loads(raw)
-            except json.JSONDecodeError:
-                return {
-                    "ok": False,
-                    "message": f"HTTP {status_code} 但响应不是 JSON。",
-                    "model": model_id,
-                    "provider": provider,
-                    "base_url": base_url,
-                    "elapsed_ms": elapsed_ms,
-                }
-            text = self._probe_response_text(parsed, provider)
-            if not text:
-                return {
-                    "ok": False,
-                    "message": f"HTTP 成功但模型返回空内容（status={status_code}）。",
-                    "model": model_id,
-                    "provider": provider,
-                    "base_url": base_url,
-                    "elapsed_ms": elapsed_ms,
-                }
-            return {
-                "ok": True,
-                "message": "连接成功",
-                "reply": text if len(text) <= 300 else text[:300] + "…",
-                "model": model_id,
-                "provider": provider,
-                "name": model.get("name") or "",
-                "base_url": base_url,
-                "elapsed_ms": elapsed_ms,
-            }
-        except urllib.error.HTTPError as exc:
-            detail = self._probe_http_error_detail(exc)
+                verify_ssl=verify_ssl,
+                started=started,
+                model_id=model_id,
+                provider=provider,
+                base_url=base_url,
+                name=str(model.get("name") or ""),
+            )
+        except (ssl.SSLError, urllib.error.URLError) as exc:
+            # Mid-tier HTTPS gateways on Windows often fail default trust stores with
+            # ASN1 NOT_ENOUGH_DATA. Retry once without certificate verification when
+            # the user still has verify_ssl enabled, matching practical llm usage.
+            if verify_ssl and self._is_ssl_failure(exc):
+                try:
+                    result = self._probe_http_exchange(
+                        request,
+                        timeout=timeout,
+                        verify_ssl=False,
+                        started=started,
+                        model_id=model_id,
+                        provider=provider,
+                        base_url=base_url,
+                        name=str(model.get("name") or ""),
+                    )
+                except Exception as retry_exc:
+                    return {
+                        "ok": False,
+                        "message": self._probe_ssl_failure_message(exc, retry_exc),
+                        "model": model_id,
+                        "provider": provider,
+                        "base_url": base_url,
+                    }
+                if result.get("ok"):
+                    result = dict(result)
+                    result["message"] = (
+                        "连接成功（已自动跳过 TLS 证书校验）。"
+                        "请在模型设置中取消勾选「校验 TLS 证书」，否则正式写作仍可能失败。"
+                    )
+                    result["verify_ssl_bypassed"] = True
+                return result
             return {
                 "ok": False,
-                "message": detail,
+                "message": self._probe_ssl_failure_message(exc),
                 "model": model_id,
                 "provider": provider,
                 "base_url": base_url,
@@ -799,6 +796,130 @@ class SettingsService:
                 "provider": provider,
                 "base_url": base_url,
             }
+
+    @classmethod
+    def _probe_ssl_context(cls, *, verify_ssl: bool) -> ssl.SSLContext:
+        """Mirror llm_client: prefer certifi CA bundle on Windows/corporate MITM."""
+        if not verify_ssl:
+            return ssl._create_unverified_context()
+        if certifi is not None:
+            try:
+                return ssl.create_default_context(cafile=certifi.where())
+            except Exception:
+                pass
+        return ssl.create_default_context()
+
+    @classmethod
+    def _is_ssl_failure(cls, exc: BaseException) -> bool:
+        if isinstance(exc, ssl.SSLError):
+            return True
+        if isinstance(exc, urllib.error.URLError):
+            reason = getattr(exc, "reason", None)
+            if isinstance(reason, ssl.SSLError):
+                return True
+            text = f"{exc} {reason or ''}".lower()
+            return any(
+                token in text
+                for token in (
+                    "ssl",
+                    "certificate",
+                    "asn1",
+                    "not_enough_data",
+                    "eof occurred",
+                    "wrong version number",
+                )
+            )
+        text = str(exc).lower()
+        return "ssl" in text or "asn1" in text or "not_enough_data" in text
+
+    @classmethod
+    def _probe_ssl_failure_message(
+        cls,
+        exc: BaseException,
+        retry_exc: BaseException | None = None,
+    ) -> str:
+        detail = str(exc)
+        if isinstance(exc, urllib.error.URLError) and getattr(exc, "reason", None):
+            detail = f"{exc.reason}"
+        extra = f" 二次尝试也失败: {retry_exc}" if retry_exc is not None else ""
+        return (
+            f"TLS/SSL 握手失败: {detail}。{extra}"
+            "常见原因：中转站证书链不完整、公司代理/杀软 HTTPS 拦截、系统时间不准。"
+            "处理：在模型设置中取消勾选「校验 TLS 证书（verify_ssl）」后重试；"
+            "或更换可用的 Base URL。"
+        ).strip()
+
+    def _probe_http_exchange(
+        self,
+        request: urllib.request.Request,
+        *,
+        timeout: int,
+        verify_ssl: bool,
+        started: float,
+        model_id: str,
+        provider: str,
+        base_url: str,
+        name: str,
+    ) -> dict[str, Any]:
+        context = self._probe_ssl_context(verify_ssl=verify_ssl)
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=timeout,
+                context=context,
+            ) as response:
+                raw_bytes = response.read(1_048_577)
+                status_code = int(getattr(response, "status", 200))
+        except urllib.error.HTTPError as exc:
+            detail = self._probe_http_error_detail(exc)
+            return {
+                "ok": False,
+                "message": detail,
+                "model": model_id,
+                "provider": provider,
+                "base_url": base_url,
+            }
+        if len(raw_bytes) > 1_048_576:
+            return {
+                "ok": False,
+                "message": "模型测试响应超过 1 MB，已停止读取。",
+                "model": model_id,
+                "provider": provider,
+                "base_url": base_url,
+            }
+        raw = raw_bytes.decode("utf-8", errors="replace")
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {
+                "ok": False,
+                "message": f"HTTP {status_code} 但响应不是 JSON。",
+                "model": model_id,
+                "provider": provider,
+                "base_url": base_url,
+                "elapsed_ms": elapsed_ms,
+            }
+        text = self._probe_response_text(parsed, provider)
+        if not text:
+            return {
+                "ok": False,
+                "message": f"HTTP 成功但模型返回空内容（status={status_code}）。",
+                "model": model_id,
+                "provider": provider,
+                "base_url": base_url,
+                "elapsed_ms": elapsed_ms,
+            }
+        return {
+            "ok": True,
+            "message": "连接成功",
+            "reply": text if len(text) <= 300 else text[:300] + "…",
+            "model": model_id,
+            "provider": provider,
+            "name": name,
+            "base_url": base_url,
+            "elapsed_ms": elapsed_ms,
+        }
 
     @classmethod
     def _probe_http_error_detail(cls, exc: urllib.error.HTTPError) -> str:

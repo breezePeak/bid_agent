@@ -11,12 +11,12 @@ from utils import read_json
 from .quality import CONTENT_QUALITY_PATH
 from .contracts import DOCUMENT_CONTRACT_ADAPTER
 from .document_contract import DOCUMENT_CONTRACT_PATH
-from .autonomous_research import AUTO_RESEARCH_REPORT_PATH
 from .renderers.render_verifier import (
     RENDER_MARKDOWN_PATH,
     RENDER_OUTPUT_PATH,
     RENDER_QUALITY_PATH,
 )
+from .writer_policy import require_all_content_units_fresh
 
 
 FINAL_MARKDOWN_PATH = RENDER_MARKDOWN_PATH
@@ -165,13 +165,16 @@ class DocumentPreviewService:
         self.store = ControlStore(context)
 
     def build(self) -> dict[str, Any]:
+        require_all_content_units_fresh(
+            self.context,
+            code="DOCUMENT_PREVIEW_STALE",
+        )
         markdown_path = self.root / FINAL_MARKDOWN_PATH
         docx_path = self.root / RENDER_OUTPUT_PATH
         report_path = self.root / RENDER_QUALITY_PATH
         report = read_json(report_path) if report_path.is_file() else {}
         if (
-            str(report.get("status") or "")
-            not in {"ready", "ready_with_warnings"}
+            str(report.get("status") or "") != "ready"
             or not markdown_path.is_file()
             or not docx_path.is_file()
         ):
@@ -253,27 +256,11 @@ class DocumentPreviewService:
             contract_nodes = list(contract.nodes)
         except Exception:
             contract_nodes = []
-        research_report = (
-            read_json(self.root / AUTO_RESEARCH_REPORT_PATH)
-            if (self.root / AUTO_RESEARCH_REPORT_PATH).is_file()
-            else {}
-        )
-        decisions_by_chapter = {
-            str(item.get("chapter_id") or ""): item
-            for item in (research_report.get("decisions") or [])
-            if isinstance(item, dict)
-        }
         for entry, node in zip(toc, contract_nodes):
             entry["chapter_id"] = node.node_id
             entry["section_domain"] = node.section_domain
             entry["content_policy"] = node.content_policy
             entry["deferred_reason"] = node.deferred_reason
-            decision = decisions_by_chapter.get(node.node_id)
-            if decision:
-                entry["research"] = {
-                    "needs_research": bool(decision.get("needs_research")),
-                    "reasons": decision.get("reasons") or [],
-                }
         quality_path = self.root / CONTENT_QUALITY_PATH
         quality = read_json(quality_path) if quality_path.is_file() else {}
         warnings = [

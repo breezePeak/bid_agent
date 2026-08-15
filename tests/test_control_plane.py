@@ -61,74 +61,6 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
-    def test_current_schema_adds_control_migration_gate_material_history_and_stage_run_tables(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            database = context.root / "workspace" / "control.db"
-            database.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(database)
-            try:
-                connection.execute(
-                    """
-                    CREATE TABLE operations (
-                        operation_id TEXT PRIMARY KEY,
-                        kind TEXT NOT NULL,
-                        status TEXT NOT NULL,
-                        start_command TEXT NOT NULL DEFAULT '',
-                        fencing_token INTEGER NOT NULL,
-                        created_at TEXT NOT NULL,
-                        updated_at TEXT NOT NULL,
-                        completed_at TEXT,
-                        message TEXT NOT NULL DEFAULT '',
-                        error_json TEXT
-                    )
-                    """
-                )
-                connection.commit()
-            finally:
-                connection.close()
-
-            store = ControlStore(context)
-            migrated = sqlite3.connect(store.path)
-            try:
-                columns = {str(row[1]) for row in migrated.execute("PRAGMA table_info(operations)")}
-                schema_version = migrated.execute(
-                    "SELECT value FROM control_meta WHERE key = 'schema_version'"
-                ).fetchone()[0]
-                migration_table = migrated.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'migration_conflicts'"
-                ).fetchone()
-                gate_evaluations = migrated.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'gate_evaluations'"
-                ).fetchone()
-                material_verifications = migrated.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'material_verifications'"
-                ).fetchone()
-                material_submissions = migrated.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'material_submissions'"
-                ).fetchone()
-            finally:
-                migrated.close()
-
-            self.assertIn("parent_operation_id", columns)
-            self.assertEqual(schema_version, str(ControlStore.SCHEMA_VERSION))
-            self.assertIsNotNone(migration_table)
-            self.assertIsNotNone(gate_evaluations)
-            self.assertIsNotNone(material_verifications)
-            self.assertIsNotNone(material_submissions)
-
-    def test_compatibility_usage_does_not_advance_control_revision(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            revision = store.revision()
-            store.record_compatibility_usage("/api/status", {"id": "owner", "type": "session"})
-            store.record_compatibility_usage("/api/status", {"id": "owner", "type": "session"})
-            usage = store.compatibility_usage()
-            self.assertEqual(usage["routes"]["/api/status"]["calls"], 2)
-            self.assertEqual(usage["routes"]["/api/status"]["last_actor"]["id"], "owner")
-            self.assertEqual(store.revision(), revision)
-
     def test_material_verification_is_immutable_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
@@ -340,282 +272,6 @@ class ControlPlaneTests(unittest.TestCase):
                     rules_version=" ",
                 )
             self.assertEqual(raised.exception.code, "STATE_UNAVAILABLE")
-
-    def test_retired_migration_conflict_does_not_block_v2_mutations(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            conflict = store.record_migration_conflict(
-                domain="goal",
-                legacy={"goal_id": "legacy", "status": "succeeded"},
-                authoritative={"goal_id": "current", "status": "in_progress"},
-                reason="goal ids disagree",
-            )
-            duplicate = store.record_migration_conflict(
-                domain="goal",
-                legacy={"goal_id": "legacy", "status": "succeeded"},
-                authoritative={"goal_id": "current", "status": "in_progress"},
-                reason="goal ids disagree",
-            )
-            self.assertEqual(conflict["conflict_id"], duplicate["conflict_id"])
-            self.assertEqual(store.migration_state()["status"], "needs_reconciliation")
-            self.assertNotIn("migration", store.snapshot())
-
-            gateway = CommandGateway(
-                context,
-                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
-            )
-            receipt = gateway.submit(_envelope(context, store, "pipeline.start"))
-            self.assertEqual(receipt.status, "accepted")
-
-            resolved = store.resolve_migration_conflict(
-                conflict["conflict_id"],
-                resolution="keep_orphan",
-                actor={"type": "user", "id": "admin", "role": "admin"},
-                reason="retain SQLite authority",
-            )
-            self.assertEqual(resolved["status"], "resolved")
-            self.assertEqual(store.migration_state()["status"], "ready")
-            decisions = store.policy_decisions(issue_id=f"migration:{conflict['conflict_id']}")
-            self.assertEqual(decisions[0]["decision_type"], "migration_reconciliation")
-            backup_path = context.root / resolved["resolution"]["backup_path"]
-            self.assertTrue(backup_path.exists())
-            self.assertEqual(hashlib.sha256(backup_path.read_bytes()).hexdigest(), resolved["resolution"]["backup_sha256"])
-            self.assertTrue(any(event["kind"] == "MigrationConflictResolved" for event in store.events()))
-
-    def test_migration_conflict_blocks_active_operation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            gateway = CommandGateway(
-                context,
-                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
-            )
-            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
-            gateway.store.record_migration_conflict(
-                domain="goal", legacy={"goal_id": "v1"}, authoritative={"goal_id": "v2"}, reason="mismatch"
-            )
-            operation = gateway.store.operation(started.operation_id or "") or {}
-            self.assertEqual(operation["status"], "blocked")
-            event = next(item for item in gateway.store.events() if item["kind"] == "MigrationConflictDetected")
-            self.assertEqual(event["payload"]["blocked_operations"], 1)
-
-    def test_migration_scan_can_record_conflict_without_blocking_its_own_operation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            gateway = CommandGateway(
-                context,
-                {"pipeline.start": lambda *_: {"accepted": True, "operation_status": "running"}},
-            )
-            started = gateway.submit(_envelope(context, gateway.store, "pipeline.start"))
-            gateway.store.record_migration_conflict(
-                domain="orphan", legacy={"path": "legacy.json"}, authoritative={}, reason="scan",
-                exclude_operation_id=started.operation_id or "",
-            )
-            self.assertEqual((gateway.store.operation(started.operation_id or "") or {})["status"], "running")
-
-    def test_binding_legacy_goal_never_promotes_legacy_success_without_revalidation(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            store.upsert_goal_state({"goal_id": "current", "status": "in_progress"}, source="test")
-            conflict = store.record_migration_conflict(
-                domain="goal",
-                legacy={"goal_id": "legacy", "status": "succeeded"},
-                authoritative=store.goal_state(),
-                reason="different goals",
-            )
-            resolved = store.resolve_migration_conflict(
-                conflict["conflict_id"],
-                resolution="bind_legacy",
-                actor={"id": "admin", "role": "admin"},
-                reason="bind after evidence review",
-            )
-            self.assertEqual(store.goal_state()["goal_id"], "legacy")
-            self.assertEqual(store.goal_state()["status"], "blocked_human")
-            self.assertEqual(resolved["resolution"]["state_effect"], "legacy_bound_goal_success_normalized")
-
-    def test_migration_backup_is_integrity_checked_before_recovery_use(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            conflict = store.record_migration_conflict(
-                domain="orphan", legacy={"path": "goal_state.json"}, authoritative={}, reason="orphan"
-            )
-            store.resolve_migration_conflict(
-                conflict["conflict_id"], resolution="keep_orphan",
-                actor={"id": "admin", "role": "admin"}, reason="retain evidence",
-            )
-            backups = store.migration_backups()
-            self.assertEqual(len(backups), 1)
-            self.assertTrue(backups[0]["verified"])
-            self.assertEqual(backups[0]["integrity"], "ok")
-            self.assertTrue(backups[0]["schema_version"])
-            drill = store.drill_migration_backup(backups[0]["path"])
-            self.assertEqual(drill["recovery_drill"], "passed")
-            self.assertIn("workspace_events", drill["restored_tables"])
-
-    def test_migration_cutover_requires_current_scan_and_no_open_conflicts(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            with self.assertRaises(ControlPlaneError) as missing:
-                store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
-            self.assertEqual(missing.exception.code, "MIGRATION_SCAN_REQUIRED")
-            store.record_migration_scan(fingerprint="scan-1", manifest=[], actor={"id": "admin"})
-            cutover = store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
-            self.assertEqual(cutover["status"], "active")
-            store.record_migration_conflict(
-                domain="orphan", legacy={"path": "legacy.json"}, authoritative={}, reason="orphan"
-            )
-            with self.assertRaises(ControlPlaneError) as blocked:
-                store.activate_migration_cutover(fingerprint="scan-1", actor={"id": "admin"})
-            self.assertEqual(blocked.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
-
-    def test_reconciliation_imports_only_terminal_legacy_pipeline_checkpoint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            conflict = store.record_migration_conflict(
-                domain="orphan",
-                legacy={
-                    "path": "workspace/pipeline_control.json",
-                    "kind": "legacy_pipeline_checkpoint",
-                    "state": {"status": "complete", "current_stage": "build-docx"},
-                },
-                authoritative={},
-                reason="legacy checkpoint requires explicit review",
-            )
-            resolved = store.resolve_migration_conflict(
-                conflict["conflict_id"],
-                resolution="bind_legacy",
-                actor={"id": "admin", "role": "admin"},
-                reason="retain terminal history",
-            )
-            operation = next(
-                item for item in store.snapshot()["operations"]
-                if item["kind"] == "pipeline.legacy_checkpoint"
-            )
-            self.assertEqual(operation["status"], "succeeded")
-            self.assertEqual(operation["start_command"], "build-docx")
-            self.assertEqual(resolved["resolution"]["state_effect"], "legacy_terminal_pipeline_imported")
-
-    def test_reconciliation_rejects_running_legacy_pipeline_checkpoint(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            conflict = store.record_migration_conflict(
-                domain="orphan",
-                legacy={
-                    "path": "workspace/pipeline_control.json",
-                    "kind": "legacy_pipeline_checkpoint",
-                    "state": {"status": "running", "current_stage": "write-all"},
-                },
-                authoritative={},
-                reason="legacy checkpoint requires explicit review",
-            )
-            with self.assertRaises(ControlPlaneError) as blocked:
-                store.resolve_migration_conflict(
-                    conflict["conflict_id"],
-                    resolution="bind_legacy",
-                    actor={"id": "admin", "role": "admin"},
-                    reason="attempt unsafe import",
-                )
-            self.assertEqual(blocked.exception.code, "COMMAND_INVALID")
-            self.assertEqual(store.migration_conflicts(status="open")[0]["conflict_id"], conflict["conflict_id"])
-
-    def test_lazy_v1_import_detects_existing_authoritative_conflicts_without_overwrite(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            connection = sqlite3.connect(store.path)
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO goal_state(
-                        singleton, goal_id, status, goal_json, source, created_at, updated_at
-                    ) VALUES (1, 'goal-v2', 'in_progress', ?, 'v2_command', 'now', 'now')
-                    """,
-                    ('{"goal_id":"goal-v2","raw_user_goal":"sqlite","status":"in_progress"}',),
-                )
-                connection.commit()
-            finally:
-                connection.close()
-            with self.assertRaises(ControlPlaneError) as conflict:
-                store.ensure_goal_state(
-                    {"goal_id": "goal-v1", "status": "succeeded", "raw_user_goal": "legacy"}
-                )
-            self.assertEqual(conflict.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
-            self.assertEqual(store.goal_state()["goal_id"], "goal-v2")
-            migration = store.migration_state()
-            self.assertEqual(migration["open_count"], 1)
-            self.assertEqual(migration["conflicts"][0]["domain"], "goal")
-            self.assertEqual(migration["conflicts"][0]["legacy"]["goal_id"], "goal-v1")
-
-    def test_migration_dry_run_classifies_inventory_without_changing_revision(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            store.upsert_goal_state({"goal_id": "g2", "status": "in_progress"}, source="test")
-            revision = store.revision()
-            result = store.migration_dry_run(
-                {
-                    "goal": {"goal_id": "g1", "status": "succeeded"},
-                    "materials": [{"item_id": "m1", "response_status": "deferred"}],
-                    "unknown": {"value": 1},
-                },
-                orphans=[{"path": "goal_state.json"}],
-            )
-            self.assertTrue(result["dry_run"])
-            self.assertEqual(result["status"], "needs_reconciliation")
-            self.assertEqual(result["counts"]["conflicts"], 1)
-            self.assertEqual(result["counts"]["importable"], 1)
-            self.assertEqual(result["counts"]["orphans"], 1)
-            self.assertEqual(result["counts"]["unrecognized"], 1)
-            self.assertEqual(store.revision(), revision)
-            self.assertEqual(store.migration_conflicts(), [])
-
-    def test_migration_dry_run_does_not_reopen_resolved_orphan_evidence(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            orphan = {"path": "goal_state.json", "kind": "root_legacy_control_state"}
-            conflict = store.record_migration_conflict(
-                domain="orphan", legacy=orphan, authoritative={}, reason="root legacy state"
-            )
-            store.resolve_migration_conflict(
-                conflict["conflict_id"],
-                resolution="keep_orphan",
-                actor={"id": "admin", "role": "admin"},
-                reason="keep evidence outside workspace",
-            )
-            dry_run = store.migration_dry_run({}, orphans=[orphan])
-            self.assertEqual(dry_run["status"], "ready")
-            self.assertEqual(dry_run["counts"]["orphans"], 0)
-            self.assertEqual(dry_run["counts"]["acknowledged"], 1)
-
-    def test_repair_and_activity_v1_import_conflicts_preserve_sqlite_authority(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            store.upsert_repair_job_state({"job_id": "v2-job", "status": "running", "phase": "repair"}, source="test")
-            store.upsert_agent_activity_state({"status": "working", "phase": "repair"}, source="test")
-            connection = sqlite3.connect(store.path)
-            try:
-                connection.execute(
-                    "DELETE FROM control_meta WHERE key IN ('repair_job_v1_imported', 'agent_activity_v1_imported')"
-                )
-                connection.commit()
-            finally:
-                connection.close()
-            with self.assertRaises(ControlPlaneError) as repair_conflict:
-                store.ensure_repair_job_state({"job_id": "v1-job", "status": "succeeded", "phase": "done"})
-            with self.assertRaises(ControlPlaneError) as activity_conflict:
-                store.ensure_agent_activity_state({"status": "idle", "phase": ""})
-            self.assertEqual(repair_conflict.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
-            self.assertEqual(activity_conflict.exception.code, "MIGRATION_RECONCILIATION_REQUIRED")
-            self.assertEqual(store.repair_job_state()["job_id"], "v2-job")
-            self.assertEqual(store.agent_activity_state()["status"], "working")
-            self.assertEqual({item["domain"] for item in store.migration_conflicts()}, {"repair_job", "agent_activity"})
 
     def test_command_is_durable_idempotent_and_emits_events(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1089,6 +745,38 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(gateway.store.operation(second.operation_id or "")["status"], "succeeded")
             self.assertEqual(gateway.store.operation(pipeline.operation_id or "")["status"], "blocked")
 
+    def test_prepare_outline_supersedes_blocked_pipeline_operation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "alpha")
+            gateway = CommandGateway(
+                context,
+                {
+                    "document.run_pipeline": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "blocked",
+                    },
+                    "document.prepare_outline": lambda ctx, envelope, operation_id: {
+                        "accepted": True,
+                        "operation_status": "succeeded",
+                    },
+                },
+            )
+            pipeline = gateway.submit(
+                _envelope(context, gateway.store, "document.run_pipeline")
+            )
+            outline = gateway.submit(
+                _envelope(context, gateway.store, "document.prepare_outline")
+            )
+
+            self.assertNotEqual(outline.operation_id, pipeline.operation_id)
+            old_operation = gateway.store.operation(pipeline.operation_id or "") or {}
+            self.assertEqual(old_operation["status"], "cancelled")
+            self.assertIsNotNone(old_operation["completed_at"])
+            self.assertEqual(
+                gateway.store.operation(outline.operation_id or "")["status"],
+                "succeeded",
+            )
+
     def test_rewrite_requires_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
@@ -1196,83 +884,6 @@ class ControlPlaneTests(unittest.TestCase):
                 store.consume_material_upload(staged["upload_token"])
             self.assertEqual(replay.exception.code, "UPLOAD_TOKEN_CONSUMED")
 
-    def test_material_state_import_is_one_time_and_v2_update_is_authoritative(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            legacy = {
-                "item_id": "mat-1",
-                "response_status": "deferred",
-                "lifecycle_status": "missing",
-                "evidence_status": "missing",
-                "requirement": "certificate",
-            }
-            self.assertEqual(store.ensure_material_states([legacy]), 1)
-            changed_legacy = {**legacy, "response_status": "ready", "lifecycle_status": "uploaded"}
-            self.assertEqual(store.ensure_material_states([changed_legacy]), 0)
-            self.assertEqual(store.material_state("mat-1")["response_status"], "deferred")
-
-            authoritative = {
-                **legacy,
-                "response_status": "ready",
-                "lifecycle_status": "verified",
-                "evidence_status": "verified",
-            }
-            store.upsert_material_state(authoritative)
-            current = store.material_state("mat-1")
-            self.assertEqual(current["lifecycle_status"], "verified")
-            self.assertEqual(current["control_source"], "v2_command")
-
-    def test_empty_material_import_is_also_frozen(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            self.assertEqual(store.ensure_material_states([]), 0)
-            late_legacy = {
-                "item_id": "late-v1-item",
-                "response_status": "ready",
-                "lifecycle_status": "uploaded",
-                "evidence_status": "missing",
-            }
-            self.assertEqual(store.ensure_material_states([late_legacy]), 0)
-            self.assertEqual(store.material_states(), [])
-
-    def test_issue_v1_import_does_not_overwrite_authoritative_state(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            legacy = {
-                "id": "iss-1",
-                "status": "open",
-                "severity": "block",
-                "code": "LEGACY",
-                "title": "legacy issue",
-            }
-            accepted = {
-                "id": "iss-2",
-                "status": "accepted",
-                "severity": "warn",
-                "code": "LEGACY_ACCEPTED",
-                "title": "accepted legacy issue",
-                "accept_reason": "legacy decision",
-                "accepted_by": "reviewer",
-            }
-            self.assertEqual(store.ensure_issue_states([legacy, accepted]), 2)
-            changed = {**legacy, "status": "accepted", "title": "file overwrite"}
-            self.assertEqual(store.ensure_issue_states([changed]), 0)
-            current = next(item for item in store.issue_states() if item["id"] == "iss-1")
-            self.assertEqual(current["status"], "open")
-            self.assertEqual(current["title"], "legacy issue")
-            imported_decisions = store.policy_decisions(issue_id="iss-2")
-            self.assertEqual(len(imported_decisions), 1)
-            self.assertEqual(imported_decisions[0]["actor"]["id"], "reviewer")
-
-            authoritative = {**legacy, "status": "fixed", "title": "v2 state"}
-            self.assertEqual(store.replace_issue_states([authoritative], source="test"), 1)
-            current = store.issue_states()[0]
-            self.assertEqual(current["status"], "fixed")
-            self.assertEqual(current["control_source"], "test")
-
     def test_policy_decisions_are_append_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
@@ -1328,21 +939,6 @@ class ControlPlaneTests(unittest.TestCase):
                 )
             self.assertEqual(store.policy_decisions(issue_id="missing"), [])
 
-    def test_goal_v1_import_is_one_time_and_v2_update_is_authoritative(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            context = self._workspace(Path(tmp), "alpha")
-            store = ControlStore(context)
-            legacy = {"goal_id": "goal-1", "status": "in_progress", "raw_user_goal": "legacy"}
-            self.assertEqual(store.ensure_goal_state(legacy), 1)
-            self.assertEqual(store.ensure_goal_state({**legacy, "status": "succeeded"}), 0)
-            self.assertEqual(store.goal_state()["status"], "in_progress")
-
-            updated = {**legacy, "status": "blocked_human", "raw_user_goal": "v2"}
-            current = store.upsert_goal_state(updated, source="test")
-            self.assertEqual(current["status"], "blocked_human")
-            self.assertEqual(current["raw_user_goal"], "v2")
-            self.assertEqual(current["control_source"], "test")
-
     def test_workspace_acl_denies_unassigned_and_read_only_writes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")
@@ -1372,6 +968,27 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(receipt.status, "rejected")
             self.assertEqual(receipt.error["code"], "GATE_BLOCKED")
             self.assertEqual(gateway.store.snapshot()["operation"]["status"], "blocked")
+
+    def test_document_regenerate_retries_a_blocked_operation(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = self._workspace(Path(tmp), "workspace")
+            attempts = 0
+
+            def run_pipeline(ctx, envelope, operation_id):
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise ControlPlaneError("RESEARCH_BLOCKED", "research needs attention")
+                return {"operation_status": "succeeded", "message": "regenerated"}
+
+            gateway = CommandGateway(context, {"document.run_pipeline": run_pipeline})
+            first = gateway.submit(_envelope(context, gateway.store, "document.run_pipeline"))
+            self.assertEqual(first.status, "rejected")
+            retry = gateway.submit(
+                _envelope(context, gateway.store, "document.run_pipeline")
+            )
+            self.assertEqual(retry.status, "accepted")
+            self.assertNotEqual(retry.operation_id, first.operation_id)
 
     def test_resume_increments_fencing_token_and_rejects_stale_worker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

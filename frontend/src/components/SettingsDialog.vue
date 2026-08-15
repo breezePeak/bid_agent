@@ -138,6 +138,11 @@
                 <input v-model="form.verify_ssl" type="checkbox" />
                 <span>校验 TLS 证书（verify_ssl）</span>
               </label>
+              <p class="field-hint">
+                中转站出现 SSLError / ASN1 NOT_ENOUGH_DATA 时，可取消勾选后保存再测。
+              </p>
+              <label class="form-check" style="display:none">
+              </label>
             </div>
             <p class="settings-hint">
               修改「使用中」模型后会实时生效；所有工作空间后续发起的大模型请求都会使用新配置。
@@ -200,28 +205,9 @@
             <label class="form-check"><input v-model="flowForm.chapter_review_enabled" type="checkbox" /><span>启用审核</span></label>
           </div>
           <p class="settings-hint">开启时，每章生成后在“生成章节”内部完成自审和按需改稿，并执行全文审核；关闭时直接生成第一版，不执行审核相关阶段。</p>
-          <div class="settings-form-title">章节正文确认（H2）</div>
-          <div class="form-check-group">
-            <label class="form-check">
-              <input v-model="flowForm.confirmation_required" type="checkbox" />
-              <span>章节正文需人工确认后才能成为正式版</span>
-            </label>
-          </div>
-          <p class="settings-hint">
-            与「启用审核」独立。开启后：草稿 → 用户编辑 → H2 确认 exact revision/hash → formal；
-            关闭后：草稿由系统签发 auto_approved 收据并指向 formal（不会伪装成人确认）。
-            开关值会冻结进新正文 revision 的审批策略，不追溯改写旧版本。H1 目录确认始终保留。
-          </p>
           <div class="settings-form-title">失败处理</div>
-          <div class="form-check-group">
-            <label class="form-check">
-              <input v-model="flowForm.validation_failure_blocks_pipeline" type="checkbox" />
-              <span>校验失败时停止主流程</span>
-            </label>
-          </div>
           <p class="settings-hint">
-            默认关闭。关闭时，资料查询、来源校验、需求或评分点覆盖等可恢复问题会记录为风险并继续生成；
-            文件损坏、权限、安全校验和必需产物缺失仍会停止。设置只影响之后启动的任务。
+            任一必需校验失败都会停止当前任务并显示具体错误；不会使用旧正文或旧目录继续交付。
           </p>
           <p v-if="flowError" class="form-error" role="alert">{{ flowError }}</p>
           <p v-if="flowSuccess" class="form-success">{{ flowSuccess }}</p>
@@ -292,14 +278,12 @@ const flowForm = reactive({
   write_batch_retries: 5,
   max_repair_rounds: 2,
   research_provider: 'doubao_web',
-  write_failure_fallback: true,
   chapter_review_enabled: true,
   chapter_review_gate: true,
   global_review_gate: true,
   anti_fabrication_gate: true,
   allow_accept_risk: false,
-  validation_failure_blocks_pipeline: false,
-  confirmation_required: true,
+  validation_failure_blocks_pipeline: true,
 })
 
 async function loadFlow() {

@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -166,6 +167,30 @@ def _envelope(
 
 
 class ChapterContextPhase2Tests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._global_context_patch = mock.patch(
+            "document_pipeline.global_project_context.GlobalProjectContextService.load_model",
+            return_value={
+                "identity": {"project_name": "测试项目", "purchaser": "测试采购人"},
+                "background": ["测试项目背景"],
+                "goals": ["测试建设目标"],
+                "scope": ["测试采购范围"],
+                "boundaries": [],
+                "work_packages": ["测试工作任务"],
+                "processing": [],
+                "inputs": [],
+                "outputs": [],
+                "deliverables": [],
+                "acceptance_conditions": [],
+                "milestones": [],
+                "constraints": [],
+            },
+        )
+        self._global_context_patch.start()
+
+    def tearDown(self) -> None:
+        self._global_context_patch.stop()
+
     def test_blueprint_seed_once_and_not_overwritten(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))

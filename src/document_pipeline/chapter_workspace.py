@@ -437,10 +437,11 @@ class ChapterWorkspaceService:
         return ChapterWorkspaceRecord.model_validate(record).model_dump(mode="json")
 
     def ensure_all(self, *, actor: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Idempotently materialize every Blueprint node after planning.
+        """Idempotently materialize writable leaf nodes after planning.
 
         This is a control-plane projection, not a second Artifact write path.
-        Existing workspaces are left unchanged; only missing rows and empty
+        Directory nodes are structural only and never need a chapter workspace.
+        Existing leaf workspaces are left unchanged; only missing rows and empty
         context heads are created.
         """
         try:
@@ -458,6 +459,7 @@ class ChapterWorkspaceService:
         created = 0
         seeded = 0
         unchanged = 0
+        leaf_ids = self._leaf_ids(blueprint["nodes"])
         for node in blueprint["nodes"]:
             chapter_id = str(node.get("chapter_id") or "").strip()
             if not chapter_id:
@@ -465,6 +467,8 @@ class ChapterWorkspaceService:
             try:
                 chapter_id = ControlStore._normalize_chapter_id(chapter_id)
             except ControlPlaneError:
+                continue
+            if chapter_id not in leaf_ids:
                 continue
             existing = self.store.chapter_workspace(chapter_id)
             before_ctx = int((existing or {}).get("head_context_revision") or 0)

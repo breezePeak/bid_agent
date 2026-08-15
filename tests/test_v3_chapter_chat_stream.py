@@ -185,15 +185,91 @@ class ChapterChatStreamTests(unittest.TestCase):
             self.assertIn("目录位置", thinking)
             self.assertIn("阶段划分", content)
             done = events[-1]
-            self.assertEqual(done["thinking"], thinking)
+            # `thinking` must retain the progress notes rendered before the
+            # model deltas; otherwise the client loses them when it swaps its
+            # live turn for the final history returned by `done`.
+            self.assertIn("先看目录标题", done["thinking"])
+            self.assertIn("标题树足够", done["thinking"])
+            self.assertIn(thinking, done["thinking"])
             self.assertEqual(done["reply"], content)
 
             history = service.load_history("ch-a")
             self.assertEqual(len(history), 2)
             self.assertEqual(history[0]["role"], "user")
             self.assertEqual(history[1]["role"], "assistant")
-            self.assertEqual(history[1]["thinking"], thinking)
+            self.assertEqual(history[1]["thinking"], done["thinking"])
             self.assertEqual(history[1]["content"], content)
+
+    def test_confirmed_outline_routes_body_to_document_instead_of_chat(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context)
+            chapter = {
+                "chapter_id": "ch-a",
+                "title": "技术方案",
+                "blueprint_node": {
+                    "chapter_id": "ch-a",
+                    "title": "技术方案",
+                    "purpose": "说明总体技术路线",
+                },
+                "context": {"items": []},
+                "is_leaf": True,
+            }
+            service = ChapterChatService(context)
+            service.set_authority(mode="human_review", chapter_id="ch-a")
+            list(service.iter_answer_events("ch-a", "先列提纲", chapter=chapter))
+
+            with mock.patch("llm_client.chat_stream_chunks") as writer:
+                events = list(
+                    service.iter_answer_events(
+                        "ch-a",
+                        "确认",
+                        chapter=chapter,
+                    )
+                )
+
+            writer.assert_not_called()
+            authority = next(item for item in events if item["type"] == "authority")
+            self.assertTrue(authority["document_write_requested"])
+            content = "".join(
+                item["delta"] for item in events if item["type"] == "content_delta"
+            )
+            self.assertIn("中间文档", content)
+            self.assertNotIn("总体技术路线分四步", content)
+            self.assertTrue(events[-1]["document_write_requested"])
+            self.assertIn("先看目录标题", events[-1]["thinking"])
+            self.assertIn("目录", events[-1]["thinking"])
+            self.assertEqual(
+                service.load_history("ch-a")[-1]["thinking"],
+                events[-1]["thinking"],
+            )
+
+    def test_request_to_write_to_middle_document_routes_body_out_of_chat(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context)
+            chapter = {
+                "chapter_id": "ch-a",
+                "title": "技术方案",
+                "blueprint_node": {"chapter_id": "ch-a", "title": "技术方案"},
+                "context": {"items": []},
+                "is_leaf": True,
+            }
+            service = ChapterChatService(context)
+            service.set_authority(mode="full_authority", chapter_id="ch-a")
+
+            with mock.patch("llm_client.chat_stream_chunks") as writer:
+                events = list(
+                    service.iter_answer_events(
+                        "ch-a",
+                        "把内容写到屏幕中间文档中",
+                        chapter=chapter,
+                    )
+                )
+
+            writer.assert_not_called()
+            self.assertTrue(events[-1]["document_write_requested"])
+            self.assertIn("中间文档", events[-1]["reply"])
 
 
 if __name__ == "__main__":

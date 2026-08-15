@@ -115,6 +115,13 @@ class WriterResearchCoordinator:
         decision.decision_status = "researching"
         self._upsert(decision.model_dump(mode="json"))
         snapshots: list[dict[str, Any]] = []
+        from .global_project_context import GlobalProjectContextService
+
+        project_anchors, task_anchors = (
+            GlobalProjectContextService.research_anchors(
+                bundle.global_project_context or bundle.project_context or {}
+            )
+        )
         for query in decision.queries:
             query.status = "researching"
             self._upsert(decision.model_dump(mode="json"))
@@ -130,7 +137,10 @@ class WriterResearchCoordinator:
                 priority="high",
                 blocking_scope="content_unit",
                 deadline_stage="execute_content_plan",
-                query_budget=5,
+                query_budget=3,
+                project_anchors=project_anchors,
+                task_anchors=task_anchors,
+                max_adopted_items=3,
             )
             started = time.perf_counter()
             batch = ResearchService(self.context, adapter).resolve(need)
@@ -277,7 +287,9 @@ class WriterResearchCoordinator:
     ) -> dict[str, Any]:
         request = {
             "unit_id": bundle.unit_id,
-            "project_context": bundle.project_context,
+            "project_context": (
+                bundle.global_project_context or bundle.project_context
+            ),
             "chapters": rows,
             "rules": {
                 "prohibited": _PROHIBITED_SCOPES,
@@ -419,7 +431,11 @@ class WriterResearchCoordinator:
                         str(item.get("applicability") or "、".join(
                             allowed[target_id]["title"] for target_id in target_ids
                         )),
-                        project_context=str(bundle.project_context or ""),
+                        project_context=str(
+                            bundle.global_project_context
+                            or bundle.project_context
+                            or ""
+                        ),
                         requirements=[
                             requirement
                             for target_id in target_ids
@@ -539,6 +555,8 @@ class WriterResearchCoordinator:
             "请先自行分析当前章节哪些事实或技术要点确实需要外部核验，再据此制定检索方向；"
             "不要套用固定的政策、标准或质量控制关键词。仅在确有必要时检索并交叉阅读相关公开资料，"
             "优先选择与你识别出的缺口最相关的权威来源。\n"
+            "检索顺序为：本项目或采购人公开信息、同类项目实施资料、具体任务对应的行业标准。"
+            "同类项目资料仅能支持方法、质量、风险和验收思路，不得写成当前项目事实。\n"
             "最后只输出以下可审计结果：\n"
             "1. 研究结论：逐条说明已核验的事实或技术要求；\n"
             "2. 可直接写入标书：按本章节组织为可执行的方法、步骤、质量控制和交付成果；\n"
@@ -561,6 +579,14 @@ class WriterResearchCoordinator:
                     "source_url": item.source_url,
                     "source_type": item.source_type.value,
                     "retrieved_at": item.retrieved_at,
+                    "relevance_tier": item.relevance_tier.value,
+                    "matched_project_anchors": list(
+                        item.matched_project_anchors
+                    ),
+                    "matched_task_anchors": list(
+                        item.matched_task_anchors
+                    ),
+                    "usage_constraints": list(item.usage_constraints),
                 }
             )
         return sources

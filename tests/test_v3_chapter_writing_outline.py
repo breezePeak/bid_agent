@@ -71,6 +71,8 @@ class ChapterWritingOutlineTests(unittest.TestCase):
         self.assertEqual(kinds, ["response", "evidence"])
         self.assertEqual(outline["blocks"][0]["heading"], "内业核查方法")
         self.assertIn("可执行做法", outline["blocks"][0]["write_as"])
+        self.assertEqual(outline["blocks"][0]["outcome_kind"], "")
+        self.assertNotIn("本章交付物", outline["blocks"][0]["write_as"])
         self.assertIn("证明类型", outline["blocks"][1]["write_as"])
         self.assertNotIn("满分条件", outline["blocks"][0]["must_answer"])
         self.assertEqual(outline["blocks"][0]["ownership"], "primary")
@@ -85,6 +87,30 @@ class ChapterWritingOutlineTests(unittest.TestCase):
         )
         self.assertEqual(outline["block_count"], 1)
         self.assertIn("本项目对象", outline["blocks"][0]["must_answer"])
+        self.assertNotIn("交付物", outline["blocks"][0]["must_answer"])
+
+    def test_marks_outcome_only_when_the_block_has_an_explicit_requirement(self) -> None:
+        outline = compile_chapter_writing_outline(
+            {
+                "chapter_id": "ch-delivery",
+                "title": "成果提交与验收",
+                "blueprint_node": {"score_condition_ids": ["SC-1"]},
+            },
+            scoring_requirements=[
+                {
+                    "score_point_id": "SP-1",
+                    "conditions": [
+                        {
+                            "condition_id": "SC-1",
+                            "condition_role": "content",
+                            "response_intent": "按要求提交成果报告并配合验收",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(outline["blocks"][0]["outcome_kind"], "acceptance")
+        self.assertIn("验收口径", outline["blocks"][0]["write_as"])
 
 
 if __name__ == "__main__":

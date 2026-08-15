@@ -22,11 +22,14 @@ _ROLE_KIND = {
 }
 
 _WRITE_AS = {
-    "response": "写可执行做法：步骤、分工、输入输出、本章交付物。不要复述评分原文。",
+    "response": "写本章对应的可执行做法：步骤、分工、输入输出和责任边界。不要复述评分原文，也不要无依据补写交付物或验收。",
     "evidence": "只写需要出示的证明类型、证明对象和放置位置；没有企业材料就写待补，禁止编造业绩、人员、证书。",
     "constraint": "把约束写进方案如何遵守，并给出可检查口径，不要单独喊口号。",
-    "quality": "写成可检查的质控/验收点：查什么、何时查、不合格怎么办。",
+    "quality": "写成可检查的质控点：查什么、何时查、不合格怎么办；只有招标要求明确验收时才写验收点。",
 }
+
+_DELIVERABLE_CUE = re.compile(r"交付|交(\s*)?成果|成果(文件|资料|清单)|提交|移交")
+_ACCEPTANCE_CUE = re.compile(r"验收|终验|初验|竣工验收")
 
 _RUBRIC_LEAK = re.compile(
     r"满分条件|得分任务|得分点|评分要求|评分标准|本节用于|"
@@ -48,6 +51,24 @@ def _heading(condition: dict[str, Any], fallback: str, index: int) -> str:
         if text:
             return text
     return f"{fallback}{index}"
+
+
+def _outcome_kind(*values: Any) -> str:
+    """Return the contractual outcome explicitly required by this writing block."""
+    text = " ".join(_clean(value, 200) for value in values if value)
+    if _ACCEPTANCE_CUE.search(text):
+        return "acceptance"
+    if _DELIVERABLE_CUE.search(text):
+        return "deliverable"
+    return ""
+
+
+def _write_as(kind: str, outcome_kind: str) -> str:
+    if outcome_kind == "deliverable":
+        return "在本章相关做法后说明招标文件明确要求的交付成果及其形成方式；不得泛化为“本章交付物”。"
+    if outcome_kind == "acceptance":
+        return "在本章相关做法后说明招标文件明确要求的验收口径、检查方式或验收依据；不得泛化为“本章交付物”。"
+    return _WRITE_AS.get(kind, _WRITE_AS["response"])
 
 
 def compile_chapter_writing_outline(
@@ -107,6 +128,7 @@ def compile_chapter_writing_outline(
         condition_id: str = "",
         requirement_ids: list[str] | None = None,
         ownership: str = "primary",
+        outcome_kind: str = "",
     ) -> None:
         if len(blocks) >= MAX_BLOCKS:
             return
@@ -122,7 +144,8 @@ def compile_chapter_writing_outline(
                 "kind": kind,
                 "heading": head,
                 "must_answer": answer,
-                "write_as": _WRITE_AS.get(kind, _WRITE_AS["response"]),
+                "write_as": _write_as(kind, outcome_kind),
+                "outcome_kind": outcome_kind,
                 "score_point_id": score_point_id,
                 "condition_id": condition_id,
                 "requirement_ids": [
@@ -153,6 +176,9 @@ def compile_chapter_writing_outline(
                 ),
                 score_point_id=score_id,
                 ownership="primary" if primary_unit_ids else "supporting",
+                outcome_kind=_outcome_kind(
+                    point.get("title"), point.get("response_expectation")
+                ),
             )
             continue
         for condition in conditions:
@@ -189,6 +215,13 @@ def compile_chapter_writing_outline(
                 condition_id=condition_id,
                 requirement_ids=linked,
                 ownership=ownership,
+                outcome_kind=_outcome_kind(
+                    _heading(condition, "", len(blocks) + 1),
+                    condition.get("response_intent"),
+                    condition.get("normalized_condition"),
+                    condition.get("text"),
+                    *(req_by_id.get(requirement_id, "") for requirement_id in linked),
+                ),
             )
 
     if not blocks:
@@ -200,7 +233,7 @@ def compile_chapter_writing_outline(
             add_block(
                 kind="response",
                 heading=title,
-                must_answer=f"围绕「{title}」写清本章做法、交付物和可检查口径",
+                must_answer=f"围绕「{title}」写清本章做法和可检查口径",
             )
 
     local_facts = [
@@ -218,7 +251,8 @@ def compile_chapter_writing_outline(
         "blocks": blocks,
         "usable_local_facts": local_facts,
         "writing_rule": (
-            "按 blocks 顺序写正文，每块至少一段；每段写清做法或检查口径，"
-            "并给出本章交付物或验收点。不要输出提纲标题本身，不要出现评分术语。"
+            "按 blocks 顺序写正文，每块至少一段；按每块 write_as 写清做法或检查口径。"
+            "只有 outcome_kind=deliverable/acceptance 的块，才能写对应的交付成果或验收内容；"
+            "其他块不得机械补写“本章交付物”。不要输出提纲标题本身，不要出现评分术语。"
         ),
     }

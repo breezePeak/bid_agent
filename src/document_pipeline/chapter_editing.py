@@ -282,9 +282,190 @@ class ChapterEditingService:
 
             root = Path(__file__).resolve().parents[2]
             settings = SettingsService(root).flow_settings()
-            return bool(settings.get("confirmation_required", True))
-        except Exception:
-            return True
+            return bool(settings.get("confirmation_required", False))
+        except Exception as exc:
+            raise ControlPlaneError(
+                "CHAPTER_POLICY_READ_FAILED",
+                f"无法读取章节确认策略，已停止提交：{exc}",
+                status_code=500,
+            ) from exc
+
+    def _make_current_effective(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Promote a newly written revision without requiring a second user action."""
+        if result.get("unchanged"):
+            return result
+        content = result.get("content") or {}
+        chapter_data = result.get("chapter") or {}
+        chapter_id = str(chapter_data.get("chapter_id") or "").strip()
+        content_revision = int(content.get("content_revision") or 0)
+        content_hash = str(content.get("content_hash") or "")
+        if not chapter_id or not content_revision or not content_hash:
+            raise ControlPlaneError(
+                "CHAPTER_EFFECTIVE_REVISION_INVALID",
+                "生成结果缺少 chapter_id、content_revision 或 content_hash，已停止提交。",
+                status_code=500,
+            )
+        receipt = self.store.record_chapter_approval_receipt(
+            chapter_id=chapter_id,
+            content_revision=content_revision,
+            content_hash=content_hash,
+            decision="auto_approved",
+            principal_id="system",
+            confirmation_required=False,
+            actor={"type": "system", "id": "system", "role": "auto"},
+        )
+        chapter = self.store.set_chapter_formal_pointer(
+            chapter_id=chapter_id,
+            expected_chapter_revision=int(chapter_data.get("chapter_revision") or 0),
+            content_revision=content_revision,
+            content_hash=content_hash,
+            approval_status="approved",
+            actor={"type": "system", "id": "system", "role": "auto"},
+        )
+        return {"chapter": chapter, "content": content, "approval": receipt, "unchanged": False}
+
+    def _require_leaf_chapter(self, chapter_id: str) -> None:
+        from .chapter_workspace import ChapterWorkspaceService
+
+        ChapterWorkspaceService(self.context).require_leaf_chapter(chapter_id)
+
+    def _evaluate_grounding(
+        self,
+        *,
+        chapter_id: str,
+        text: str,
+        expected_global_ref: tuple[str, int, str] | None = None,
+        expected_chapter_ref: tuple[str, int, str] | None = None,
+        evidence_batch_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
+        from .chapter_workspace import ChapterWorkspaceService
+        from .content_grounding import ContentGroundingGate
+        from .global_project_context import GlobalProjectContextService
+        from .requirement_ledger import load_promoted_requirement_ledger
+        from .research_service import load_published_batch
+        from .score_model import load_promoted_score_model
+
+        global_context = GlobalProjectContextService(self.context).load()
+        current = (
+            str(global_context.get("global_context_id") or ""),
+            int(global_context.get("global_context_revision") or 0),
+            str(global_context.get("global_context_hash") or ""),
+        )
+        if expected_global_ref is not None and expected_global_ref != current:
+            raise ControlPlaneError(
+                "GLOBAL_PROJECT_CONTEXT_CONFLICT",
+                "全局项目事实已更新，请刷新后重新生成本章。",
+                status_code=409,
+                details={"requested": expected_global_ref, "current": current},
+            )
+        chapter = ChapterWorkspaceService(self.context).get_chapter(chapter_id)
+        node = chapter.get("blueprint_node")
+        node = node if isinstance(node, dict) else {}
+        requirement_ids = {str(item) for item in node.get("requirement_ids") or []}
+        score_ids = {str(item) for item in node.get("score_point_ids") or []}
+        condition_ids = {
+            str(item) for item in node.get("score_condition_ids") or []
+        }
+        ledger = load_promoted_requirement_ledger(self.context)
+        requirement_texts = [
+            str(item.normalized_requirement or "")
+            for item in ledger.requirements
+            if item.requirement_id in requirement_ids
+        ]
+        scores = load_promoted_score_model(self.context)
+        for point in scores.points:
+            selected_conditions = [
+                condition
+                for condition in point.score_conditions
+                if condition.condition_id in condition_ids
+            ]
+            if point.score_point_id in score_ids or selected_conditions:
+                requirement_texts.append(
+                    str(point.response_expectation or "")
+                )
+                requirement_texts.extend(
+                    str(condition.text or "")
+                    for condition in selected_conditions
+                )
+        evidence_sources: list[dict[str, Any]] = []
+        normalized_batch_ids = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (evidence_batch_ids or [])
+                if str(item).strip()
+            )
+        )
+        for batch_id in normalized_batch_ids:
+            batch = load_published_batch(self.context, batch_id)
+            if batch is None:
+                raise ControlPlaneError(
+                    "EVIDENCE_BATCH_INVALID",
+                    "章节引用的公开资料批次不存在或尚未发布。",
+                    status_code=409,
+                    details={"batch_id": batch_id},
+                )
+            evidence_sources.extend(
+                {
+                    "batch_id": batch.batch_id,
+                    "evidence_id": item.evidence_id,
+                    "content": item.content,
+                    "supporting_excerpt": item.supporting_excerpt,
+                    "relevance_tier": item.relevance_tier.value,
+                    "usage_constraints": list(item.usage_constraints),
+                }
+                for item in batch.items
+            )
+        context_record = chapter.get("context")
+        context_record = (
+            context_record if isinstance(context_record, dict) else {}
+        )
+        chapter_context = GlobalProjectContextService(
+            self.context
+        ).build_chapter_context(
+            chapter_id,
+            requirement_excerpts=[
+                {
+                    "requirement_id": item.requirement_id,
+                    "text": str(item.normalized_requirement or ""),
+                }
+                for item in ledger.requirements
+                if item.requirement_id in requirement_ids
+            ],
+            chapter_context_items=list(context_record.get("items") or []),
+            chapter_context_revision=int(
+                context_record.get("context_revision") or 0
+            ),
+            chapter_context_hash=str(
+                context_record.get("context_hash") or ""
+            ),
+        )
+        current_chapter_ref = (
+            str(chapter_context.get("chapter_context_id") or ""),
+            int(chapter_context.get("chapter_context_revision") or 0),
+            str(chapter_context.get("chapter_context_hash") or ""),
+        )
+        if (
+            expected_chapter_ref is not None
+            and expected_chapter_ref != current_chapter_ref
+        ):
+            raise ControlPlaneError(
+                "CHAPTER_CONTEXT_CONFLICT",
+                "本章上下文已更新，请刷新后重新生成。",
+                status_code=409,
+                details={
+                    "requested": expected_chapter_ref,
+                    "current": current_chapter_ref,
+                },
+            )
+        return ContentGroundingGate.evaluate(
+            global_context=global_context,
+            chapter=chapter,
+            content=text,
+            requirement_texts=requirement_texts,
+            chapter_grounding_context=chapter_context,
+            evidence_sources=evidence_sources,
+            require_evidence_use=bool(evidence_sources),
+        )
 
     def apply_operations(
         self,
@@ -294,6 +475,7 @@ class ChapterEditingService:
         operations: list[dict[str, Any]],
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._require_leaf_chapter(chapter_id)
         workspace = self.store.chapter_workspace(chapter_id)
         if workspace is None:
             raise ControlPlaneError(
@@ -309,10 +491,18 @@ class ChapterEditingService:
             chapter_id=chapter_id,
             actor=actor,
         )
+        previous_policy = dict((head or {}).get("approval_policy") or {})
         policy = {
             "confirmation_required": self._confirmation_required(),
             "frozen_at": _now_iso(),
+            "grounding_required": bool(
+                previous_policy.get("grounding")
+                or previous_policy.get("grounding_required")
+            ),
         }
+        previous_grounding = previous_policy.get("grounding")
+        if isinstance(previous_grounding, dict):
+            policy["source_grounding"] = previous_grounding
         result = self.store.append_chapter_content_revision(
             chapter_id=chapter_id,
             expected_chapter_revision=expected_chapter_revision,
@@ -322,6 +512,8 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
+        if not self._confirmation_required():
+            return self._make_current_effective(result)
         return result
 
     def restore_revision(
@@ -332,6 +524,7 @@ class ChapterEditingService:
         from_content_revision: int,
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._require_leaf_chapter(chapter_id)
         source = self.store.chapter_content_revision(chapter_id, from_content_revision)
         if source is None:
             raise ControlPlaneError(
@@ -344,7 +537,12 @@ class ChapterEditingService:
             "frozen_at": _now_iso(),
             "restored_from": int(from_content_revision),
         }
-        return self.store.append_chapter_content_revision(
+        source_policy = dict(source.get("approval_policy") or {})
+        if source_policy.get("grounding") or source_policy.get("grounding_required"):
+            policy["grounding_required"] = True
+            if isinstance(source_policy.get("grounding"), dict):
+                policy["source_grounding"] = source_policy["grounding"]
+        result = self.store.append_chapter_content_revision(
             chapter_id=chapter_id,
             expected_chapter_revision=expected_chapter_revision,
             blocks=list(source.get("blocks") or []),
@@ -353,6 +551,9 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
+        if not self._confirmation_required():
+            return self._make_current_effective(result)
+        return result
 
     def generate_draft(
         self,
@@ -362,8 +563,13 @@ class ChapterEditingService:
         text: str | None = None,
         overwrite_locked: bool = False,
         actor: dict[str, Any] | None = None,
+        grounding_report: dict[str, Any] | None = None,
+        expected_global_ref: tuple[str, int, str] | None = None,
+        expected_chapter_ref: tuple[str, int, str] | None = None,
+        evidence_batch_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Create an AI draft revision. Never updates formal pointer."""
+        """Create an AI revision and make it current when H2 is disabled."""
+        self._require_leaf_chapter(chapter_id)
         workspace = self.store.chapter_workspace(chapter_id)
         if workspace is None:
             raise ControlPlaneError(
@@ -391,6 +597,25 @@ class ChapterEditingService:
             source="AI_GENERATED",
             confidence=0.75,
         )
+        source_report = dict(grounding_report or {})
+        if expected_global_ref is None and source_report:
+            expected_global_ref = (
+                str(source_report.get("global_context_id") or ""),
+                int(source_report.get("global_context_revision") or 0),
+                str(source_report.get("global_context_hash") or ""),
+            )
+        if expected_chapter_ref is None and source_report:
+            expected_chapter_ref = (
+                str(source_report.get("chapter_context_id") or ""),
+                int(source_report.get("chapter_context_revision") or 0),
+                str(source_report.get("chapter_context_hash") or ""),
+            )
+        if evidence_batch_ids is None and source_report:
+            evidence_batch_ids = [
+                str(item)
+                for item in source_report.get("evidence_batch_ids") or []
+                if str(item)
+            ]
         head = self.store.chapter_content_head(chapter_id)
         existing = list((head or {}).get("blocks") or [])
         merged = merge_ai_blocks_with_locks(
@@ -398,11 +623,28 @@ class ChapterEditingService:
             incoming=incoming,
             overwrite_locked=bool(overwrite_locked),
         )
+        report = self._evaluate_grounding(
+            chapter_id=chapter_id,
+            text="\n\n".join(
+                str(block.get("content") or "") for block in merged
+            ),
+            expected_global_ref=expected_global_ref,
+            expected_chapter_ref=expected_chapter_ref,
+            evidence_batch_ids=evidence_batch_ids,
+        )
+        fact_bindings = report.get("paragraph_fact_bindings")
+        fact_bindings = fact_bindings if isinstance(fact_bindings, dict) else {}
+        for index, block in enumerate(merged):
+            if str(block.get("source") or "") == "AI_GENERATED":
+                block["fact_ids"] = list(
+                    fact_bindings.get(str(index)) or []
+                )
         confirmation_required = self._confirmation_required()
         policy = {
             "confirmation_required": confirmation_required,
             "frozen_at": _now_iso(),
             "overwrite_locked": bool(overwrite_locked),
+            "grounding": report,
         }
         result = self.store.append_chapter_content_revision(
             chapter_id=chapter_id,
@@ -413,32 +655,8 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        # Auto-approval only when confirmation is not required; never pretend human.
-        if not confirmation_required and not result.get("unchanged"):
-            content = result["content"]
-            receipt = self.store.record_chapter_approval_receipt(
-                chapter_id=chapter_id,
-                content_revision=int(content["content_revision"]),
-                content_hash=str(content["content_hash"]),
-                decision="auto_approved",
-                principal_id="system",
-                confirmation_required=False,
-                actor={"type": "system", "id": "system", "role": "auto"},
-            )
-            chapter = self.store.set_chapter_formal_pointer(
-                chapter_id=chapter_id,
-                expected_chapter_revision=int(result["chapter"]["chapter_revision"]),
-                content_revision=int(content["content_revision"]),
-                content_hash=str(content["content_hash"]),
-                approval_status="approved",
-                actor={"type": "system", "id": "system", "role": "auto"},
-            )
-            result = {
-                "chapter": chapter,
-                "content": content,
-                "approval": receipt,
-                "unchanged": False,
-            }
+        if not confirmation_required:
+            return self._make_current_effective(result)
         return result
 
     def confirm_approval(
@@ -450,6 +668,7 @@ class ChapterEditingService:
         content_hash: str,
         actor: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._require_leaf_chapter(chapter_id)
         principal = _actor_id(actor)
         if not principal or principal in {"system", "auto"}:
             raise ControlPlaneError(
@@ -472,6 +691,40 @@ class ChapterEditingService:
             )
         policy = dict(content.get("approval_policy") or {})
         confirmation_required = bool(policy.get("confirmation_required", True))
+        if policy.get("grounding") or policy.get("grounding_required"):
+            source_grounding = policy.get("grounding") or policy.get(
+                "source_grounding"
+            )
+            expected_ref = None
+            expected_chapter_ref = None
+            evidence_batch_ids: list[str] = []
+            if isinstance(source_grounding, dict):
+                expected_ref = (
+                    str(source_grounding.get("global_context_id") or ""),
+                    int(source_grounding.get("global_context_revision") or 0),
+                    str(source_grounding.get("global_context_hash") or ""),
+                )
+                expected_chapter_ref = (
+                    str(source_grounding.get("chapter_context_id") or ""),
+                    int(source_grounding.get("chapter_context_revision") or 0),
+                    str(source_grounding.get("chapter_context_hash") or ""),
+                )
+                evidence_batch_ids = [
+                    str(item)
+                    for item in source_grounding.get("evidence_batch_ids") or []
+                    if str(item)
+                ]
+            self._evaluate_grounding(
+                chapter_id=chapter_id,
+                text="\n\n".join(
+                    str(block.get("content") or "")
+                    for block in content.get("blocks") or []
+                    if isinstance(block, dict)
+                ),
+                expected_global_ref=expected_ref,
+                expected_chapter_ref=expected_chapter_ref,
+                evidence_batch_ids=evidence_batch_ids,
+            )
         # Even if auto mode is on, explicit human confirm still issues approved receipt.
         receipt = self.store.record_chapter_approval_receipt(
             chapter_id=chapter_id,
@@ -531,6 +784,8 @@ class ChapterEditingService:
             if not isinstance(item, dict):
                 continue
             if str(item.get("status") or "") == "archived":
+                continue
+            if item.get("is_leaf") is False:
                 continue
             if not item.get("materialized"):
                 continue
@@ -669,12 +924,50 @@ class ChapterEditingService:
         if not chapter_id:
             raise ControlPlaneError("CHAPTER_ID_REQUIRED", "缺少 chapter_id。", status_code=400)
         text = payload.get("text")
+        if text is None or not str(text).strip():
+            raise ControlPlaneError(
+                "GROUNDING_RECEIPT_REQUIRED",
+                "AI 草稿必须提供经过全局项目上下文校验的正文。",
+                status_code=409,
+            )
+        try:
+            requested_global = (
+                str(payload.get("global_context_id") or ""),
+                int(payload.get("global_context_revision")),
+                str(payload.get("global_context_hash") or ""),
+            )
+            requested_chapter = (
+                str(payload.get("chapter_context_id") or ""),
+                int(payload.get("chapter_context_revision")),
+                str(payload.get("chapter_context_hash") or ""),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ControlPlaneError(
+                "GROUNDING_RECEIPT_REQUIRED",
+                "章节草稿必须携带全局项目事实和本章上下文版本。",
+                status_code=409,
+            ) from exc
+        if not all((requested_global[0], requested_global[2])) or not all(
+            (requested_chapter[0], requested_chapter[2])
+        ):
+            raise ControlPlaneError(
+                "GROUNDING_RECEIPT_REQUIRED",
+                "章节草稿必须携带全局项目事实和本章上下文版本。",
+                status_code=409,
+            )
         result = self.generate_draft(
             chapter_id=chapter_id,
             expected_chapter_revision=self._expected_chapter_revision(payload),
             text=str(text) if text is not None else None,
             overwrite_locked=bool(payload.get("overwrite_locked")),
             actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+            expected_global_ref=requested_global,
+            expected_chapter_ref=requested_chapter,
+            evidence_batch_ids=[
+                str(item)
+                for item in payload.get("evidence_batch_ids") or []
+                if str(item)
+            ],
         )
         return {
             "accepted": True,

@@ -47,6 +47,24 @@ class DocumentPlanner:
             if active is None or str(active["artifact_hash"]) != contract.source_blueprint_hash:
                 raise ValueError("DOCUMENT_PLAN_BLOCKED: DocumentContract 未绑定当前 confirmed Blueprint")
             blueprint = load_promoted_chapter_blueprint(self.context)
+            blueprint_node_ids = {node.chapter_id for node in blueprint.nodes}
+            contract_node_ids = {node.node_id for node in contract.nodes}
+            if contract_node_ids != blueprint_node_ids:
+                # A stale contract must never leak a raw chapter-id KeyError into
+                # the writing-plan stage. Recompile it from the confirmed
+                # Blueprint, then validate the sets once more.
+                from .document_contract import DocumentContractCompiler
+
+                contract = DocumentContractCompiler(self.context).compile()
+                blueprint_node_ids = {node.chapter_id for node in blueprint.nodes}
+                contract_node_ids = {node.node_id for node in contract.nodes}
+                if contract_node_ids != blueprint_node_ids:
+                    missing = sorted(contract_node_ids - blueprint_node_ids)
+                    extra = sorted(blueprint_node_ids - contract_node_ids)
+                    raise ValueError(
+                        "DOCUMENT_PLAN_BLOCKED: 当前文档结构与已确认目录不一致；"
+                        f"仅文档结构存在={missing}，仅确认目录存在={extra}"
+                    )
             if blueprint.planning_model != "score_direct":
                 raise ValueError(
                     "DOCUMENT_PLAN_LEGACY_READ_ONLY: legacy TopicGraph "
@@ -284,7 +302,15 @@ class DocumentPlanner:
 
     @staticmethod
     def _content_units(nodes, plan: DocumentPlan) -> list[ContentUnit]:
-        roots = [node for node in nodes if node.parent_node_id is None]
+        writable_node_ids = {node.node_id for node in nodes}
+        # A non-writable structural parent is deliberately absent from `nodes`.
+        # Its first writable child therefore becomes a writing-unit root.
+        roots = [
+            node
+            for node in nodes
+            if node.parent_node_id is None
+            or node.parent_node_id not in writable_node_ids
+        ]
         if len(roots) == len(nodes) and len(nodes) > 1:
             return [
                 ContentUnit(
@@ -308,7 +334,10 @@ class DocumentPlanner:
         while current.parent_node_id:
             if current.parent_node_id == root_id:
                 return True
-            current = by_id[current.parent_node_id]
+            parent = by_id.get(current.parent_node_id)
+            if parent is None:
+                return False
+            current = parent
         return False
 
     @staticmethod

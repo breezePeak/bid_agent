@@ -87,6 +87,127 @@ class V3GenerationProgressTests(TestCase):
             workspace_id="alpha",
         )
 
+    def test_analysis_snapshot_ignores_newer_generation_operation(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+
+            class _Control:
+                @staticmethod
+                def snapshot():
+                    return {
+                        "commands": [
+                            {
+                                "kind": "document.run_pipeline",
+                                "operation_id": "generation-operation",
+                                "status": "running",
+                            },
+                            {
+                                "kind": "document.prepare_outline",
+                                "operation_id": "outline-operation",
+                                "status": "succeeded",
+                            },
+                        ]
+                    }
+
+                @staticmethod
+                def operation(operation_id: str):
+                    return {
+                        "operation_id": operation_id,
+                        "kind": (
+                            "document.prepare_outline"
+                            if operation_id == "outline-operation"
+                            else "document.run_pipeline"
+                        ),
+                        "status": "succeeded",
+                    }
+
+                @staticmethod
+                def stage_runs(operation_id: str):
+                    if operation_id == "outline-operation":
+                        return [
+                            {
+                                "stage_command": "compile_chapter_blueprint",
+                                "status": "succeeded",
+                            }
+                        ]
+                    return [
+                        {
+                            "stage_command": "execute_content_plan",
+                            "status": "running",
+                        }
+                    ]
+
+            latest = V3WorkspaceSnapshotBuilder(context)._latest_analysis_operation(
+                _Control(),
+                {},
+            )
+
+            self.assertEqual(latest["kind"], "document.prepare_outline")
+            self.assertEqual(latest["operation_id"], "outline-operation")
+            self.assertTrue(latest["completed_outline"])
+
+    def test_generation_snapshot_keeps_its_llm_requests_on_generation_stages(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+
+            class _Control:
+                @staticmethod
+                def snapshot():
+                    return {
+                        "commands": [
+                            {
+                                "kind": "document.run_pipeline",
+                                "operation_id": "generation-operation",
+                                "status": "running",
+                            }
+                        ]
+                    }
+
+                @staticmethod
+                def operation(_operation_id: str):
+                    return {"status": "running"}
+
+                @staticmethod
+                def stage_runs(_operation_id: str):
+                    return [
+                        {
+                            "stage_command": "execute_content_plan",
+                            "status": "running",
+                            "attempt": 1,
+                        }
+                    ]
+
+                @staticmethod
+                def llm_requests(_operation_id: str):
+                    return [
+                        {
+                            "request_id": "generation-request",
+                            "stage_id": "execute_content_plan",
+                            "status": "running",
+                            "parameters": {"candidate_attempt": 1},
+                        }
+                    ]
+
+            builder = V3WorkspaceSnapshotBuilder(context)
+            with mock.patch.object(builder, "_content_progress", return_value={}):
+                generation = builder._generation_snapshot(
+                    _Control(),
+                    plan={},
+                    writer_research={},
+                    delivery={},
+                )
+
+            writing = next(
+                stage
+                for stage in generation["stages"]
+                if stage["stage_id"] == "execute_content_plan"
+            )
+            self.assertEqual(writing["llm_request_count"], 1)
+            self.assertEqual(
+                writing["llm_requests"][0]["request_id"],
+                "generation-request",
+            )
+
     def test_pipeline_records_queued_running_and_terminal_for_every_stage(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context = self._context(Path(temporary))
