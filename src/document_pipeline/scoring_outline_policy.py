@@ -169,6 +169,35 @@ _HEADING_PREDICATE = re.compile(
     r"重点突出|逻辑清楚|条理清楚|层次清楚)"
 )
 
+_HEADING_EVALUATIVE_SUFFIX = re.compile(
+    r"(?:条理清楚|逻辑清晰|重点突出|全面具体|全面细致|科学|合理|可行|"
+    r"清楚|清晰|细致|具体|全面|完整|突出|可操作性强|操作性强)$"
+)
+
+
+def is_evaluative_sentence_heading(value: str) -> bool:
+    """Whether a heading is a score criterion sentence rather than a topic.
+
+    A concrete subject is allowed to contain terms such as ``可行性``.  The
+    check is intentionally limited to evaluation predicates at the end of a
+    heading, which are the phrases that make a table-of-contents entry read
+    like a scoring rule.
+    """
+
+    normalized = re.sub(r"\s+", "", str(value or "")).strip("：:、，,。；;/-—")
+    if not normalized:
+        return False
+    if normalized.startswith("对") and ("有具体实例" in normalized or "有实例" in normalized):
+        return True
+    return bool(_HEADING_EVALUATIVE_SUFFIX.search(normalized))
+
+
+def is_contextless_heading(value: str) -> bool:
+    """Return true for labels that need their business object in a TOC."""
+
+    normalized = re.sub(r"\s+", "", str(value or "")).strip("：:、，,。；;/-—")
+    return normalized in {"使用说明", "操作说明", "实例", "案例", "方法", "分析"}
+
 
 def is_document_quality_score(title: str, criterion: str = "") -> bool:
     """Return True only for a criterion that evaluates the document as a whole."""
@@ -321,9 +350,13 @@ def full_score_condition_heading(condition: str, fallback_index: int) -> str:
     if instance_match is not None:
         subject = instance_match.group(1)
         subject = subject.replace("容易混淆的", "易混淆").replace("的类型", "类型")
-        return f"{subject.strip()}实例"[:40]
+        return f"{subject.strip()}判别实例与操作指引"[:40]
     heading = _HEADING_PREDICATE.split(text, maxsplit=1)[0]
     heading = heading.strip(" ，,；;、。.:：-—")
+    # The generic predicate splitter deliberately preserves nouns ending in
+    # “性” (for example “可行性分析”).  Strip only the remaining sentence-style
+    # score suffixes after a concrete topic has been retained.
+    heading = _HEADING_EVALUATIVE_SUFFIX.sub("", heading).strip(" ，,；;、。.:：-—")
     if len(heading) > 32:
         heading = re.split(r"[，,；;。]", heading, maxsplit=1)[0].strip()
     return (heading or f"满分条件{fallback_index}")[:40]
@@ -1093,6 +1126,20 @@ def _audit_chapter_blueprint_direct(
                     f"{node.title}",
                 )
             )
+        if blueprint.mode == "auto_outline" and is_evaluative_sentence_heading(node.title):
+            findings.append(
+                _finding(
+                    "EVALUATIVE_SENTENCE_HEADING",
+                    f"章节 {node.chapter_id} 标题包含评分式评价语: {node.title}",
+                )
+            )
+        if blueprint.mode == "auto_outline" and is_contextless_heading(node.title):
+            findings.append(
+                _finding(
+                    "MISSING_SUBJECT_HEADING",
+                    f"章节 {node.chapter_id} 标题缺少业务对象: {node.title}",
+                )
+            )
         bound_units = {
             *node.primary_response_unit_ids,
             *node.supporting_response_unit_ids,
@@ -1318,7 +1365,6 @@ def _audit_chapter_blueprint_direct(
                 )
             )
 
-    substantive_nodes_by_unit: dict[str, list[str]] = defaultdict(list)
     for condition_id in visible_condition_ids:
         unit_id = condition_owner_unit.get(condition_id)
         primaries = primary_chapters_by_unit.get(unit_id or "", [])
@@ -1382,19 +1428,6 @@ def _audit_chapter_blueprint_direct(
                         f"{unit_id} primary 章节的 writing_objectives",
                     )
                 )
-        if role in {"content", "evidence"} or sectionable_quality:
-            substantive_nodes_by_unit[unit_id or ""].extend(
-                sorted(bound_nodes)
-            )
-    for unit_id, bound_node_ids in substantive_nodes_by_unit.items():
-        if len(bound_node_ids) != len(set(bound_node_ids)):
-            findings.append(
-                _finding(
-                    "SUBSTANTIVE_CONDITIONS_COLLAPSED",
-                    f"ScoreResponseUnit {unit_id} 的可成文满分条件 "
-                    "满分条件未各自形成可检查章节节点",
-                )
-            )
 
     gates_by_unit: dict[str, list[Any]] = defaultdict(list)
     gate_covered_requirement_ids: set[str] = set()

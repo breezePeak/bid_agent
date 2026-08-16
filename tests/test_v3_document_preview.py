@@ -62,7 +62,7 @@ class DocumentPreviewTests(unittest.TestCase):
             )
         )
 
-    def test_ready_with_warnings_is_previewable_and_hash_bound(self):
+    def test_ready_with_warnings_is_blocked_from_preview(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
@@ -89,11 +89,9 @@ class DocumentPreviewTests(unittest.TestCase):
                     ],
                 },
             )
-            preview = DocumentPreviewService(context).build()
-            self.assertEqual(preview["status"], "ready_with_warnings")
-            self.assertEqual(preview["docx_sha256"], digest)
-            self.assertEqual(preview["warning_count"], 1)
-            self.assertEqual(preview["toc"][1]["title"], "技术方案")
+            with self.assertRaises(ControlPlaneError) as captured:
+                DocumentPreviewService(context).build()
+            self.assertEqual(captured.exception.code, "DOCUMENT_PREVIEW_NOT_READY")
 
     def test_delivery_verifier_allows_quality_warning_and_hashes_both_formats(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

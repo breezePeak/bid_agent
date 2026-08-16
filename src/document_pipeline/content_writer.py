@@ -65,6 +65,27 @@ class ContentWriter:
         """Generate only from a frozen Bundle; this method never reads workspace facts."""
         if not self.deterministic_test:
             require_writer_model(self.root)
+            from .global_project_context import GlobalProjectContextService
+
+            current_global = GlobalProjectContextService(self.context).load()
+            bundle_global = dict(bundle.global_project_context or {})
+            current_ref = (
+                str(current_global.get("global_context_id") or ""),
+                int(current_global.get("global_context_revision") or 0),
+                str(current_global.get("global_context_hash") or ""),
+            )
+            bundle_ref = (
+                str(bundle_global.get("global_context_id") or ""),
+                int(bundle_global.get("global_context_revision") or 0),
+                str(bundle_global.get("global_context_hash") or ""),
+            )
+            if bundle_ref != current_ref:
+                raise ControlPlaneError(
+                    "GLOBAL_PROJECT_CONTEXT_CONFLICT",
+                    "WriterBundle 未绑定当前全局项目事实版本，请重新编译写作单元。",
+                    status_code=409,
+                    details={"bundle": bundle_ref, "current": current_ref},
+                )
         requirements = {
             str(item["requirement_id"]): item
             for item in bundle.requirement_excerpts
@@ -96,10 +117,26 @@ class ContentWriter:
                 ):
                     condition_units[str(condition_id_value)] = unit
         blocks: list[ContentBlock] = []
+        parent_chapter_ids = {
+            str(item.get("parent_chapter_id") or "")
+            for item in bundle.blueprint_slice
+            if isinstance(item, dict)
+            and str(item.get("parent_chapter_id") or "")
+        }
+
+        def _is_leaf_target(target: dict) -> bool:
+            if "is_leaf" in target:
+                return bool(target.get("is_leaf"))
+            target_id = str(
+                target.get("node_id") or target.get("output_target") or ""
+            )
+            return target_id not in parent_chapter_ids
+
         writable_targets = [
             target
             for target in bundle.document_target_constraints
             if str(target.get("content_policy") or "full") == "full"
+            and _is_leaf_target(target)
         ]
         if writable_targets:
             first_target = writable_targets[0]
@@ -130,6 +167,8 @@ class ContentWriter:
                 )
         for target in bundle.document_target_constraints:
             if str(target.get("content_policy") or "full") != "full":
+                continue
+            if not _is_leaf_target(target):
                 continue
             target_id = str(target["output_target"])
             title = str(target["title"])
@@ -222,6 +261,72 @@ class ContentWriter:
                 ],
                 research_evidence=research_evidence,
             )
+            grounding_report: dict[str, object] = {}
+            if not self.deterministic_test:
+                from .content_grounding import ContentGroundingGate
+
+                local_grounding_context = dict(
+                    (bundle.chapter_grounding_contexts or {}).get(
+                        str(target.get("node_id") or "")
+                    )
+                    or bundle.chapter_grounding_context
+                    or {}
+                )
+
+                grounding_report = ContentGroundingGate.evaluate(
+                    global_context=dict(bundle.global_project_context or {}),
+                    chapter={
+                        "chapter_id": target_id,
+                        "title": title,
+                        "blueprint_node": next(
+                            (
+                                item
+                                for item in bundle.blueprint_slice
+                                if isinstance(item, dict)
+                                and str(item.get("chapter_id") or "") == target_id
+                            ),
+                            {},
+                        ),
+                    },
+                    content=content,
+                    requirement_texts=[
+                        *(
+                            str(
+                                item.get("normalized_requirement")
+                                or item.get("statement")
+                                or ""
+                            )
+                            for item in (
+                                requirements[requirement_id]
+                                for requirement_id in all_requirement_ids
+                                if requirement_id in requirements
+                            )
+                        ),
+                        *(
+                            str(item.get("text") or "")
+                            for item in (
+                                conditions[condition_id]
+                                for condition_id in target_condition_ids
+                                if condition_id in conditions
+                            )
+                        ),
+                    ],
+                    chapter_grounding_context=local_grounding_context,
+                    evidence_sources=[
+                        {
+                            **source,
+                            "batch_id": str(item.get("batch_id") or ""),
+                            "content": str(item.get("content") or ""),
+                        }
+                        for item in research_evidence
+                        if isinstance(item, dict)
+                        for source in item.get("sources") or []
+                        if isinstance(source, dict)
+                        and str(source.get("evidence_id") or "")
+                        in set(used_evidence_ids)
+                    ],
+                    require_evidence_use=bool(used_evidence_ids),
+                )
             self._validate_generated_chapter(
                 content,
                 target=target,
@@ -256,22 +361,83 @@ class ContentWriter:
                         "chapter_id": str(target.get("node_id") or ""),
                     },
                 )
-            blocks.append(
-                ContentBlock(
-                    block_id=f"{bundle.bundle_id}-{target['node_id']}-chapter",
-                    target_node_id=target_id,
-                    type="paragraph",
-                    content=content,
-                    topic_ids=sorted(topic_ids),
-                    duty_ids=sorted(duty_ids),
-                    requirement_ids=all_requirement_ids,
-                    score_point_ids=sorted(score_ids),
-                    evidence_ids=used_evidence_ids,
-                    claim_ids=target_condition_ids,
-                    confidence=0.82,
-                    source_bundle_hash=bundle.bundle_hash,
-                )
+            from .chapter_editing import split_text_into_blocks
+
+            # Phase 3: AI output is multiple blocks (paragraph/list/table), not one chapter string.
+            split_payloads = split_text_into_blocks(
+                content,
+                chapter_id=target_id,
+                actor_id="writer",
+                source="AI_GENERATED",
+                confidence=0.82,
+                source_bundle_hash=bundle.bundle_hash,
             )
+            if not split_payloads:
+                split_payloads = [
+                    {
+                        "block_id": f"{bundle.bundle_id}-{target_id}-chapter",
+                        "target_node_id": target_id,
+                        "type": "paragraph",
+                        "content": content,
+                        "order": 0,
+                        "source": "AI_GENERATED",
+                        "confidence": 0.82,
+                        "source_bundle_hash": bundle.bundle_hash,
+                    }
+                ]
+            for payload in split_payloads:
+                paragraph_index = int(payload.get("order") or 0)
+                fact_bindings = (
+                    grounding_report.get("paragraph_fact_bindings")
+                    if isinstance(grounding_report, dict)
+                    else {}
+                )
+                fact_bindings = (
+                    fact_bindings if isinstance(fact_bindings, dict) else {}
+                )
+                blocks.append(
+                    ContentBlock(
+                        block_id=str(payload["block_id"]),
+                        target_node_id=target_id,
+                        type=payload.get("type") or "paragraph",
+                        content=str(payload["content"]),
+                        topic_ids=sorted(topic_ids),
+                        duty_ids=sorted(duty_ids),
+                        requirement_ids=all_requirement_ids,
+                        score_point_ids=sorted(score_ids),
+                        evidence_ids=used_evidence_ids,
+                        fact_ids=list(
+                            fact_bindings.get(str(paragraph_index)) or []
+                        ),
+                        claim_ids=target_condition_ids,
+                        confidence=float(payload.get("confidence") or 0.82),
+                        source_bundle_hash=bundle.bundle_hash,
+                        source="AI_GENERATED",
+                        order=int(payload.get("order") or 0),
+                        created_by="writer",
+                        updated_by="writer",
+                        created_at=str(payload.get("created_at") or ""),
+                        updated_at=str(payload.get("updated_at") or ""),
+                        lock_state="UNLOCKED",
+                        human_locked=False,
+                    )
+                )
+            # Phase 7: if chapter workspace exists, also append a draft content revision
+            # (never formal). Locked blocks are preserved by the merge service.
+            if self.store.chapter_workspace(target_id) is not None:
+                from .chapter_editing import ChapterEditingService
+
+                workspace = self.store.chapter_workspace(target_id) or {}
+                ChapterEditingService(self.context).generate_draft(
+                    chapter_id=target_id,
+                    expected_chapter_revision=int(
+                        workspace.get("chapter_revision") or 0
+                    ),
+                    text=content,
+                    overwrite_locked=False,
+                    grounding_report=grounding_report,
+                    actor={"type": "system", "id": "writer", "role": "writer"},
+                )
             # This is an execution checkpoint only.  It lets the workspace show
             # the durable part of a running draft without promoting it to the
             # final Word artifact before the unit-level quality gate passes.
@@ -452,6 +618,19 @@ class ContentWriter:
         )
 
     @staticmethod
+    def _strip_writer_fences(raw: str) -> str:
+        cleaned = str(raw or "").strip().lstrip("\ufeff")
+        if cleaned.startswith("```"):
+            fence = re.match(
+                r"^```[a-zA-Z0-9_-]*\s*(.*?)\s*```$",
+                cleaned,
+                re.DOTALL,
+            )
+            if fence:
+                return fence.group(1).strip()
+        return cleaned
+
+    @staticmethod
     def _escape_raw_control_chars_in_json_strings(text: str) -> str:
         """Escape bare control characters that models often leave inside strings."""
 
@@ -484,47 +663,138 @@ class ContentWriter:
             out.append(char)
         return "".join(out)
 
+    @staticmethod
+    def _repair_common_json_noise(text: str) -> str:
+        repaired = str(text or "")
+        repaired = repaired.replace("“", '"').replace("”", '"')
+        repaired = repaired.replace("‘", "'").replace("’", "'")
+        # Trailing commas before object/array close.
+        repaired = re.sub(r",(\s*[}\]])", r"\1", repaired)
+        return repaired
+
+    @classmethod
+    def _object_candidates(cls, raw: str) -> list[str]:
+        cleaned = cls._strip_writer_fences(raw)
+        candidates: list[str] = []
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            candidates.append(cleaned[start : end + 1])
+        try:
+            extracted = extract_json_text(raw)
+        except Exception:
+            extracted = ""
+        if str(extracted).lstrip().startswith("{"):
+            candidates.append(str(extracted).strip())
+        # Deduplicate while preserving order.
+        unique: list[str] = []
+        for item in candidates:
+            if item and item not in unique:
+                unique.append(item)
+        return unique
+
+    @classmethod
+    def _salvage_writer_payload(cls, raw: str) -> dict | None:
+        """Best-effort recovery when the model emits almost-JSON chapter bodies."""
+
+        text = cls._escape_raw_control_chars_in_json_strings(
+            cls._repair_common_json_noise(cls._strip_writer_fences(raw))
+        )
+        content_match = re.search(
+            r'"content"\s*:\s*"((?:\\.|[^"\\])*)"',
+            text,
+            re.DOTALL,
+        )
+        if not content_match:
+            # Content with residual bare newlines after partial repair: take the
+            # span until the next top-level field or object close.
+            loose = re.search(
+                r'"content"\s*:\s*"(.*)"\s*,\s*"used_evidence_ids"',
+                text,
+                re.DOTALL,
+            )
+            if not loose:
+                loose = re.search(
+                    r'"content"\s*:\s*"(.*)"\s*}',
+                    text,
+                    re.DOTALL,
+                )
+            if not loose:
+                return None
+            content_raw = loose.group(1)
+        else:
+            content_raw = content_match.group(1)
+        try:
+            content = json.loads(f'"{content_raw}"')
+        except json.JSONDecodeError:
+            content = (
+                content_raw.replace("\\n", "\n")
+                .replace("\\r", "\r")
+                .replace("\\t", "\t")
+                .replace('\\"', '"')
+                .replace("\\\\", "\\")
+            )
+        content = str(content or "").strip()
+        if not content:
+            return None
+        evidence_ids: list[str] = []
+        evidence_match = re.search(
+            r'"used_evidence_ids"\s*:\s*(\[[^\]]*\])',
+            text,
+            re.DOTALL,
+        )
+        if evidence_match:
+            try:
+                parsed_ids = json.loads(
+                    cls._repair_common_json_noise(evidence_match.group(1))
+                )
+            except json.JSONDecodeError:
+                parsed_ids = []
+            if isinstance(parsed_ids, list):
+                evidence_ids = [
+                    str(item).strip()
+                    for item in parsed_ids
+                    if str(item).strip()
+                ]
+        return {
+            "content": content,
+            "used_evidence_ids": evidence_ids,
+        }
+
     @classmethod
     def _parse_writer_json(cls, raw: str) -> dict:
         """Parse writer model output as a JSON object (never a bare array/scalar)."""
 
-        cleaned = str(raw or "").strip()
-        if cleaned.startswith("```"):
-            fence = re.match(
-                r"^```[a-zA-Z0-9_-]*\s*(.*?)\s*```$",
-                cleaned,
-                re.DOTALL,
-            )
-            if fence:
-                cleaned = fence.group(1).strip()
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start < 0 or end <= start:
-            # Fall back to shared extractor only for object-shaped payloads.
-            try:
-                extracted = extract_json_text(raw)
-            except Exception as exc:  # noqa: BLE001
-                raise ValueError("模型输出中未找到 JSON 对象") from exc
-            if not str(extracted).lstrip().startswith("{"):
-                raise ValueError("Writer 输出必须是 JSON 对象")
-            start, end = 0, len(extracted) - 1
-            cleaned = extracted
-        text = cleaned[start : end + 1]
         last_error: Exception | None = None
-        for payload in (
-            text,
-            cls._escape_raw_control_chars_in_json_strings(text),
-        ):
-            try:
-                decoded = json.loads(payload)
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
-                continue
-            if isinstance(decoded, dict):
-                return decoded
-            last_error = ValueError("Writer 输出必须是 JSON 对象")
-        assert last_error is not None
-        raise last_error
+        for candidate in cls._object_candidates(raw):
+            variants = [
+                candidate,
+                cls._repair_common_json_noise(candidate),
+                cls._escape_raw_control_chars_in_json_strings(candidate),
+                cls._escape_raw_control_chars_in_json_strings(
+                    cls._repair_common_json_noise(candidate)
+                ),
+            ]
+            for payload in variants:
+                try:
+                    decoded = json.loads(payload)
+                except Exception as exc:  # noqa: BLE001 - try next repair
+                    last_error = exc
+                    continue
+                if isinstance(decoded, dict) and str(
+                    decoded.get("content") or ""
+                ).strip():
+                    return decoded
+                if isinstance(decoded, dict):
+                    last_error = ValueError("Writer 输出正文为空")
+                else:
+                    last_error = ValueError("Writer 输出必须是 JSON 对象")
+        salvaged = cls._salvage_writer_payload(raw)
+        if salvaged is not None:
+            return salvaged
+        if last_error is not None:
+            raise last_error
+        raise ValueError("模型输出中未找到 JSON 对象")
 
     @staticmethod
     def _short_items(values: list[object], limit: int = 4) -> list[str]:
@@ -622,7 +892,39 @@ class ContentWriter:
             ],
             5,
         )
-        project = bundle.project_context or {}
+        chapter_grounding_context = dict(
+            (bundle.chapter_grounding_contexts or {}).get(
+                str(target.get("node_id") or "")
+            )
+            or bundle.chapter_grounding_context
+            or {}
+        )
+        blueprint_node = next(
+            (
+                item
+                for item in bundle.blueprint_slice
+                if isinstance(item, dict)
+                and str(item.get("chapter_id") or "")
+                == str(target.get("node_id") or "")
+            ),
+            {},
+        )
+        from .content_grounding import chapter_opening_policy
+
+        opening_policy = chapter_opening_policy(
+            {
+                "title": title,
+                "blueprint_node": blueprint_node,
+            }
+        )
+        project = bundle.global_project_context or bundle.project_context or {}
+        if not self.deterministic_test:
+            from .global_project_context import GlobalProjectContextService
+
+            project = GlobalProjectContextService.prompt_projection(
+                dict(project),
+                chapter_grounding_context,
+            )
         project_name = str(
             (project.get("identity") or {}).get("project_name")
             or (project.get("identity") or {}).get("项目名称")
@@ -640,11 +942,42 @@ class ContentWriter:
                 if str(evidence_id)
             }
         )
+        from .chapter_writing_outline import compile_chapter_writing_outline
+
+        writing_outline = compile_chapter_writing_outline(
+            {
+                "chapter_id": str(target.get("node_id") or ""),
+                "title": title,
+                "blueprint_node": blueprint_node,
+            },
+            tender_requirements=[
+                {
+                    "requirement_id": item.get("requirement_id"),
+                    "text": item.get("normalized_requirement") or item.get("statement"),
+                }
+                for item in requirements
+            ],
+            scoring_requirements=[
+                {
+                    "score_point_id": item.get("score_point_id"),
+                    "title": item.get("title"),
+                    "response_expectation": item.get("response_expectation"),
+                    "conditions": list(item.get("score_conditions") or []),
+                    "response_units": list(item.get("response_units") or []),
+                }
+                for item in bundle.score_obligations
+                if isinstance(item, dict)
+            ],
+            chapter_context_items=list(bundle.chapter_context_items or []),
+        )
         if not self.deterministic_test:
             prompt_bundle = {
                 "chapter_title": title,
                 "target_size": target_size,
                 "project_context": project,
+                "chapter_grounding_context": chapter_grounding_context,
+                "opening_policy": opening_policy,
+                "writing_outline": writing_outline,
                 "chapter_objectives": objectives,
                 "tender_requirement_excerpts": requirement_points,
                 "internal_coverage_intents": intents,
@@ -653,8 +986,11 @@ class ContentWriter:
                 "required_evidence_types": evidence_types,
                 "allowed_research_evidence": research_evidence or [],
                 "writing_rule": (
-                    "以章节标题和评分义务为主线，只覆盖与本章相关的内容；"
-                    "不要求每个章节机械包含背景、步骤、质量、成果、验收或风险等全部维度。"
+                    "按 writing_outline.blocks 顺序写正文，一块至少一段；"
+                    "每段按对应 block 的 write_as 写清做法或检查口径；"
+                    "只有 outcome_kind=deliverable/acceptance 的 block，才能写招标文件明确要求的"
+                    "交付成果或验收内容，其他 block 不得机械添加“本章交付物”。"
+                    "不要输出提纲标题，不要出现评分术语。"
                 ),
                 "prohibited_visible_text": [
                     "满分条件",
@@ -678,14 +1014,22 @@ class ContentWriter:
                     {
                         "role": "system",
                         "content": (
-                            "你是技术标书正文写作器。以章节标题和评分义务为主线输出项目化正文，"
+                            "你是技术标书正文写作器。按 writing_outline.blocks 顺序输出项目化正文，"
+                            "一块至少一段，并按各 block 的 write_as 写清做法或检查口径。"
+                            "只有 outcome_kind=deliverable/acceptance 的 block，才能写招标文件明确要求的"
+                            "交付成果或验收内容；其他 block 不得机械添加“本章交付物”。"
                             "不得复述评分条件、招标写作指令或生成占位话术。"
                             "需求与评分信息只用于内部覆盖检查，不能写成“本节用于、"
                             "围绕要求、满分条件、得分任务”等正文。"
                             "公开研究只可支持背景、现行依据、专业方法和风险控制；"
+                            "必须遵守每条资料的 relevance_tier 与 usage_constraints；"
+                            "同类项目和行业标准不得写成当前项目的采购人、范围、任务或成果事实。"
                             "禁止用公开资料虚构企业资质、业绩、人员、报价或承诺。"
                             "只展开与本章相关、能够支撑评分义务的内容；不要为了凑模板"
                             "强行补写不相关的方法、步骤、质量控制、成果、验收或风险。"
+                            "严格执行 opening_policy：只有项目背景或任务背景章节可用项目概况开篇；"
+                            "其他章节必须直接切入标题对应的核心内容，不得重复覆盖区域、总体任务"
+                            "和成果清单，不得在同级子章节套用同一段项目总述。"
                             "并严格输出 JSON 对象，不要 Markdown；"
                             "content 字段内不要插入未转义的换行控制字符。"
                         ),
@@ -699,13 +1043,14 @@ class ContentWriter:
                     },
                 ]
                 last_error: Exception | None = None
-                # One automatic retry absorbs occasional malformed model JSON
-                # without falling back to template prose.
-                for attempt in range(2):
+                # Automatic retries absorb malformed model JSON without falling
+                # back to template prose or pausing the whole pipeline early.
+                attempt_messages = list(messages)
+                for attempt in range(3):
                     try:
                         raw = chat(
-                            messages,
-                            temperature=0.25 if attempt == 0 else 0.15,
+                            attempt_messages,
+                            temperature=0.25 if attempt == 0 else 0.1,
                         ).strip()
                         decoded = ContentWriter._parse_writer_json(raw)
                         content = str(decoded.get("content") or "").strip()
@@ -723,6 +1068,20 @@ class ContentWriter:
                         return content, used_evidence_ids
                     except Exception as attempt_exc:
                         last_error = attempt_exc
+                        attempt_messages = [
+                            *messages,
+                            {
+                                "role": "user",
+                                "content": (
+                                    "上次输出无法解析为合法 JSON 对象。"
+                                    "请只输出一个 JSON 对象，字段为 content 与 "
+                                    "used_evidence_ids；content 使用 \\n 表示换行，"
+                                    "不要 Markdown、不要前后说明文字。"
+                                    f"错误：{type(attempt_exc).__name__}: "
+                                    f"{attempt_exc}"[:500]
+                                ),
+                            },
+                        ]
                         continue
                 assert last_error is not None
                 raise last_error
@@ -731,10 +1090,15 @@ class ContentWriter:
             except Exception as exc:
                 raise ControlPlaneError(
                     "WRITER_MODEL_ACTION_REQUIRED",
-                    "写作模型未返回有效的项目化正文，生成已暂停；不会使用模板回退。",
+                    (
+                        "写作模型多次未返回可解析的项目化正文，生成已在当前章节暂停；"
+                        "请检查模型配置后重试该章节，不会使用模板回退。"
+                    ),
+                    retryable=True,
                     details={
                         "unit_id": bundle.unit_id,
                         "chapter_id": str(target.get("node_id") or ""),
+                        "chapter_title": title,
                         "error": f"{type(exc).__name__}: {exc}"[:2000],
                     },
                 ) from exc

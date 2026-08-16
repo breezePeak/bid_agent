@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
@@ -8,11 +9,33 @@ from typing import Protocol
 from control_plane import ControlStore, WorkspaceContext
 from utils import read_json, write_json
 
-from .contracts import EvidenceBatch, EvidenceItem, EvidenceNeed, EvidenceSourceType
+from .contracts import (
+    EvidenceBatch,
+    EvidenceItem,
+    EvidenceNeed,
+    EvidenceRelevanceTier,
+    EvidenceSourceType,
+)
 from .input_manifest import V3_ROOT
 
 
 EVIDENCE_BATCH_DIR = V3_ROOT / "evidence" / "batches"
+RESEARCH_RELEVANCE_POLICY_VERSION = "v3.project-relevance.v1"
+
+
+def load_published_batch(context: WorkspaceContext, batch_id: str) -> EvidenceBatch | None:
+    """Read one path-safe published batch without depending on a scheduler."""
+    normalized = str(batch_id or "").strip()
+    if not re.fullmatch(r"EB-[0-9a-f]{16}(?:-R[1-9][0-9]*)?", normalized):
+        return None
+    path = context.root / EVIDENCE_BATCH_DIR / f"{normalized}.json"
+    if not path.is_file():
+        return None
+    try:
+        batch = EvidenceBatch.model_validate(read_json(path))
+    except Exception:
+        return None
+    return batch if batch.status == "published" else None
 
 
 @dataclass(frozen=True)
@@ -23,6 +46,8 @@ class ResearchCandidate:
     source_url: str | None = None
     source_type: EvidenceSourceType = EvidenceSourceType.WEB
     claim_types: tuple[str, ...] = ("project_context",)
+    relevance_tier: EvidenceRelevanceTier | None = None
+    supporting_excerpt: str = ""
 
 
 class ResearchProvider(Protocol):
@@ -53,7 +78,12 @@ class ResearchService:
             return self._publish(need, [], query_count=0, status="gap")
         self.store.upsert_evidence_need({**need.model_dump(mode="json"), "status": "researching"})
         try:
-            candidates = self.provider.search(need.question, limit=need.query_budget)
+            # Retrieve a broader candidate set, then adopt only the best three
+            # relevant sources.  A real URL is not evidence of relevance.
+            candidates = self.provider.search(
+                need.question,
+                limit=max(12, need.query_budget),
+            )
         except Exception as exc:
             return self._publish(
                 need,
@@ -62,9 +92,33 @@ class ResearchService:
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}"[:2000],
             )
-        items = [self._validate_candidate(need, candidate, index) for index, candidate in enumerate(candidates[: need.query_budget])]
+        items = [
+            self._validate_candidate(need, candidate, index)
+            for index, candidate in enumerate(candidates)
+        ]
         items = [item for item in items if item is not None]
-        return self._publish(need, items, query_count=min(len(candidates), need.query_budget), status="published" if items else "gap")
+        rank = {
+            EvidenceRelevanceTier.PROJECT_DIRECT: 0,
+            EvidenceRelevanceTier.SIMILAR_PROJECT: 1,
+            EvidenceRelevanceTier.INDUSTRY_STANDARD: 2,
+            EvidenceRelevanceTier.GENERAL_REFERENCE: 3,
+        }
+        items.sort(
+            key=lambda item: (
+                rank[item.relevance_tier],
+                -len(item.matched_project_anchors),
+                -len(item.matched_task_anchors),
+                item.evidence_id,
+            )
+        )
+        adopted_limit = min(need.query_budget, need.max_adopted_items)
+        items = items[:adopted_limit]
+        return self._publish(
+            need,
+            items,
+            query_count=1,
+            status="published" if items else "gap",
+        )
 
     def _validate_candidate(self, need: EvidenceNeed, candidate: ResearchCandidate, index: int) -> EvidenceItem | None:
         if not candidate.title.strip() or not candidate.publisher.strip() or not candidate.content.strip():
@@ -75,6 +129,42 @@ class ResearchService:
             return None
         if "enterprise_capability" in candidate.claim_types:
             return None
+        tier, matched_project, matched_task = self._classify_relevance(
+            need, candidate
+        )
+        if tier is None:
+            return None
+        allowed = set(need.allowed_relevance_tiers)
+        if tier not in allowed and not (
+            not need.project_anchors
+            and not need.task_anchors
+            and tier is EvidenceRelevanceTier.GENERAL_REFERENCE
+        ):
+            return None
+        claim_types = [
+            str(item)
+            for item in candidate.claim_types
+            if str(item) != "enterprise_capability"
+        ]
+        if tier is not EvidenceRelevanceTier.PROJECT_DIRECT:
+            claim_types = [
+                item for item in claim_types if item != "project_context"
+            ]
+            if tier is EvidenceRelevanceTier.INDUSTRY_STANDARD:
+                claim_types = list(dict.fromkeys([*claim_types, "standard", "method"]))
+            else:
+                claim_types = list(dict.fromkeys([*claim_types, "method"]))
+        usage_constraints = []
+        if tier is EvidenceRelevanceTier.SIMILAR_PROJECT:
+            usage_constraints.append(
+                "仅可支持实施方法、质量控制、风险或验收思路，不得写成当前项目事实。"
+            )
+        elif tier is EvidenceRelevanceTier.INDUSTRY_STANDARD:
+            usage_constraints.append(
+                "仅可支持现行标准、专业方法和检查验收依据，不得替代招标文件中的项目事实。"
+            )
+        elif tier is EvidenceRelevanceTier.GENERAL_REFERENCE:
+            usage_constraints.append("仅供线索核对，不得写入当前项目正文。")
         batch_id = self._base_batch_id(need)
         evidence_id = f"E-{hashlib.sha256(f'{batch_id}:{index}:{candidate.source_url or candidate.title}'.encode('utf-8')).hexdigest()[:16]}"
         return EvidenceItem(
@@ -85,9 +175,99 @@ class ResearchService:
             source_url=candidate.source_url,
             publisher=candidate.publisher,
             content=candidate.content,
-            claim_types=list(candidate.claim_types),
+            claim_types=claim_types,
             retrieved_at=datetime.now(UTC).isoformat(),
+            relevance_tier=tier,
+            matched_project_anchors=matched_project,
+            matched_task_anchors=matched_task,
+            supporting_excerpt=(
+                str(candidate.supporting_excerpt or "").strip()
+                or self._supporting_excerpt(
+                    candidate.content,
+                    [*matched_project, *matched_task],
+                )
+            ),
+            usage_constraints=usage_constraints,
         )
+
+    @staticmethod
+    def _normalized(value: str) -> str:
+        return re.sub(r"[\W_]+", "", str(value or ""), flags=re.UNICODE).casefold()
+
+    @classmethod
+    def _matched_anchors(
+        cls,
+        anchors: list[str],
+        haystack: str,
+    ) -> list[str]:
+        compact_haystack = cls._normalized(haystack)
+        matches: list[str] = []
+        for anchor in anchors:
+            value = str(anchor or "").strip()
+            compact = cls._normalized(value)
+            if len(compact) >= 3 and compact in compact_haystack:
+                matches.append(value)
+        return list(dict.fromkeys(matches))
+
+    @classmethod
+    def _classify_relevance(
+        cls,
+        need: EvidenceNeed,
+        candidate: ResearchCandidate,
+    ) -> tuple[EvidenceRelevanceTier | None, list[str], list[str]]:
+        text = "\n".join(
+            (
+                candidate.title,
+                candidate.publisher,
+                candidate.source_url or "",
+                candidate.content,
+            )
+        )
+        matched_project = cls._matched_anchors(need.project_anchors, text)
+        matched_task = cls._matched_anchors(need.task_anchors, text)
+        project_aware = bool(need.project_anchors or need.task_anchors)
+        explicit = candidate.relevance_tier
+        if matched_project:
+            tier = EvidenceRelevanceTier.PROJECT_DIRECT
+        elif not project_aware:
+            if explicit is not None:
+                tier = explicit
+            elif candidate.source_type is EvidenceSourceType.STANDARD:
+                tier = EvidenceRelevanceTier.INDUSTRY_STANDARD
+            else:
+                tier = EvidenceRelevanceTier.GENERAL_REFERENCE
+        elif matched_task:
+            standard_cues = re.search(
+                r"标准|规范|规程|指南|办法|技术要求|质量要求|验收",
+                text,
+            )
+            if (
+                candidate.source_type is EvidenceSourceType.STANDARD
+                or standard_cues
+                or explicit is EvidenceRelevanceTier.INDUSTRY_STANDARD
+            ):
+                tier = EvidenceRelevanceTier.INDUSTRY_STANDARD
+            else:
+                tier = EvidenceRelevanceTier.SIMILAR_PROJECT
+        else:
+            # Even genuine government pages are rejected when they cannot show
+            # which current-project or current-task conclusion they support.
+            return None, [], []
+        if explicit is EvidenceRelevanceTier.PROJECT_DIRECT and not matched_project:
+            return None, [], []
+        return tier, matched_project, matched_task
+
+    @staticmethod
+    def _supporting_excerpt(content: str, anchors: list[str]) -> str:
+        paragraphs = [
+            item.strip()
+            for item in re.split(r"[\r\n]+", str(content or ""))
+            if item.strip()
+        ]
+        for paragraph in paragraphs:
+            if any(str(anchor) in paragraph for anchor in anchors):
+                return paragraph[:800]
+        return str(content or "").strip()[:800]
 
     def _publish(
         self,
@@ -115,6 +295,9 @@ class ResearchService:
             )
         source_hashes = {
             need.need_id: hashlib.sha256(need.question.encode("utf-8")).hexdigest(),
+            "relevance_policy": hashlib.sha256(
+                RESEARCH_RELEVANCE_POLICY_VERSION.encode("utf-8")
+            ).hexdigest(),
         }
         if provider_fingerprint := self._provider_fingerprint():
             source_hashes["research_attachments"] = provider_fingerprint
@@ -135,12 +318,22 @@ class ResearchService:
                 raise ValueError("EvidenceBatch 不可变；相同 need 不能覆盖已有证据快照")
         else:
             write_json(path, batch.model_dump(mode="json"))
-        next_status = "satisfied" if status == "published" else "gap"
+        next_status = {
+            "published": "satisfied",
+            "gap": "gap",
+            "failed": "open",
+        }[status]
         self.store.upsert_evidence_need({**need.model_dump(mode="json"), "status": next_status, "active_batch_id": batch_id})
         return batch
 
     def _base_batch_id(self, need: EvidenceNeed) -> str:
-        seed = f"{need.need_id}:{need.question}"
+        seed = (
+            f"{RESEARCH_RELEVANCE_POLICY_VERSION}:"
+            f"{need.need_id}:{need.question}:"
+            f"{'|'.join(need.project_anchors)}:"
+            f"{'|'.join(need.task_anchors)}:"
+            f"{'|'.join(item.value for item in need.allowed_relevance_tiers)}"
+        )
         if provider_fingerprint := self._provider_fingerprint():
             seed += f":{provider_fingerprint}"
         return f"EB-{hashlib.sha256(seed.encode('utf-8')).hexdigest()[:16]}"

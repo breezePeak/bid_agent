@@ -1,7 +1,7 @@
-# 标书 Agent 控制面架构 V2
+# 标书 Agent 控制面架构 V2（历史归档）
 
 > 版本：V2  
-> 状态：V2-only 切换进行中，V1 API 已废弃
+> 状态：已废弃 / 历史归档；不得作为运行时、API 或数据恢复依据
 > 确认日期：2026-07-21  
 > 现行实现：[current_logic_flow.md](./current_logic_flow.md)
 > 版本导航：[current_logic_flow.md](./current_logic_flow.md)

@@ -6,7 +6,29 @@ import { fetchCurrentUser } from '../api'
 const routes = [
   { path: '/', redirect: '/login' },
   { path: '/login', name: 'Login', component: Login },
-  { path: '/business', name: 'Business', component: Business },
+  {
+    path: '/business',
+    name: 'Business',
+    component: Business,
+  },
+  {
+    path: '/business/:workspaceId',
+    name: 'ProjectHome',
+    component: Business,
+    props: true,
+  },
+  {
+    path: '/business/:workspaceId/pipeline',
+    name: 'WorkspacePipeline',
+    component: Business,
+    props: true,
+  },
+  {
+    path: '/business/:workspaceId/chapters/:chapterId',
+    name: 'ChapterWorkspace',
+    component: Business,
+    props: true,
+  },
 ]
 
 const router = createRouter({

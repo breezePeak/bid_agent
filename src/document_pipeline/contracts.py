@@ -3,7 +3,15 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 
 V3_SCHEMA_VERSION = "v3"
@@ -531,10 +539,7 @@ class ProjectFact(BaseModel):
     statement: str = Field(min_length=1)
     source_anchor: SourceAnchor | None = None
     requirement_ids: list[str] = Field(default_factory=list)
-    upstream_refs: list[str] = Field(
-        default_factory=list,
-        exclude_if=lambda value: not value,
-    )
+    upstream_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def references_are_unique(self) -> "ProjectFact":
@@ -543,6 +548,22 @@ class ProjectFact(BaseModel):
         if len(self.upstream_refs) != len(set(self.upstream_refs)):
             raise ValueError("ProjectFact 不允许重复 upstream_refs")
         return self
+
+    @model_serializer(mode="wrap")
+    def _serialize_model(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and not data.get("upstream_refs"):
+            data.pop("upstream_refs", None)
+        return data
+
+
+class EvidenceRelevanceTier(str, Enum):
+    """How a public source may be used for the current procurement."""
+
+    PROJECT_DIRECT = "project_direct"
+    SIMILAR_PROJECT = "similar_project"
+    INDUSTRY_STANDARD = "industry_standard"
+    GENERAL_REFERENCE = "general_reference"
 
 
 class EvidenceNeed(BaseModel):
@@ -556,6 +577,91 @@ class EvidenceNeed(BaseModel):
     deadline_stage: str = Field(min_length=1)
     query_budget: int = Field(ge=0, le=20)
     status: Literal["open", "researching", "satisfied", "gap", "cancelled"] = "open"
+    project_anchors: list[str] = Field(default_factory=list)
+    task_anchors: list[str] = Field(default_factory=list)
+    allowed_relevance_tiers: list[EvidenceRelevanceTier] = Field(
+        default_factory=lambda: [
+            EvidenceRelevanceTier.PROJECT_DIRECT,
+            EvidenceRelevanceTier.SIMILAR_PROJECT,
+            EvidenceRelevanceTier.INDUSTRY_STANDARD,
+        ]
+    )
+    max_adopted_items: int = Field(default=3, ge=1, le=5)
+
+    @model_validator(mode="after")
+    def research_anchors_are_unique(self) -> "EvidenceNeed":
+        if len(self.project_anchors) != len(set(self.project_anchors)):
+            raise ValueError("EvidenceNeed 不允许重复 project_anchors")
+        if len(self.task_anchors) != len(set(self.task_anchors)):
+            raise ValueError("EvidenceNeed 不允许重复 task_anchors")
+        if len(self.allowed_relevance_tiers) != len(
+            set(self.allowed_relevance_tiers)
+        ):
+            raise ValueError("EvidenceNeed 不允许重复 allowed_relevance_tiers")
+        return self
+
+
+class ResearchQuery(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    query_id: str = Field(min_length=1)
+    question: str = Field(min_length=1)
+    target_node_ids: list[str] = Field(min_length=1)
+    applicability: str = Field(min_length=1)
+    status: Literal[
+        "planned",
+        "researching",
+        "published",
+        "blocked_human",
+        "skipped",
+    ] = "planned"
+    attempts: list[dict[str, Any]] = Field(default_factory=list)
+    batch_id: str = ""
+    evidence_count: int = Field(default=0, ge=0)
+    sources: list[dict[str, Any]] = Field(default_factory=list)
+    error: str = ""
+
+    @model_validator(mode="after")
+    def target_ids_are_unique(self) -> "ResearchQuery":
+        if len(self.target_node_ids) != len(set(self.target_node_ids)):
+            raise ValueError("ResearchQuery 不允许重复 target_node_ids")
+        return self
+
+
+class ResearchDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    decision_id: str = Field(min_length=1)
+    operation_id: str = Field(min_length=1)
+    unit_id: str = Field(min_length=1)
+    applicable_chapter_ids: list[str] = Field(default_factory=list)
+    applicable_chapter_titles: list[str] = Field(default_factory=list)
+    needs_research: bool
+    reason: str = Field(min_length=1)
+    queries: list[ResearchQuery] = Field(default_factory=list, max_length=3)
+    prohibited_research_scopes: list[str] = Field(default_factory=list)
+    decision_status: Literal[
+        "planned",
+        "skipped",
+        "researching",
+        "published",
+        "blocked_human",
+    ]
+    runtime: dict[str, Any] = Field(default_factory=dict)
+    used_evidence_by_chapter: dict[str, list[str]] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def decision_is_consistent(self) -> "ResearchDecision":
+        if self.needs_research and not self.queries:
+            raise ValueError("需要检索的 ResearchDecision 至少包含一个查询")
+        if not self.needs_research and self.queries:
+            raise ValueError("不需要检索的 ResearchDecision 不应包含查询")
+        if len(self.applicable_chapter_ids) != len(
+            set(self.applicable_chapter_ids)
+        ):
+            raise ValueError("ResearchDecision 不允许重复适用章节")
+        return self
 
 
 class EvidenceSourceType(str, Enum):
@@ -580,6 +686,13 @@ class EvidenceItem(BaseModel):
     content: str = Field(min_length=1)
     claim_types: list[Literal["project_context", "standard", "method", "enterprise_capability"]] = Field(default_factory=list)
     retrieved_at: str = Field(min_length=1)
+    relevance_tier: EvidenceRelevanceTier = (
+        EvidenceRelevanceTier.GENERAL_REFERENCE
+    )
+    matched_project_anchors: list[str] = Field(default_factory=list)
+    matched_task_anchors: list[str] = Field(default_factory=list)
+    supporting_excerpt: str = ""
+    usage_constraints: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def enterprise_claims_require_company_evidence(self) -> "EvidenceItem":
@@ -627,14 +740,88 @@ class ProjectModel(ContractModel):
 
     @model_validator(mode="after")
     def unique_project_references(self) -> "ProjectModel":
-        fact_ids = [fact.fact_id for group in (self.confirmed_facts, self.inferences, self.conflicts) for fact in group]
+        fact_ids = [
+            fact.fact_id
+            for group in (self.confirmed_facts, self.inferences, self.conflicts)
+            for fact in group
+        ]
         need_ids = [need.need_id for need in self.evidence_needs]
         if len(fact_ids) != len(set(fact_ids)) or len(need_ids) != len(set(need_ids)):
             raise ValueError("ProjectModel 不允许重复事实或 EvidenceNeed ID")
-        if len(self.semantic_upstream_refs) != len(
-            set(self.semantic_upstream_refs)
-        ):
+        if len(self.semantic_upstream_refs) != len(set(self.semantic_upstream_refs)):
             raise ValueError("ProjectModel 不允许重复 semantic_upstream_refs")
+        return self
+
+
+class GlobalProjectContext(BaseModel):
+    """One immutable project fact view inherited by every chapter."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    global_context_id: str = Field(min_length=1)
+    global_context_revision: int = Field(ge=1)
+    global_context_hash: str = Field(min_length=1)
+    project_id: str = Field(min_length=1)
+    identity: dict[str, str] = Field(default_factory=dict)
+    background: list[str] = Field(default_factory=list)
+    goals: list[str] = Field(default_factory=list)
+    scope: list[str] = Field(default_factory=list)
+    boundaries: list[str] = Field(default_factory=list)
+    work_packages: list[str] = Field(default_factory=list)
+    dependencies: list[str] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
+    processing: list[str] = Field(default_factory=list)
+    outputs: list[str] = Field(default_factory=list)
+    deliverables: list[str] = Field(default_factory=list)
+    acceptance_conditions: list[str] = Field(default_factory=list)
+    milestones: list[str] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
+    risks: list[str] = Field(default_factory=list)
+    constraints: list[str] = Field(default_factory=list)
+    terminology: dict[str, str] = Field(default_factory=dict)
+    confirmed_facts: list[ProjectFact] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def has_shared_project_identity(self) -> "GlobalProjectContext":
+        identity = {str(key).casefold(): str(value) for key, value in self.identity.items()}
+        project_name = next(
+            (
+                identity[key]
+                for key in ("project_name", "项目名称", "project", "项目")
+                if identity.get(key)
+            ),
+            "",
+        )
+        if not project_name:
+            raise ValueError("全局项目上下文必须包含项目名称")
+        fact_ids = [fact.fact_id for fact in self.confirmed_facts]
+        if len(fact_ids) != len(set(fact_ids)):
+            raise ValueError("全局项目上下文不允许重复 fact_id")
+        return self
+
+
+class ChapterGroundingContext(BaseModel):
+    """Chapter-local additions referencing, never copying, global facts."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    global_context_id: str = Field(min_length=1)
+    global_context_revision: int = Field(ge=1)
+    global_context_hash: str = Field(min_length=1)
+    chapter_context_id: str = Field(min_length=1)
+    chapter_context_revision: int = Field(default=0, ge=0)
+    chapter_context_hash: str = Field(min_length=1)
+    requirement_excerpts: list[dict[str, Any]] = Field(default_factory=list)
+    score_obligations: list[dict[str, Any]] = Field(default_factory=list)
+    chapter_context_items: list[dict[str, Any]] = Field(default_factory=list)
+    highlighted_fact_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def highlighted_facts_are_unique(self) -> "ChapterGroundingContext":
+        if len(self.highlighted_fact_ids) != len(set(self.highlighted_fact_ids)):
+            raise ValueError("章节上下文不允许重复 highlighted_fact_ids")
         return self
 
 
@@ -921,6 +1108,121 @@ class ChapterBlueprint(ContractModel):
         return self
 
 
+class ChapterWorkspaceRecord(BaseModel):
+    """Logical chapter workspace inside a bid project Workspace.
+
+    Phase 1 control-plane aggregate. Not a promoted canonical Artifact and not a
+    separate project/control.db. Bound to one ChapterBlueprint ``chapter_id``.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    blueprint_revision: int = Field(ge=1)
+    blueprint_hash: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    parent_chapter_id: str | None = None
+    order: int = Field(ge=0)
+    status: Literal["active", "archived"] = "active"
+    approval_status: Literal[
+        "not_started",
+        "draft",
+        "pending_approval",
+        "approved",
+    ] = "not_started"
+    # Independent CAS counter for chapter-scoped mutations.
+    chapter_revision: int = Field(default=0, ge=0)
+    head_content_revision: int = Field(default=0, ge=0)
+    formal_content_revision: int = Field(default=0, ge=0)
+    head_context_revision: int = Field(default=0, ge=0)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    state_hash: str = Field(default="")
+    created_at: str = Field(min_length=1)
+    updated_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def chapter_id_is_safe(self) -> "ChapterWorkspaceRecord":
+        value = self.chapter_id
+        if (
+            not value
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or value != value.strip()
+        ):
+            raise ValueError("chapter_id 非法")
+        return self
+
+
+ChapterContextItemKind = Literal[
+    "GOAL",
+    "SCORING_REQUIREMENT",
+    "TECHNICAL_CONSTRAINT",
+    "KEY_FACT",
+]
+
+
+class ChapterContextItem(BaseModel):
+    """Stable chapter-local context item (Phase 2).
+
+    Overlay on shared global artifacts (RequirementLedger / ScoreModel / …).
+    Does not replace or delete upstream facts.
+    """
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    item_id: str = Field(min_length=1)
+    kind: ChapterContextItemKind
+    title: str = Field(min_length=1)
+    body: str = Field(default="")
+    order: int = Field(ge=0)
+    source: Literal["BLUEPRINT_SEED", "USER"] = "USER"
+    origin_ref: str | None = None
+
+    @model_validator(mode="after")
+    def item_id_is_safe(self) -> "ChapterContextItem":
+        value = self.item_id
+        if (
+            not value
+            or value in {".", ".."}
+            or "/" in value
+            or "\\" in value
+            or value != value.strip()
+        ):
+            raise ValueError("item_id 非法")
+        return self
+
+
+class ChapterContextRevisionRecord(BaseModel):
+    """Append-only chapter context revision metadata + ordered items."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    context_revision: int = Field(ge=1)
+    parent_context_revision: int | None = Field(default=None, ge=1)
+    items: list[ChapterContextItem] = Field(default_factory=list)
+    content_hash: str = Field(min_length=1)
+    seeded_from_blueprint: bool = False
+    actor: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def items_are_consistent(self) -> "ChapterContextRevisionRecord":
+        ids = [item.item_id for item in self.items]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ChapterContextRevision 不允许重复 item_id")
+        orders = [item.order for item in self.items]
+        if len(orders) != len(set(orders)):
+            raise ValueError("ChapterContextRevision 不允许重复 order")
+        if (
+            self.parent_context_revision is not None
+            and self.parent_context_revision >= self.context_revision
+        ):
+            raise ValueError("parent_context_revision 必须小于 context_revision")
+        return self
+
+
 class DocumentMode(str, Enum):
     TEMPLATE_STRICT = "template_strict"
     AUTO_OUTLINE = "auto_outline"
@@ -1074,12 +1376,22 @@ class WriterInputBundle(ContractModel):
     evidence_snapshot: list[dict[str, Any]] = Field(default_factory=list)
     research_decisions: list[dict[str, Any]] = Field(default_factory=list)
     project_context: dict[str, Any] = Field(default_factory=dict)
+    global_project_context: dict[str, Any] = Field(default_factory=dict)
+    chapter_grounding_context: dict[str, Any] = Field(default_factory=dict)
+    chapter_grounding_contexts: dict[str, dict[str, Any]] = Field(default_factory=dict)
     project_constraints: list[str] = Field(default_factory=list)
     terminology: dict[str, str] = Field(default_factory=dict)
     document_target_constraints: list[dict[str, Any]] = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
     model_config_hash: str = Field(min_length=1)
     bundle_hash: str = Field(min_length=1)
+    # Phase 7: chapter workspace overlays (optional; empty when not materialised).
+    chapter_id: str | None = None
+    chapter_context_revision: int = Field(default=0, ge=0)
+    chapter_context_items: list[dict[str, Any]] = Field(default_factory=list)
+    head_content_revision: int = Field(default=0, ge=0)
+    locked_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    content_history_summary: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ContentBlock(BaseModel):
@@ -1100,12 +1412,73 @@ class ContentBlock(BaseModel):
     critical_claims: list[str] = Field(default_factory=list)
     claim_ids: list[str] = Field(default_factory=list)
     source_bundle_hash: str | None = None
+    # Phase 3+ chapter editor fields. Missing legacy fields map to AI_GENERATED.
+    source: Literal["AI_GENERATED", "USER_CREATED", "USER_EDITED"] = "AI_GENERATED"
+    created_by: str = ""
+    updated_by: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    order: int = Field(default=0, ge=0)
+    lock_state: Literal["UNLOCKED", "USER_LOCKED"] = "UNLOCKED"
 
     @model_validator(mode="after")
     def critical_claims_need_sources(self) -> "ContentBlock":
         if self.critical_claims and not (self.evidence_ids or self.fact_ids):
             raise ValueError("关键 Claim 必须关联 evidence_ids 或 fact_ids")
+        # Keep human_locked and lock_state aligned for integrators/renderers.
+        updates: dict[str, Any] = {}
+        if self.lock_state == "USER_LOCKED" and not self.human_locked:
+            updates["human_locked"] = True
+        elif self.human_locked and self.lock_state == "UNLOCKED":
+            updates["lock_state"] = "USER_LOCKED"
+        return self.model_copy(update=updates) if updates else self
+
+
+class ChapterContentRevisionRecord(BaseModel):
+    """Append-only ordered ContentBlock[] revision for one chapter workspace."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chapter_id: str = Field(min_length=1)
+    content_revision: int = Field(ge=1)
+    parent_content_revision: int | None = Field(default=None, ge=1)
+    blocks: list[ContentBlock] = Field(default_factory=list)
+    content_hash: str = Field(min_length=1)
+    source: Literal[
+        "user_edit",
+        "ai_draft",
+        "restore",
+        "merge",
+        "auto_approve",
+    ]
+    approval_policy: dict[str, Any] = Field(default_factory=dict)
+    actor: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def blocks_are_consistent(self) -> "ChapterContentRevisionRecord":
+        ids = [block.block_id for block in self.blocks]
+        if len(ids) != len(set(ids)):
+            raise ValueError("ChapterContentRevision 不允许重复 block_id")
         return self
+
+
+class ChapterApprovalReceiptRecord(BaseModel):
+    """H2 chapter body approval (or explicit auto-approval) for one content revision."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    receipt_id: str = Field(min_length=1)
+    chapter_id: str = Field(min_length=1)
+    content_revision: int = Field(ge=1)
+    content_hash: str = Field(min_length=1)
+    decision: Literal["approved", "auto_approved"]
+    principal_id: str = Field(min_length=1)
+    confirmation_required: bool
+    receipt_hash: str = Field(min_length=1)
+    actor: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(min_length=1)
+    gate_id: Literal["H2_CHAPTER_APPROVAL"] = "H2_CHAPTER_APPROVAL"
 
 
 class ContentProposal(BaseModel):

@@ -9,7 +9,9 @@ from utils import read_json
 from .contracts import ContentBlock, WriterInputBundle
 from .document_planner import CONTENT_UNITS_PATH
 from .input_manifest import V3_ROOT
+from .research_service import load_published_batch
 from .writer_bundle import BUNDLE_DIR
+from .writer_policy import assess_content_unit, registered_content_path
 
 
 class V3WorkspaceSnapshotBuilder:
@@ -18,9 +20,11 @@ class V3WorkspaceSnapshotBuilder:
     _ANALYSIS_INPUT_ROLES = frozenset(
         {"tender", "score", "amendment", "template"}
     )
-    _ANALYSIS_COMMAND_KINDS = frozenset(
-        {"document.prepare_outline", "document.run_pipeline"}
-    )
+    # The outline and full-document runs are two independent user-visible
+    # phases.  Keep the analysis projection pinned to the latest outline run;
+    # generation has its own snapshot below.  Mixing both command kinds here
+    # made generation stage runs appear inside the phase-2 activity stream.
+    _ANALYSIS_COMMAND_KINDS = frozenset({"document.prepare_outline"})
     _ANALYSIS_CHAIN = (
         "InputManifest",
         "SourceIndex",
@@ -48,10 +52,9 @@ class V3WorkspaceSnapshotBuilder:
         "analyze_scores": "评分理解",
         "compile_chapter_blueprint": "目录生成",
         "confirm_planning": "目录确认",
-        "sync_material_requirements": "材料同步",
-        "compile_document_contract": "文档结构编译",
-        "plan_document": "写作计划",
-        "resolve_evidence": "DeepSeek 公开研究",
+        "sync_material_requirements": "检查材料与证据缺口",
+        "compile_document_contract": "锁定确认后的文档结构",
+        "plan_document": "生成逐章写作任务",
         "execute_content_plan": "章节写作",
         "integrate_document": "全文整合",
         "verify_document": "质量审核",
@@ -116,6 +119,18 @@ class V3WorkspaceSnapshotBuilder:
                         else "artifact_dependencies_stale"
                     ),
                 }
+            elif not any(
+                isinstance(item, dict) and str(item.get("chapter_id") or "").strip()
+                for item in (plan or {}).get("nodes", [])
+            ):
+                # An empty blueprint cannot be meaningfully reviewed or
+                # confirmed.  Do not expose the H1 gate as actionable until
+                # the directory-generation result contains chapter nodes.
+                planning = {
+                    "status": "blocked",
+                    "reason": "PLANNING_OUTLINE_EMPTY",
+                    "message": "目录未生成任何章节，无法人工确认；请重新生成目录。",
+                }
             else:
                 from .artifact_promotion import HumanGateService
 
@@ -126,6 +141,19 @@ class V3WorkspaceSnapshotBuilder:
                 except Exception:
                     try:
                         planning = {"status": "needs_human", "snapshot": service.planning_snapshot()}
+                    except ControlPlaneError as exc:
+                        # A changed planning runtime means the existing outline
+                        # is intentionally no longer confirmable.  Project this
+                        # as an outdated result instead of a generic "blocked"
+                        # state: the latter hides both the confirmation and the
+                        # re-planning actions, leaving the user at a dead end.
+                        planning = {
+                            "status": "outdated"
+                            if exc.code == "PLANNING_CONFIRM_STALE"
+                            else "blocked",
+                            "reason": exc.code,
+                            "message": exc.message,
+                        }
                     except Exception:
                         planning = {"status": "blocked"}
         scheduled_needs = {
@@ -166,21 +194,35 @@ class V3WorkspaceSnapshotBuilder:
                 }
             )
         projected_needs.extend(scheduled_needs.values())
-        from .autonomous_research import AUTO_RESEARCH_REPORT_PATH
+        from .writer_research import WRITER_RESEARCH_REPORT_PATH
 
-        auto_research_path = self.root / AUTO_RESEARCH_REPORT_PATH
-        auto_research = (
-            read_json(auto_research_path)
-            if auto_research_path.is_file()
+        writer_research_path = self.root / WRITER_RESEARCH_REPORT_PATH
+        writer_research = (
+            read_json(writer_research_path)
+            if writer_research_path.is_file()
             else {}
         )
         generation = self._generation_snapshot(
             control,
             plan=plan or {},
-            auto_research=(
-                auto_research if isinstance(auto_research, dict) else {}
-            ),
+            writer_research=(writer_research if isinstance(writer_research, dict) else {}),
             delivery=delivery or {},
+        )
+        analysis_pipeline = self._analysis_pipeline(
+            control,
+            artifacts,
+            artifact_states,
+            latest_analysis_operation,
+            planning_confirmed=planning.get("status") == "confirmed",
+            planning_status=str(planning.get("status") or "not_ready"),
+        )
+        chapters = self._chapters_snapshot(control, plan or {})
+        workflow = self._workflow_projection(
+            planning=planning,
+            analysis_pipeline=analysis_pipeline,
+            generation=generation,
+            chapters=chapters,
+            blueprint_artifact=artifacts.get("ChapterBlueprint") or {},
         )
         return {
             "schema_version": "v3",
@@ -214,21 +256,20 @@ class V3WorkspaceSnapshotBuilder:
                 "current_input_manifest_revision": int((payload("InputManifest") or {}).get("revision") or 0),
                 "source_input_manifest_revision": int((source_index or {}).get("input_manifest_revision") or 0),
                 "latest_operation": latest_analysis_operation or None,
-                "pipeline": self._analysis_pipeline(
-                    control,
-                    artifacts,
-                    artifact_states,
-                    latest_analysis_operation,
-                ),
+                "pipeline": analysis_pipeline,
             },
             "planning": planning,
+            "workflow": workflow,
             "evidence_needs": projected_needs,
-            "auto_research": (
-                auto_research if isinstance(auto_research, dict) else {}
-            ),
             "generation": generation,
+            "chapter_write_job": (
+                control.agent_activity_state()
+                if (control.agent_activity_state() or {}).get("control_source") == "chapter_batch"
+                else None
+            ),
             "materials": payload("EvidenceRepository"),
             "content_units": (content_blocks or {}).get("units", []),
+            "chapters": chapters,
             "quality": {
                 "coverage": (quality or {}).get("coverage"),
                 "report": quality,
@@ -236,12 +277,168 @@ class V3WorkspaceSnapshotBuilder:
             },
         }
 
+    @staticmethod
+    def _workflow_projection(
+        *,
+        planning: dict[str, Any],
+        analysis_pipeline: dict[str, Any],
+        generation: dict[str, Any],
+        chapters: dict[str, Any],
+        blueprint_artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The single UI-facing workflow truth.
+
+        Historical artifacts remain visible through their legacy projections,
+        but this value is deliberately driven by the latest operation and the
+        current review receipts only.
+        """
+        planning_status = str(planning.get("status") or "not_ready")
+        analysis_status = str(analysis_pipeline.get("status") or "not_started")
+        generation_status = str(generation.get("status") or "not_started")
+        operation_id = str(analysis_pipeline.get("operation_id") or "")
+        stages = list(analysis_pipeline.get("stages") or [])
+        phase = "materials"
+        status = "not_started"
+        current_stage_id = ""
+        pending_reviews: list[dict[str, Any]] = []
+
+        active_stage = next(
+            (
+                item for item in stages
+                if isinstance(item, dict)
+                and str(item.get("status") or "") in {"queued", "running"}
+            ),
+            None,
+        )
+        if active_stage:
+            current_stage_id = str(active_stage.get("stage_id") or "")
+
+        if planning_status == "confirmed":
+            phase = "writing"
+            status = generation_status if generation_status != "not_started" else "ready"
+            operation_id = str(generation.get("operation_id") or operation_id)
+            current_stage_id = str(generation.get("current_stage_id") or "")
+        elif planning_status == "needs_human":
+            phase = "planning_review"
+            status = "blocked_human"
+            payload = blueprint_artifact.get("payload") or {}
+            pending_reviews.append(
+                {
+                    "review_id": "planning:"
+                    + str(blueprint_artifact.get("artifact_hash") or payload.get("artifact_hash") or "current"),
+                    "kind": "planning",
+                    "status": "pending",
+                    "title": "目录已生成，等待审核",
+                    "summary": "请核验评分点覆盖、章节结构和响应任务。",
+                    "target_revision": int(blueprint_artifact.get("revision") or payload.get("revision") or 0),
+                    "target_hash": str(blueprint_artifact.get("artifact_hash") or ""),
+                    "items": [
+                        {
+                            "label": "章节节点",
+                            "value": len(payload.get("nodes") or []),
+                        }
+                    ],
+                }
+            )
+        elif analysis_status == "failed" or any(
+            str(item.get("status") or "") == "failed"
+            for item in stages
+            if isinstance(item, dict)
+        ):
+            phase = "planning"
+            status = "failed"
+        elif analysis_status in {"queued", "running", "processing"}:
+            phase = "planning"
+            status = "running"
+
+        for chapter in (chapters.get("items") or []):
+            if not isinstance(chapter, dict):
+                continue
+            if str(chapter.get("approval_status") or "") not in {
+                "pending",
+                "draft",
+            }:
+                continue
+            chapter_id = str(chapter.get("chapter_id") or "")
+            if not chapter_id:
+                continue
+            pending_reviews.append(
+                {
+                    "review_id": f"chapter:{chapter_id}:{int(chapter.get('head_content_revision') or 0)}",
+                    "kind": "chapter_content",
+                    "status": "pending",
+                    "title": f"章节待审核：{chapter.get('title') or chapter_id}",
+                    "summary": "确认当前正文版本，或提交修改意见。",
+                    "chapter_id": chapter_id,
+                    "target_revision": int(chapter.get("head_content_revision") or 0),
+                    "target_hash": str(chapter.get("head_content_hash") or ""),
+                    "items": [],
+                }
+            )
+
+        return {
+            "phase": phase,
+            "status": status,
+            "operation_id": operation_id,
+            "attempt": max(
+                (int(item.get("attempt") or 0) for item in stages if isinstance(item, dict)),
+                default=0,
+            ),
+            "current_stage_id": current_stage_id,
+            "stages": stages,
+            "pending_reviews": pending_reviews,
+            "can_resume": status == "failed",
+            "current_artifact": {
+                "kind": "ChapterBlueprint",
+                "revision": int(blueprint_artifact.get("revision") or 0),
+                "hash": str(blueprint_artifact.get("artifact_hash") or ""),
+                "is_current": planning_status in {"needs_human", "confirmed"},
+            },
+            "invalidation_reason": str(
+                planning.get("reason")
+                or planning.get("message")
+                or ""
+            ),
+        }
+
+    def _chapters_snapshot(
+        self,
+        control: ControlStore,
+        plan: dict[str, Any],
+    ) -> dict[str, Any]:
+        from .chapter_workspace import ChapterWorkspaceService
+
+        try:
+            return ChapterWorkspaceService(self.context).list_chapters(
+                include_archived=True
+            )
+        except ControlPlaneError:
+            materializations = control.chapter_workspaces(include_archived=True)
+            nodes = [
+                item
+                for item in (plan.get("nodes") or [])
+                if isinstance(item, dict) and str(item.get("chapter_id") or "").strip()
+            ]
+            return {
+                "blueprint_revision": int(plan.get("revision") or 0),
+                "blueprint_hash": "",
+                "total": len(nodes) or len(materializations),
+                "materialized": len(materializations),
+                "active": sum(
+                    1 for item in materializations if item.get("status") == "active"
+                ),
+                "archived": sum(
+                    1 for item in materializations if item.get("status") == "archived"
+                ),
+                "items": materializations,
+            }
+
     def _generation_snapshot(
         self,
         control: ControlStore,
         *,
         plan: dict[str, Any],
-        auto_research: dict[str, Any],
+        writer_research: dict[str, Any],
         delivery: dict[str, Any],
     ) -> dict[str, Any]:
         commands = [
@@ -268,10 +465,17 @@ class V3WorkspaceSnapshotBuilder:
                 previous.get("attempt") or 0
             ):
                 runs_by_stage[stage_id] = item
+        llm_requests_by_stage: dict[str, list[dict[str, Any]]] = {}
+        for request in control.llm_requests(operation_id) if operation_id else []:
+            llm_requests_by_stage.setdefault(
+                str(request.get("stage_id") or ""),
+                [],
+            ).append(request)
 
         stages: list[dict[str, Any]] = []
         for stage_id, label in self._GENERATION_STAGE_LABELS.items():
             run = runs_by_stage.get(stage_id) or {}
+            llm_requests = llm_requests_by_stage.get(stage_id, [])
             output = run.get("output")
             output_value = output if isinstance(output, dict) else {}
             summary = output_value.get("summary")
@@ -288,6 +492,8 @@ class V3WorkspaceSnapshotBuilder:
                     "attempt": int(run.get("attempt") or 0),
                     "started_at": str(run.get("started_at") or ""),
                     "completed_at": str(run.get("completed_at") or ""),
+                    "llm_request_count": len(llm_requests),
+                    "llm_requests": llm_requests,
                     "summary": summary if isinstance(summary, dict) else {},
                     "warnings": warnings,
                     "warning_count": int(
@@ -327,16 +533,21 @@ class V3WorkspaceSnapshotBuilder:
                 "",
             )
         content = self._content_progress(control, plan)
-        research_questions = [
-            {
-                "need_id": str(item.get("need_id") or ""),
-                "question": str(item.get("question") or ""),
-                "status": str(item.get("status") or "open"),
-                "topic_id": str(item.get("topic_id") or ""),
-                "updated_at": str(item.get("updated_at") or ""),
-            }
-            for item in control.evidence_needs()
-            if str(item.get("need_id") or "").startswith("EN-AUTO-")
+        research_calls = [
+            item for item in (writer_research.get("operations") or {}).get(operation_id, [])
+            if isinstance(item, dict)
+        ]
+        research_calls.sort(
+            key=lambda item: (
+                str(item.get("created_at") or ""),
+                str(item.get("decision_id") or ""),
+            )
+        )
+        research_queries = [
+            query
+            for call in research_calls
+            for query in (call.get("queries") or [])
+            if isinstance(query, dict)
         ]
         error = operation.get("error")
         generation_warnings = [
@@ -377,15 +588,24 @@ class V3WorkspaceSnapshotBuilder:
             "warning_count": len(generation_warnings),
             "warnings": generation_warnings,
             "content": content,
+            "has_stale_content": bool(content.get("stale_units")),
             "research": {
-                **auto_research,
                 "source_count": sum(
-                    int(item.get("item_count") or 0)
-                    for item in (auto_research.get("results") or [])
-                    if isinstance(item, dict)
-                    and str(item.get("status") or "") == "published"
+                    len(item.get("sources") or [])
+                    for item in research_queries
+                    if str(item.get("status") or "") == "published"
                 ),
-                "questions": research_questions,
+                "call_count": len(research_calls),
+                "published_count": sum(
+                    str(item.get("decision_status") or "") == "published"
+                    for item in research_calls
+                ),
+                "blocked_count": sum(
+                    str(item.get("decision_status") or "")
+                    == "blocked_human"
+                    for item in research_calls
+                ),
+                "calls": research_calls,
             },
             "delivery": delivery,
         }
@@ -436,16 +656,53 @@ class V3WorkspaceSnapshotBuilder:
             if len(titles) > 1:
                 title = f"{title} 等 {len(titles)} 个章节"
             state = states.get(unit_id) or {}
-            preview = self._content_unit_preview(unit_id, state)
+            assessment = assess_content_unit(
+                self.context,
+                item,
+                state,
+            )
+            persisted_status = str(state.get("state") or "pending")
+            stale = persisted_status == "stale" or (
+                persisted_status == "completed"
+                and not assessment["fresh"]
+            )
+            status = "stale" if stale else persisted_status
+            preview = (
+                self._content_unit_preview(unit_id, state)
+                if assessment["fresh"]
+                else {
+                    "character_count": 0,
+                    "block_count": 0,
+                    "preview": "",
+                }
+            )
             units.append(
                 {
                     "unit_id": unit_id,
                     "title": title,
                     "node_ids": node_ids,
-                    "status": str(state.get("state") or "pending"),
+                    "status": status,
                     "attempt": int(state.get("attempt") or 0),
                     "updated_at": str(state.get("updated_at") or ""),
                     "error": str(state.get("invalidation_reason") or ""),
+                    "current_chapter_id": str(
+                        state.get("current_chapter_id") or ""
+                    ),
+                    "current_chapter_title": str(
+                        state.get("current_chapter_title") or ""
+                    ),
+                    "progress_phase": str(state.get("progress_phase") or ""),
+                    "draft_preview": str(state.get("draft_preview") or ""),
+                    "writer_fingerprint": str(
+                        state.get("writer_fingerprint") or ""
+                    ),
+                    "stale": stale,
+                    "stale_reason": str(
+                        assessment.get("stale_reason")
+                        or state.get("stale_reason")
+                        or ""
+                    ),
+                    "blocked_human": persisted_status == "blocked_human",
                     **preview,
                 }
             )
@@ -455,6 +712,8 @@ class V3WorkspaceSnapshotBuilder:
             "completed_units": statuses.count("completed"),
             "running_units": statuses.count("running"),
             "failed_units": statuses.count("failed"),
+            "stale_units": statuses.count("stale"),
+            "blocked_units": statuses.count("blocked_human"),
             "units": units,
         }
 
@@ -463,29 +722,11 @@ class V3WorkspaceSnapshotBuilder:
         unit_id: str,
         state: dict[str, Any],
     ):
-        registered = str(state.get("output_artifact_id") or "").strip()
-        if not registered:
-            return None
-        content_dir = (self.root / V3_ROOT / "content_units").resolve()
-        candidate = (self.root / registered).resolve()
-        try:
-            relative = candidate.relative_to(content_dir)
-        except ValueError as exc:
-            raise ControlPlaneError(
-                "CONTENT_UNIT_PATH_INVALID",
-                "章节正文登记路径不在当前工作区内容目录内。",
-                status_code=409,
-            ) from exc
-        if (
-            len(relative.parts) != 1
-            or candidate.name != f"{unit_id}.json"
-        ):
-            raise ControlPlaneError(
-                "CONTENT_UNIT_PATH_INVALID",
-                "章节正文登记路径与章节标识不一致。",
-                status_code=409,
-            )
-        return candidate
+        return registered_content_path(
+            self.context,
+            unit_id,
+            state,
+        )
 
     def _content_unit_preview(
         self,
@@ -521,6 +762,44 @@ class V3WorkspaceSnapshotBuilder:
                 "CONTENT_UNIT_NOT_FOUND",
                 "未找到该章节写作单元。",
                 status_code=404,
+            )
+        if str(state.get("output_artifact_id") or "").strip():
+            # Preserve the path-containment error as the primary failure for
+            # a tampered registration, before any freshness projection.
+            self._registered_content_path(normalized, state)
+        index_path = self.root / CONTENT_UNITS_PATH
+        index = read_json(index_path) if index_path.is_file() else {}
+        unit = next(
+            (
+                item
+                for item in (index.get("units") or [])
+                if isinstance(item, dict)
+                and str(item.get("unit_id") or "") == normalized
+            ),
+            None,
+        )
+        if unit is None:
+            raise ControlPlaneError(
+                "CONTENT_UNIT_NOT_FOUND",
+                "当前写作计划中不存在该章节单元。",
+                status_code=404,
+            )
+        assessment = assess_content_unit(
+            self.context,
+            unit,
+            state,
+        )
+        if str(state.get("state") or "") == "stale" or (
+            str(state.get("state") or "") == "completed"
+            and not assessment["fresh"]
+        ):
+            raise ControlPlaneError(
+                "CONTENT_UNIT_STALE",
+                str(
+                    assessment.get("stale_reason")
+                    or "该章节正文已过期，必须重新生成。"
+                ),
+                status_code=409,
             )
         if str(state.get("state") or "") != "completed":
             raise ControlPlaneError(
@@ -612,15 +891,222 @@ class V3WorkspaceSnapshotBuilder:
                                 )
                             }
                         )
+        used_evidence_ids = {
+            evidence_id
+            for block in blocks
+            for evidence_id in block.evidence_ids
+        }
+        for binding in data.get("evidence_batches") or []:
+            if not isinstance(binding, dict):
+                continue
+            batch = load_published_batch(
+                self.context,
+                str(binding.get("batch_id") or ""),
+            )
+            if batch is None:
+                continue
+            for item in batch.items:
+                if item.evidence_id not in used_evidence_ids:
+                    continue
+                identity = item.evidence_id or item.source_url or ""
+                if not identity or identity in seen_sources:
+                    continue
+                seen_sources.add(identity)
+                sources.append(
+                    {
+                        "evidence_id": item.evidence_id,
+                        "title": item.title,
+                        "publisher": item.publisher,
+                        "source_url": item.source_url,
+                        "source_type": item.source_type.value,
+                        "retrieved_at": item.retrieved_at,
+                    }
+                )
         return {
             "unit_id": normalized,
             "status": str(state.get("state") or ""),
             "updated_at": str(state.get("updated_at") or ""),
             "bundle_id": bundle_id,
+            "writer_fingerprint": str(data.get("writer_fingerprint") or ""),
+            "research_decision_id": str(
+                data.get("research_decision_id") or ""
+            ),
             "block_count": len(blocks),
             "character_count": sum(len(block.content) for block in blocks),
             "blocks": [block.model_dump(mode="json") for block in blocks],
             "sources": sources,
+        }
+
+    @staticmethod
+    def _trace_excerpt(value: Any, *, limit: int = 480) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) <= limit:
+            return text
+        return text[: max(0, limit - 1)].rstrip() + "…"
+
+    def _writer_research_trace(self, call: dict[str, Any]) -> dict[str, Any]:
+        chapter_ids = [
+            str(item)
+            for item in (call.get("applicable_chapter_ids") or [])
+            if str(item)
+        ]
+        chapter_titles = [
+            str(item)
+            for item in (call.get("applicable_chapter_titles") or [])
+            if str(item)
+        ]
+        chapter_title_by_id = {
+            chapter_id: (
+                chapter_titles[index]
+                if index < len(chapter_titles)
+                else chapter_id
+            )
+            for index, chapter_id in enumerate(chapter_ids)
+        }
+        used_by_chapter_value = call.get("used_evidence_by_chapter")
+        used_by_chapter = (
+            used_by_chapter_value
+            if isinstance(used_by_chapter_value, dict)
+            else {}
+        )
+        used_rows: list[dict[str, Any]] = []
+        evidence_chapters: dict[str, list[dict[str, str]]] = {}
+        used_evidence_ids: set[str] = set()
+        for chapter_id, raw_evidence_ids in sorted(used_by_chapter.items()):
+            normalized_chapter_id = str(chapter_id or "")
+            evidence_ids = list(
+                dict.fromkeys(
+                    str(item)
+                    for item in (
+                        raw_evidence_ids
+                        if isinstance(raw_evidence_ids, list)
+                        else []
+                    )
+                    if str(item)
+                )
+            )
+            if not normalized_chapter_id or not evidence_ids:
+                continue
+            chapter = {
+                "chapter_id": normalized_chapter_id,
+                "chapter_title": chapter_title_by_id.get(
+                    normalized_chapter_id,
+                    normalized_chapter_id,
+                ),
+            }
+            used_rows.append({**chapter, "evidence_ids": evidence_ids})
+            for evidence_id in evidence_ids:
+                used_evidence_ids.add(evidence_id)
+                evidence_chapters.setdefault(evidence_id, []).append(chapter)
+
+        query_rows: list[dict[str, Any]] = []
+        for raw_query in call.get("queries") or []:
+            if not isinstance(raw_query, dict):
+                continue
+            batch_id = str(raw_query.get("batch_id") or "")
+            batch = load_published_batch(self.context, batch_id)
+            source_rows = (
+                [
+                    item.model_dump(mode="json")
+                    for item in batch.items
+                ]
+                if batch is not None
+                else [
+                    item
+                    for item in (raw_query.get("sources") or [])
+                    if isinstance(item, dict)
+                ]
+            )
+            results: list[dict[str, Any]] = []
+            seen_sources: set[str] = set()
+            for source in source_rows:
+                evidence_id = str(source.get("evidence_id") or "")
+                identity = str(
+                    evidence_id
+                    or source.get("source_url")
+                    or source.get("title")
+                    or ""
+                )
+                if not identity or identity in seen_sources:
+                    continue
+                seen_sources.add(identity)
+                used_in_chapters = evidence_chapters.get(evidence_id, [])
+                results.append(
+                    {
+                        "evidence_id": evidence_id,
+                        "title": str(source.get("title") or ""),
+                        "publisher": str(source.get("publisher") or ""),
+                        "source_url": str(source.get("source_url") or ""),
+                        "source_type": str(source.get("source_type") or ""),
+                        "retrieved_at": str(source.get("retrieved_at") or ""),
+                        "answer_excerpt": self._trace_excerpt(
+                            source.get("content") or source.get("excerpt")
+                        ),
+                        "used_in_bid": bool(used_in_chapters),
+                        "usage_status": (
+                            "used" if used_in_chapters else "unknown"
+                        ),
+                        "used_in_chapters": used_in_chapters,
+                    }
+                )
+            query_rows.append(
+                {
+                    "query_id": str(raw_query.get("query_id") or ""),
+                    "question": str(raw_query.get("question") or ""),
+                    "applicability": str(raw_query.get("applicability") or ""),
+                    "target_node_ids": [
+                        str(item)
+                        for item in (raw_query.get("target_node_ids") or [])
+                        if str(item)
+                    ],
+                    "status": str(raw_query.get("status") or ""),
+                    "batch_id": batch_id,
+                    "evidence_count": int(
+                        raw_query.get("evidence_count") or len(results)
+                    ),
+                    "error": str(raw_query.get("error") or ""),
+                    "attempts": [
+                        {
+                            key: attempt.get(key)
+                            for key in (
+                                "attempt",
+                                "status",
+                                "batch_id",
+                                "evidence_count",
+                                "source_count",
+                                "error",
+                                "duration_ms",
+                                "at",
+                            )
+                        }
+                        for attempt in (raw_query.get("attempts") or [])
+                        if isinstance(attempt, dict)
+                    ],
+                    "results": results,
+                }
+            )
+
+        return {
+            "decision_id": str(call.get("decision_id") or ""),
+            "unit_id": str(call.get("unit_id") or ""),
+            "chapter_ids": chapter_ids,
+            "chapter_titles": chapter_titles,
+            "needs_research": bool(call.get("needs_research")),
+            "decision_status": str(call.get("decision_status") or ""),
+            "decision_summary": str(call.get("reason") or ""),
+            "queries": query_rows,
+            "query_count": len(query_rows),
+            "source_count": sum(
+                len(query.get("results") or []) for query in query_rows
+            ),
+            "used_evidence_count": len(used_evidence_ids),
+            "used_by_chapter": used_rows,
+            "prohibited_research_scopes": [
+                str(item)
+                for item in (call.get("prohibited_research_scopes") or [])
+                if str(item)
+            ],
+            "created_at": str(call.get("created_at") or ""),
         }
 
     def generation_stage_detail(self, stage_id: str) -> dict[str, Any]:
@@ -666,6 +1152,9 @@ class V3WorkspaceSnapshotBuilder:
             )
         items: list[dict[str, Any]] = []
         details: dict[str, Any] = {}
+        research_trace: list[dict[str, Any]] = []
+        trace_disclosure = ""
+        current_writing: dict[str, Any] | None = None
         artifact_kind = {
             "normalize_sources": "SourceIndex",
             "build_requirement_ledger": "RequirementLedger",
@@ -783,83 +1272,9 @@ class V3WorkspaceSnapshotBuilder:
                     )
                     if isinstance(item, dict)
                 ]
-        elif normalized == "resolve_evidence":
-            research = generation.get("research") or {}
-            details = {
-                key: research.get(key)
-                for key in (
-                    "provider_id",
-                    "planned_count",
-                    "published_count",
-                    "gap_count",
-                    "failed_count",
-                    "max_retries",
-                    "max_rounds",
-                    "blocking_policy",
-                )
-            }
-            details["decision_count"] = len(
-                [
-                    item
-                    for item in (research.get("decisions") or [])
-                    if isinstance(item, dict)
-                ]
-            )
-            items = [
-                {
-                    "id": str(item.get("need_id") or index),
-                    "title": str(
-                        item.get("chapter_title")
-                        or item.get("need_id")
-                        or f"研究问题 {index}"
-                    ),
-                    "status": str(item.get("status") or ""),
-                    "description": str(item.get("error") or ""),
-                    "attempts": [
-                        attempt
-                        for attempt in (item.get("attempts") or [])
-                        if isinstance(attempt, dict)
-                    ],
-                    "meta": {
-                        "chapter_id": item.get("chapter_id"),
-                        "evidence_count": item.get("evidence_count"),
-                        "query": item.get("query"),
-                    },
-                }
-                for index, item in enumerate(
-                    research.get("results") or [],
-                    start=1,
-                )
-                if isinstance(item, dict)
-            ]
-            if not items:
-                items = [
-                    {
-                        "id": str(item.get("chapter_id") or index),
-                        "title": str(
-                            item.get("chapter_title")
-                            or item.get("chapter_id")
-                            or f"研究判断 {index}"
-                        ),
-                        "status": (
-                            "needs_research"
-                            if item.get("needs_research")
-                            else "skipped"
-                        ),
-                        "description": "；".join(
-                            str(reason)
-                            for reason in (item.get("reasons") or [])
-                        ),
-                        "meta": item,
-                    }
-                    for index, item in enumerate(
-                        research.get("decisions") or [],
-                        start=1,
-                    )
-                    if isinstance(item, dict)
-                ]
         elif normalized == "execute_content_plan":
             content = generation.get("content") or {}
+            research = generation.get("research") or {}
             details = {
                 key: content.get(key)
                 for key in (
@@ -869,6 +1284,97 @@ class V3WorkspaceSnapshotBuilder:
                     "failed_units",
                 )
             }
+            details["research_call_count"] = int(research.get("call_count") or 0)
+            details["research_published_count"] = int(research.get("published_count") or 0)
+            unit_states = {
+                str(item.get("unit_id") or ""): item
+                for item in (content.get("units") or [])
+                if isinstance(item, dict) and str(item.get("unit_id") or "")
+            }
+            active_unit = next(
+                (
+                    item
+                    for item in (content.get("units") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("status") or "") == "running"
+                ),
+                None,
+            )
+            if active_unit is None:
+                # Surface the chapter that paused the pipeline so the UI does
+                # not keep showing a stale "正在撰写" state.
+                blocked_units = [
+                    item
+                    for item in (content.get("units") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("status") or "")
+                    in {"blocked_human", "failed"}
+                    and (
+                        str(item.get("current_chapter_title") or "").strip()
+                        or str(item.get("progress_phase") or "").strip()
+                    )
+                ]
+                if blocked_units:
+                    active_unit = max(
+                        blocked_units,
+                        key=lambda item: str(item.get("updated_at") or ""),
+                    )
+            if isinstance(active_unit, dict):
+                current_writing = {
+                    "unit_id": str(active_unit.get("unit_id") or ""),
+                    "unit_title": str(active_unit.get("title") or ""),
+                    "unit_status": str(active_unit.get("status") or ""),
+                    "chapter_id": str(active_unit.get("current_chapter_id") or ""),
+                    "chapter_title": str(
+                        active_unit.get("current_chapter_title") or ""
+                    ),
+                    "phase": str(active_unit.get("progress_phase") or ""),
+                    "error": str(active_unit.get("error") or ""),
+                    "updated_at": str(active_unit.get("updated_at") or ""),
+                }
+            for item in research.get("calls") or []:
+                if not isinstance(item, dict):
+                    continue
+                trace = self._writer_research_trace(item)
+                unit_state = unit_states.get(str(trace.get("unit_id") or "")) or {}
+                trace.update(
+                    {
+                        "unit_status": str(unit_state.get("status") or ""),
+                        "unit_attempt": int(unit_state.get("attempt") or 0),
+                        "unit_updated_at": str(unit_state.get("updated_at") or ""),
+                        "current_chapter_id": str(
+                            unit_state.get("current_chapter_id") or ""
+                        ),
+                        "current_chapter_title": str(
+                            unit_state.get("current_chapter_title") or ""
+                        ),
+                        "progress_phase": str(
+                            unit_state.get("progress_phase") or ""
+                        ),
+                    }
+                )
+                if trace["unit_status"] == "completed":
+                    for query in trace.get("queries") or []:
+                        for result in query.get("results") or []:
+                            if result.get("usage_status") == "unknown":
+                                result["usage_status"] = "not_used"
+                research_trace.append(trace)
+            details["search_query_count"] = sum(
+                int(item.get("query_count") or 0)
+                for item in research_trace
+            )
+            details["research_source_count"] = sum(
+                int(item.get("source_count") or 0)
+                for item in research_trace
+            )
+            details["used_evidence_count"] = sum(
+                int(item.get("used_evidence_count") or 0)
+                for item in research_trace
+            )
+            trace_disclosure = (
+                "展示可审计的决策依据摘要、工具调用与证据采用记录；"
+                "不展示模型内部隐藏推理。"
+            )
             items = [
                 {
                     "id": str(item.get("unit_id") or index),
@@ -918,6 +1424,9 @@ class V3WorkspaceSnapshotBuilder:
             **stage,
             "details": details,
             "items": items,
+            "research_trace": research_trace,
+            "trace_disclosure": trace_disclosure,
+            "current_writing": current_writing,
         }
 
     def _artifact_states(
@@ -1077,6 +1586,9 @@ class V3WorkspaceSnapshotBuilder:
         artifacts: dict[str, dict[str, Any]],
         artifact_states: dict[str, bool],
         latest_operation: dict[str, Any],
+        *,
+        planning_confirmed: bool = False,
+        planning_status: str = "not_ready",
     ) -> dict[str, Any]:
         operation_id = str(latest_operation.get("operation_id") or "")
         raw_runs = (
@@ -1102,6 +1614,32 @@ class V3WorkspaceSnapshotBuilder:
                 previous.get("attempt") or 0
             ):
                 runs_by_stage[stage] = item
+
+        # The outline operation deliberately stops at the human gate, so its
+        # final stage remains ``blocked_human`` in that operation's history.
+        # A later explicit confirmation is recorded by a separate command.
+        # Project the current confirmed planning state back onto this timeline
+        # so the UI accurately marks the final "人工确认" node as complete.
+        if planning_confirmed:
+            previous = runs_by_stage.get("confirm_planning") or {}
+            runs_by_stage["confirm_planning"] = {
+                **previous,
+                "stage_command": "confirm_planning",
+                "status": "succeeded",
+                "attempt": max(1, int(previous.get("attempt") or 0)),
+                "disposition": "explicit_human_confirmation",
+            }
+        elif planning_status != "needs_human":
+            previous = runs_by_stage.get("confirm_planning") or {}
+            if str(previous.get("status") or "") == "blocked_human":
+                # The historical outline operation stops at H1 by design.
+                # If no reviewable outline is currently available, that old
+                # pause must not be presented as an actionable confirmation.
+                runs_by_stage["confirm_planning"] = {
+                    **previous,
+                    "stage_command": "confirm_planning",
+                    "status": "pending",
+                }
 
         operation_status = str(latest_operation.get("status") or "")
         operation_error = latest_operation.get("error")
@@ -1150,6 +1688,8 @@ class V3WorkspaceSnapshotBuilder:
             )
 
         analyze_run = runs_by_stage.get("analyze_scores") or {}
+        score_structure_run = runs_by_stage.get("score_structure") or {}
+        score_semantic_run = runs_by_stage.get("score_semantic") or {}
         analyze_output = (
             analyze_run.get("output")
             if isinstance(analyze_run.get("output"), dict)
@@ -1177,7 +1717,9 @@ class V3WorkspaceSnapshotBuilder:
             analyze_status == "failed"
             and "score_semantic_" in analyze_message
         )
-        if structure_ready:
+        if score_structure_run:
+            score_structure_status = status_for("score_structure")
+        elif structure_ready:
             score_structure_status = "succeeded"
         elif analyze_status in {"running", "failed"}:
             score_structure_status = analyze_status
@@ -1187,7 +1729,9 @@ class V3WorkspaceSnapshotBuilder:
                 if analyze_status in {"succeeded", "reused"}
                 else "pending"
             )
-        if analyze_status == "running" and not structure_ready:
+        if score_semantic_run:
+            score_semantic_status = status_for("score_semantic")
+        elif analyze_status == "running" and not structure_ready:
             score_semantic_status = "pending"
         else:
             score_semantic_status = analyze_status
@@ -1208,13 +1752,13 @@ class V3WorkspaceSnapshotBuilder:
             self._pipeline_stage(
                 "score_structure",
                 score_structure_status,
-                analyze_run,
+                score_structure_run or analyze_run,
                 llm_requests_by_stage,
             ),
             self._pipeline_stage(
                 "score_semantic",
                 score_semantic_status,
-                analyze_run,
+                score_semantic_run or analyze_run,
                 llm_requests_by_stage,
             ),
             self._pipeline_stage(
@@ -1236,9 +1780,12 @@ class V3WorkspaceSnapshotBuilder:
             raw_runs,
             latest_operation,
         )
+        projected_status = operation_status or "not_started"
+        if planning_status == "blocked" and projected_status == "blocked_human":
+            projected_status = "failed"
         return {
             "operation_id": operation_id,
-            "status": operation_status or "not_started",
+            "status": projected_status,
             "stages": stage_rows,
             "products": products,
         }
@@ -1266,6 +1813,11 @@ class V3WorkspaceSnapshotBuilder:
             "stage_id": stage_id,
             "label": self._PIPELINE_STAGE_LABELS[stage_id],
             "status": status or "pending",
+            "result": (
+                "produced" if status == "succeeded"
+                else str(status or "pending")
+            ),
+            "operation_id": str(value.get("operation_id") or ""),
             "attempt": int(value.get("attempt") or 0),
             "started_at": str(value.get("started_at") or ""),
             "completed_at": str(value.get("completed_at") or ""),

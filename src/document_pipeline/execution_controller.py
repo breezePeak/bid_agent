@@ -6,6 +6,8 @@ from typing import Any
 
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
+from .chapter_editing import ChapterEditingService
+from .chapter_workspace import ChapterWorkspaceService
 from .stage_runner import V3StageRunner
 from .research_tool import V3ResearchTool
 
@@ -21,7 +23,17 @@ V3_PIPELINE_STAGES = (
     "sync_material_requirements",
     "compile_document_contract",
     "plan_document",
-    "resolve_evidence",
+    "execute_content_plan",
+    "integrate_document",
+    "verify_document",
+    "render_document",
+    "verify_delivery",
+)
+
+V3_GENERATION_STAGES = (
+    "sync_material_requirements",
+    "compile_document_contract",
+    "plan_document",
     "execute_content_plan",
     "integrate_document",
     "verify_document",
@@ -72,13 +84,135 @@ class V3ExecutionController:
         )
 
     def handlers(self) -> dict[str, Any]:
+        chapters = ChapterWorkspaceService(self.context)
+        editing = ChapterEditingService(self.context)
         return {
             "document.run_stage": self.run_stage,
             "document.prepare_outline": self.prepare_outline,
             "document.run_pipeline": self.run_pipeline,
             "document.confirm_planning": self.confirm_planning,
             "research.resolve": self.resolve_research,
+            "chapter.workspace.create": chapters.handle_create,
+            "chapter.workspace.ensure_all": chapters.handle_ensure_all,
+            "chapter.workspace.archive": chapters.handle_archive,
+            "chapter.workspace.save_metadata": chapters.handle_save_metadata,
+            "chapter.context.save": chapters.handle_save_context,
+            "chapter.content.apply": editing.handle_content_apply,
+            "chapter.revision.restore": editing.handle_revision_restore,
+            "chapter.generate_draft": editing.handle_generate_draft,
+            "chapter.approval.confirm": editing.handle_approval_confirm,
+            "chapter.batch.generate": self.generate_chapter_batch,
         }
+
+    def generate_chapter_batch(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        """Run selected leaf chapters server-side and persist queue progress."""
+        from .artifact_promotion import HumanGateService
+        from .chapter_chat import ChapterChatService
+        from .chapter_workspace import ChapterWorkspaceService
+        from .global_project_context import GlobalProjectContextService
+
+        chapter_ids = list(dict.fromkeys(
+            str(item).strip() for item in (envelope.payload.get("chapter_ids") or []) if str(item).strip()
+        ))
+        if not chapter_ids:
+            raise ControlPlaneError("CHAPTER_BATCH_EMPTY", "请选择至少一个可编写章节。", status_code=400)
+        job = {
+            "job_id": operation_id,
+            "operation_id": operation_id,
+            "status": "queued",
+            "chapter_ids": chapter_ids,
+            "current_chapter_id": "",
+            "completed_count": 0,
+            "failed_count": 0,
+            "error": None,
+            "items": [{"chapter_id": item, "status": "queued", "content_revision": 0} for item in chapter_ids],
+        }
+        self.store.upsert_agent_activity_state({**job, "phase": "chapter_batch"}, source="chapter_batch")
+        try:
+            # Validate every prerequisite before the first chapter is started.
+            GlobalProjectContextService(context).load_model()
+            HumanGateService(context).require_current_confirmation()
+            chapters = ChapterWorkspaceService(context)
+            for chapter_id in chapter_ids:
+                chapter = chapters.get_chapter(chapter_id)
+                if chapter.get("is_leaf") is False:
+                    raise ControlPlaneError("CHAPTER_BODY_REQUIRES_LEAF", "批量编写只能选择叶子章节。", status_code=409)
+                if not chapter.get("materialized"):
+                    raise ControlPlaneError("CHAPTER_NOT_MATERIALIZED", f"章节 Workspace 尚未创建: {chapter_id}", status_code=409)
+                chapter_context = chapter.get("context") if isinstance(chapter.get("context"), dict) else {}
+                if not chapter_context.get("context_hash"):
+                    raise ControlPlaneError("CHAPTER_CONTEXT_REQUIRED", f"章节上下文未就绪: {chapter_id}", status_code=409)
+        except ControlPlaneError as exc:
+            job.update({"status": "blocked", "error": exc.as_dict()})
+            self.store.upsert_agent_activity_state({**job, "phase": "blocked"}, source="chapter_batch")
+            return {"accepted": False, "operation_status": "blocked", "message": exc.message, "error": exc.as_dict()}
+
+        chat = ChapterChatService(context)
+        for index, chapter_id in enumerate(chapter_ids):
+            authority = chat.load_authority(chapter_id)
+            if str(authority.get("mode") or "") == "human_review":
+                error = {
+                    "code": "CHAPTER_OUTLINE_REVIEW_REQUIRED",
+                    "message": "该章节配置为人工审核，请先确认本章提纲后再继续批量编写。",
+                    "retryable": True,
+                    "details": {"chapter_id": chapter_id},
+                }
+                job["items"][index].update({"status": "blocked_human", "error": error})
+                job.update({"status": "blocked_human", "error": error})
+                self.store.record_stage_run(
+                    operation_id,
+                    f"chapter.batch:{chapter_id}",
+                    "blocked_human",
+                    disposition="chapter_outline_review_required",
+                    error=error,
+                )
+                self.store.cancel_active_stage_runs(
+                    operation_id,
+                    disposition="chapter_outline_review_required",
+                    error=error,
+                )
+                self.store.upsert_agent_activity_state(
+                    {**job, "phase": "blocked_human"}, source="chapter_batch"
+                )
+                return {
+                    "accepted": True,
+                    "operation_status": "blocked_human",
+                    "message": error["message"],
+                    "error": error,
+                }
+            job["status"] = "running"
+            job["current_chapter_id"] = chapter_id
+            job["items"][index]["status"] = "running"
+            self.store.upsert_agent_activity_state({**job, "phase": "writing"}, source="chapter_batch")
+            self.store.record_stage_run(operation_id, f"chapter.batch:{chapter_id}", "running", disposition="chapter_batch")
+            try:
+                # Respect the chapter's persisted review authority.  A batch
+                # command must never silently turn a human-review chapter into
+                # an autonomous one.
+                scoped = CommandEnvelope.from_mapping(
+                    {**envelope.as_dict(), "kind": "document.run_pipeline", "payload": {"chapter_ids": [chapter_id]}},
+                    workspace_id=context.workspace_id,
+                )
+                self.run_pipeline(context, scoped, operation_id)
+                updated = chapters.get_chapter(chapter_id)
+                revision = int(updated.get("head_content_revision") or 0)
+                if revision <= 0:
+                    raise ControlPlaneError("CHAPTER_DRAFT_COMMIT_REJECTED", "章节正文未写入中间文档。", status_code=409)
+                job["items"][index].update({"status": "succeeded", "content_revision": revision})
+                job["completed_count"] += 1
+                self.store.record_stage_run(operation_id, f"chapter.batch:{chapter_id}", "succeeded", disposition="chapter_batch")
+            except Exception as exc:
+                error = self._stage_error(exc if isinstance(exc, Exception) else Exception(str(exc)))
+                job["items"][index].update({"status": "failed", "error": error})
+                job.update({"status": "failed", "failed_count": 1, "error": error})
+                self.store.record_stage_run(operation_id, f"chapter.batch:{chapter_id}", "failed", disposition="chapter_batch", error=error)
+                self.store.upsert_agent_activity_state({**job, "phase": "failed"}, source="chapter_batch")
+                return {"accepted": False, "operation_status": "failed", "message": error["message"], "error": error}
+            finally:
+                self.store.upsert_agent_activity_state({**job, "phase": "writing"}, source="chapter_batch")
+        job.update({"status": "succeeded", "current_chapter_id": ""})
+        self.store.upsert_agent_activity_state({**job, "phase": "completed"}, source="chapter_batch")
+        return {"accepted": True, "operation_status": "succeeded", "message": f"已完成 {job['completed_count']} 个章节的编写。"}
 
     def _active_artifact_identity(self, stage: str) -> tuple[str, int, str] | None:
         kind = _STAGE_ARTIFACT_KIND.get(stage)
@@ -170,18 +304,6 @@ class V3ExecutionController:
         if stage == "plan_document" and isinstance(result, tuple):
             units = result[1] if len(result) > 1 and isinstance(result[1], list) else []
             return {"content_unit_count": len(units)}
-        if stage == "resolve_evidence" and isinstance(result, dict):
-            return {
-                key: result.get(key)
-                for key in (
-                    "provider_id",
-                    "planned_count",
-                    "published_count",
-                    "gap_count",
-                    "failed_count",
-                )
-                if key in result
-            }
         if stage == "execute_content_plan" and isinstance(result, list):
             blocks = [
                 block
@@ -331,15 +453,29 @@ class V3ExecutionController:
         return {"accepted": True, "operation_status": "succeeded", "message": f"V3 阶段完成: {stage}"}
 
     def run_pipeline(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        # document.run_pipeline starts after the separately confirmed outline.
+        # Re-running ingestion/score analysis/outline compilation here both wastes
+        # time and can invalidate the exact chapter IDs the user just confirmed.
+        stages = V3_GENERATION_STAGES
+        requested_chapter_ids = [
+            str(item).strip()
+            for item in (envelope.payload.get("chapter_ids") or [])
+            if str(item).strip()
+        ]
+        set_scope = getattr(self.runner, "set_generation_scope", None)
+        if callable(set_scope):
+            set_scope(requested_chapter_ids)
+        if requested_chapter_ids:
+            stages = V3_GENERATION_STAGES[:4]
         completed: list[str] = []
-        for stage in V3_PIPELINE_STAGES:
+        for stage in stages:
             self.store.record_stage_run(
                 operation_id,
                 stage,
                 "queued",
                 disposition="v3_pipeline",
             )
-        for stage in V3_PIPELINE_STAGES:
+        for stage in stages:
             self.store.record_stage_run(
                 operation_id,
                 stage,
@@ -351,6 +487,51 @@ class V3ExecutionController:
                     result = self.runner.run(stage, operation_id=operation_id)
             except Exception as exc:
                 error = self._stage_error(exc)
+                blocked_code = getattr(exc, "code", "")
+                if blocked_code in {
+                    "WRITER_RESEARCH_ACTION_REQUIRED",
+                    "WRITER_MODEL_ACTION_REQUIRED",
+                    "TECHNICAL_DRAFT_READY",
+                }:
+                    disposition = (
+                        "writer_model_action_required"
+                        if blocked_code == "WRITER_MODEL_ACTION_REQUIRED"
+                        else (
+                            "technical_draft_ready"
+                            if blocked_code == "TECHNICAL_DRAFT_READY"
+                            else "writer_research_action_required"
+                        )
+                    )
+                    self.store.record_stage_run(
+                        operation_id,
+                        stage,
+                        "paused",
+                        disposition=disposition,
+                        error=error,
+                    )
+                    self.store.cancel_active_stage_runs(
+                        operation_id,
+                        disposition=disposition,
+                        error=error,
+                    )
+                    return {
+                        "accepted": True,
+                        "operation_status": "blocked",
+                        "message": (
+                            str(getattr(exc, "message", "") or "")
+                            or (
+                                "写作模型输出无法解析；任务已在当前章节暂停，可直接重试该章节。"
+                                if blocked_code == "WRITER_MODEL_ACTION_REQUIRED"
+                                else (
+                                    "技术章节已写完；商务部分和价格部分按当前要求暂不写入。"
+                                    if blocked_code == "TECHNICAL_DRAFT_READY"
+                                    else "写作 Agent 需要公开资料检索；请完成当前 Provider 的检索后重新生成以继续当前章节。"
+                                )
+                            )
+                        ),
+                        "completed_stages": completed,
+                        "error": error,
+                    }
                 self.store.record_stage_run(
                     operation_id,
                     stage,
@@ -388,8 +569,13 @@ class V3ExecutionController:
         return {
             "accepted": True,
             "operation_status": "succeeded",
-            "message": f"V3 Pipeline 完成: {len(completed)} 个阶段",
+            "message": (
+                f"指定章节写作完成: {len(requested_chapter_ids)} 个章节范围"
+                if requested_chapter_ids
+                else f"V3 Pipeline 完成: {len(completed)} 个阶段"
+            ),
             "completed_stages": completed,
+            "chapter_ids": requested_chapter_ids,
         }
 
     def prepare_outline(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
@@ -397,11 +583,31 @@ class V3ExecutionController:
 
         from .artifact_promotion import HumanGateService
 
+        payload = envelope.payload if isinstance(envelope.payload, dict) else {}
+        review_feedback = str(payload.get("review_feedback") or "").strip()
+        base_blueprint_hash = str(payload.get("base_blueprint_hash") or "").strip()
+        if review_feedback:
+            active_blueprint = self.store.v3_active_artifact("ChapterBlueprint")
+            active_hash = str((active_blueprint or {}).get("artifact_hash") or "")
+            if not active_hash or active_hash != base_blueprint_hash:
+                raise ControlPlaneError(
+                    "PLANNING_REVIEW_STALE",
+                    "目录版本已变化，请刷新后对最新目录发表意见。",
+                    status_code=409,
+                )
+            request_revision = getattr(self.runner, "request_outline_revision", None)
+            if callable(request_revision):
+                request_revision(review_feedback)
+
         completed: list[str] = []
         reused: list[str] = []
         for stage in V3_OUTLINE_STAGES:
             can_reuse = getattr(self.runner, "can_reuse_stage", None)
-            if callable(can_reuse) and bool(can_reuse(stage)):
+            if (
+                callable(can_reuse)
+                and bool(can_reuse(stage))
+                and not (review_feedback and stage == "compile_chapter_blueprint")
+            ):
                 self.store.record_stage_run(
                     operation_id,
                     stage,
@@ -456,6 +662,9 @@ class V3ExecutionController:
                 reused.append(stage)
             completed.append(stage)
         planning_snapshot = HumanGateService(self.context).planning_snapshot()
+        workspaces = ChapterWorkspaceService(self.context).ensure_all(
+            actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+        )
         self.store.record_stage_run(
             operation_id,
             "confirm_planning",
@@ -468,7 +677,9 @@ class V3ExecutionController:
             "message": "评分点解析与章节目录草案已生成，等待审阅确认。",
             "completed_stages": completed,
             "reused_stages": reused,
+            "review_feedback_applied": bool(review_feedback),
             "planning_snapshot": planning_snapshot,
+            "chapter_workspaces": workspaces,
         }
 
     def confirm_planning(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
@@ -490,9 +701,11 @@ class V3ExecutionController:
             nonce=envelope.command_id,
         )
         self.store.record_stage_run(operation_id, "confirm_planning", "succeeded", disposition="explicit_human_confirmation")
+        workspaces = ChapterWorkspaceService(self.context).ensure_all(actor=actor)
         return {
             "accepted": True,
             "operation_status": "succeeded",
             "message": "规划已由认证用户确认，H1 Receipt 已签发。",
             "planning_receipt": receipt.model_dump(mode="json"),
+            "chapter_workspaces": workspaces,
         }

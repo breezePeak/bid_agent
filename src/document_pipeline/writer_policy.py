@@ -14,10 +14,12 @@ from .document_planner import CONTENT_UNITS_PATH
 from .input_manifest import V3_ROOT
 
 
-WRITER_IMPLEMENTATION_VERSION = "v3.writer.projectized.v4"
-WRITER_PROMPT_VERSION = "v3.writer.projectized.prompt.v4"
-RESEARCH_DECISION_POLICY_VERSION = "v3.writer.research.unit.v4"
+WRITER_IMPLEMENTATION_VERSION = "v3.writer.leaf-chapters-only.v7"
+WRITER_PROMPT_VERSION = "v3.writer.leaf-chapters-only.prompt.v7"
+RESEARCH_DECISION_POLICY_VERSION = "v3.writer.research.project-relevance.v5"
 CONTENT_QUALITY_POLICY_VERSION = "v3.writer.quality.no-rubric.v3"
+GLOBAL_GROUNDING_POLICY_VERSION = "v3.global-project-context.v1"
+RESEARCH_RELEVANCE_POLICY_VERSION = "v3.project-relevance.v1"
 
 _FORBIDDEN_TEMPLATE_MARKERS = (
     "满分条件",
@@ -87,6 +89,7 @@ def writer_base_fingerprint(
         "RequirementLedger",
         "ScoreModel",
         "ChapterBlueprint",
+        "ProjectModel",
         "TemplateStructureContract",
     ):
         item = store.v3_active_artifact(kind)
@@ -98,6 +101,8 @@ def writer_base_fingerprint(
             "prompt_version": WRITER_PROMPT_VERSION,
             "research_policy_version": RESEARCH_DECISION_POLICY_VERSION,
             "quality_policy_version": CONTENT_QUALITY_POLICY_VERSION,
+            "global_grounding_policy_version": GLOBAL_GROUNDING_POLICY_VERSION,
+            "research_relevance_policy_version": RESEARCH_RELEVANCE_POLICY_VERSION,
             "model": writer_model_identity(
                 context.root,
                 deterministic_test=deterministic_test,

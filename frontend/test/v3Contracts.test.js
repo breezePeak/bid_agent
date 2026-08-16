@@ -185,6 +185,28 @@ test('workspace snapshot normalization preserves pipeline stages and products', 
   assert.equal(normalized.analysis.pipeline.products[0].kind, 'ScoreStructureDraft')
 })
 
+test('workspace snapshot keeps one normalized global project context for every chapter view', () => {
+  const normalized = normalizeV3WorkspaceSnapshot({
+    snapshot: {
+      global_project_context: {
+        global_context_id: 'ProjectModel@6',
+        global_context_revision: 6,
+        global_context_hash: 'abc123',
+        identity: { project_name: '全国国土变更调查核查项目' },
+        scope: ['覆盖全国31个省级区域'],
+        work_packages: ['国家级内外业核查'],
+        confirmed_facts: [{ fact_id: 'PF-1', statement: '覆盖31个省级区域' }],
+      },
+    },
+  })
+
+  assert.equal(normalized.global_project_context.global_context_id, 'ProjectModel@6')
+  assert.equal(normalized.global_project_context.global_context_revision, 6)
+  assert.deepEqual(normalized.global_project_context.scope, ['覆盖全国31个省级区域'])
+  assert.deepEqual(normalized.global_project_context.background, [])
+  assert.equal(normalized.global_project_context.confirmed_facts[0].fact_id, 'PF-1')
+})
+
 test('workspace snapshot normalization preserves generation stages and lightweight content units', () => {
   const normalized = normalizeV3WorkspaceSnapshot({
     snapshot: {
@@ -240,6 +262,8 @@ test('V3 workspace routes stay in the V3 namespace and encode run IDs', () => {
     v3WorkspacePath(runId, '/commands/'),
     v3WorkspacePath(runId, 'uploads'),
     v3WorkspacePath(runId, 'chat/turn'),
+    v3WorkspacePath(runId, 'chapters/ch-a/chat/turn'),
+    v3WorkspacePath(runId, 'chapters/ch-a/chat/history'),
     v3WorkspacePath(runId, 'exports/final'),
   ]
 
@@ -259,10 +283,20 @@ test('pipeline command uses the frozen command envelope', () => {
   assert.deepEqual(buildRunPipelineCommand('cmd-pipeline-1', 17), {
     command_id: 'cmd-pipeline-1',
     kind: 'document.run_pipeline',
-    payload: {},
+    payload: { chapter_ids: [] },
     expected_revision: 17,
     idempotency_key: 'cmd-pipeline-1',
   })
+  assert.deepEqual(
+    buildRunPipelineCommand('cmd-pipeline-2', 18, ['chapter-3', 'chapter-3']),
+    {
+      command_id: 'cmd-pipeline-2',
+      kind: 'document.run_pipeline',
+      payload: { chapter_ids: ['chapter-3'] },
+      expected_revision: 18,
+      idempotency_key: 'cmd-pipeline-2',
+    },
+  )
 })
 
 test('outline command stops at the score-aware planning boundary', () => {

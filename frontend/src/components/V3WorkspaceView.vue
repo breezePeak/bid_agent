@@ -1,117 +1,5 @@
 <template>
   <section class="v3-workspace" :aria-busy="running || uploading">
-    <header class="workspace-header">
-      <div>
-        <p class="eyebrow">标书编制工作台</p>
-        <div class="title-row">
-          <h1>{{ workspaceName }}</h1>
-          <span class="status-pill" :class="`status-${planningStatus}`">
-            {{ planningStatusLabel }}
-          </span>
-        </div>
-        <p class="header-copy">上传招标与公司资料，先生成可追溯到评分点的章节目录草案。</p>
-      </div>
-      <div class="header-actions">
-        <button class="btn" type="button" :disabled="loading || running" @click="refresh(true)">
-          <svg aria-hidden="true" viewBox="0 0 24 24">
-            <path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7" />
-          </svg>
-          {{ loading ? '刷新中' : '刷新状态' }}
-        </button>
-        <button
-          v-if="deliveryReady"
-          class="btn btn-primary"
-          type="button"
-          @click="download"
-        >
-          下载 Word
-        </button>
-      </div>
-    </header>
-
-    <!-- 实时步骤进度链 (Step Progress Tracker) -->
-    <section v-if="topPipelineStages.length" class="pipeline-stepper-panel" aria-label="后台处理流程进度链">
-      <div class="stepper-bar-header">
-        <div class="stepper-bar-title">
-          <p class="section-kicker">流水线进度</p>
-          <h3>{{ topPipelineTitle }}（{{ topPipelineStages.length }} 步）</h3>
-          <p class="pipeline-context-copy">{{ topPipelineDescription }}</p>
-        </div>
-        <div class="stepper-right-info">
-          <span class="pipeline-state-pill" :class="`pipeline-state-${topPipelineStatus}`">
-            {{ topPipelineStatusLabel }}
-          </span>
-          <button
-            v-if="planningStatus !== 'confirmed' && hasTender"
-            class="btn btn-primary"
-            type="button"
-            :disabled="outlineActionDisabled"
-            @click="prepareOutline"
-          >
-            <span v-if="outlineBusy" class="spinner" aria-hidden="true" />
-            {{ outlineBusy ? outlineRunningLabel : outlineActionLabel }}
-          </button>
-          <button
-            v-else-if="planningStatus === 'confirmed'"
-            class="btn btn-primary"
-            type="button"
-            :disabled="running || generationBusy"
-            @click="runDocument"
-          >
-            {{ generationBusy ? '正在生成，不要重复提交' : (generation.status === 'failed' ? '重新生成完整标书' : '生成完整标书') }}
-          </button>
-          <button
-            class="text-button log-toggle-btn"
-            type="button"
-            @click="activeTab = activeTab === 'pipeline' ? 'planning' : 'pipeline'"
-          >
-            {{ activeTab === 'pipeline' ? '返回结果主视窗' : '查看完整步骤产物明细 →' }}
-          </button>
-        </div>
-      </div>
-
-      <div v-if="showGenerationPipeline" class="pipeline-prerequisite-note">
-        <strong>前置规划不会重复展示</strong>
-        <span>
-          已完成 {{ generationPrerequisiteCompleted }}/{{ generationPrerequisiteStages.length }} 个目录前置步骤，
-          其中 {{ generationPrerequisiteReused }} 个直接复用；下方只展示正文生成与交付步骤。
-        </span>
-      </div>
-
-      <ol class="stepper-bar-list" aria-label="处理步骤节点">
-        <li
-          v-for="(stage, index) in topPipelineStages"
-          :key="stage.stage_id"
-        >
-          <button
-            class="stepper-node"
-            :class="[
-              `stage-${stage.status}`,
-              { selected: selectedDrawerStage?.stage_id === stage.stage_id, 'has-warning': stage.warning_count > 0 }
-            ]"
-            type="button"
-            :aria-pressed="selectedDrawerStage?.stage_id === stage.stage_id"
-            @click="openStageDrawer(stage)"
-          >
-            <div class="node-badge">
-              <span v-if="stage.warning_count > 0">!</span>
-              <span v-else-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
-              <span v-else-if="stage.status === 'failed'">×</span>
-              <span v-else-if="stage.status === 'running' || stage.status === 'queued'" class="spinner-dot" />
-              <span v-else>{{ index + 1 }}</span>
-            </div>
-            <div class="node-content">
-              <strong>{{ stage.label }}</strong>
-              <small>{{ stage.warning_count > 0 ? '已带警告继续' : pipelineStageStatus(stage) }}</small>
-              <small class="stage-operation">{{ pipelineStageOperation(stage) }}</small>
-            </div>
-            <span v-if="stage.llm_request_count > 0" class="node-req-tag">
-              {{ stage.llm_request_count }}次 LLM 请求
-            </span>
-          </button>
-        </li>
-      </ol>
-    </section>
 
     <!-- 步骤细节诊断 Drawer 抽屉/弹窗 -->
     <div v-if="selectedDrawerStage" class="stage-drawer-overlay" @click.self="closeStageDrawer">
@@ -133,7 +21,8 @@
         <div class="drawer-body">
           <div class="drawer-status-box" :class="`status-${selectedDrawerStage.status}`">
             <strong>步骤状态：{{ pipelineStageStatus(selectedDrawerStage) }}</strong>
-            <span>尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
+            <span>流程尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
+            <span>模型请求 {{ selectedDrawerStage.llm_request_count || 0 }} 次</span>
           </div>
           <dl
             v-if="selectedDrawerStage.started_at || selectedDrawerStage.completed_at"
@@ -152,11 +41,20 @@
           <section
             v-if="stageDetail?.current_writing"
             class="current-writing-card"
+            :class="{
+              'current-writing-paused': ['blocked_human', 'failed', 'paused'].includes(
+                stageDetail.current_writing.unit_status
+                  || selectedDrawerStage.status
+                  || ''
+              ) || ['model_output_invalid', 'research_blocked', 'paused', 'failed'].includes(
+                stageDetail.current_writing.phase || ''
+              )
+            }"
             aria-live="polite"
           >
             <p class="section-kicker">实时写作位置</p>
             <strong>
-              {{ writingPhaseLabel(stageDetail.current_writing.phase) }}：
+              {{ writingPhaseLabel(stageDetail.current_writing.phase, stageDetail.current_writing.unit_status || selectedDrawerStage.status) }}：
               {{
                 stageDetail.current_writing.chapter_title
                   || stageDetail.current_writing.unit_title
@@ -168,6 +66,12 @@
               <template v-if="stageDetail.current_writing.chapter_id">
                 · 章节 {{ stageDetail.current_writing.chapter_id }}
               </template>
+            </p>
+            <p
+              v-if="stageDetail.current_writing.error"
+              class="current-writing-error"
+            >
+              {{ stageDetail.current_writing.error }}
             </p>
             <small v-if="stageDetail.current_writing.updated_at">
               最近更新：{{ formatTimestamp(stageDetail.current_writing.updated_at) }}
@@ -383,20 +287,26 @@
 
           <div v-if="selectedDrawerStage.llm_requests?.length" class="drawer-llm-list">
             <h4>大模型请求历史明细 ({{ selectedDrawerStage.llm_requests.length }} 次)</h4>
-            <article
-              v-for="request in selectedDrawerStage.llm_requests"
+            <details
+              v-for="(request, requestIndex) in selectedDrawerStage.llm_requests"
               :key="request.request_id"
               class="pipeline-llm-request"
+              :open="shouldExpandLlmRequest(request, requestIndex, selectedDrawerStage.llm_requests.length)"
             >
-              <header>
+              <summary>
                 <strong>第 {{ request.request_index }} 次请求</strong>
+                <span class="llm-request-purpose-summary">{{ llmRequestPurpose(request) }}</span>
                 <span :class="`llm-request-${request.status}`">
                   {{ llmRequestStatus(request.status) }}
                 </span>
-              </header>
-              <p>{{ llmRequestSummary(request) }}</p>
-              <pre>{{ formatLlmRequest(request) }}</pre>
-            </article>
+                <svg class="llm-request-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>
+              </summary>
+              <div class="pipeline-llm-request-detail">
+                <p class="llm-request-purpose"><strong>本次请求：</strong>{{ llmRequestPurpose(request) }}</p>
+                <p>{{ llmRequestSummary(request) }}</p>
+                <pre>{{ formatLlmRequest(request) }}</pre>
+              </div>
+            </details>
           </div>
           <section v-if="stageDetail && Object.keys(stageDetail.details || {}).length" class="drawer-business-detail">
             <h4>阶段结果</h4>
@@ -436,307 +346,505 @@
       </aside>
     </div>
 
-    <nav class="workflow-tabs" aria-label="标书处理步骤与视图">
-      <button
-        class="workflow-tab-btn"
-        :class="{ active: activeTab === 'upload' }"
-        type="button"
-        @click="activeTab = 'upload'"
-      >
-        <span class="tab-step-num">01</span>
-        <div class="tab-text">
-          <strong>1. 输入资料与配置</strong>
-          <small>{{ hasTender ? `${activeInputs.length} 个文件已登记` : '请上传招标文件' }}</small>
-          <span class="tab-action-hint">操作：上传、替换或补充项目资料</span>
-        </div>
-      </button>
-
-      <button
-        class="workflow-tab-btn"
-        :class="{ active: activeTab === 'planning', highlight: hasOutline }"
-        type="button"
-        @click="activeTab = 'planning'"
-      >
-        <span class="tab-step-num">02</span>
-        <div class="tab-text">
-          <strong>2. 审阅评分目录草案</strong>
-          <small>{{ hasOutline ? `${planningView.summary.chapter_count} 章节 · ${planningView.summary.score_point_count} 评分点` : (outlineBusy ? '正在解析目录…' : '结果主视窗') }}</small>
-          <span class="tab-action-hint">操作：生成目录、检查评分覆盖、确认目录</span>
-        </div>
-        <span v-if="hasOutline" class="tab-badge">结果就绪</span>
-      </button>
-
-      <button
-        class="workflow-tab-btn"
-        :class="{ active: activeTab === 'generation', highlight: generation.operation_id }"
-        type="button"
-        @click="activeTab = 'generation'"
-      >
-        <span class="tab-step-num">03</span>
-        <div class="tab-text">
-          <strong>3. 完整标书生成</strong>
-          <small>{{ generationTabLabel }}</small>
-          <span class="tab-action-hint">操作：整本生成或只生成所选章节、补充人工材料、预览并下载 Word</span>
-        </div>
-        <span v-if="generationBusy" class="tab-badge">生成中</span>
-      </button>
-    </nav>
-
-    <div class="announcer" aria-live="polite" aria-atomic="true">
-      <div v-if="error" class="message error" role="alert">
-        <p><strong>处理失败：</strong>{{ error }}</p>
-        <div v-if="errorDetails.length" class="error-detail-list">
-          <strong>详细问题（{{ errorDetails.length }} 项）</strong>
-          <ol>
-            <li v-for="item in errorDetails" :key="`${item.title}:${item.description}`">
-              <b>{{ item.title }}</b>
-              <span>{{ item.description }}</span>
-            </li>
-          </ol>
-        </div>
-      </div>
-      <p v-else-if="message" class="message success">
-        {{ message }}
-      </p>
-    </div>
-
-    <div v-show="activeTab === 'upload'" class="workspace-tab-view tab-upload">
-      <div class="workspace-grid upload-grid-layout">
-        <section class="panel upload-panel" aria-labelledby="upload-heading">
-        <div class="panel-heading">
+    <!-- 大模型调用明细与诊断 Modal 弹窗 -->
+    <Teleport to="body">
+      <div v-if="showLlmModal" class="llm-modal-overlay" @click.self="showLlmModal = false">
+        <div class="llm-modal-content" role="dialog" aria-modal="true" aria-labelledby="llm-modal-title">
+        <header class="llm-modal-header">
           <div>
-            <p class="section-kicker">01 · 输入资料</p>
-            <h2 id="upload-heading">上传项目文件</h2>
+            <p class="section-kicker">大模型调用轨迹与日志审计</p>
+            <h3 id="llm-modal-title">大模型请求明细与内容诊断</h3>
           </div>
-          <span class="file-count">{{ activeInputs.length }} 个已登记文件</span>
-        </div>
-        <p class="panel-description">
-          支持 PDF、DOCX、Markdown 和 TXT。完整招标文件中的评分章节也会参与评分解析。
-        </p>
-
-        <div class="upload-zones">
-          <article
-            v-for="zone in uploadZones"
-            :key="zone.role"
-            class="upload-zone"
-            :class="{ required: zone.required }"
-          >
-            <div class="zone-heading">
-              <div class="zone-icon" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-                  <path d="M14 2v6h6M12 18v-6m-3 3 3-3 3 3" />
-                </svg>
-              </div>
-              <div>
-                <h3>
-                  {{ zone.title }}
-                  <span v-if="zone.required" class="required-mark">必传</span>
-                </h3>
-                <p>{{ zone.description }}</p>
-              </div>
-            </div>
-
-            <input
-              :id="`upload-${zone.role}`"
-              class="visually-hidden"
-              type="file"
-              accept=".pdf,.docx,.md,.txt"
-              multiple
-              :disabled="uploading || running"
-              @change="selectFiles(zone.role, $event)"
-            />
-            <label
-              class="file-picker"
-              :class="{ disabled: uploading || running }"
-              :for="`upload-${zone.role}`"
-            >
-              选择一个或多个文件
-            </label>
-
-            <ul v-if="pendingUploads[zone.role].length" class="pending-files" aria-label="待上传文件">
-              <li v-for="(file, index) in pendingUploads[zone.role]" :key="`${file.name}-${file.size}`">
-                <span>
-                  <strong>{{ file.name }}</strong>
-                  <small>{{ formatBytes(file.size) }}</small>
-                </span>
-                <button
-                  class="remove-file"
-                  type="button"
-                  :aria-label="`移除 ${file.name}`"
-                  @click="removePendingFile(zone.role, index)"
-                >
-                  移除
-                </button>
-              </li>
-            </ul>
-
-            <button
-              v-if="pendingUploads[zone.role].length"
-              class="btn upload-button"
-              type="button"
-              :disabled="uploading || running"
-              @click="uploadRole(zone.role)"
-            >
-              {{ uploadingRole === zone.role ? '正在上传…' : `上传 ${pendingUploads[zone.role].length} 个文件` }}
-            </button>
-
-            <ul v-if="inputsForRole(zone.role).length" class="registered-files" aria-label="已登记文件">
-              <li v-for="item in inputsForRole(zone.role)" :key="item.input_id">
-                <span class="file-state-dot" :class="sourceStatusClass(item)" aria-hidden="true" />
-                <span class="registered-file-name">
-                  <strong>{{ item.filename }}</strong>
-                  <small>{{ sourceStatusLabel(item) }} · v{{ item.version }}</small>
-                </span>
-                <label v-if="deepSeekEligible(item)" class="research-check">
-                  <input v-model="deepSeekAttachmentIds" type="checkbox" :value="item.input_id" />
-                  允许研究时使用
-                </label>
-              </li>
-            </ul>
-          </article>
-        </div>
-
-        <p class="upload-note">
-          扫描版公司附件会标记为“待 OCR”，不会阻断招标评分和目录主链；扫描版招标文件仍需先完成 OCR。
-        </p>
-      </section>
-
-      <aside class="panel action-panel" aria-labelledby="action-heading">
-        <div class="panel-heading compact">
-          <div>
-            <p class="section-kicker">02 · 解析规划</p>
-            <h2 id="action-heading">生成评分目录</h2>
-          </div>
-        </div>
-
-        <div class="analysis-summary">
-          <div>
-            <span>招标文件</span>
-            <strong>{{ tenderInputs.length }}</strong>
-          </div>
-          <div>
-            <span>公司资料</span>
-            <strong>{{ companyInputs.length }}</strong>
-          </div>
-          <div>
-            <span>评分点</span>
-            <strong>{{ planningView.summary.score_point_count }}</strong>
-          </div>
-          <div>
-            <span>章节节点</span>
-            <strong>{{ planningView.summary.chapter_count }}</strong>
-          </div>
-        </div>
-
-        <div v-if="analysisStale" class="inline-warning">
-          {{ analysisStaleMessage }}
-        </div>
-
-        <button
-          class="btn btn-primary primary-action"
-          type="button"
-          :disabled="outlineActionDisabled"
-          @click="prepareOutline"
-        >
-          <span v-if="outlineBusy" class="spinner" aria-hidden="true" />
-          {{ outlineBusy ? outlineRunningLabel : outlineActionLabel }}
-        </button>
-        <p v-if="!hasTender" class="action-hint">请先上传至少一份招标文件。</p>
-        <p v-else class="action-hint">本操作只生成目录草案，不会开始写正文。</p>
-
-        <div v-if="hasOutline" class="planning-actions">
-          <button
-            v-if="planningStatus === 'needs_human'"
-            class="btn confirm-button"
-            type="button"
-            :disabled="running"
-            @click="confirmPlanning"
-          >
-            确认当前目录
+          <button class="modal-close-btn" type="button" aria-label="关闭" @click="showLlmModal = false">
+            <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
           </button>
-          <button
-            v-else-if="planningStatus === 'confirmed'"
-            class="btn"
-            type="button"
-            :disabled="running || generationBusy"
-            @click="runDocument"
-          >
-            {{ generationBusy || (running && runningAction === 'document') ? '正在生成，不要重复提交' : '生成完整标书' }}
-          </button>
-        </div>
+        </header>
 
-        <dl class="delivery-list">
-          <div>
-            <dt>目录状态</dt>
-            <dd>{{ planningStatusLabel }}</dd>
-          </div>
-          <div>
-            <dt>目录模式</dt>
-            <dd>{{ document.mode === 'template_strict' ? '严格模板' : '自动目录' }}</dd>
-          </div>
-          <div>
-            <dt>交付状态</dt>
-            <dd>{{ deliveryStatusLabel }}</dd>
-          </div>
-        </dl>
-      </aside>
-      </div>
-
-      <div class="workspace-grid support-grid-layout">
-        <section class="panel support-panel" aria-labelledby="evidence-heading">
-          <div class="panel-heading compact">
-            <div>
-              <p class="section-kicker">05 · 资料补充</p>
-              <h2 id="evidence-heading">证据缺口</h2>
-            </div>
-            <span class="file-count">{{ evidenceNeeds.length }} 项</span>
-          </div>
-          <ul class="evidence-list">
-            <li v-for="need in evidenceNeeds" :key="need.need_id">
-              <span>
-                <strong>{{ need.question }}</strong>
-                <small>
-                  {{ need.status === 'satisfied'
-                    ? '已满足'
-                    : '待人工补充' }}
-                </small>
-              </span>
-              <span class="manual-evidence-badge">请上传项目真实材料</span>
-            </li>
-            <li v-if="!evidenceNeeds.length" class="support-empty">
-              当前没有已识别的证据缺口。
-            </li>
-          </ul>
-          <p class="support-note">
-            证据缺口必须由人工提供真实的企业、人员、业绩、资质或项目材料；系统不会联网补造或代替证明文件。
+          <div class="llm-modal-body">
+          <p v-if="!allLlmRequests.length" class="modal-empty-hint">
+            当前任务尚未向大模型发起请求。
           </p>
-        </section>
+          <div v-else class="llm-request-cards">
+            <article
+              v-for="(req, idx) in allLlmRequests"
+              :key="req.request_id || idx"
+              class="llm-detail-card"
+              :class="`status-${req.status}`"
+            >
+              <header class="llm-card-header">
+                <div class="llm-card-title">
+                  <strong>第 {{ req.request_index || (idx + 1) }} 次大模型请求</strong>
+                  <span class="llm-badge" :class="`badge-${req.status}`">
+                    {{ llmRequestStatus(req.status) }}
+                  </span>
+                  <span class="attempt-type-tag">
+                    {{ requestAttemptKindLabel(req) }}
+                  </span>
+                </div>
+                <small v-if="req.started_at" class="llm-card-time">
+                  {{ formatTimestamp(req.started_at) }}
+                </small>
+              </header>
 
-        <section class="panel support-panel" aria-labelledby="chat-heading">
-          <div class="panel-heading compact">
+              <div class="llm-card-meta">
+                <span><strong>所属阶段:</strong> {{ getStageLabel(req.stage_id) }}</span>
+                <span><strong>逻辑批次:</strong> <code>{{ req.parameters?.logical_batch_id || '默认批次' }}</code></span>
+                <span><strong>后端 Skill / Provider:</strong> <code>{{ req.parameters?.capability_id || req.capability_id || 'planning.chapter_outline_split' }}</code></span>
+              </div>
+
+              <div class="llm-request-purpose-card">
+                <strong>本次请求在做什么</strong>
+                <p>{{ llmRequestPurpose(req) }}</p>
+              </div>
+
+              <!-- 如果属于受控修复或曾报错，显示校验诊断 -->
+              <div v-if="req.error || req.parameters?.repair_feedback" class="llm-repair-alert">
+                <strong>校验诊断 & 受控修复指导 (Diagnostic & Feedback):</strong>
+                <p v-if="req.error" class="error-msg">{{ req.error }}</p>
+                <pre v-if="req.parameters?.repair_feedback" class="repair-feedback-box">{{ req.parameters.repair_feedback }}</pre>
+              </div>
+
+              <!-- 可折叠展开查看请求参数 JSON -->
+              <details class="llm-card-details">
+                <summary>展开查看完整 Prompt 输入快照与模型参数</summary>
+                <div class="llm-snapshot-view">
+                  <pre>{{ formatLlmParameters(req) }}</pre>
+                </div>
+              </details>
+            </article>
+          </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- 目录进入人工确认时，明确打断对话并引导到可审核页面。 -->
+    <Teleport to="body">
+      <div v-if="showPlanningReviewPrompt" class="planning-review-overlay" role="presentation">
+        <section
+          class="planning-review-dialog"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="planning-review-title"
+        >
+          <button
+            class="planning-review-close"
+            type="button"
+            aria-label="稍后审核"
+            @click="dismissPlanningReviewPrompt"
+          >
+            ×
+          </button>
+          <span class="planning-review-icon" aria-hidden="true">✓</span>
+          <p class="section-kicker">需要您的审核</p>
+          <h2 id="planning-review-title">目录已生成，等待审核</h2>
+          <p>
+            请核验评分点覆盖、章节结构和响应任务，再确认目录并进入完整标书生成。
+          </p>
+          <dl class="planning-review-metrics">
+            <div><dt>章节节点</dt><dd>{{ planningView.summary.chapter_count }}</dd></div>
+            <div><dt>评分点</dt><dd>{{ planningView.summary.score_point_count }}</dd></div>
+            <div><dt>已覆盖响应</dt><dd>{{ planningView.summary.covered_response_unit_count }}</dd></div>
+            <div><dt>待处理覆盖</dt><dd>{{ planningView.summary.uncovered_response_unit_count }}</dd></div>
+          </dl>
+          <label class="planning-review-feedback">
+            <span>发表修改意见（可选）</span>
+            <textarea
+              v-model="planningReviewFeedback"
+              rows="3"
+              placeholder="例如：调整目录层级，补充某评分项的响应章节"
+            />
+          </label>
+          <div class="planning-review-actions">
+            <button class="btn" type="button" @click="dismissPlanningReviewPrompt">稍后审核</button>
+            <button class="btn" type="button" :disabled="running || !planningReviewFeedback.trim()" @click="submitPlanningFeedback">
+              提交修改意见
+            </button>
+            <button class="btn btn-primary" type="button" @click="openPlanningReview">
+              进入审核目录
+            </button>
+          </div>
+        </section>
+      </div>
+    </Teleport>
+
+        <div v-show="activeTab === 'upload'" class="workspace-tab-view tab-upload">
+      <div class="initial-chat-studio">
+        <!-- 头部导航与状态概览 -->
+        <header class="studio-header">
+          <div class="bot-brand">
+            <span class="bot-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M12 3v3M8 3h8M6 8h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" />
+                <path d="M8 13h.01M16 13h.01M9 16h6" />
+              </svg>
+            </span>
             <div>
-              <p class="section-kicker">06 · 协作</p>
-              <h2 id="chat-heading">向标书 Agent 提问</h2>
+              <h3>AI 标书编制助手</h3>
+              <p>智能对话 · 材料投递 · 目录与正文生成</p>
             </div>
           </div>
-          <p v-if="reply" class="assistant-reply">{{ reply }}</p>
-          <label class="visually-hidden" for="workspace-question">输入问题</label>
-          <textarea
-            id="workspace-question"
-            v-model="question"
-            rows="4"
-            placeholder="例如：哪些评分点还没有公司材料支撑？"
-          />
-          <button
-            class="btn btn-primary chat-button"
-            type="button"
-            :disabled="asking || !question.trim()"
-            @click="ask"
+          <div class="studio-header-stats">
+            <span class="stat-tag">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5" /></svg>
+              招标文件 {{ tenderInputs.length }} 份
+            </span>
+            <span class="stat-tag">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
+              公司资料 {{ companyInputs.length }} 份
+            </span>
+          </div>
+        </header>
+
+        <div ref="studioChatBody" class="studio-chat-body" @scroll.passive="updateChatFollowState">
+          <div class="legacy-chat-stream">
+          <!-- 步骤 1：材料投递引导 -->
+          <div class="chat-msg bot-msg timeline-step-msg">
+            <div class="msg-avatar step-avatar" aria-hidden="true">1</div>
+            <div class="msg-bubble step-bubble">
+              <header class="workflow-step-header">
+                <div class="workflow-step-heading">
+                  <span class="step-tag">步骤 1 · 材料投递</span>
+                  <div>
+                    <h4>投递项目材料</h4>
+                    <p>先准备招标文件，再补充公司资质与参考资料。</p>
+                  </div>
+                </div>
+                <span class="workflow-step-status" :class="initialMaterialsReady ? 'done' : 'pending'">
+                  {{ initialMaterialsReady ? '已完成' : '待上传' }}
+                </span>
+              </header>
+              <p class="workflow-step-intro">请上传<b>招标文件</b>和<b>公司资质/参考资料</b>。两类材料都登记完成后，我会先询问您是否进入第二阶段。</p>
+            </div>
+          </div>
+
+          <div v-if="!initialMaterialsReady && !loading" class="chat-msg bot-msg timeline-step-msg upload-start-msg">
+            <div class="msg-avatar material-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M12 10v7M8.5 13.5h7" /></svg>
+            </div>
+            <div class="msg-bubble upload-start-bubble">
+              <span class="workflow-result-kicker">开始投递</span>
+              <h4>请先补齐两类必传材料</h4>
+              <p>仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。</p>
+              <div class="required-upload-zones">
+                <div
+                  v-for="zone in uploadZones"
+                  :key="zone.role"
+                  class="required-upload-zone"
+                  :class="{ complete: inputsForRole(zone.role).length }"
+                >
+                  <label class="required-upload-zone-label">
+                    <input
+                      class="visually-hidden"
+                      type="file"
+                      accept=".pdf,.docx,.md,.txt"
+                      multiple
+                      :disabled="uploading || running"
+                      @change="handleQuickUpload(zone.role, $event)"
+                    />
+                    <span class="required-upload-zone-icon" aria-hidden="true">{{ zone.role === 'tender' ? '▤' : '▦' }}</span>
+                    <span>
+                      <strong>{{ zone.title }} <em>必传</em></strong>
+                      <small>{{ zone.description }}</small>
+                    </span>
+                    <b>{{ inputsForRole(zone.role).length ? `已上传 ${inputsForRole(zone.role).length} 份` : '点击上传' }}</b>
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 步骤 1.1：已登记材料卡片消息 -->
+          <div v-if="activeInputs.length" class="chat-msg bot-msg timeline-step-msg">
+            <div class="msg-avatar material-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6" /></svg>
+            </div>
+            <div class="msg-bubble materials-card-bubble">
+              <header class="card-title-row">
+                <div>
+                  <span class="workflow-result-kicker">步骤结果</span>
+                  <h4>已接收材料（{{ activeInputs.length }} 份）</h4>
+                </div>
+                <span class="material-status-tag ok">✓ 已就绪</span>
+              </header>
+              <ul class="chat-materials-grid">
+                <li v-for="item in activeInputs" :key="item.input_id" class="chat-material-card">
+                  <span class="file-icon" aria-hidden="true">
+                    <svg v-if="item.role === 'tender'" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5" /></svg>
+                    <svg v-else viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
+                  </span>
+                  <div class="file-info">
+                    <strong>{{ item.filename }}</strong>
+                    <small>{{ roleLabel(item.role) }} · {{ sourceStatusLabel(item) }}</small>
+                  </div>
+                  <span class="file-badge">✓ 已就绪</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+
+          <div v-if="initialMaterialsReady && !secondStageConfirmed && !hasOutline && !outlineBusy && !planningReadyForReview" class="chat-msg bot-msg timeline-step-msg highlight-msg">
+            <div class="msg-avatar step-avatar" aria-hidden="true">?</div>
+            <div class="msg-bubble action-launch-bubble">
+              <header class="workflow-step-header">
+                <div class="workflow-step-heading">
+                  <span class="step-tag">材料已就绪</span>
+                  <div>
+                    <h4>是否继续第二阶段？</h4>
+                    <p>招标文件和公司资质/参考资料均已上传。请在下方回复“继续第二阶段”后，再开始解析评分点并生成目录。</p>
+                  </div>
+                </div>
+                <span class="workflow-step-status action">等待回复</span>
+              </header>
+            </div>
+          </div>
+
+          <!-- 交互问答历史记录。每条 AI 回复原位展示处理状态与可展开详情。 -->
+          <div
+            v-for="turn in initialChatTurns"
+            :key="turn.id"
+            class="chat-msg"
+            :class="turn.role === 'user' ? 'user-msg' : 'bot-msg'"
           >
-            {{ asking ? '处理中…' : '发送问题' }}
-          </button>
-        </section>
+            <div class="msg-avatar conversation-avatar" aria-hidden="true">{{ turn.role === 'user' ? '你' : 'AI' }}</div>
+            <div class="msg-bubble conversation-bubble">
+              <p>{{ turn.content }}</p>
+            </div>
+          </div>
+
+          <!-- 阶段 2 从开始、失败到完成始终只占一条 AI 消息。 -->
+          <div v-if="showOutlineProcessMessage" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
+            <div class="msg-avatar outline-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v16H7.5A2.5 2.5 0 0 0 5 20.5zm2.5 0H20M9 7h7M9 11h7M9 15h4" /></svg>
+            </div>
+            <div class="msg-bubble outline-card-bubble">
+              <header class="card-title-row">
+                <div>
+                  <span class="workflow-result-kicker">阶段 2 · 解析评分并生成目录</span>
+                  <h4>{{ outlineWorkflowTitle }}</h4>
+                </div>
+              </header>
+              <p class="outline-card-summary">{{ outlineWorkflowDescription }}</p>
+              <AiProcessDisclosure
+                :status="outlineProcessStatus"
+                :seconds="outlineElapsedSeconds"
+              >
+                <div class="ai-process-overview">
+                  <span>{{ outlineCompletedStageCount }}/{{ pipelineStages.length }} 步完成</span>
+                  <span>{{ outlinePipelineLlmRequestCount }} 次模型调用</span>
+                </div>
+                <ol v-if="pipelineStages.length" class="ai-process-stage-list">
+                  <li v-for="(stage, index) in pipelineStages" :key="stage.stage_id">
+                    <button type="button" @click="openStageDrawer(stage)">
+                      <span class="ai-stage-marker" :class="`stage-${stage.status}`" aria-hidden="true">
+                        <span v-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
+                        <span v-else-if="stage.status === 'failed'">×</span>
+                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
+                        <span v-else>{{ index + 1 }}</span>
+                      </span>
+                      <span class="ai-stage-copy">
+                        <strong>{{ stage.label }}</strong>
+                        <small>{{ pipelineStageStatus(stage) }}</small>
+                      </span>
+                      <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 5 5 5-5 5" /></svg>
+                    </button>
+                  </li>
+                </ol>
+                <p v-else>正在建立阶段 2 执行队列，收到节点状态后会自动更新。</p>
+              </AiProcessDisclosure>
+
+              <template v-if="planningReadyForReview && planningStatus !== 'confirmed'">
+                <details class="chat-outline-details outline-card-details">
+                  <summary>点击查看详细目录（{{ flatOutline.length }} 个章节节点）</summary>
+                  <div class="preview-tree-box full-outline-preview">
+                    <div
+                      v-for="node in flatOutline"
+                      :key="node.chapter_id"
+                      class="tree-preview-item"
+                      :style="{ '--outline-depth': Math.max(0, (node.depth || 1) - 1) }"
+                    >
+                      <span class="node-num">{{ node.number }}</span>
+                      <div class="node-content">
+                        <strong class="node-title">{{ node.title }}</strong>
+                        <small v-if="node.purpose">{{ node.purpose }}</small>
+                      </div>
+                      <span v-if="node.score_point_ids?.length" class="node-coverage">
+                        覆盖 {{ node.score_point_ids.length }} 项
+                      </span>
+                    </div>
+                  </div>
+                </details>
+                <button class="workflow-result-link" type="button" @click="activeTab = 'planning'">
+                  审阅并确认完整目录 →
+                </button>
+              </template>
+            </div>
+          </div>
+
+          <!-- 阶段 3 也只保留一条消息，详情按需展开。 -->
+          <div v-if="showGenerationPipeline" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
+            <div class="msg-avatar generation-avatar" aria-hidden="true">3</div>
+            <div class="msg-bubble generation-stage-bubble">
+              <header class="workflow-step-header">
+                <div class="workflow-step-heading">
+                  <span class="step-tag ready">阶段 3 · 完整标书生成</span>
+                  <div>
+                    <h4>{{ generationWorkflowTitle }}</h4>
+                    <p>基于已确认目录执行材料检查、逐章写作、全文整合、质量审核和 Word 交付。</p>
+                  </div>
+                </div>
+              </header>
+              <p class="workflow-step-intro generation-stage-headline">{{ generationHeadline }}</p>
+
+              <AiProcessDisclosure
+                :status="generationProcessStatus"
+                :seconds="generationElapsedSeconds"
+              >
+                <div class="ai-process-overview">
+                  <span>{{ generationCompletedStageCount }}/{{ generationExecutionStages.length }} 步完成</span>
+                  <span>{{ generationPipelineLlmRequestCount }} 次模型调用</span>
+                </div>
+                <ol v-if="generationExecutionStages.length" class="ai-process-stage-list">
+                  <li v-for="(stage, index) in generationExecutionStages" :key="stage.stage_id">
+                    <button type="button" @click="openStageDrawer(stage)">
+                      <span class="ai-stage-marker" :class="`stage-${stage.status}`" aria-hidden="true">
+                        <span v-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
+                        <span v-else-if="stage.status === 'failed'">×</span>
+                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
+                        <span v-else>{{ index + 1 }}</span>
+                      </span>
+                      <span class="ai-stage-copy">
+                        <strong>{{ stage.label }}</strong>
+                        <small>{{ pipelineStageStatus(stage) }}</small>
+                      </span>
+                      <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 5 5 5-5 5" /></svg>
+                    </button>
+                  </li>
+                </ol>
+                <p v-else>正在建立阶段 3 执行队列，收到节点状态后会自动更新。</p>
+              </AiProcessDisclosure>
+            </div>
+          </div>
+
+          <div v-if="error" class="chat-msg bot-msg status-chat-msg error-chat-msg" role="alert">
+            <div class="msg-avatar status-avatar" aria-hidden="true">!</div>
+            <div class="msg-bubble status-bubble">
+              <p><strong>处理失败：</strong>{{ error }}</p>
+              <div v-if="errorDetails.length" class="error-detail-list">
+                <strong>详细问题（{{ errorDetails.length }} 项）</strong>
+                <ol>
+                  <li v-for="item in errorDetails" :key="`${item.title}:${item.description}`">
+                    <b>{{ item.title }}</b>
+                    <span>{{ item.description }}</span>
+                  </li>
+                </ol>
+              </div>
+            </div>
+          </div>
+          <div v-else-if="message" class="chat-msg bot-msg status-chat-msg success-chat-msg" role="status">
+            <div class="msg-avatar status-avatar" aria-hidden="true">✓</div>
+            <div class="msg-bubble status-bubble"><p>{{ message }}</p></div>
+          </div>
+
+          </div>
+        </div>
+
+        <footer class="studio-input-footer">
+
+          <section
+            v-if="planningStatus === 'confirmed' && hasOutline"
+            class="workbench-entry-card"
+            aria-label="进入章节写作工作台"
+          >
+            <span class="workbench-entry-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24">
+                <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v16H6.5A2.5 2.5 0 0 0 4 21.5zM8 7h8M8 11h8M8 15h5" />
+              </svg>
+            </span>
+            <span class="workbench-entry-copy">
+              <strong>目录已确认，可以开始章节编写</strong>
+              <small>进入三栏工作台：左侧目录、中间正文、右侧本章对话与公共上下文。</small>
+            </span>
+            <button type="button" class="workbench-entry-action" @click="openWritingWorkbench">
+              进入写作工作台
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg>
+            </button>
+          </section>
+
+          <div class="modern-input-card">
+            <textarea
+              v-model="initialChatInput"
+              class="modern-textarea"
+              rows="2"
+              placeholder="说明您的标书编制需求，或点击下方 + 按钮投递项目材料…"
+              @keydown.enter.exact.prevent="sendInitialChat"
+            />
+            <div class="modern-card-toolbar">
+              <div class="toolbar-left">
+                <input
+                  id="quick-upload-tender"
+                  class="visually-hidden"
+                  type="file"
+                  accept=".pdf,.docx,.md,.txt"
+                  multiple
+                  :disabled="uploading || running"
+                  @change="handleQuickUpload('tender', $event)"
+                />
+                <input
+                  id="quick-upload-company"
+                  class="visually-hidden"
+                  type="file"
+                  accept=".pdf,.docx,.md,.txt"
+                  multiple
+                  :disabled="uploading || running"
+                  @change="handleQuickUpload('company', $event)"
+                />
+                <div class="toolbar-attachment-menu">
+                  <button
+                    class="attachment-trigger"
+                    type="button"
+                    :aria-expanded="showQuickUploadMenu"
+                    aria-controls="quick-upload-menu"
+                    aria-label="添加项目材料"
+                    title="添加项目材料"
+                    @click="showQuickUploadMenu = !showQuickUploadMenu"
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" /></svg>
+                  </button>
+                  <div v-if="showQuickUploadMenu" id="quick-upload-menu" class="quick-upload-menu" role="menu">
+                    <label class="quick-upload-option" for="quick-upload-tender" role="menuitem" @click="showQuickUploadMenu = false">
+                      上传招标文件 <span class="tag-req">必传</span>
+                    </label>
+                    <label class="quick-upload-option" for="quick-upload-company" role="menuitem" @click="showQuickUploadMenu = false">
+                      上传公司资料
+                    </label>
+                  </div>
+                </div>
+
+                <span v-if="uploadingRole" class="uploading-state-hint">
+                  <span class="spinner" /> 正在上传 {{ roleLabel(uploadingRole) }}…
+                </span>
+              </div>
+
+              <div class="toolbar-right">
+                <button
+                  class="modern-send-circle-btn"
+                  type="button"
+                  :disabled="!initialChatInput.trim()"
+                  title="发送消息"
+                  aria-label="发送消息"
+                  @click="sendInitialChat"
+                >
+                  <span v-if="initialAsking && !initialChatInput.trim()" class="spinner-dot" />
+                  <svg v-else aria-hidden="true" viewBox="0 0 24 24">
+                    <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </div>
+          <p class="studio-compliance-note">注：证据缺口必须由人工提供真实的企业、人员、业绩、资质或项目材料；系统不会联网补造或代替证明文件。</p>
+        </footer>
       </div>
     </div>
 
@@ -748,6 +856,7 @@
             <h2 id="generation-heading">完整标书生成进度</h2>
             <p>{{ generationHeadline }}</p>
           </div>
+          <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
         </div>
 
         <section class="writer-workspace" aria-label="标书实时写作工作区">
@@ -755,8 +864,32 @@
             <header>
               <p class="section-kicker">目录章节</p>
               <h3>标书目录</h3>
-              <small>点击目录定位中间 Word 正文</small>
+              <small>勾选章节后可一键生成；勾选大章节会包含其全部子章节。</small>
             </header>
+            <div class="writer-batch-actions" role="group" aria-label="一键生成范围">
+              <button
+                class="btn btn-primary"
+                type="button"
+                :disabled="running || generationBusy || !flatOutline.length"
+                @click="runDocument"
+              >
+                {{ runningAction === 'document' ? '正在一键生成…' : '一键生成全部' }}
+              </button>
+              <button
+                class="btn"
+                type="button"
+                :disabled="running || generationBusy || !selectedGenerationChapterIds.length"
+                @click="runSelectedChapters"
+              >
+                一键生成所选{{ selectedGenerationChapterIds.length ? `（${selectedGenerationChapterIds.length}）` : '' }}
+              </button>
+              <button
+                v-if="selectedGenerationChapterIds.length"
+                class="text-button writer-clear-selection"
+                type="button"
+                @click="clearGenerationSelection"
+              >清空</button>
+            </div>
             <nav v-if="visibleWriterOutline.length" class="writer-word-toc" aria-label="标书目录导航">
               <button
                 v-for="(chapter, chapterIndex) in visibleWriterOutline"
@@ -768,6 +901,14 @@
                 type="button"
                 @click="selectWriterChapter(chapter)"
               >
+                <input
+                  class="writer-chapter-check"
+                  type="checkbox"
+                  :checked="isGenerationChapterSelected(chapter.chapter_id)"
+                  :aria-label="`选择${chapter.title || chapter.chapter_id}及其子章节生成`"
+                  @click.stop
+                  @change="toggleGenerationChapter(chapter)"
+                >
                 <span
                   v-if="chapter.children?.length"
                   class="writer-toc-toggle"
@@ -797,7 +938,7 @@
                   :disabled="running || generationBusy || !selectedWriterChapterId"
                   @click="runSelectedChapter"
                 >
-                  {{ runningAction === 'selected-chapter' ? '正在生成本章…' : '只生成本章' }}
+                  {{ runningAction === 'selected-chapter' ? '正在生成所选…' : '生成当前章' }}
                 </button>
               </div>
             </header>
@@ -823,7 +964,8 @@
             <div class="agent-trace-feed">
               <article v-if="writerUnit?.current_chapter_title" class="agent-trace-item">
                 <strong>当前任务</strong>
-                <p>{{ writingPhaseLabel(writerUnit.progress_phase) }}：{{ writerUnit.current_chapter_title }}</p>
+                <p>{{ writingPhaseLabel(writerUnit.progress_phase, writerUnit.status) }}：{{ writerUnit.current_chapter_title }}</p>
+                <small v-if="writerUnit.error">{{ writerUnit.error }}</small>
               </article>
               <article v-for="call in writerResearchCalls" :key="call.decision_id" class="agent-trace-item">
                 <strong>{{ call.needs_research ? '联网检索判断' : '无需联网' }}</strong>
@@ -1073,9 +1215,12 @@
               页面每 5 秒读取后台阶段记录；程序审核提示只标记需复核，不会阻塞后续目录生成。
             </p>
           </div>
-          <span class="pipeline-state" :class="`pipeline-state-${pipelineStatus}`">
-            {{ pipelineStatusLabel }}
-          </span>
+          <div class="view-heading-actions">
+            <span class="pipeline-state" :class="`pipeline-state-${pipelineStatus}`">
+              {{ pipelineStatusLabel }}
+            </span>
+            <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
+          </div>
         </div>
 
         <div
@@ -1110,20 +1255,26 @@
               </em>
               <details v-if="stage.llm_requests?.length" class="pipeline-llm-requests">
                 <summary>查看每次请求参数</summary>
-                <article
-                  v-for="request in stage.llm_requests"
+                <details
+                  v-for="(request, requestIndex) in stage.llm_requests"
                   :key="request.request_id"
                   class="pipeline-llm-request"
+                  :open="shouldExpandLlmRequest(request, requestIndex, stage.llm_requests.length)"
                 >
-                  <header>
+                  <summary>
                     <strong>第 {{ request.request_index }} 次请求</strong>
+                    <span class="llm-request-purpose-summary">{{ llmRequestPurpose(request) }}</span>
                     <span :class="`llm-request-${request.status}`">
                       {{ llmRequestStatus(request.status) }}
                     </span>
-                  </header>
-                  <p>{{ llmRequestSummary(request) }}</p>
-                  <pre>{{ formatLlmRequest(request) }}</pre>
-                </article>
+                    <svg class="llm-request-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></svg>
+                  </summary>
+                  <div class="pipeline-llm-request-detail">
+                    <p class="llm-request-purpose"><strong>本次请求：</strong>{{ llmRequestPurpose(request) }}</p>
+                    <p>{{ llmRequestSummary(request) }}</p>
+                    <pre>{{ formatLlmRequest(request) }}</pre>
+                  </div>
+                </details>
               </details>
             </div>
           </li>
@@ -1259,8 +1410,9 @@
         </div>
 
         <div class="sticky-bar-actions">
+          <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
           <button
-            v-if="!hasOutline && hasTender"
+            v-if="!hasOutline && initialMaterialsReady && secondStageConfirmed"
             class="btn btn-primary"
             type="button"
             :disabled="outlineActionDisabled"
@@ -1278,15 +1430,6 @@
               @click="confirmPlanning"
             >
               确认当前目录
-            </button>
-            <button
-              v-else-if="planningStatus === 'confirmed'"
-              class="btn btn-primary"
-              type="button"
-              :disabled="running || generationBusy"
-              @click="runDocument"
-            >
-              {{ generationBusy || (running && runningAction === 'document') ? '正在生成，不要重复提交' : '生成完整标书' }}
             </button>
             <button
               v-if="deliveryReady"
@@ -1495,6 +1638,14 @@
                 >
                   全部收起
                 </button>
+                <button
+                  v-if="visibleOutline && visibleOutline.length"
+                  class="text-button"
+                  type="button"
+                  @click="exportOutlineMarkdown"
+                >
+                  导出 MD
+                </button>
               </div>
             </div>
             <article
@@ -1661,7 +1812,10 @@
 </template>
 
 <script setup>
+defineOptions({ name: 'V3WorkspaceView' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
+import AiProcessDisclosure from './AiProcessDisclosure.vue'
 import {
   chatV3,
   confirmV3Planning,
@@ -1673,6 +1827,7 @@ import {
   prepareV3Outline,
   resolveV3Research,
   runV3Pipeline,
+  subscribeV3Workspace,
   uploadV3Input,
 } from '../api'
 import {
@@ -1687,6 +1842,7 @@ import {
 const props = defineProps({
   runId: { type: String, required: true },
 })
+const router = useRouter()
 
 const uploadZones = [
   {
@@ -1696,16 +1852,10 @@ const uploadZones = [
     required: true,
   },
   {
-    role: 'score',
-    title: '评分附件（可选）',
-    description: '评分表单独成文时上传；完整招标文件内嵌评分表无需重复上传。',
-    required: false,
-  },
-  {
     role: 'company',
-    title: '公司资料',
+    title: '公司资质/参考资料',
     description: '企业资质、案例、人员、产品说明和证明文件。',
-    required: false,
+    required: true,
   },
 ]
 const pipelineSummaryLabels = {
@@ -1736,6 +1886,7 @@ const loading = ref(false)
 const running = ref(false)
 const runningAction = ref('')
 const uploadingRole = ref('')
+const showQuickUploadMenu = ref(false)
 const asking = ref(false)
 const researchingNeedId = ref('')
 const error = ref('')
@@ -1755,6 +1906,7 @@ const activeStageDrawerId = ref('')
 const selectedContentUnitId = ref('')
 const selectedContentUnitTitle = ref('')
 const selectedWriterChapterId = ref('')
+const selectedGenerationChapterIds = ref([])
 const expandedWriterChapterIds = ref(new Set())
 const contentUnitDetail = ref(null)
 const contentUnitLoading = ref(false)
@@ -1767,7 +1919,211 @@ const documentPreviewError = ref('')
 const selectedPreviewSectionId = ref('')
 const previewMode = ref('word')
 const loadedPreviewOperationId = ref('')
-let timer = null
+
+const initialChatInput = ref('')
+const initialChatTurns = ref([])
+const secondStageConfirmed = ref(false)
+const dismissedPlanningReviewOperationId = ref('')
+const planningReviewFeedback = ref('')
+const initialPendingCount = ref(0)
+const initialAsking = computed(() => initialPendingCount.value > 0)
+const assistantClockNow = ref(Date.now())
+const studioChatBody = ref(null)
+let shouldAutoFollowChat = true
+
+function updateChatFollowState() {
+  const element = studioChatBody.value
+  if (!element) return
+  const distanceFromBottom = element.scrollHeight - element.scrollTop - element.clientHeight
+  shouldAutoFollowChat = distanceFromBottom < 96
+}
+
+async function scrollChatToLatest(force = false) {
+  await nextTick()
+  const element = studioChatBody.value
+  if (!element || (!force && !shouldAutoFollowChat)) return
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  element.scrollTo({
+    top: element.scrollHeight,
+    behavior: reduceMotion ? 'auto' : 'smooth',
+  })
+}
+
+async function handleQuickUpload(role, event) {
+  const files = Array.from(event.target.files || [])
+  if (!files.length) return
+  const existingNames = new Set(activeInputs.value.map(item => canonicalInputFilename(item.filename)))
+  const queuedNames = new Set()
+  const accepted = files.filter((file) => {
+    const key = canonicalInputFilename(file.name)
+    if (!key || existingNames.has(key) || queuedNames.has(key)) return false
+    queuedNames.add(key)
+    return true
+  })
+  const duplicateCount = files.length - accepted.length
+  event.target.value = ''
+  if (!accepted.length) {
+    message.value = '所选文件已在当前工作区中，无需重复上传。'
+    return
+  }
+  uploadingRole.value = role
+  clearError()
+  message.value = ''
+  let count = 0
+  for (const file of accepted) {
+    try {
+      await uploadV3Input(props.runId, role, file)
+      count += 1
+    } catch (e) {
+      reportError(e, `上传 ${file.name} 失败`)
+    }
+  }
+  uploadingRole.value = ''
+  if (count) {
+    message.value = duplicateCount
+      ? `成功上传 ${count} 份${roleLabel(role)}，已跳过 ${duplicateCount} 份重复文件。`
+      : `成功上传 ${count} 份${roleLabel(role)}。`
+    await refresh()
+  }
+}
+
+function canonicalInputFilename(filename) {
+  return String(filename || '')
+    .trim()
+    .replace(/^[a-f0-9]{24,}[_-]/i, '')
+    .toLocaleLowerCase()
+}
+
+function isContinueIntent(message) {
+  return /^(继续|继续执行|继续处理|继续整个流程|重试|再试一次)[。！!]?$/u.test(
+    String(message || '').trim(),
+  )
+}
+
+function isSecondStageConfirmation(message) {
+  return /^(继续第二阶段|开始第二阶段|确认进入第二阶段|确认|继续|是|好的|可以)[。！!]?$/u.test(
+    String(message || '').trim(),
+  )
+}
+
+function confirmSecondStage() {
+  secondStageConfirmed.value = true
+  // 长流程只在后台启动，不能占用聊天输入状态。
+  void prepareOutline()
+  return '收到确认，现进入第二阶段：解析评分点并生成章节目录。'
+}
+
+async function continueCurrentWorkflow() {
+  await refresh()
+
+  if (outlineBusy.value || generationBusy.value) {
+    return '当前阶段仍在执行，我会继续等待并刷新进度，不会重复提交。'
+  }
+
+  if (!initialMaterialsReady.value) {
+    return hasTender.value
+      ? '还需要上传公司资质或参考资料；两类材料齐全后，我会询问是否进入第二阶段。'
+      : '请先上传招标文件和公司资质/参考资料，再继续执行。'
+  }
+
+  if (!secondStageConfirmed.value && !hasOutline.value && !planningReadyForReview.value) {
+    return confirmSecondStage()
+  }
+
+  const outlineOperation = latestOutlineOperation()
+  if (initialMaterialsReady.value && secondStageConfirmed.value && (
+    outlineOperation?.status === 'failed'
+    || (!planningReadyForReview.value && !hasOutline.value)
+  )) {
+    void prepareOutline()
+    return '已从目录规划的失败阶段继续，已完成节点会直接复用。'
+  }
+
+  const generationStatus = String(generation.value.status || 'new')
+  if (
+    planningStatus.value === 'confirmed'
+    && ['new', 'not_started', 'failed', 'cancelled'].includes(generationStatus)
+  ) {
+    void runDocument()
+    return generationStatus === 'failed'
+      ? '已从完整标书生成的失败阶段继续。'
+      : '目录已确认，正在继续生成完整标书。'
+  }
+
+  let content = '当前没有可继续的失败任务。'
+  if (!initialMaterialsReady.value) {
+    content = hasTender.value
+      ? '请补充公司资质或参考资料，再继续执行。'
+      : '请先上传招标文件和公司资质/参考资料，再继续执行。'
+  } else if (planningReadyForReview.value && planningStatus.value !== 'confirmed') {
+    content = '目录已经生成，请先审阅并确认目录；确认后即可继续生成完整标书。'
+  } else if (['blocked', 'blocked_human'].includes(generationStatus)) {
+    content = '当前生成任务正在等待人工处理；请先按页面提示处理阻断项，再继续执行。'
+  } else if (generation.value.status === 'succeeded') {
+    content = '完整标书已经生成完成，可进入写作工作台继续审阅和修改。'
+  }
+  return content
+}
+
+function dismissPlanningReviewPrompt() {
+  dismissedPlanningReviewOperationId.value = planningReviewOperationId.value
+}
+
+function openPlanningReview() {
+  dismissPlanningReviewPrompt()
+  activeTab.value = 'planning'
+}
+
+async function sendInitialChat() {
+  const msg = initialChatInput.value.trim()
+  if (!msg) return
+  initialChatInput.value = ''
+  const startedAt = Date.now()
+  const turnSuffix = `${startedAt}-${initialChatTurns.value.length}`
+  const userTurn = { id: `u-${turnSuffix}`, role: 'user', content: msg }
+  const assistantTurn = reactive({
+    id: `a-${turnSuffix}`,
+    role: 'bot',
+    content: '正在处理您的问题…',
+    processStatus: 'processing',
+    processDetail: '请求已接收，正在检查当前工作区状态并准备回复。',
+    startedAt,
+    finishedAt: 0,
+  })
+  initialChatTurns.value.push(userTurn)
+  initialChatTurns.value.push(assistantTurn)
+  initialPendingCount.value += 1
+  await nextTick()
+  await scrollChatToLatest(true)
+  try {
+    if (secondStageConfirmationNeeded.value && isSecondStageConfirmation(msg)) {
+      assistantTurn.content = confirmSecondStage()
+      assistantTurn.processDetail = '已记录阶段确认，并在后台启动目录规划；聊天输入保持可用。'
+      assistantTurn.processStatus = 'completed'
+      return
+    }
+    if (isContinueIntent(msg)) {
+      assistantTurn.content = await continueCurrentWorkflow()
+      assistantTurn.processDetail = '已检查当前任务和可复用节点；需要继续时，长流程已转入后台执行。'
+      assistantTurn.processStatus = 'completed'
+      return
+    }
+    const { data } = await chatV3(props.runId, msg)
+    const answer = String(data?.reply || data?.answer || data?.message || '').trim()
+    assistantTurn.content = answer || '暂未收到可显示的回复，请稍后重试。'
+    assistantTurn.processDetail = '服务端回复已返回并显示在当前对话。'
+    assistantTurn.processStatus = 'completed'
+  } catch (e) {
+    const detail = e?.response?.data?.message || e?.message || String(e)
+    assistantTurn.content = `处理失败：${detail}`
+    assistantTurn.processDetail = `请求未完成：${detail}`
+    assistantTurn.processStatus = 'failed'
+  } finally {
+    assistantTurn.finishedAt = Date.now()
+    initialPendingCount.value = Math.max(0, initialPendingCount.value - 1)
+  }
+}
+let closeWorkspaceStream = null
 let stageDetailRequestToken = 0
 
 const selectedDrawerStage = computed(() => (
@@ -1833,9 +2189,12 @@ function closeStageDrawer() {
 }
 
 function handleWorkspaceKeydown(event) {
-  if (event.key === 'Escape' && activeStageDrawerId.value) {
-    closeStageDrawer()
+  if (event.key !== 'Escape') return
+  if (showLlmModal.value) {
+    showLlmModal.value = false
+    return
   }
+  if (activeStageDrawerId.value) closeStageDrawer()
 }
 
 function markdownTable(rows) {
@@ -1857,10 +2216,28 @@ const workspaceName = computed(() => {
   return matched ? matched[1].replace(/_/g, ' ') : props.runId
 })
 const inputs = computed(() => snapshot.value.inputs || {})
-const activeInputs = computed(() => (inputs.value.inputs || []).filter(item => item.active))
+const activeInputs = computed(() => {
+  const seen = new Set()
+  return (inputs.value.inputs || []).filter((item) => {
+    if (!item.active) return false
+    const key = canonicalInputFilename(item.filename)
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+})
 const tenderInputs = computed(() => activeInputs.value.filter(item => item.role === 'tender'))
 const companyInputs = computed(() => activeInputs.value.filter(item => item.role === 'company'))
 const hasTender = computed(() => tenderInputs.value.length > 0)
+const hasCompanyMaterials = computed(() => companyInputs.value.length > 0)
+const initialMaterialsReady = computed(() => hasTender.value && hasCompanyMaterials.value)
+const secondStageConfirmationNeeded = computed(() => (
+  initialMaterialsReady.value
+  && !secondStageConfirmed.value
+  && !hasOutline.value
+  && !outlineBusy.value
+  && !planningReadyForReview.value
+))
 const document = computed(() => snapshot.value.document || {})
 const generation = computed(() => snapshot.value.generation || {})
 const documentPreviewMarkdown = computed(() => (documentPreview.value?.blocks || [])
@@ -1883,6 +2260,54 @@ const writerUnit = computed(() => {
     || units[0]
     || null
 })
+const defaultPlanningSummary = {
+  total_points: 0,
+  score_point_count: 0,
+  covered_score_point_count: 0,
+  uncovered_score_point_count: 0,
+  response_unit_count: 0,
+  covered_response_unit_count: 0,
+  uncovered_response_unit_count: 0,
+  chapter_count: 0,
+}
+const planningView = computed(() => {
+  const projected = projectV3Planning(snapshot.value) || {}
+  return {
+    outdated: false,
+    score_model: {},
+    blueprint: {},
+    score_points: [],
+    score_conditions: [],
+    response_units: [],
+    requirements: [],
+    quality_gates: [],
+    outline: [],
+    uncovered_score_points: [],
+    uncovered_response_units: [],
+    ...projected,
+    summary: {
+      ...defaultPlanningSummary,
+      ...(projected.summary || {}),
+    },
+  }
+})
+const flatOutline = computed(() => {
+  const result = []
+  const append = chapters => {
+    for (const chapter of chapters || []) {
+      const directIds = new Set(chapter.direct_score_point_ids || [])
+      result.push({
+        ...chapter,
+        direct_score_points: (chapter.score_points || []).filter(
+          point => directIds.has(point.score_point_id),
+        ),
+      })
+      append(chapter.children || [])
+    }
+  }
+  append(planningView.value.outline)
+  return result
+})
 const selectedWriterChapter = computed(() => flatOutline.value.find(
   chapter => chapter.chapter_id === selectedWriterChapterId.value,
 ) || null)
@@ -1893,9 +2318,16 @@ const writerPreviewText = computed(() => {
   return String(writerUnit.value?.draft_preview || writerUnit.value?.preview || '')
 })
 const writerPreviewParagraphs = computed(() => writerPreviewText.value.split(/\n{2,}/).filter(Boolean))
-const writerPhaseText = computed(() => writerUnit.value?.status === 'running'
-  ? writingPhaseLabel(writerUnit.value.progress_phase)
-  : contentUnitStatusLabel(writerUnit.value?.status || 'queued'))
+const writerPhaseText = computed(() => {
+  const status = String(writerUnit.value?.status || 'queued')
+  if (status === 'running') {
+    return writingPhaseLabel(writerUnit.value.progress_phase, status)
+  }
+  if (['blocked_human', 'failed', 'paused'].includes(status)) {
+    return writingPhaseLabel(writerUnit.value?.progress_phase, status)
+  }
+  return contentUnitStatusLabel(status)
+})
 const writerResearchCalls = computed(() => {
   const unitId = writerUnit.value?.unit_id
   const calls = generationResearch.value.calls || []
@@ -1949,34 +2381,20 @@ const generationTabLabel = computed(() => {
 })
 const evidenceNeeds = computed(() => snapshot.value.evidence_needs || [])
 const planning = computed(() => snapshot.value.planning || {})
+const workflow = computed(() => snapshot.value.workflow || {})
+const pendingReviews = computed(() => workflow.value.pending_reviews || [])
 const planningStatus = computed(() => planning.value.status || 'not_ready')
 const deliveryStatus = computed(() => document.value.delivery?.status || 'new')
 const deliveryReady = computed(() => (
-  ['ready', 'ready_with_warnings'].includes(deliveryStatus.value)
+  deliveryStatus.value === 'ready'
   && Number(generationContent.value.stale_units || 0) === 0
 ))
-const planningView = computed(() => projectV3Planning(snapshot.value))
 const hasScorePoints = computed(() => planningView.value.summary.score_point_count > 0)
-const hasOutline = computed(() => planningView.value.summary.chapter_count > 0)
-
-// 当生成完成或已存在目录时，自动切至【审阅目录】Tab
-watch(hasOutline, (val) => {
-  if (val && activeTab.value === 'upload') {
-    activeTab.value = 'planning'
-  }
-}, { immediate: true })
-watch(
-  () => generation.value.operation_id,
-  (operationId) => {
-    if (
-      operationId
-      && ['queued', 'running', 'processing', 'blocked', 'failed'].includes(generation.value.status)
-    ) {
-      activeTab.value = 'generation'
-    }
-  },
-  { immediate: true },
-)
+const hasOutline = computed(() => (
+  ['planning_review', 'writing'].includes(String(workflow.value.phase || ''))
+  && String(workflow.value.status || '') !== 'failed'
+  && planningView.value.summary.chapter_count > 0
+))
 watch(
   () => [
     deliveryStatus.value,
@@ -1985,7 +2403,7 @@ watch(
   ],
   ([status]) => {
     if (
-      ['ready', 'ready_with_warnings'].includes(status)
+      status === 'ready'
       && Number(generationContent.value.stale_units || 0) === 0
     ) {
       loadDocumentPreview()
@@ -1998,7 +2416,11 @@ watch(
 )
 const sourceIndex = computed(() => snapshot.value.analysis?.source_index || {})
 const analysisPipeline = computed(() => snapshot.value.analysis?.pipeline || {})
-const pipelineStages = computed(() => analysisPipeline.value.stages || [])
+const pipelineStages = computed(() => (
+  workflow.value.phase === 'planning' || workflow.value.phase === 'planning_review'
+    ? (workflow.value.stages || analysisPipeline.value.stages || [])
+    : (analysisPipeline.value.stages || [])
+))
 const latestWorkspaceOperation = computed(() => (
   snapshot.value.analysis?.latest_operation || {}
 ))
@@ -2012,10 +2434,141 @@ const latestOutlineOperationBusy = computed(() => (
   latestOperationKind.value === 'document.prepare_outline'
   && ['queued', 'running', 'processing'].includes(latestOperationStatus.value)
 ))
+const pipelineStatus = computed(() => {
+  const workflowStatus = String(workflow.value.status || '')
+  if (workflowStatus === 'failed') return 'failed'
+  if (workflowStatus === 'blocked_human') return 'blocked_human'
+  if (workflowStatus === 'running') return 'running'
+  const status = String(analysisPipeline.value.status || 'not_started')
+  if (pipelineStages.value.some(stage => ['running', 'queued'].includes(stage.status))) {
+    return 'running'
+  }
+  if (pipelineStages.value.some(stage => stage.status === 'failed')) return 'failed'
+  if (pipelineStages.value.some(stage => stage.status === 'blocked_human')) return 'blocked_human'
+  return status
+})
+const outlineBusy = computed(() => (
+  (running.value && runningAction.value === 'outline')
+  || latestOutlineOperationBusy.value
+))
+const pipelineBusy = computed(() => outlineBusy.value)
+const outlineActionDisabled = computed(() => (
+  running.value
+  || outlineBusy.value
+  || generationBusy.value
+  || uploading.value
+  || !initialMaterialsReady.value
+  || !secondStageConfirmed.value
+))
+
+// 过程与大模型监控相关（已置于全部依赖变量声明之后，确保安全求值）
+const showLlmModal = ref(false)
+const runningDurationSeconds = ref(0)
+let runningTimer = null
+let assistantClockTimer = null
+
+watch(
+  () => (
+    outlineBusy.value
+    || generationBusy.value
+    || (running.value && ['outline', 'document'].includes(runningAction.value))
+    || ['running', 'processing'].includes(pipelineStatus.value)
+  ),
+  (isBusy, wasBusy) => {
+    if (isBusy) {
+      if (!wasBusy) runningDurationSeconds.value = 0
+      if (!runningTimer) {
+        runningTimer = window.setInterval(() => {
+          runningDurationSeconds.value += 1
+        }, 1000)
+      }
+    } else {
+      if (runningTimer) {
+        window.clearInterval(runningTimer)
+        runningTimer = null
+      }
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => initialAsking.value || outlineBusy.value || generationBusy.value,
+  isActive => {
+    if (isActive && !assistantClockTimer) {
+      assistantClockNow.value = Date.now()
+      assistantClockTimer = window.setInterval(() => {
+        assistantClockNow.value = Date.now()
+      }, 1000)
+    } else if (!isActive && assistantClockTimer) {
+      window.clearInterval(assistantClockTimer)
+      assistantClockTimer = null
+    }
+  },
+  { immediate: true },
+)
+
+const allLlmRequests = computed(() => {
+  const result = []
+  const stages = showGenerationPipeline.value
+    ? generationExecutionStages.value
+    : pipelineStages.value
+  for (const stage of stages) {
+    if (Array.isArray(stage.llm_requests)) {
+      for (const req of stage.llm_requests) {
+        result.push({
+          ...req,
+          stage_id: stage.stage_id,
+          stage_label: stage.label,
+        })
+      }
+    }
+  }
+  return result
+})
+
+const latestLlmRequest = computed(() => (
+  allLlmRequests.value.length > 0
+    ? allLlmRequests.value[allLlmRequests.value.length - 1]
+    : null
+))
+
+function requestAttemptKindLabel(req) {
+  if (!req) return '初始尝试'
+  const kind = req.parameters?.attempt_kind || req.attempt_kind
+  const attemptIndex = req.parameters?.candidate_attempt || req.attempt_index || 1
+  if (kind === 'controlled_repair') {
+    return `第 ${attemptIndex} 次受控修复 (Controlled Repair)`
+  }
+  return `第 ${attemptIndex} 次初始生成`
+}
+
+function getStageLabel(stageId) {
+  const stage = [...pipelineStages.value, ...generationStages.value].find(
+    item => item.stage_id === stageId,
+  )
+  return stage ? stage.label : (stageId || '目录生成阶段')
+}
+
+function formatLlmParameters(req) {
+  if (!req) return ''
+  try {
+    return JSON.stringify(req.parameters || req, null, 2)
+  } catch (e) {
+    return String(req.parameters || req)
+  }
+}
 const showGenerationPipeline = computed(() => (
-  (running.value && runningAction.value === 'document')
-  || latestOperationKind.value === 'document.run_pipeline'
-  || (!latestOperationKind.value && Boolean(generation.value.operation_id))
+  hasOutline.value
+  && planningStatus.value === 'confirmed'
+  && generationBusy.value
+))
+// Once Step 3 is visible, Step 2 is necessarily complete and its launch CTA
+// must never be rendered again. Planning status and chapter data cover both
+// current and legacy snapshots before generation starts.
+const planningReadyForReview = computed(() => (
+  hasOutline.value
+  || ['needs_human', 'confirmed'].includes(planningStatus.value)
 ))
 const generationStageIds = new Set([
   'sync_material_requirements',
@@ -2033,6 +2586,82 @@ const generationPrerequisiteStages = computed(() => (
 const generationExecutionStages = computed(() => (
   generationStages.value.filter(stage => generationStageIds.has(stage.stage_id))
 ))
+const outlineCompletedStageCount = computed(() => pipelineStages.value.filter(
+  stage => ['succeeded', 'reused', 'completed'].includes(stage.status),
+).length)
+const generationCompletedStageCount = computed(() => generationExecutionStages.value.filter(
+  stage => ['succeeded', 'reused', 'completed'].includes(stage.status),
+).length)
+const outlinePipelineLlmRequestCount = computed(() => pipelineStages.value.reduce(
+  (total, stage) => total + Number(stage.llm_request_count || 0),
+  0,
+))
+const generationPipelineLlmRequestCount = computed(() => generationExecutionStages.value.reduce(
+  (total, stage) => total + Number(stage.llm_request_count || 0),
+  0,
+))
+
+function timestampMilliseconds(value) {
+  const timestamp = Date.parse(String(value || ''))
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0) {
+  const startedAt = stages
+    .map(stage => timestampMilliseconds(stage.started_at))
+    .filter(Boolean)
+  if (!startedAt.length) return fallbackSeconds
+  const completedAt = stages
+    .map(stage => timestampMilliseconds(stage.completed_at))
+    .filter(Boolean)
+  const end = isRunning ? assistantClockNow.value : (Math.max(...completedAt, ...startedAt))
+  return Math.max(0, Math.floor((end - Math.min(...startedAt)) / 1000))
+}
+
+function assistantTurnElapsedSeconds(turn) {
+  const startedAt = Number(turn?.startedAt) || assistantClockNow.value
+  const finishedAt = Number(turn?.finishedAt) || assistantClockNow.value
+  return Math.max(0, Math.floor((finishedAt - startedAt) / 1000))
+}
+
+const outlineElapsedSeconds = computed(() => workflowElapsedSeconds(
+  pipelineStages.value,
+  outlineBusy.value,
+  runningDurationSeconds.value,
+))
+const generationElapsedSeconds = computed(() => workflowElapsedSeconds(
+  generationExecutionStages.value,
+  generationBusy.value,
+  runningDurationSeconds.value,
+))
+const outlineProcessStatus = computed(() => {
+  if (outlineBusy.value) return 'processing'
+  if (pipelineStatus.value === 'failed') return 'failed'
+  if (planningStatus.value === 'needs_human') return 'waiting'
+  return 'completed'
+})
+const generationProcessStatus = computed(() => {
+  if (generationBusy.value) return 'processing'
+  if (['failed', 'blocked'].includes(String(generation.value.status || ''))) return 'failed'
+  return 'completed'
+})
+const showOutlineProcessMessage = computed(() => (
+  hasOutline.value
+  || planningReadyForReview.value
+  || outlineBusy.value
+  || pipelineStages.value.some(stage => stage.status !== 'pending')
+))
+const outlineWorkflowTitle = computed(() => {
+  if (outlineProcessStatus.value === 'processing') return '正在解析评分点并生成目录'
+  if (outlineProcessStatus.value === 'failed') return '评分点解析与目录生成失败'
+  if (outlineProcessStatus.value === 'waiting') return '编写计划已生成，等待您审核'
+  return `编写计划已生成（${planningView.value.summary.chapter_count} 个章节节点）`
+})
+const outlineWorkflowDescription = computed(() => {
+  if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
+  if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
+  return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
+})
 const generationPrerequisiteCompleted = computed(() => (
   generationPrerequisiteStages.value.filter(
     stage => ['succeeded', 'reused'].includes(stage.status),
@@ -2053,7 +2682,7 @@ const topPipelineTitle = computed(() => (
 ))
 const topPipelineDescription = computed(() => (
   showGenerationPipeline.value
-    ? '使用已经确认的评分目录，执行材料同步、逐章写作、全文整合、质量审核和 Word 交付。'
+    ? '使用已经确认的评分目录，检查材料与证据缺口、锁定文档结构，再执行逐章写作、全文整合、质量审核和 Word 交付。'
     : '只解析招标要求、评分点并生成章节目录；本阶段不会写正文。'
 ))
 const pipelineProducts = computed(() => analysisPipeline.value.products || [])
@@ -2070,27 +2699,6 @@ const pipelineWarnings = computed(() => (
       .filter(Boolean),
   )]
 ))
-const pipelineStatus = computed(() => {
-  const status = String(analysisPipeline.value.status || 'not_started')
-  if (pipelineStages.value.some(stage => ['running', 'queued'].includes(stage.status))) {
-    return 'running'
-  }
-  if (pipelineStages.value.some(stage => stage.status === 'failed')) return 'failed'
-  if (pipelineStages.value.some(stage => stage.status === 'blocked_human')) return 'blocked_human'
-  return status
-})
-const outlineBusy = computed(() => (
-  (running.value && runningAction.value === 'outline')
-  || latestOutlineOperationBusy.value
-))
-const pipelineBusy = computed(() => outlineBusy.value)
-const outlineActionDisabled = computed(() => (
-  running.value
-  || outlineBusy.value
-  || generationBusy.value
-  || uploading.value
-  || !hasTender.value
-))
 const activePipelineStage = computed(() => (
   pipelineStages.value.find(stage => ['running', 'queued'].includes(stage.status))
 ))
@@ -2099,34 +2707,185 @@ const outlineRunningLabel = computed(() => (
     ? `正在${activePipelineStage.value.label}…`
     : '正在生成评分目录…'
 ))
-const pipelineStatusLabel = computed(() => ({
-  not_started: '尚未开始',
-  pending: '等待执行',
-  queued: '已排队',
-  processing: '处理中',
-  running: '处理中',
-  failed: '已失败',
-  blocked_human: '等待人工确认',
-  succeeded: '已完成',
-  completed: '已完成',
-}[pipelineStatus.value] || pipelineStatus.value))
+const pipelineStatusLabel = computed(() => {
+  const label = {
+    not_started: '尚未开始',
+    pending: '等待执行',
+    queued: '已排队',
+    processing: '正在处理',
+    running: '正在处理',
+    failed: '已失败',
+    blocked_human: '等待人工确认',
+    succeeded: '已完成',
+    completed: '已完成',
+  }[pipelineStatus.value] || pipelineStatus.value
+  return ['processing', 'running'].includes(pipelineStatus.value)
+    ? `${label} · 已运行 ${formatPipelineDuration(runningDurationSeconds.value)}`
+    : label
+})
 const topPipelineStatus = computed(() => (
   showGenerationPipeline.value
     ? (generationBusy.value ? 'running' : String(generation.value.status || 'not_started'))
     : pipelineStatus.value
 ))
-const topPipelineStatusLabel = computed(() => ({
-  not_started: '尚未开始',
-  pending: '等待执行',
-  queued: '已排队',
-  processing: '处理中',
-  running: '处理中',
-  failed: '已失败',
-  blocked_human: '等待人工确认',
-  succeeded: '已完成',
-  completed: '已完成',
-  cancelled: '已取消',
-}[topPipelineStatus.value] || topPipelineStatus.value))
+const topPipelineStatusLabel = computed(() => {
+  const label = {
+    not_started: '尚未开始',
+    pending: '等待执行',
+    queued: '已排队',
+    processing: '正在处理',
+    running: '正在处理',
+    failed: '已失败',
+    blocked_human: '等待人工确认',
+    succeeded: '已完成',
+    completed: '已完成',
+    cancelled: '已取消',
+  }[topPipelineStatus.value] || topPipelineStatus.value
+  return ['processing', 'running'].includes(topPipelineStatus.value)
+    ? `${label} · 已运行 ${formatPipelineDuration(runningDurationSeconds.value)}`
+    : label
+})
+const showPipelineMonitor = computed(() => (
+  hasOutline.value
+  || outlineBusy.value
+  || showGenerationPipeline.value
+  || pipelineStatus.value === 'running'
+  || Boolean(latestLlmRequest.value)
+))
+const completedPipelineStageCount = computed(() => (
+  topPipelineStages.value.filter(stage => ['succeeded', 'reused', 'completed'].includes(stage.status)).length
+))
+const remainingPipelineStageCount = computed(() => (
+  topPipelineStages.value.filter(
+    stage => !['succeeded', 'reused', 'completed'].includes(stage.status),
+  ).length
+))
+function buildPipelineActivityMessages(stages, phaseKey) {
+  const messages = []
+  let localRequestNumber = 0
+
+  stages.forEach((stage, stageIndex) => {
+    const stageRequests = Array.isArray(stage.llm_requests) ? stage.llm_requests : []
+    stageRequests.forEach((request) => {
+      localRequestNumber += 1
+      const requestNumber = localRequestNumber
+      const requestStatus = String(request.status || 'completed')
+      const isRunning = ['running', 'processing', 'queued'].includes(requestStatus)
+      const isFailed = requestStatus === 'failed'
+      const batchId = request.parameters?.logical_batch_id
+      messages.push({
+        id: `${phaseKey}:llm:${request.request_id || `${stage.stage_id}:${requestNumber}`}:${requestStatus}`,
+        kind: 'llm',
+        status: isFailed ? 'failed' : (isRunning ? 'running' : 'completed'),
+        title: isFailed
+          ? `第 ${requestNumber} 次连接大模型失败`
+          : (isRunning ? `正在进行第 ${requestNumber} 次大模型连接` : `第 ${requestNumber} 次大模型连接已完成`),
+        detail: `${stage.label} · ${requestAttemptKindLabel(request)}${batchId ? ` · 批次 ${batchId}` : ''}`,
+        meta: isFailed ? '模型返回未通过校验，系统将按规则重试或停止。' : (isRunning ? '正在发送上下文并等待模型响应。' : '模型响应已接收，正在进入后续校验。'),
+      })
+    })
+
+    const stageStatus = String(stage.status || 'pending')
+    const isCompleted = ['succeeded', 'reused', 'completed'].includes(stageStatus)
+    const isRunning = ['running', 'processing', 'queued'].includes(stageStatus)
+    const isFailed = stageStatus === 'failed'
+    if (!isCompleted && !isRunning && !isFailed) return
+
+    const laterIncomplete = stages.slice(stageIndex + 1).filter(
+      item => !['succeeded', 'reused', 'completed'].includes(item.status),
+    ).length
+    messages.push({
+      id: `${phaseKey}:stage:${stage.stage_id}:${stageStatus}`,
+      kind: 'stage',
+      status: isFailed ? 'failed' : (isRunning ? 'running' : 'completed'),
+      title: isFailed ? `处理失败：${stage.label}` : (isRunning ? `正在执行：${stage.label}` : `已完成：${stage.label}`),
+      detail: stageResultSummary(stage) || (isRunning ? '正在执行本步骤的确定性处理、模型调用与结果校验。' : '本步骤产物已保存，可供后续步骤复用。'),
+      meta: isRunning
+        ? `当前第 ${stageIndex + 1}/${stages.length} 步，完成当前步骤后还剩 ${laterIncomplete} 步。`
+        : `第 ${stageIndex + 1}/${stages.length} 步 · ${pipelineStageStatus(stage)}`,
+    })
+  })
+
+  return messages.slice(-12)
+}
+const outlinePipelineActivityMessages = computed(() => (
+  buildPipelineActivityMessages(pipelineStages.value, 'phase-2')
+))
+const generationPipelineActivityMessages = computed(() => (
+  buildPipelineActivityMessages(generationExecutionStages.value, 'phase-3')
+))
+const pipelineLlmRequestCount = computed(() => topPipelineStages.value.reduce(
+  (total, stage) => total + Number(stage.llm_request_count || 0),
+  0,
+))
+const planningReviewOperationId = computed(() => String(
+  latestOutlineOperation()?.operation_id
+  || snapshot.value.analysis?.latest_operation?.operation_id
+  || snapshot.value.analysis?.operation_id
+  || '',
+))
+const showPlanningReviewPrompt = computed(() => (
+  planningStatus.value === 'needs_human'
+  && hasOutline.value
+  && planningReviewOperationId.value !== dismissedPlanningReviewOperationId.value
+))
+const processingSummaryLabel = computed(() => {
+  const duration = runningDurationSeconds.value > 0
+    ? `已处理 ${formatPipelineDuration(runningDurationSeconds.value)}`
+    : '处理摘要'
+  return duration
+})
+function formatPipelineDuration(totalSeconds) {
+  const normalized = Math.max(0, Number(totalSeconds) || 0)
+  const minutes = Math.floor(normalized / 60)
+  const seconds = normalized % 60
+  if (minutes > 0) return `${minutes} 分钟 ${seconds} 秒`
+  return `${seconds} 秒`
+}
+const outlinePipelineActivitySummaryLabel = computed(() => (
+  `阶段 2 执行过程 · ${outlinePipelineActivityMessages.value.length} 条记录`
+))
+const generationPipelineActivitySummaryLabel = computed(() => {
+  if (runningDurationSeconds.value > 0) {
+    return `阶段 3 执行过程 · ${generationBusy.value ? '已运行' : '耗时'} ${formatPipelineDuration(runningDurationSeconds.value)}`
+  }
+  return `阶段 3 执行过程 · ${generationPipelineActivityMessages.value.length} 条记录`
+})
+const generationWorkflowStatusClass = computed(() => {
+  if (generation.value.status === 'failed' || generation.value.status === 'blocked') return 'failed'
+  if (generation.value.status === 'succeeded') return 'done'
+  return 'action'
+})
+const generationWorkflowStatusLabel = computed(() => {
+  if (generationBusy.value) {
+    return `正在处理 · 已运行 ${formatPipelineDuration(runningDurationSeconds.value)}`
+  }
+  if (generation.value.status === 'succeeded') return '已完成'
+  if (generation.value.status === 'failed') return '已失败'
+  if (generation.value.status === 'blocked') return '已暂停'
+  return '已启动'
+})
+const generationWorkflowTitle = computed(() => {
+  if (generationBusy.value) return '完整标书正在生成'
+  if (generation.value.status === 'succeeded') return '完整标书生成完成'
+  if (generation.value.status === 'failed') return '完整标书生成失败'
+  if (generation.value.status === 'blocked') return '完整标书生成已暂停'
+  return '完整标书生成已启动'
+})
+watch(
+  () => [
+    initialChatTurns.value.length,
+    message.value,
+    error.value,
+    outlinePipelineActivityMessages.value.length,
+    generationPipelineActivityMessages.value.length,
+    topPipelineStages.value.map(stage => `${stage.stage_id}:${stage.status}:${stage.llm_request_count || 0}`).join('|'),
+    latestLlmRequest.value?.request_id || '',
+    latestLlmRequest.value?.status || '',
+  ],
+  () => scrollChatToLatest(),
+  { flush: 'post' },
+)
 const sourceStatusById = computed(() => new Map(
   (sourceIndex.value.input_status || []).map(item => [item.input_id, item]),
 ))
@@ -2144,23 +2903,6 @@ const analysisStaleMessage = computed(() => {
     return '最近一次评分点解析未成功，旧评分点、旧目录和旧确认状态已隐藏，请修正问题后重新解析。'
   }
   return '上传文件已变化，旧评分点、旧目录和旧确认状态已隐藏，请重新解析。'
-})
-const flatOutline = computed(() => {
-  const result = []
-  const append = chapters => {
-    for (const chapter of chapters) {
-      const directIds = new Set(chapter.direct_score_point_ids || [])
-      result.push({
-        ...chapter,
-        direct_score_points: (chapter.score_points || []).filter(
-          point => directIds.has(point.score_point_id),
-        ),
-      })
-      append(chapter.children || [])
-    }
-  }
-  append(planningView.value.outline)
-  return result
 })
 const visibleWriterOutline = computed(() => {
   const result = []
@@ -2238,7 +2980,7 @@ const planningStatusLabel = computed(() => ({
 const deliveryStatusLabel = computed(() => ({
   new: '尚未生成',
   ready: '可下载',
-  ready_with_warnings: '带风险可下载',
+  ready_with_warnings: '不可交付：存在校验错误',
   failed: '交付失败',
 }[deliveryStatus.value] || deliveryStatus.value))
 const outlineActionLabel = computed(() => (
@@ -2252,8 +2994,8 @@ const outlineActionLabel = computed(() => (
 const workflowSteps = computed(() => [
   {
     label: '上传资料',
-    description: hasTender.value ? `${activeInputs.value.length} 个文件已登记` : '至少上传一份招标文件',
-    status: hasTender.value ? 'done' : 'active',
+    description: initialMaterialsReady.value ? `${activeInputs.value.length} 个文件已登记` : '请上传招标文件和公司资质/参考资料',
+    status: initialMaterialsReady.value ? 'done' : 'active',
   },
   {
     label: '解析评分点',
@@ -2307,21 +3049,44 @@ async function refresh(resetError = false) {
   loading.value = true
   try {
     const { data } = await fetchV3WorkspaceSnapshot(props.runId)
-    snapshot.value = normalizeV3WorkspaceSnapshot(data)
-    if (activeStageDrawerId.value && !stageDetailLoading.value) {
-      void loadStageDetail(activeStageDrawerId.value)
-    }
-    if (resetError) {
-      clearError()
-    } else if (!error.value) {
-      const latest = latestOutlineOperation()
-      if (latest?.status === 'failed') reportOutlineOperationFailure(latest)
-    }
+    applyWorkspaceSnapshot(data, resetError)
   } catch (cause) {
     reportError(cause, 'V3 工作区状态读取失败。')
   } finally {
     loading.value = false
   }
+}
+
+function applyWorkspaceSnapshot(data, resetError = false) {
+  snapshot.value = normalizeV3WorkspaceSnapshot(data)
+  // Once this workspace has entered planning, a stale outline should expose
+  // the re-planning action immediately after refresh.  Do not require the
+  // user to repeat the conversational "enter phase 2" acknowledgement just
+  // because the old outline was invalidated by a prompt/model update.
+  if (
+    initialMaterialsReady.value
+    && ['outdated', 'blocked', 'needs_human', 'confirmed'].includes(planningStatus.value)
+  ) {
+    secondStageConfirmed.value = true
+  }
+  if (activeStageDrawerId.value && !stageDetailLoading.value) {
+    void loadStageDetail(activeStageDrawerId.value)
+  }
+  if (resetError) {
+    clearError()
+  } else if (!error.value) {
+    const latest = latestOutlineOperation()
+    if (latest?.status === 'failed') reportOutlineOperationFailure(latest)
+  }
+}
+
+function connectWorkspaceStream() {
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
+  if (!props.runId) return
+  closeWorkspaceStream = subscribeV3Workspace(props.runId, {
+    onSnapshot: data => applyWorkspaceSnapshot(data),
+  })
 }
 
 async function uploadRole(role) {
@@ -2352,9 +3117,19 @@ async function uploadRole(role) {
 }
 
 async function prepareOutline() {
+  if (outlineBusy.value || (running.value && runningAction.value === 'outline')) {
+    return
+  }
+  if (!initialMaterialsReady.value) {
+    message.value = '请先上传招标文件和公司资质/参考资料，再进入第二阶段。'
+    return
+  }
+  if (!secondStageConfirmed.value) {
+    message.value = '材料已齐全，请先在对话中回复“继续第二阶段”。'
+    return
+  }
   running.value = true
   runningAction.value = 'outline'
-  activeTab.value = 'planning'
   clearError()
   waitingForOutlineCompletion.value = false
   message.value = ''
@@ -2395,6 +3170,33 @@ async function prepareOutline() {
   }
 }
 
+async function submitPlanningFeedback() {
+  const feedback = planningReviewFeedback.value.trim()
+  if (!feedback) return
+  const activeReview = pendingReviews.value.find(item => item.kind === 'planning') || {}
+  const baseBlueprintHash = String(activeReview.target_hash || '')
+  if (!baseBlueprintHash) {
+    error.value = '当前目录版本已变化，请刷新后再提交修改意见。'
+    return
+  }
+  running.value = true
+  runningAction.value = 'planning-feedback'
+  clearError()
+  try {
+    const { data } = await prepareV3Outline(props.runId, { reviewFeedback: feedback, baseBlueprintHash })
+    assertCommandAccepted(data, '目录修改失败')
+    planningReviewFeedback.value = ''
+    dismissedPlanningReviewOperationId.value = ''
+    message.value = '已提交修改意见，正在生成新的目录版本。'
+    await refresh()
+  } catch (cause) {
+    reportError(cause, '提交目录修改意见失败')
+  } finally {
+    running.value = false
+    runningAction.value = ''
+  }
+}
+
 async function confirmPlanning() {
   running.value = true
   runningAction.value = 'confirm'
@@ -2404,6 +3206,7 @@ async function confirmPlanning() {
     assertCommandAccepted(data, '目录确认失败。')
     message.value = '目录已确认；正文生成尚未启动。'
     await refresh()
+    activeTab.value = 'upload'
   } catch (cause) {
     reportError(cause, '目录确认失败。')
   } finally {
@@ -2412,11 +3215,15 @@ async function confirmPlanning() {
   }
 }
 
+function openWritingWorkbench() {
+  router.push({ name: 'ProjectHome', params: { workspaceId: props.runId } })
+}
+
 async function runDocument(chapterIds = []) {
   const normalizedChapterIds = Array.isArray(chapterIds) ? chapterIds.filter(Boolean) : []
   running.value = true
   runningAction.value = normalizedChapterIds.length ? 'selected-chapter' : 'document'
-  activeTab.value = 'generation'
+  activeTab.value = 'upload'
   clearError()
   // A regenerate is a new attempt. Do not leave the previous attempt's
   // research failures, chapter body, or Word preview visible while it starts.
@@ -2439,12 +3246,18 @@ async function runDocument(chapterIds = []) {
     },
   }
   message.value = normalizedChapterIds.length
-    ? `章节“${selectedWriterChapter.value?.title || normalizedChapterIds[0]}”已开始单独生成。`
+    ? `已开始一键生成所选 ${normalizedChapterIds.length} 个章节范围。`
     : '完整标书生成任务已启动，正在等待后端阶段状态。'
   try {
     const { data } = await runV3Pipeline(props.runId, normalizedChapterIds)
     assertCommandAccepted(data, normalizedChapterIds.length ? '本章生成失败。' : '完整标书生成失败。')
     message.value = data.message || data.receipt?.message || (normalizedChapterIds.length ? '本章已生成。' : '完整标书已生成。')
+    await router.push({
+      name: normalizedChapterIds.length ? 'ChapterWorkspace' : 'ProjectHome',
+      params: normalizedChapterIds.length
+        ? { workspaceId: props.runId, chapterId: normalizedChapterIds[0] }
+        : { workspaceId: props.runId },
+    })
     await refresh()
   } catch (cause) {
     let refreshError = null
@@ -2476,6 +3289,52 @@ async function runSelectedChapter() {
     return
   }
   await runDocument([selectedWriterChapterId.value])
+}
+
+function isGenerationChapterSelected(chapterId) {
+  return selectedGenerationChapterIds.value.includes(chapterId)
+}
+
+function descendantChapterIds(chapterId) {
+  const selected = new Set([chapterId])
+  let changed = true
+  while (changed) {
+    const size = selected.size
+    for (const chapter of flatOutline.value) {
+      if (selected.has(chapter.parent_chapter_id)) selected.add(chapter.chapter_id)
+    }
+    changed = selected.size !== size
+  }
+  return [...selected]
+}
+
+function toggleGenerationChapter(chapter) {
+  const chapterId = String(chapter?.chapter_id || '')
+  if (!chapterId) return
+  const relatedIds = descendantChapterIds(chapterId)
+  const next = new Set(selectedGenerationChapterIds.value)
+  const selecting = !next.has(chapterId)
+  for (const id of relatedIds) {
+    if (selecting) next.add(id)
+    else next.delete(id)
+  }
+  selectedGenerationChapterIds.value = flatOutline.value
+    .map(item => item.chapter_id)
+    .filter(id => next.has(id))
+}
+
+function clearGenerationSelection() {
+  selectedGenerationChapterIds.value = []
+}
+
+async function runSelectedChapters() {
+  if (!selectedGenerationChapterIds.value.length) {
+    error.value = '请先勾选需要一键生成的章节。'
+    return
+  }
+  // Child chapter IDs are intentionally sent too: this keeps the visual selection
+  // and the requested write scope exactly aligned, while the backend de-duplicates it.
+  await runDocument(selectedGenerationChapterIds.value)
 }
 
 async function openContentUnit(unit) {
@@ -2713,9 +3572,9 @@ function pipelineStageOperation(stage) {
     analyze_scores: '操作：解析评分点与满分条件',
     compile_chapter_blueprint: '操作：生成评分驱动章节目录',
     confirm_planning: '用户操作：审阅并确认目录',
-    sync_material_requirements: '操作：列出需人工提供的真实材料',
-    compile_document_contract: '操作：锁定已确认章节结构',
-    plan_document: '操作：生成逐章写作计划',
+    sync_material_requirements: '操作：匹配公司资料并列出证据缺口',
+    compile_document_contract: '操作：固化已确认目录、模板和写入位置',
+    plan_document: '操作：拆分章节、依赖和写作任务',
     execute_content_plan: '操作：按所选章节写作；缺公开依据时自动联网检索',
     integrate_document: '操作：合并章节并统一术语',
     verify_document: '操作：检查覆盖、质量和一致性',
@@ -2760,6 +3619,24 @@ function generationStageSummary(stage) {
     parts.push(`输出 ${summary.output_files.join('、')}`)
   }
   return parts.join(' · ')
+}
+
+function stageResultSummary(stage) {
+  const generatedSummary = generationStageSummary(stage)
+  if (generatedSummary) return generatedSummary
+  const summary = stage?.summary && typeof stage.summary === 'object' ? stage.summary : {}
+  const entries = Object.entries(summary)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
+    .slice(0, 3)
+  if (entries.length) {
+    return entries
+      .map(([key, value]) => `${pipelineSummaryLabels[key] || key} ${formatPoints(value)}`)
+      .join(' · ')
+  }
+  if (['succeeded', 'reused'].includes(stage?.status)) return '步骤已完成，产物已持久化。'
+  if (stage?.status === 'failed') return pipelineStageError(stage)
+  if (stage?.status === 'blocked_human') return '需要人工处理后才能继续。'
+  return ''
 }
 
 function contentUnitStatusLabel(status) {
@@ -2807,10 +3684,29 @@ function researchUsageLabel(status) {
   }[status] || '采用情况待确认'
 }
 
-function writingPhaseLabel(phase) {
+function writingPhaseLabel(phase, unitStatus = '') {
+  const status = String(unitStatus || '')
+  if (
+    status === 'blocked_human'
+    || status === 'failed'
+    || status === 'paused'
+  ) {
+    return {
+      model_output_invalid: '模型输出无效，已暂停',
+      research_blocked: '联网检索受阻，已暂停',
+      paused: '写作已暂停',
+      failed: '写作失败',
+      drafting: '写作已暂停',
+      preparing_research: '写作已暂停',
+    }[phase] || '写作已暂停'
+  }
   return {
     preparing_research: '正在检查人工材料',
     drafting: '正在撰写',
+    model_output_invalid: '模型输出无效，已暂停',
+    research_blocked: '联网检索受阻，已暂停',
+    paused: '写作已暂停',
+    failed: '写作失败',
   }[phase] || '正在处理'
 }
 
@@ -2831,6 +3727,35 @@ function llmRequestStatus(status) {
     succeeded: '接口已返回',
     failed: '接口失败',
   }[status] || status
+}
+
+function shouldExpandLlmRequest(request, requestIndex, requestCount) {
+  return request?.status === 'failed' || requestIndex === requestCount - 1
+}
+
+function llmRequestPurpose(request) {
+  const parameters = request?.parameters || {}
+  const explicitPurpose = String(parameters.request_purpose || '').trim()
+  if (explicitPurpose) return explicitPurpose
+
+  const capabilityId = String(
+    parameters.capability_id || request?.capability_id || '',
+  ).trim()
+  const initialPurpose = {
+    'planning.chapter_outline_split': '根据已提取的招标要求和评分项，生成可用于编写投标文件的章节目录及评分覆盖关系。',
+    'score.semantic_reconcile': '核对评分项、响应内容和证据之间的对应关系，补全可追溯的评分模型。',
+    'planning.project_understanding': '归纳项目背景、建设目标、范围和关键约束，形成项目理解。',
+    'planning.topic_duty_plan': '把招标要求拆分为编写主题、责任范围和所需材料。',
+  }[capabilityId]
+
+  const attemptKind = parameters.attempt_kind || request?.attempt_kind
+  if (attemptKind === 'controlled_repair' || attemptKind === 'repair') {
+    return initialPurpose
+      ? `修复上一轮不符合格式或校验要求的输出，并重新提交：${initialPurpose}`
+      : '修复上一轮不符合格式或校验要求的模型输出；不改变已提供的业务事实。'
+  }
+
+  return initialPurpose || '根据本阶段已准备好的业务资料生成结构化结果，供后续流程继续使用。'
 }
 
 function llmRequestSummary(request) {
@@ -3052,6 +3977,28 @@ function collapseAllChapters() {
   expandedChapterIds.value = new Set()
 }
 
+function exportOutlineMarkdown() {
+  const outlineChapters = visibleOutline.value || []
+  if (!outlineChapters.length) return
+  let mdText = '# 章节目录\n\n'
+  function renderChapter(ch, depth = 0) {
+    const indent = '  '.repeat(depth)
+    const title = ch.title || ch.chapter_id || ch.id
+    mdText += `${indent}- ${title}\n`
+    if (ch.children && ch.children.length) {
+      ch.children.forEach(child => renderChapter(child, depth + 1))
+    }
+  }
+  outlineChapters.forEach(ch => renderChapter(ch, 0))
+  const blob = new Blob([mdText], { type: 'text/markdown;charset=utf-8;' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = `章节目录_${props.workspaceId || 'outline'}.md`
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
 function expandChapterPath(chapterId) {
   const byId = new Map(flatOutline.value.map(chapter => [chapter.chapter_id, chapter]))
   const next = new Set(expandedChapterIds.value)
@@ -3082,7 +4029,7 @@ function formatBytes(value) {
 }
 
 function roleLabel(role) {
-  return { tender: '招标', score: '评分', company: '公司资料' }[role] || ''
+  return { tender: '招标', score: '评分', company: '公司资料', company_fact: '公司资料' }[role] || ''
 }
 
 function sourceStatus(item) {
@@ -3171,19 +4118,21 @@ watch(
     pendingUploads.tender.splice(0)
     pendingUploads.score.splice(0)
     pendingUploads.company.splice(0)
+    connectWorkspaceStream()
     refresh()
   },
 )
 
 onMounted(() => {
   refresh()
+  connectWorkspaceStream()
   window.addEventListener('keydown', handleWorkspaceKeydown)
-  timer = window.setInterval(() => {
-    if (!uploading.value && !loading.value) refresh()
-  }, 2000)
 })
 onUnmounted(() => {
-  window.clearInterval(timer)
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
+  if (runningTimer) window.clearInterval(runningTimer)
+  if (assistantClockTimer) window.clearInterval(assistantClockTimer)
   window.removeEventListener('keydown', handleWorkspaceKeydown)
 })
 </script>
@@ -3643,6 +4592,17 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 .current-writing-pending { border-style: dashed; }
+.current-writing-paused {
+  border-color: #f59e0b;
+  background: #fffbeb;
+}
+.current-writing-error {
+  margin: 8px 0 0;
+  color: #b45309;
+  font-size: 13px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
 
 .drawer-error-alert {
   padding: 14px;
@@ -4435,11 +5395,15 @@ onUnmounted(() => {
 .writer-outline-pane { border-right: 1px solid var(--border-color, #dbe3ef); }
 .writer-agent-pane { border-left: 1px solid var(--border-color, #dbe3ef); display: flex; flex-direction: column; gap: 12px; }
 .writer-outline-pane h3, .writer-document-pane h3, .writer-agent-pane h3 { margin: 3px 0 0; font-size: 16px; }
+.writer-batch-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 4px; }
+.writer-batch-actions .btn { min-height: 36px; font-size: 12px; }
+.writer-clear-selection { padding: 5px 2px; font-size: 12px; }
 .writer-chapter-list { display: grid; gap: 7px; margin-top: 16px; }
 .writer-word-toc { display: grid; gap: 2px; margin-top: 16px; }
 .writer-toc-item { display: flex; width: 100%; gap: 7px; padding-top: 7px; padding-bottom: 7px; border: 0; border-radius: 5px; color: #27384d; background: transparent; text-align: left; cursor: pointer; line-height: 1.45; }
 .writer-toc-item:hover, .writer-toc-item.active { background: #eaf0ff; color: #315bc4; }
 .writer-toc-item > span { flex: 0 0 auto; font-family: 'Times New Roman', serif; }
+.writer-chapter-check { width: 16px; height: 16px; flex: 0 0 16px; margin: 2px 0 0; accent-color: #315bc4; cursor: pointer; }
 .writer-toc-item strong { font-weight: 500; }
 .writer-toc-toggle, .writer-toc-spacer { display: inline-grid; place-items: center; width: 14px; flex: 0 0 14px; }
 .writer-toc-toggle { color: #66758a; font-family: sans-serif !important; cursor: pointer; }
@@ -4972,18 +5936,49 @@ onUnmounted(() => {
 }
 .pipeline-llm-request {
   margin-top: 8px;
-  padding: 8px;
   border: 1px solid #dbe3f0;
   border-radius: 8px;
   background: #fff;
 }
-.pipeline-llm-request header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
+.pipeline-llm-request > summary {
+  min-height: 40px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto 16px;
   gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  color: #334155;
+  cursor: pointer;
+  list-style: none;
 }
-.pipeline-llm-request header span { font-size: 9px; font-weight: 700; }
+.pipeline-llm-request > summary::-webkit-details-marker { display: none; }
+.pipeline-llm-request > summary:hover { background: #f8fafc; }
+.pipeline-llm-request > summary > strong { font-size: 11px; white-space: nowrap; }
+.llm-request-purpose-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pipeline-llm-request > summary > span:not(.llm-request-purpose-summary) { font-size: 9px; font-weight: 700; }
+.llm-request-chevron {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform .2s ease;
+}
+.pipeline-llm-request[open] .llm-request-chevron { transform: rotate(90deg); }
+.pipeline-llm-request-detail {
+  padding: 0 10px 10px;
+  border-top: 1px solid #e2e8f0;
+}
 .pipeline-llm-request .llm-request-running { color: #4338ca; }
 .pipeline-llm-request .llm-request-succeeded { color: #047857; }
 .pipeline-llm-request .llm-request-failed { color: #b91c1c; }
@@ -5720,5 +6715,2382 @@ onUnmounted(() => {
   .stage-drawer-overlay,
   .stage-drawer { animation: none; }
   .spinner { animation-duration: 1.6s; }
+}
+
+.v3-workspace {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+.workspace-tab-view.tab-upload {
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* 极简 AI 对话中心与材料投递视窗 (精确自适应无遮挡) */
+.initial-chat-studio {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  background: #ffffff;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  overflow: hidden;
+}
+.studio-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 22px;
+  background: #f8fafc;
+  border-bottom: 1px solid #e2e8f0;
+  flex-shrink: 0;
+}
+.bot-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.bot-icon {
+  font-size: 24px;
+  background: #eff6ff;
+  padding: 6px 10px;
+  border-radius: 12px;
+}
+.bot-brand h3 { margin: 0; font-size: 16px; color: #0f172a; font-weight: 700; }
+.bot-brand p { margin: 2px 0 0; font-size: 12px; color: #64748b; }
+.studio-header-stats { display: flex; gap: 8px; }
+.stat-tag {
+  font-size: 12px;
+  padding: 4px 10px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  color: #475569;
+  font-weight: 500;
+}
+.studio-chat-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  background: #fafafa;
+}
+.legacy-chat-stream {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 16px;
+}
+.chat-msg {
+  display: flex;
+  gap: 12px;
+  max-width: 88%;
+}
+.chat-msg.bot-msg { align-self: flex-start; }
+.chat-msg.user-msg { align-self: flex-end; flex-direction: row-reverse; }
+.msg-avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: #eff6ff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+}
+.user-msg .msg-avatar { background: #f1f5f9; }
+.msg-bubble {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 12px 16px;
+  font-size: 14px;
+  color: #1e293b;
+  line-height: 1.6;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+}
+.user-msg .msg-bubble {
+  background: #2563eb;
+  color: #ffffff;
+  border-color: #2563eb;
+}
+.materials-card-bubble {
+  width: 100%;
+  max-width: 520px;
+  background: #f8fafc;
+}
+.upload-start-bubble {
+  width: 100%;
+  max-width: 560px;
+  background: #f8fbff;
+  border-color: #c7d7fe;
+}
+.upload-start-bubble h4 { margin: 2px 0 4px; color: #172554; font-size: 15px; }
+.upload-start-bubble p { margin: 0; color: #475569; font-size: 13px; }
+.upload-start-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.upload-start-actions .btn { display: inline-flex; align-items: center; cursor: pointer; }
+.upload-start-actions .btn span { margin-left: 6px; font-size: 11px; opacity: .82; }
+.required-upload-zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.required-upload-zone { min-width: 0; border: 1px dashed #93c5fd; border-radius: 10px; background: #fff; transition: border-color .2s ease, background .2s ease; }
+.required-upload-zone.complete { border-style: solid; border-color: #86efac; background: #f0fdf4; }
+.required-upload-zone-label { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 9px; padding: 12px; cursor: pointer; }
+.required-upload-zone-label:hover { background: #eff6ff; }
+.required-upload-zone.complete .required-upload-zone-label:hover { background: #dcfce7; }
+.required-upload-zone-icon { display: grid; place-items: center; width: 26px; height: 30px; color: #2563eb; font-size: 22px; }
+.required-upload-zone-label strong { display: block; color: #172554; font-size: 13px; }
+.required-upload-zone-label strong em { margin-left: 4px; color: #dc2626; font-size: 11px; font-style: normal; }
+.required-upload-zone-label small { display: block; margin-top: 3px; color: #64748b; font-size: 11px; line-height: 1.45; }
+.required-upload-zone-label b { grid-column: 2; color: #2563eb; font-size: 12px; }
+.required-upload-zone.complete .required-upload-zone-label b { color: #15803d; }
+@media (max-width: 720px) {
+  .required-upload-zones { grid-template-columns: 1fr; }
+}
+.card-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.card-title-row h4 { margin: 0; font-size: 14px; color: #0f172a; }
+.chat-materials-grid { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.chat-material-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+}
+.file-info { flex: 1; display: flex; flex-direction: column; }
+.file-info strong { font-size: 13px; color: #0f172a; }
+.file-info small { font-size: 11px; color: #64748b; }
+.file-badge { font-size: 11px; color: #166534; background: #dcfce7; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+.highlight-msg .msg-bubble {
+  background: #f0fdf4;
+  border-color: #bbf7d0;
+  width: 100%;
+  max-width: 540px;
+}
+.launch-card-content { display: flex; flex-direction: column; gap: 12px; }
+.launch-card-content h4 { margin: 0; color: #14532d; font-size: 15px; }
+.launch-card-content p { margin: 4px 0 0; color: #166534; font-size: 13px; }
+.launch-plan-btn { margin-top: 4px; width: 100%; justify-content: center; font-weight: 700; font-size: 15px; height: 42px; }
+.plan-preview-bubble { width: 100%; max-width: 560px; background: #eff6ff; border-color: #bfdbfe; }
+.plan-preview-bubble h4 { margin: 0; color: #1e40af; font-size: 15px; }
+.plan-summary-line { font-size: 12px; color: #2563eb; font-weight: 600; margin: 4px 0 10px; }
+.chat-outline-details { margin-bottom: 12px; }
+.chat-outline-details > summary { cursor: pointer; color: #1d4ed8; font-size: 13px; font-weight: 700; }
+.chat-outline-details > summary::marker { color: #2563eb; }
+.preview-tree-box { background: #fff; border-radius: 8px; padding: 10px 12px; border: 1px solid #cbd5e1; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
+.tree-preview-item { font-size: 13px; color: #334155; }
+.tree-preview-item .node-num { font-weight: 700; margin-right: 6px; color: #2563eb; }
+.full-outline-preview { margin: 8px 0 0; max-height: 360px; overflow: auto; }
+.full-outline-preview .tree-preview-item { display: flex; align-items: flex-start; gap: 6px; padding: 5px 0 5px calc(var(--outline-depth) * 16px); border-bottom: 1px solid #f1f5f9; }
+.full-outline-preview .tree-preview-item:last-child { border-bottom: 0; }
+.full-outline-preview .node-num { flex: 0 0 auto; margin-right: 0; }
+.node-content { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.node-content small { color: #64748b; font-size: 11px; line-height: 1.45; }
+.node-coverage { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 10px; white-space: nowrap; }
+.more-tree-hint { font-size: 11px; color: #94a3b8; padding-top: 4px; }
+.plan-actions-row { display: flex; gap: 10px; justify-content: flex-end; }
+.studio-input-footer {
+  flex-shrink: 0;
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  padding: 14px 20px;
+  background: #fff;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.upload-quick-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.toolbar-label { font-size: 12px; font-weight: 600; color: #475569; }
+.upload-quick-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: #f1f5f9;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #334155;
+  transition: all 0.15s ease;
+}
+.upload-quick-btn:hover { background: #e2e8f0; border-color: #94a3b8; }
+.upload-quick-btn.tender { background: #eff6ff; border-color: #93c5fd; color: #1d4ed8; }
+.upload-quick-btn.tender:hover { background: #dbeafe; }
+.tag-req { font-size: 10px; background: #dc2626; color: #fff; padding: 1px 4px; border-radius: 4px; }
+.uploading-state-hint { font-size: 12px; color: #2563eb; font-weight: 500; display: flex; align-items: center; gap: 6px; }
+.chat-input-box { display: flex; gap: 10px; }
+.studio-text-field {
+  flex: 1;
+  padding: 10px 14px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  font-size: 14px;
+  outline: none;
+}
+.studio-text-field:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
+.send-btn { padding: 0 20px; font-weight: 600; border-radius: 10px; }
+
+/* 现代一体化浅色 AI 胶囊输入框 */
+.modern-input-card {
+  background: #f8fafc;
+  border: 1px solid #dbe3ef;
+  border-radius: 12px;
+  box-shadow: none;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+.workbench-entry-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+.workbench-entry-icon {
+  width: 40px;
+  height: 40px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+.workbench-entry-icon svg,
+.workbench-entry-action svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.workbench-entry-copy { min-width: 0; }
+.workbench-entry-copy strong,
+.workbench-entry-copy small { display: block; }
+.workbench-entry-copy strong { color: #172033; font-size: 13px; line-height: 1.45; }
+.workbench-entry-copy small { margin-top: 2px; color: #64748b; font-size: 11px; line-height: 1.45; }
+.workbench-entry-action {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 13px;
+  border: 1px solid #2563eb;
+  border-radius: 9px;
+  color: #fff;
+  background: #2563eb;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color .2s ease, border-color .2s ease;
+}
+.workbench-entry-action:hover { border-color: #1d4ed8; background: #1d4ed8; }
+.workbench-entry-action:focus-visible { outline: 3px solid rgba(37, 99, 235, .24); outline-offset: 2px; }
+.workbench-entry-action svg { width: 16px; height: 16px; }
+.modern-input-card:focus-within {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12), 0 4px 14px rgba(15, 23, 42, 0.05);
+}
+.modern-textarea {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  color: #0f172a;
+  resize: none;
+  width: 100%;
+  line-height: 1.5;
+  font-family: inherit;
+}
+.modern-textarea::placeholder {
+  color: #94a3b8;
+}
+.modern-card-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 6px;
+  border-top: 1px solid #f1f5f9;
+}
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.toolbar-attachment-menu {
+  position: relative;
+}
+.attachment-trigger {
+  display: inline-grid;
+  width: 44px;
+  height: 44px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+}
+.attachment-trigger:hover,
+.attachment-trigger[aria-expanded="true"] {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.attachment-trigger svg {
+  width: 20px;
+  height: 20px;
+}
+.quick-upload-menu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  min-width: 184px;
+  padding: 6px;
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, .12);
+}
+.quick-upload-option {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 7px;
+  color: #334155;
+  cursor: pointer;
+  font-size: 13px;
+}
+.quick-upload-option:hover {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+.toolbar-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  font-size: 12px;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.toolbar-chip-btn:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+.chip-icon {
+  font-weight: 700;
+  font-size: 14px;
+  color: #2563eb;
+}
+.modern-send-circle-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.modern-send-circle-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+  transform: scale(1.05);
+}
+.modern-send-circle-btn:disabled {
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+/* 聊天窗口内嵌项目流程卡片 */
+.flow-card-msg .msg-bubble {
+  width: 100%;
+  max-width: 680px;
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  padding: 14px 18px;
+}
+.embedded-pipeline-bubble { display: flex; flex-direction: column; gap: 12px; }
+.pipeline-card-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; }
+.pipeline-card-header h4 { margin: 0; font-size: 15px; color: #0f172a; font-weight: 700; }
+.pipeline-card-header p { margin: 2px 0 0; font-size: 12px; color: #64748b; }
+.chat-workflow-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 4px 0; }
+.chat-step-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  opacity: 0.7;
+}
+.chat-step-item.active { opacity: 1; border-color: #2563eb; background: #eff6ff; }
+.step-num { font-weight: 800; font-size: 12px; color: #2563eb; background: #dbeafe; padding: 2px 6px; border-radius: 4px; }
+.step-info { display: flex; flex-direction: column; }
+.step-info strong { font-size: 12px; color: #0f172a; }
+.step-info small { font-size: 11px; color: #64748b; }
+.chat-stepper-list { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0; }
+.chat-stepper-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.15s ease;
+}
+.chat-stepper-node:hover { border-color: #2563eb; background: #eff6ff; }
+.chat-stepper-node.stage-succeeded { border-color: #a7f3d0; background: #ecfdf5; }
+.chat-stepper-node.stage-running { border-color: #93c5fd; background: #eff6ff; }
+.mini-node-badge {
+  width: 16px; height: 16px; border-radius: 50%; background: #e2e8f0; font-size: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700;
+}
+.stage-succeeded .mini-node-badge { background: #166534; color: #fff; }
+.stage-running .mini-node-badge { background: #2563eb; color: #fff; }
+.mini-node-info { display: flex; flex-direction: column; }
+.mini-node-info strong { font-size: 11px; color: #1e293b; }
+.mini-node-info small { font-size: 10px; color: #64748b; }
+
+/* 步骤时间线卡片 header */
+.step-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.step-card-header h4 { margin: 0; font-size: 15px; color: #0f172a; font-weight: 700; }
+.step-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+}
+.step-tag.ready { background: #dbeafe; color: #1d4ed8; }
+.step-tag.finish { background: #dcfce7; color: #166534; }
+.mini-stepper-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 12px; color: #475569; font-weight: 600; }
+.chat-stepper-container { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+
+/* 聊天工作区最终布局：状态、过程、结果都在同一条消息流内。 */
+.v3-workspace {
+  height: auto;
+  background: #f8fafc;
+}
+
+.workspace-tab-view {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.workspace-tab-view.tab-upload {
+  height: auto;
+  overflow: hidden;
+}
+
+.initial-chat-studio {
+  width: 60vw;
+  max-width: 60vw;
+  height: auto;
+  margin-inline: auto;
+  background: #fff;
+}
+
+.studio-header {
+  min-height: 72px;
+  gap: 20px;
+  padding: 14px clamp(16px, 2.5vw, 28px);
+}
+
+.bot-brand,
+.bot-brand > div,
+.studio-header-stats,
+.stat-tag,
+.chat-msg,
+.msg-bubble,
+.process-card-title,
+.mini-node-info,
+.file-info {
+  min-width: 0;
+}
+
+.bot-icon {
+  display: grid;
+  flex: 0 0 40px;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  place-items: center;
+  color: #4f46e5;
+}
+
+.bot-icon svg,
+.material-avatar svg,
+.outline-avatar svg,
+.file-icon svg,
+.stat-tag svg,
+.chip-icon {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.studio-header-stats {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.stat-tag {
+  min-height: 36px;
+  gap: 7px;
+  padding: 6px 11px;
+}
+
+.stat-tag svg {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+}
+
+.studio-chat-body {
+  padding: 24px clamp(14px, 3vw, 36px) 28px;
+  gap: 18px;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  background: #f6f8fb;
+}
+
+/* 任务驾驶舱：当前事项优先，过程和诊断按需展开。 */
+.cockpit-chat-body {
+  align-items: center;
+}
+
+.workspace-cockpit {
+  display: grid;
+  width: min(100%, 960px);
+  gap: 14px;
+}
+
+.cockpit-steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cockpit-steps li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border: 1px solid #dbe4f0;
+  border-radius: 10px;
+  background: #fff;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cockpit-step-index {
+  display: grid;
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border-radius: 50%;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 10px;
+}
+
+.cockpit-steps .is-done { border-color: #bbf7d0; color: #047857; }
+.cockpit-steps .is-done .cockpit-step-index { background: #15803d; color: #fff; }
+.cockpit-steps .is-current { border-color: #a5b4fc; background: #eef2ff; color: #3730a3; }
+.cockpit-steps .is-current .cockpit-step-index { background: #4f46e5; color: #fff; }
+.cockpit-steps .is-error { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
+.cockpit-steps .is-error .cockpit-step-index { background: #dc2626; color: #fff; }
+.cockpit-steps .is-locked { background: #f8fafc; color: #94a3b8; }
+
+.cockpit-current-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 24px;
+  align-items: center;
+  padding: 24px;
+  border: 1px solid #c7d2fe;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #fff 0%, #f5f7ff 100%);
+  box-shadow: 0 10px 24px rgba(15, 23, 42, .06);
+}
+
+.cockpit-current-card.has-failure { border-color: #fecaca; background: linear-gradient(135deg, #fff 0%, #fff7f7 100%); }
+.cockpit-current-copy h4 { margin: 0; color: #172554; font-size: 20px; line-height: 1.35; }
+.cockpit-current-copy p { max-width: 660px; margin: 7px 0 0; color: #52627a; font-size: 14px; line-height: 1.65; }
+.cockpit-current-copy .cockpit-stage-hint { color: #3730a3; font-weight: 700; }
+.cockpit-current-action { display: grid; min-width: 152px; gap: 8px; justify-items: stretch; }
+.cockpit-primary-action { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; cursor: pointer; text-align: center; }
+.cockpit-secondary-action { min-height: 36px; color: #475569; font-size: 12px; }
+
+.cockpit-inline-error {
+  margin: 0;
+  padding: 11px 13px;
+  border: 1px solid #fecaca;
+  border-radius: 10px;
+  background: #fef2f2;
+  color: #991b1b;
+  font-size: 13px;
+}
+
+.cockpit-history-card {
+  padding: 0 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #fff;
+}
+
+.cockpit-history-card > summary {
+  display: flex;
+  min-height: 48px;
+  align-items: center;
+  cursor: pointer;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.cockpit-history-card > p { margin: 0 0 10px; color: #64748b; font-size: 12px; line-height: 1.55; }
+.cockpit-history-card > .text-button { margin: 0 0 12px; color: #3730a3; font-size: 12px; }
+.cockpit-material-list { display: grid; gap: 8px; margin: 0 0 12px; padding: 0; list-style: none; }
+.cockpit-material-list li { display: grid; gap: 2px; padding: 9px 10px; border-radius: 8px; background: #f8fafc; }
+.cockpit-material-list strong { overflow-wrap: anywhere; color: #334155; font-size: 12px; }
+.cockpit-material-list span { color: #64748b; font-size: 11px; }
+.cockpit-generation-history ol { display: grid; gap: 8px; margin: 0 0 12px; padding: 0; list-style: none; }
+.cockpit-generation-history li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #e2e8f0; border-radius: 8px; }
+.cockpit-generation-history li.stage-failed { border-color: #fecaca; background: #fff7f7; }
+.cockpit-generation-history li > div { display: grid; gap: 2px; min-width: 0; }
+.cockpit-generation-history strong { color: #334155; font-size: 12px; }
+.cockpit-generation-history span { color: #64748b; font-size: 11px; }
+.cockpit-generation-history button { flex: 0 0 auto; min-height: 36px; padding: 6px 9px; border: 1px solid #dbe4f0; border-radius: 7px; background: #f8fafc; color: #334155; cursor: pointer; font: inherit; font-size: 11px; font-weight: 700; }
+.cockpit-diagnostics { border-style: dashed; }
+
+.chat-msg {
+  width: 100%;
+  max-width: 100%;
+  align-items: flex-start;
+}
+
+.chat-msg.process-msg {
+  width: 100%;
+}
+
+.chat-msg.user-msg {
+  width: auto;
+  max-width: min(78%, 720px);
+}
+
+.msg-avatar {
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: 1px solid #dbe4f0;
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.step-avatar {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.material-avatar {
+  background: #f8fafc;
+  color: #475569;
+}
+
+.material-avatar svg {
+  width: 18px;
+  height: 18px;
+}
+
+.outline-avatar {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.outline-avatar svg {
+  width: 18px;
+  height: 18px;
+}
+
+.conversation-avatar {
+  letter-spacing: -.02em;
+}
+
+.user-msg .conversation-avatar {
+  border-color: #cbd5e1;
+  background: #f1f5f9;
+  color: #334155;
+}
+
+.msg-bubble {
+  max-width: 100%;
+  border-color: #dbe4f0;
+  border-radius: 4px 16px 16px;
+  padding: 14px 16px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, .035);
+  overflow-wrap: anywhere;
+}
+
+.msg-bubble p {
+  margin: 0;
+}
+
+.user-msg .msg-bubble {
+  border-radius: 16px 4px 16px 16px;
+}
+
+.materials-card-bubble,
+.highlight-msg .msg-bubble {
+  width: 100%;
+  max-width: 680px;
+}
+
+.chat-material-card {
+  min-height: 52px;
+}
+
+.file-icon {
+  display: grid;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.file-icon svg {
+  width: 16px;
+  height: 16px;
+}
+
+.file-info strong,
+.node-title,
+.llm-card-meta code,
+.llm-batch-code code {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.process-bubble {
+  width: 100%;
+  padding: 18px;
+  border-color: #c7d2fe;
+  background: linear-gradient(180deg, #f8faff 0%, #f3f6ff 100%);
+}
+
+.process-card-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 18px;
+  align-items: start;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #dbe4ff;
+}
+
+.process-card-title h4 {
+  margin: 8px 0 0;
+  color: #172554;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.process-card-title p {
+  max-width: 680px;
+  margin-top: 5px;
+  color: #52627a;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.process-card-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.process-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.process-metrics span {
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e0e7ff;
+  color: #3730a3;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.process-detail-button {
+  min-height: 40px;
+  padding-inline: 13px;
+  box-shadow: none;
+}
+
+.process-bubble .chat-stepper-container {
+  margin: 14px 0 0;
+  padding: 12px;
+  border-color: #dbe4f0;
+  border-radius: 12px;
+}
+
+.mini-stepper-title {
+  gap: 12px;
+  min-height: 28px;
+  margin-bottom: 10px;
+}
+
+.chat-stepper-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(152px, 1fr));
+  gap: 8px;
+}
+
+.chat-stepper-list > li {
+  min-width: 0;
+}
+
+.chat-stepper-node {
+  width: 100%;
+  min-height: 56px;
+  gap: 9px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  font: inherit;
+  text-align: left;
+}
+
+.chat-stepper-node:focus-visible,
+.chat-llm-status button:focus-visible,
+.process-detail-button:focus-visible,
+.toolbar-chip-btn:focus-within,
+.modern-send-circle-btn:focus-visible,
+.modal-close-btn:focus-visible {
+  outline: 3px solid rgba(79, 70, 229, .24);
+  outline-offset: 2px;
+}
+
+.chat-stepper-node.stage-reused,
+.chat-stepper-node.stage-succeeded {
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+}
+
+.chat-stepper-node.stage-queued,
+.chat-stepper-node.stage-running,
+.chat-stepper-node.stage-processing {
+  border-color: #a5b4fc;
+  background: #eef2ff;
+}
+
+.chat-stepper-node.stage-failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.chat-stepper-node.has-warning {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.stage-reused .mini-node-badge,
+.stage-succeeded .mini-node-badge {
+  background: #15803d;
+  color: #fff;
+}
+
+.stage-failed .mini-node-badge {
+  background: #dc2626;
+  color: #fff;
+}
+
+.has-warning .mini-node-badge {
+  background: #d97706;
+  color: #fff;
+}
+
+.mini-node-badge {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+}
+
+.mini-node-info {
+  flex: 1;
+}
+
+.mini-node-info strong,
+.mini-node-info small {
+  display: block;
+  white-space: normal;
+}
+
+.mini-node-info strong {
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.chat-llm-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 52px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 10px;
+  background: #fff;
+}
+
+.llm-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #10b981;
+  box-shadow: 0 0 0 4px #d1fae5;
+}
+
+.llm-status-running .llm-status-dot {
+  background: #4f46e5;
+  box-shadow: 0 0 0 4px #e0e7ff;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+.llm-status-failed .llm-status-dot {
+  background: #dc2626;
+  box-shadow: 0 0 0 4px #fee2e2;
+}
+
+.chat-llm-status strong,
+.chat-llm-status small {
+  display: block;
+}
+
+.chat-llm-status strong {
+  color: #1e293b;
+  font-size: 12px;
+}
+
+.chat-llm-status small {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.chat-llm-status button {
+  min-height: 40px;
+  padding: 7px 10px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #3730a3;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.plan-result-details {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #dbe4ff;
+}
+
+/* 统一步骤卡片：每一步都按“步骤头部 → 操作/进度 → 步骤结果”组织。 */
+.timeline-step-msg {
+  width: min(100%, 960px);
+}
+
+.timeline-step-msg > .msg-bubble {
+  width: 100%;
+  max-width: none;
+}
+
+.workflow-step-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e5eaf2;
+}
+
+.workflow-step-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workflow-step-heading h4 {
+  margin: 0;
+  color: #172033;
+  font-size: 17px;
+  line-height: 1.35;
+}
+
+.workflow-step-heading p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workflow-step-intro {
+  margin-top: 12px !important;
+  color: #334155;
+  line-height: 1.65;
+}
+
+.workflow-step-status,
+.workflow-result-status {
+  display: inline-flex;
+  min-height: 28px;
+  align-items: center;
+  padding: 4px 9px;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.workflow-step-status.done,
+.workflow-result-status.done {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.workflow-step-status.action {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.workflow-result-status.action {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+}
+
+.workflow-step-status.failed,
+.workflow-result-status.failed {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.workflow-result-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.materials-card-bubble .card-title-row {
+  align-items: flex-start;
+}
+
+.materials-card-bubble .card-title-row h4 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.outline-card-bubble {
+  width: 100%;
+  max-width: 560px;
+  background: #f8fbff;
+  border-color: #bfdbfe;
+}
+
+.outline-card-summary {
+  margin: 0 0 10px;
+  color: #475569;
+  font-size: 12px;
+}
+
+.outline-card-details {
+  margin-bottom: 0;
+}
+
+.outline-card-details > summary {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  padding: 7px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+}
+
+.outline-card-details[open] > summary {
+  margin-bottom: 8px;
+  background: #dbeafe;
+}
+
+.action-launch-bubble {
+  background: linear-gradient(180deg, #f5fbff 0%, #f0fdf4 100%);
+  border-color: #bae6fd;
+}
+
+.generation-stage-bubble {
+  background: linear-gradient(180deg, #f8faff 0%, #f5f3ff 100%);
+  border-color: #c7d2fe;
+}
+
+.generation-avatar {
+  border-color: #c7d2fe;
+  background: #eef2ff;
+  color: #4338ca;
+  font-weight: 800;
+}
+
+.generation-stage-headline {
+  margin-bottom: 0 !important;
+}
+
+.ai-process-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ai-process-overview span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #eef4fb;
+  color: #52627a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ai-process-stage-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ai-process-stage-list button {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 18px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  color: #45566f;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-process-stage-list button:hover { background: #f1f6fc; }
+.ai-process-stage-list button:focus-visible { outline: 3px solid rgba(59, 130, 246, .22); outline-offset: 1px; }
+.ai-process-stage-list button > svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.ai-stage-marker {
+  width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #cbd8e8;
+  border-radius: 50%;
+  color: #60738e;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 800;
+}
+.ai-stage-marker.stage-succeeded,
+.ai-stage-marker.stage-reused { border-color: #6fcf97; color: #fff; background: #229b5f; }
+.ai-stage-marker.stage-failed { border-color: #f1a9a9; color: #fff; background: #cf4545; }
+.ai-stage-marker.stage-running,
+.ai-stage-marker.stage-processing,
+.ai-stage-marker.stage-queued { border-color: #a8c6f5; color: #2f6fed; background: #edf5ff; }
+.ai-stage-copy { min-width: 0; }
+.ai-stage-copy strong,
+.ai-stage-copy small { display: block; }
+.ai-stage-copy strong { color: #33465f; font-size: 12px; }
+.ai-stage-copy small { overflow: hidden; color: #73839a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
+.generation-queue-note {
+  margin: 12px 0 0;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.launch-card-content {
+  margin-top: 14px;
+}
+
+.workflow-result-panel {
+  margin-top: 14px;
+  padding: 13px;
+  border: 1px solid #dbe4f0;
+  border-radius: 11px;
+  background: rgba(255, 255, 255, .86);
+}
+
+.workflow-result-header,
+.workflow-result-item-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workflow-result-header strong {
+  color: #1e293b;
+  font-size: 13px;
+}
+
+.workflow-result-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 11px;
+}
+
+.workflow-result-metrics span {
+  padding: 8px 9px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  color: #64748b;
+  font-size: 11px;
+  text-align: center;
+}
+
+.workflow-result-metrics b {
+  display: block;
+  color: #1d4ed8;
+  font-size: 17px;
+  line-height: 1.2;
+}
+
+.workflow-result-link {
+  min-height: 38px;
+  margin-top: 10px;
+  padding: 7px 10px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workflow-result-link:hover,
+.workflow-result-item button:hover {
+  background: #dbeafe;
+}
+
+.pipeline-result-panel {
+  background: rgba(255, 255, 255, .72);
+}
+
+.workflow-result-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.workflow-result-item {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 9px;
+  background: #fff;
+}
+
+.workflow-result-item.result-succeeded,
+.workflow-result-item.result-reused {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+}
+
+.workflow-result-item.result-failed {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.workflow-result-item-heading strong {
+  min-width: 0;
+  color: #1e293b;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.workflow-result-item-heading span {
+  flex: 0 0 auto;
+  color: #64748b;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.workflow-result-item p {
+  display: -webkit-box;
+  margin: 6px 0 8px;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 10px;
+  line-height: 1.5;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.workflow-result-item button {
+  min-height: 32px;
+  padding: 5px 8px;
+  border: 1px solid #dbe4f0;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: #334155;
+  cursor: pointer;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.process-card-title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: start;
+}
+
+.process-card-title .step-tag {
+  grid-row: 1 / span 2;
+  align-self: start;
+}
+
+.process-card-title h4,
+.process-card-title p {
+  grid-column: 2;
+}
+
+.mini-node-result {
+  display: -webkit-box !important;
+  margin-top: 3px !important;
+  overflow: hidden;
+  color: #334155 !important;
+  line-height: 1.35 !important;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.plan-summary-line {
+  margin-top: 0;
+}
+
+.status-chat-msg {
+  width: min(100%, 760px);
+}
+
+.status-avatar {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.status-bubble {
+  width: 100%;
+  box-shadow: none;
+}
+
+.success-chat-msg .status-bubble {
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+  color: #065f46;
+}
+
+.error-chat-msg .status-avatar,
+.error-chat-msg .status-bubble {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #991b1b;
+}
+
+.error-detail-list {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #fecaca;
+}
+
+.error-detail-list ol {
+  display: grid;
+  gap: 6px;
+  margin: 7px 0 0;
+  padding-left: 20px;
+}
+
+.error-detail-list li span {
+  display: block;
+}
+
+.studio-input-footer {
+  position: relative;
+  bottom: auto;
+  z-index: auto;
+  flex: 0 0 auto;
+  padding: 14px clamp(14px, 3vw, 36px) 16px;
+  background: #fafafa;
+}
+
+.modern-input-card {
+  width: 100%;
+  padding: 12px 14px;
+  border-color: #cbd5e1;
+}
+
+.modern-textarea {
+  min-height: 48px;
+}
+
+.toolbar-chip-btn {
+  min-height: 40px;
+  padding: 7px 11px;
+}
+
+.chip-icon {
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+}
+
+.modern-send-circle-btn {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+}
+
+.modern-send-circle-btn svg {
+  width: 20px;
+  height: 20px;
+}
+
+.studio-compliance-note {
+  margin: 0;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.view-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+/* 诊断弹窗由聊天内按钮触发，浮层不参与工作区高度计算。 */
+.llm-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  padding: 20px;
+  place-items: center;
+  background: rgba(15, 23, 42, .55);
+  backdrop-filter: blur(4px);
+}
+
+.llm-modal-content {
+  display: flex;
+  flex-direction: column;
+  width: min(920px, 100%);
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+  border: 1px solid #dbe4f0;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(15, 23, 42, .28);
+}
+
+.llm-modal-header {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 20px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 18px 20px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.llm-modal-header h3 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 18px;
+}
+
+.modal-close-btn {
+  display: grid;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid #e2e8f0;
+  border-radius: 50%;
+  background: #fff;
+  color: #475569;
+  cursor: pointer;
+  font-size: 16px;
+}
+
+.modal-close-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.llm-modal-body {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  padding: 18px 20px 22px;
+  overflow: auto;
+}
+
+.modal-empty-hint {
+  margin: 0;
+  padding: 28px;
+  color: #64748b;
+  text-align: center;
+}
+
+.llm-request-cards {
+  display: grid;
+  gap: 12px;
+}
+
+.llm-detail-card {
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.llm-detail-card.status-failed {
+  border-color: #fecaca;
+  background: #fff7f7;
+}
+
+.llm-card-header,
+.llm-card-title,
+.llm-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.llm-card-header {
+  justify-content: space-between;
+}
+
+.llm-card-title {
+  min-width: 0;
+}
+
+.llm-card-time {
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+
+.llm-card-meta {
+  margin-top: 10px;
+  color: #475569;
+  font-size: 11px;
+}
+
+.llm-card-meta span {
+  min-width: 0;
+}
+
+.llm-request-purpose-card {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid #4f46e5;
+  border-radius: 8px;
+  background: #eef2ff;
+  color: #312e81;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.llm-request-purpose-card strong {
+  display: block;
+  font-weight: 800;
+}
+
+.llm-request-purpose-card p,
+.llm-request-purpose {
+  margin: 5px 0 0;
+}
+
+.pipeline-llm-request .llm-request-purpose,
+.drawer-llm-list .llm-request-purpose {
+  color: #334155;
+  line-height: 1.55;
+}
+
+.llm-card-meta code,
+.llm-snapshot-view pre,
+.repair-feedback-box {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.llm-repair-alert {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 9px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+}
+
+.llm-repair-alert p {
+  margin: 5px 0 0;
+}
+
+.llm-card-details {
+  margin-top: 12px;
+}
+
+.llm-card-details > summary {
+  min-height: 40px;
+  padding: 9px 11px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #334155;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.llm-snapshot-view,
+.repair-feedback-box {
+  max-width: 100%;
+  overflow: auto;
+}
+
+.llm-snapshot-view pre,
+.repair-feedback-box {
+  margin: 8px 0 0;
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #dbeafe;
+  background: #f8fbff;
+  color: #334155;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.planning-review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1250;
+  display: grid;
+  padding: 20px;
+  place-items: center;
+  background: rgba(148, 163, 184, .42);
+  backdrop-filter: blur(3px);
+}
+.planning-review-dialog {
+  position: relative;
+  width: min(520px, 100%);
+  padding: 30px;
+  border: 1px solid #dbeafe;
+  border-radius: 20px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgba(30, 64, 175, .18);
+  color: #172554;
+}
+.planning-review-dialog h2 { margin: 8px 0; color: #172554; font-size: 24px; }
+.planning-review-dialog > p:not(.section-kicker) { margin: 0; color: #475569; line-height: 1.7; }
+.planning-review-close {
+  position: absolute;
+  top: 13px;
+  right: 14px;
+  width: 34px;
+  height: 34px;
+  border: 0;
+  border-radius: 50%;
+  color: #64748b;
+  background: #f1f5f9;
+  font-size: 22px;
+  cursor: pointer;
+}
+.planning-review-icon {
+  display: inline-grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #2563eb;
+  font-weight: 800;
+}
+.planning-review-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 22px 0;
+}
+.planning-review-metrics div { padding: 12px; border: 1px solid #e0e7ff; border-radius: 11px; background: #f8faff; }
+.planning-review-metrics dt { color: #64748b; font-size: 12px; }
+.planning-review-metrics dd { margin: 4px 0 0; color: #1d4ed8; font-size: 20px; font-weight: 800; }
+.planning-review-feedback { display: grid; gap: 6px; margin: 0 0 18px; color: #334155; font-size: 13px; font-weight: 700; }
+.planning-review-feedback textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #bfdbfe; border-radius: 9px; color: #172554; font: inherit; font-weight: 400; line-height: 1.5; }
+.planning-review-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+/* 执行计划固定在输入框上方；实时动作作为普通聊天消息进入消息流。 */
+.legacy-chat-stream .bot-msg > .msg-bubble {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.pipeline-activity-group {
+  width: calc(100% - 54px);
+  margin-left: 54px;
+  color: #64748b;
+  background: transparent;
+}
+.pipeline-plan-chat-msg .pipeline-activity-group {
+  width: 100%;
+  margin: 10px 0 0;
+}
+.pipeline-activity-group > summary {
+  width: 100%;
+  min-height: 44px;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 4px 2px;
+  border-bottom: 1px solid #0f172a;
+  color: #64748b;
+  background: transparent;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+  font-weight: 650;
+}
+.pipeline-activity-group > summary::-webkit-details-marker { display: none; }
+.pipeline-activity-group > summary:hover { color: #334155; }
+.pipeline-group-chevron {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: transform .2s ease;
+}
+.pipeline-activity-group[open] .pipeline-group-chevron { transform: rotate(90deg); }
+.generation-stage-bubble .generation-activity-group {
+  width: 100%;
+  margin: 8px 0 0;
+  padding-top: 4px;
+  border-top: 1px solid #e0e7ff;
+}
+.pipeline-activity-list { padding: 2px 0 8px; }
+.pipeline-activity-msg {
+  width: 100%;
+  max-width: 100%;
+  display: block;
+}
+.pipeline-log-entry {
+  width: 100%;
+  color: #64748b;
+  background: transparent;
+}
+.pipeline-log-entry > summary {
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 18px;
+  gap: 10px;
+  align-items: center;
+  padding: 5px 2px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  list-style: none;
+}
+.pipeline-log-entry > summary::-webkit-details-marker { display: none; }
+.pipeline-log-entry > summary:hover { color: #334155; }
+.pipeline-log-icon {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.pipeline-log-icon svg,
+.pipeline-log-chevron {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.pipeline-log-line {
+  min-width: 0;
+  display: flex;
+  gap: 7px;
+  align-items: baseline;
+  white-space: nowrap;
+}
+.pipeline-log-line strong {
+  flex: 0 0 auto;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 650;
+}
+.pipeline-log-line > span {
+  min-width: 0;
+  overflow: hidden;
+  color: #94a3b8;
+  font-size: 12px;
+  text-overflow: ellipsis;
+}
+.activity-running .pipeline-log-line strong { color: #334155; }
+.activity-failed .pipeline-log-line strong,
+.activity-failed .pipeline-log-icon { color: #b91c1c; }
+.pipeline-log-chevron { transition: transform .2s ease; }
+.pipeline-log-entry[open] .pipeline-log-chevron { transform: rotate(90deg); }
+.pipeline-log-detail {
+  margin: 0 0 6px 10px;
+  padding: 2px 0 8px 31px;
+  border-left: 1px solid #e2e8f0;
+}
+.pipeline-log-detail p {
+  margin: 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.pipeline-log-detail button {
+  min-height: 40px;
+  margin-top: 5px;
+  padding: 6px 0;
+  border: 0;
+  color: #4f46e5;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.pipeline-activity-group > summary:focus-visible,
+.pipeline-log-entry > summary:focus-visible,
+.pipeline-log-detail button:focus-visible,
+.pipeline-plan-actions button:focus-visible,
+.vertical-plan-node:focus-visible {
+  outline: 3px solid rgba(79, 70, 229, .24);
+  outline-offset: 2px;
+}
+.pipeline-plan-actions button {
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 9px;
+  color: #3730a3;
+  background: #eef2ff;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: border-color .2s ease, background-color .2s ease;
+}
+.pipeline-plan-actions button:hover { border-color: #818cf8; background: #e0e7ff; }
+
+.pipeline-plan-dock {
+  width: 100%;
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 14px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, .06);
+}
+.pipeline-processing-summary {
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid #e0e7ff;
+  border-radius: 10px;
+  background: #f8faff;
+  color: #475569;
+}
+.pipeline-processing-summary summary { cursor: pointer; color: #334155; font-size: 12px; font-weight: 750; }
+.pipeline-processing-summary ul { display: grid; gap: 5px; margin: 9px 0 0; padding-left: 19px; font-size: 12px; line-height: 1.5; }
+.pipeline-plan-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 16px;
+  align-items: start;
+  padding-bottom: 11px;
+  border-bottom: 1px solid #e7edf5;
+}
+.pipeline-plan-header > div:first-child { min-width: 0; }
+.pipeline-plan-kicker,
+.pipeline-plan-header strong,
+.pipeline-plan-header small { display: block; }
+.pipeline-plan-kicker {
+  margin-bottom: 3px;
+  color: #4f46e5;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.pipeline-plan-header strong { color: #172033; font-size: 14px; line-height: 1.45; }
+.pipeline-plan-header small { margin-top: 3px; color: #64748b; font-size: 11px; line-height: 1.45; }
+.pipeline-plan-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: flex-end;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+}
+.pipeline-plan-summary > span:not(.pipeline-state-pill) {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+}
+.vertical-pipeline-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.vertical-pipeline-plan > li { position: relative; min-width: 0; }
+.vertical-pipeline-plan > li:not(:last-child)::after {
+  content: '';
+  position: absolute;
+  z-index: 0;
+  top: 31px;
+  bottom: -9px;
+  left: 15px;
+  width: 2px;
+  background: #dbe4f0;
+}
+.vertical-plan-node {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  min-height: 42px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) minmax(0, auto);
+  gap: 9px;
+  align-items: center;
+  padding: 5px 7px 5px 0;
+  border: 0;
+  border-radius: 9px;
+  color: #334155;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color .2s ease;
+}
+.vertical-plan-node:hover { background: #f8fafc; }
+.vertical-plan-node.stage-running,
+.vertical-plan-node.stage-processing,
+.vertical-plan-node.stage-queued { background: #f5f7ff; }
+.vertical-plan-marker {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #dbe4f0;
+  border-radius: 50%;
+  color: #64748b;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 800;
+}
+.stage-succeeded .vertical-plan-marker,
+.stage-reused .vertical-plan-marker,
+.stage-completed .vertical-plan-marker { border-color: #16a34a; color: #fff; background: #16a34a; }
+.stage-running .vertical-plan-marker,
+.stage-processing .vertical-plan-marker,
+.stage-queued .vertical-plan-marker { border-color: #6366f1; color: #4338ca; background: #eef2ff; }
+.stage-failed .vertical-plan-marker,
+.has-warning .vertical-plan-marker { border-color: #dc2626; color: #fff; background: #dc2626; }
+.vertical-plan-copy { min-width: 0; }
+.vertical-plan-copy strong,
+.vertical-plan-copy small { display: block; }
+.vertical-plan-copy strong { color: #273449; font-size: 12px; line-height: 1.4; }
+.vertical-plan-copy small,
+.vertical-plan-result { color: #64748b; font-size: 10px; line-height: 1.4; }
+.vertical-plan-result { max-width: 320px; overflow-wrap: anywhere; text-align: right; }
+.pipeline-plan-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e7edf5;
+  color: #64748b;
+  font-size: 11px;
+}
+.pipeline-plan-actions button { margin-left: 4px; }
+
+/* 对话统一为浅色消息流，用户与 AI 的内容在时间线上清晰区分。 */
+.legacy-chat-stream > .chat-msg.user-msg { justify-content: flex-end; }
+.legacy-chat-stream > .chat-msg.user-msg .msg-avatar { order: initial; }
+.legacy-chat-stream > .chat-msg.user-msg .msg-bubble {
+  max-width: min(760px, 88%);
+  border: 1px solid #bfdbfe;
+  border-radius: 16px;
+  background: #eaf2ff;
+  color: #172554;
+  box-shadow: none;
+}
+.legacy-chat-stream > .chat-msg.bot-msg:not(.timeline-step-msg):not(.pipeline-plan-chat-msg) .msg-bubble {
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: #fff;
+  color: #334155;
+  box-shadow: 0 4px 16px rgba(15, 23, 42, .04);
+}
+
+@media (max-width: 760px) {
+  .initial-chat-studio {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .studio-header {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .studio-header-stats {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .studio-chat-body {
+    padding: 16px 12px 20px;
+  }
+
+  .workspace-cockpit {
+    gap: 12px;
+  }
+
+  .cockpit-steps {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .cockpit-steps li {
+    min-height: 40px;
+  }
+
+  .cockpit-current-card {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 18px;
+  }
+
+  .cockpit-current-copy h4 {
+    font-size: 18px;
+  }
+
+  .cockpit-current-action {
+    width: 100%;
+  }
+
+  .cockpit-primary-action {
+    width: 100%;
+  }
+
+  .cockpit-generation-history li {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .cockpit-generation-history button {
+    width: 100%;
+  }
+
+  .chat-msg,
+  .chat-msg.process-msg,
+  .status-chat-msg {
+    width: 100%;
+    max-width: 100%;
+    gap: 9px;
+  }
+
+  .chat-msg.user-msg {
+    width: auto;
+    max-width: 92%;
+  }
+
+  .msg-bubble {
+    padding: 12px 13px;
+  }
+
+  .workflow-step-header {
+    grid-template-columns: 1fr;
+  }
+
+  .workflow-result-header {
+    flex-direction: column;
+  }
+
+  .workflow-step-status,
+  .workflow-result-status {
+    justify-self: start;
+  }
+
+  .workflow-step-heading {
+    grid-template-columns: 1fr;
+    gap: 7px;
+  }
+
+  .workflow-step-heading h4 {
+    font-size: 16px;
+  }
+
+  .workflow-result-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .process-card-header {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .process-card-actions {
+    align-items: stretch;
+  }
+
+  .process-metrics {
+    justify-content: flex-start;
+  }
+
+  .process-detail-button {
+    width: 100%;
+  }
+
+  .chat-stepper-list {
+    grid-template-columns: 1fr;
+  }
+
+  .chat-llm-status {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .chat-llm-status button {
+    grid-column: 1 / -1;
+    width: 100%;
+  }
+
+  .plan-actions-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .plan-actions-row .btn {
+    width: 100%;
+    min-height: 44px;
+  }
+
+  .studio-input-footer {
+    padding: 12px;
+  }
+
+  .workbench-entry-card {
+    grid-template-columns: 40px minmax(0, 1fr);
+  }
+  .workbench-entry-action {
+    grid-column: 1 / -1;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .pipeline-plan-header { grid-template-columns: 1fr; gap: 9px; }
+  .pipeline-plan-summary { justify-content: flex-start; }
+  .vertical-plan-node { grid-template-columns: 30px minmax(0, 1fr); }
+  .vertical-plan-result { grid-column: 2; text-align: left; }
+  .pipeline-plan-actions { justify-content: flex-start; }
+  .pipeline-plan-actions button { width: 100%; margin-left: 0; }
+  .pipeline-log-line { display: grid; gap: 2px; white-space: normal; }
+  .pipeline-log-line > span { white-space: nowrap; }
+  .pipeline-activity-group { width: calc(100% - 42px); margin-left: 42px; }
+
+  .modern-card-toolbar {
+    gap: 10px;
+    align-items: flex-end;
+  }
+
+  .toolbar-left {
+    flex: 1;
+  }
+
+  .toolbar-chip-btn {
+    min-height: 44px;
+  }
+
+  .modern-textarea {
+    font-size: 16px;
+  }
+
+  .llm-modal-overlay {
+    padding: 10px;
+  }
+
+  .llm-modal-content {
+    max-height: calc(100dvh - 20px);
+    border-radius: 12px;
+  }
+
+  .llm-modal-header,
+  .llm-modal-body {
+    padding-inline: 14px;
+  }
+
+  .planning-review-overlay { padding: 12px; }
+  .planning-review-dialog { padding: 25px 18px 18px; border-radius: 16px; }
+  .planning-review-metrics { grid-template-columns: 1fr 1fr; }
+  .planning-review-actions { flex-direction: column-reverse; }
+  .planning-review-actions .btn { width: 100%; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .studio-chat-body {
+    scroll-behavior: auto;
+  }
+
+  .llm-status-running .llm-status-dot,
+  .modern-send-circle-btn,
+  .toolbar-chip-btn,
+  .chat-stepper-node,
+  .pipeline-group-chevron,
+  .pipeline-log-chevron {
+    animation: none;
+    transition: none;
+  }
 }
 </style>

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 from utils import read_json, write_json
@@ -22,7 +23,7 @@ from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
 from .artifact_promotion import HumanGateService
-from .project_model import load_promoted_project_model
+from .global_project_context import GlobalProjectContextService
 from .research_service import load_published_batch
 from .writer_policy import (
     WRITER_PROMPT_VERSION,
@@ -87,6 +88,14 @@ class WriterInputBundleAssembler:
                         "source_url": item.source_url,
                         "source_type": item.source_type.value,
                         "retrieved_at": item.retrieved_at,
+                        "relevance_tier": item.relevance_tier.value,
+                        "matched_project_anchors": list(
+                            item.matched_project_anchors
+                        ),
+                        "matched_task_anchors": list(
+                            item.matched_task_anchors
+                        ),
+                        "usage_constraints": list(item.usage_constraints),
                     }
                 )
             combined = "\n\n".join(contents)
@@ -126,6 +135,12 @@ class WriterInputBundleAssembler:
         if not node_id_set or not node_id_set.issubset({node.node_id for node in contract.nodes}):
             raise ControlPlaneError("WRITER_BUNDLE_BLOCKED", "ContentUnit 包含未授权章节目标。", status_code=409)
         blueprint_by_node = {node.chapter_id: node for node in blueprint.nodes}
+        parent_chapter_ids = {
+            str(node.parent_chapter_id)
+            for node in blueprint.nodes
+            if node.parent_chapter_id is not None
+        }
+        leaf_chapter_ids = set(blueprint_by_node) - parent_chapter_ids
         if unknown_nodes := node_id_set - set(blueprint_by_node):
             raise ControlPlaneError(
                 "WRITER_BUNDLE_BLOCKED",
@@ -217,31 +232,18 @@ class WriterInputBundleAssembler:
             score_ids=score_ids,
             requirement_ids=set(requirement_ids),
         )
-        try:
-            project = load_promoted_project_model(self.context)
-            project_context = {
-                "identity": dict(project.identity),
-                "background": list(project.background),
-                "goals": list(project.goals),
-                "scope": list(project.scope),
-                "work_packages": list(project.work_packages),
-                "deliverables": list(project.deliverables),
-                "acceptance_conditions": list(project.acceptance_conditions),
-                "constraints": list(project.constraints),
-                "risks": list(project.risks),
-                "unknowns": list(project.unknowns),
-                "terminology": dict(project.terminology),
-            }
-            project_constraints = [
-                *project.constraints,
-                *project.boundaries,
-                *project.risks,
-            ]
-            terminology = dict(project.terminology)
-        except Exception:
-            project_context = {}
-            project_constraints = []
-            terminology = {}
+        global_context_service = GlobalProjectContextService(self.context)
+        global_project_context = (
+            global_context_service.load_for_deterministic_tests()
+            if self.deterministic_test
+            else global_context_service.load()
+        )
+        project_constraints = [
+            *list(global_project_context.get("constraints") or []),
+            *list(global_project_context.get("boundaries") or []),
+            *list(global_project_context.get("risks") or []),
+        ]
+        terminology = dict(global_project_context.get("terminology") or {})
         targets = [item for item in contract.nodes if item.node_id in node_id_set]
         writable_targets: list[tuple[ContractNode, str]] = []
         if isinstance(contract, TemplateContract):
@@ -271,6 +273,7 @@ class WriterInputBundleAssembler:
                 "RequirementLedger",
                 "ScoreModel",
                 "ChapterBlueprint",
+                "ProjectModel",
                 "TemplateStructureContract",
             )
             if (item := self.store.v3_active_artifact(kind)) is not None
@@ -346,7 +349,12 @@ class WriterInputBundleAssembler:
             "score_obligations": score_obligations,
             "evidence_snapshot": evidence_snapshot,
             "research_decisions": [],
-            "project_context": project_context,
+            # Kept only as a read-compatibility field for historical bundles.
+            # New bundles store the shared facts exactly once below.
+            "project_context": {},
+            "global_project_context": global_project_context,
+            "chapter_grounding_context": {},
+            "chapter_grounding_contexts": {},
             "project_constraints": project_constraints,
             "terminology": terminology,
             "document_target_constraints": [
@@ -382,9 +390,11 @@ class WriterInputBundleAssembler:
                     "deferred_reason": blueprint_by_node[
                         item.node_id
                     ].deferred_reason,
+                    "is_leaf": item.node_id in leaf_chapter_ids,
                 }
                 for item, output_target in writable_targets
                 if blueprint_by_node[item.node_id].content_policy == "full"
+                and item.node_id in leaf_chapter_ids
             ],
             "prompt_version": PROMPT_VERSION,
             "model_config_hash": canonical_hash(
@@ -394,6 +404,108 @@ class WriterInputBundleAssembler:
                 )
             ),
         }
+        # Phase 7: attach chapter-local context/locks when a workspace is materialised.
+        primary_chapter_id = ""
+        for item in body.get("document_target_constraints") or []:
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip():
+                primary_chapter_id = str(item.get("node_id") or "").strip()
+                break
+        if primary_chapter_id:
+            workspace = self.store.chapter_workspace(primary_chapter_id)
+            if workspace is not None:
+                context_head = self.store.chapter_context_head(primary_chapter_id)
+                content_head = self.store.chapter_content_head(primary_chapter_id)
+                locked = [
+                    block
+                    for block in ((content_head or {}).get("blocks") or [])
+                    if isinstance(block, dict)
+                    and (
+                        block.get("human_locked")
+                        or str(block.get("lock_state") or "") == "USER_LOCKED"
+                    )
+                ]
+                history = [
+                    {
+                        "content_revision": item.get("content_revision"),
+                        "content_hash": item.get("content_hash"),
+                        "source": item.get("source"),
+                        "created_at": item.get("created_at"),
+                        "block_count": len(item.get("blocks") or []),
+                    }
+                    for item in self.store.chapter_content_revisions(
+                        primary_chapter_id, limit=5
+                    )
+                ]
+                body.update(
+                    {
+                        "chapter_id": primary_chapter_id,
+                        "chapter_context_revision": int(
+                            workspace.get("head_context_revision") or 0
+                        ),
+                        "chapter_context_items": list(
+                            (context_head or {}).get("items") or []
+                        ),
+                        "head_content_revision": int(
+                            workspace.get("head_content_revision") or 0
+                        ),
+                        "locked_blocks": locked,
+                        "content_history_summary": history,
+                    }
+                )
+        chapter_grounding_contexts: dict[str, dict[str, Any]] = {}
+        requirement_rows = list(body.get("requirement_excerpts") or [])
+        score_rows = list(body.get("score_obligations") or [])
+        for target in body.get("document_target_constraints") or []:
+            if not isinstance(target, dict):
+                continue
+            target_chapter_id = str(target.get("node_id") or "").strip()
+            if not target_chapter_id:
+                continue
+            context_head = self.store.chapter_context_head(target_chapter_id) or {}
+            target_requirement_ids = {
+                str(item) for item in target.get("primary_requirement_ids") or []
+            }
+            target_score_ids = {
+                str(item) for item in target.get("score_point_ids") or []
+            }
+            chapter_grounding_contexts[target_chapter_id] = (
+                global_context_service.build_chapter_context(
+                    target_chapter_id,
+                    requirement_excerpts=[
+                        item
+                        for item in requirement_rows
+                        if isinstance(item, dict)
+                        and str(item.get("requirement_id") or "")
+                        in target_requirement_ids
+                    ],
+                    score_obligations=[
+                        item
+                        for item in score_rows
+                        if isinstance(item, dict)
+                        and (
+                            not target_score_ids
+                            or str(item.get("score_point_id") or "")
+                            in target_score_ids
+                        )
+                    ],
+                    chapter_context_items=list(context_head.get("items") or []),
+                    chapter_context_revision=int(
+                        context_head.get("context_revision") or 0
+                    ),
+                    chapter_context_hash=str(
+                        context_head.get("context_hash") or ""
+                    ),
+                    global_context_override=(
+                        global_project_context
+                        if self.deterministic_test
+                        else None
+                    ),
+                )
+            )
+        body["chapter_grounding_contexts"] = chapter_grounding_contexts
+        body["chapter_grounding_context"] = dict(
+            chapter_grounding_contexts.get(primary_chapter_id) or {}
+        )
         source_hashes = dict(blueprint.source_hashes)
         for item in evidence_snapshot:
             source_hashes[
@@ -414,9 +526,22 @@ def load_writer_bundle(root: Path, bundle_id: str) -> WriterInputBundle:
     bundle = WriterInputBundle.model_validate(read_json(path))
     body = bundle.model_dump(mode="json", exclude={"revision", "source_hashes", "bundle_id", "bundle_hash"})
     body_hash = canonical_hash(body)
+    if body_hash != bundle.bundle_hash:
+        # Read-only compatibility for older bundle field sets.
+        legacy_body = dict(body)
+        legacy_body.pop("evidence_snapshot", None)
+        for key in (
+            "chapter_id",
+            "chapter_context_revision",
+            "chapter_context_items",
+            "head_content_revision",
+            "locked_blocks",
+            "content_history_summary",
+            "research_decisions",
+        ):
+            legacy_body.pop(key, None)
+        body_hash = canonical_hash(legacy_body)
     if body_hash != bundle.bundle_hash and not bundle.evidence_snapshot:
-        # Read-only compatibility for bundles created before evidence_snapshot
-        # became part of the frozen contract.
         legacy_body = dict(body)
         legacy_body.pop("evidence_snapshot", None)
         body_hash = canonical_hash(legacy_body)

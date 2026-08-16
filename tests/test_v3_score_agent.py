@@ -34,6 +34,8 @@ from document_pipeline.score_model import (
 from document_pipeline.scoring_outline_policy import (
     full_score_condition_heading,
     highest_score_conditions,
+    is_contextless_heading,
+    is_evaluative_sentence_heading,
 )
 from document_pipeline.source_normalizer import SOURCE_INDEX_PATH
 from document_pipeline.stage_runner import V3StageRunner
@@ -328,8 +330,21 @@ class TestV3ScoreAgent(unittest.TestCase):
                 full_score_condition_heading(condition, index)
                 for index, condition in enumerate(conditions, start=1)
             ],
-            ["变更图斑正确性检查分析", "核查样本影像分类方法", "使用说明", "易混淆类型实例"],
+            [
+                "变更图斑正确性检查分析",
+                "核查样本影像分类方法",
+                "使用说明",
+                "易混淆类型判别实例与操作指引",
+            ],
         )
+
+    def test_score_style_headings_are_rejected_without_damaging_topic_nouns(self) -> None:
+        self.assertTrue(is_evaluative_sentence_heading("检查方法科学、重点突出、方法可行"))
+        self.assertTrue(is_evaluative_sentence_heading("核查样本影像分类方法合理"))
+        self.assertTrue(is_evaluative_sentence_heading("对容易混淆的类型有具体实例、可操作性强"))
+        self.assertTrue(is_contextless_heading("使用说明"))
+        self.assertFalse(is_evaluative_sentence_heading("工作必要性和可行性"))
+        self.assertFalse(is_evaluative_sentence_heading("方案可行性分析"))
 
     def test_score_model_is_promoted_and_idempotent(self) -> None:
         from document_pipeline.contracts import SourceAnchor, SourceBlock, SourceIndex

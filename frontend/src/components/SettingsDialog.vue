@@ -138,6 +138,11 @@
                 <input v-model="form.verify_ssl" type="checkbox" />
                 <span>校验 TLS 证书（verify_ssl）</span>
               </label>
+              <p class="field-hint">
+                中转站出现 SSLError / ASN1 NOT_ENOUGH_DATA 时，可取消勾选后保存再测。
+              </p>
+              <label class="form-check" style="display:none">
+              </label>
             </div>
             <p class="settings-hint">
               修改「使用中」模型后会实时生效；所有工作空间后续发起的大模型请求都会使用新配置。
@@ -201,15 +206,8 @@
           </div>
           <p class="settings-hint">开启时，每章生成后在“生成章节”内部完成自审和按需改稿，并执行全文审核；关闭时直接生成第一版，不执行审核相关阶段。</p>
           <div class="settings-form-title">失败处理</div>
-          <div class="form-check-group">
-            <label class="form-check">
-              <input v-model="flowForm.validation_failure_blocks_pipeline" type="checkbox" />
-              <span>校验失败时停止主流程</span>
-            </label>
-          </div>
           <p class="settings-hint">
-            默认关闭。关闭时，资料查询、来源校验、需求或评分点覆盖等可恢复问题会记录为风险并继续生成；
-            文件损坏、权限、安全校验和必需产物缺失仍会停止。设置只影响之后启动的任务。
+            任一必需校验失败都会停止当前任务并显示具体错误；不会使用旧正文或旧目录继续交付。
           </p>
           <p v-if="flowError" class="form-error" role="alert">{{ flowError }}</p>
           <p v-if="flowSuccess" class="form-success">{{ flowSuccess }}</p>
@@ -274,7 +272,19 @@ const activeTab = ref('model')
 const flowSaving = ref(false)
 const flowError = ref('')
 const flowSuccess = ref('')
-const flowForm = reactive({ workers: 4, llm_concurrency: 8, write_batch_retries: 5, max_repair_rounds: 2, research_provider: 'doubao_web', write_failure_fallback: true, chapter_review_enabled: true, chapter_review_gate: true, global_review_gate: true, anti_fabrication_gate: true, allow_accept_risk: false, validation_failure_blocks_pipeline: false })
+const flowForm = reactive({
+  workers: 4,
+  llm_concurrency: 8,
+  write_batch_retries: 5,
+  max_repair_rounds: 2,
+  research_provider: 'doubao_web',
+  chapter_review_enabled: true,
+  chapter_review_gate: true,
+  global_review_gate: true,
+  anti_fabrication_gate: true,
+  allow_accept_risk: false,
+  validation_failure_blocks_pipeline: true,
+})
 
 async function loadFlow() {
   try {
@@ -422,7 +432,17 @@ async function handleTest() {
     }
   } catch (e) {
     testOk.value = false
-    const msg = e.response?.data?.message || e.message || '测试请求失败'
+    const status = e?.response?.status
+    const data = e?.response?.data
+    const serverMsg = data?.message || data?.error?.message || data?.detail
+    let msg = serverMsg || e.message || '测试请求失败'
+    if (!serverMsg && status) {
+      msg = `测试请求失败（HTTP ${status}）。请确认后端已重启并查看服务日志。`
+    }
+    // Avoid showing bare axios strings like "Request failed with status code 500".
+    if (/^Request failed with status code \d+$/i.test(String(msg))) {
+      msg = `测试请求失败（HTTP ${status || '?'}）。后端未返回可读错误，请重启后端后再试。`
+    }
     testResult.value = msg
     error.value = msg
   } finally {

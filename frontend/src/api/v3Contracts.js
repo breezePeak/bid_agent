@@ -223,6 +223,26 @@ export function normalizeV3WorkspaceSnapshot(payload) {
   const rawGeneration = objectOrEmpty(raw.generation)
   const rawGenerationContent = objectOrEmpty(rawGeneration.content)
   const rawGenerationResearch = objectOrEmpty(rawGeneration.research)
+  const rawWorkflow = objectOrEmpty(raw.workflow)
+  const rawGlobalProjectContext = objectOrEmpty(raw.global_project_context)
+  const globalProjectContext = {
+    ...rawGlobalProjectContext,
+    identity: objectOrEmpty(rawGlobalProjectContext.identity),
+    background: arrayOrEmpty(rawGlobalProjectContext.background),
+    goals: arrayOrEmpty(rawGlobalProjectContext.goals),
+    scope: arrayOrEmpty(rawGlobalProjectContext.scope),
+    boundaries: arrayOrEmpty(rawGlobalProjectContext.boundaries),
+    work_packages: arrayOrEmpty(rawGlobalProjectContext.work_packages),
+    inputs: arrayOrEmpty(rawGlobalProjectContext.inputs),
+    processing: arrayOrEmpty(rawGlobalProjectContext.processing),
+    outputs: arrayOrEmpty(rawGlobalProjectContext.outputs),
+    deliverables: arrayOrEmpty(rawGlobalProjectContext.deliverables),
+    acceptance_conditions: arrayOrEmpty(rawGlobalProjectContext.acceptance_conditions),
+    milestones: arrayOrEmpty(rawGlobalProjectContext.milestones),
+    constraints: arrayOrEmpty(rawGlobalProjectContext.constraints),
+    confirmed_facts: arrayOrEmpty(rawGlobalProjectContext.confirmed_facts),
+    terminology: objectOrEmpty(rawGlobalProjectContext.terminology),
+  }
   const analysis = {
     ...rawAnalysis,
     source_index: objectOrEmpty(
@@ -268,8 +288,31 @@ export function normalizeV3WorkspaceSnapshot(payload) {
       inputs: arrayOrEmpty(inputs.inputs),
     },
     promoted_artifacts: promotedArtifacts,
+    global_project_context: globalProjectContext,
     analysis,
     planning: objectOrEmpty(raw.planning),
+    workflow: {
+      ...rawWorkflow,
+      phase: String(rawWorkflow.phase || 'materials'),
+      status: String(rawWorkflow.status || 'not_started'),
+      operation_id: String(rawWorkflow.operation_id || ''),
+      attempt: Number(rawWorkflow.attempt) || 0,
+      current_stage_id: String(rawWorkflow.current_stage_id || ''),
+      can_resume: rawWorkflow.can_resume === true,
+      stages: arrayOrEmpty(rawWorkflow.stages).map(stage => ({
+        ...objectOrEmpty(stage),
+        attempt: Number(objectOrEmpty(stage).attempt) || 0,
+        llm_request_count: Number(objectOrEmpty(stage).llm_request_count) || 0,
+        llm_requests: arrayOrEmpty(objectOrEmpty(stage).llm_requests),
+      })),
+      pending_reviews: arrayOrEmpty(rawWorkflow.pending_reviews).map(review => ({
+        ...objectOrEmpty(review),
+        review_id: String(objectOrEmpty(review).review_id || ''),
+        kind: String(objectOrEmpty(review).kind || ''),
+        status: String(objectOrEmpty(review).status || 'pending'),
+        items: arrayOrEmpty(objectOrEmpty(review).items),
+      })),
+    },
     document,
     generation: {
       ...rawGeneration,
@@ -285,10 +328,32 @@ export function normalizeV3WorkspaceSnapshot(payload) {
         completed_units: Number(rawGenerationContent.completed_units) || 0,
         running_units: Number(rawGenerationContent.running_units) || 0,
         failed_units: Number(rawGenerationContent.failed_units) || 0,
-        units: arrayOrEmpty(rawGenerationContent.units),
+        stale_units: Number(rawGenerationContent.stale_units) || 0,
+        blocked_units: Number(rawGenerationContent.blocked_units) || 0,
+        units: arrayOrEmpty(rawGenerationContent.units).map(unit => ({
+          ...objectOrEmpty(unit),
+          stale: objectOrEmpty(unit).stale === true,
+          stale_reason: String(objectOrEmpty(unit).stale_reason || ''),
+          blocked_human: objectOrEmpty(unit).blocked_human === true,
+          writer_fingerprint: String(objectOrEmpty(unit).writer_fingerprint || ''),
+        })),
       },
       research: {
         ...rawGenerationResearch,
+        calls: arrayOrEmpty(rawGenerationResearch.calls).map(call => ({
+          ...objectOrEmpty(call),
+          applicable_chapter_ids: arrayOrEmpty(objectOrEmpty(call).applicable_chapter_ids),
+          applicable_chapter_titles: arrayOrEmpty(objectOrEmpty(call).applicable_chapter_titles),
+          prohibited_research_scopes: arrayOrEmpty(objectOrEmpty(call).prohibited_research_scopes),
+          queries: arrayOrEmpty(objectOrEmpty(call).queries).map(query => ({
+            ...objectOrEmpty(query),
+            target_node_ids: arrayOrEmpty(objectOrEmpty(query).target_node_ids),
+            attempts: arrayOrEmpty(objectOrEmpty(query).attempts),
+            sources: arrayOrEmpty(objectOrEmpty(query).sources),
+          })),
+          runtime: objectOrEmpty(objectOrEmpty(call).runtime),
+          used_evidence_by_chapter: objectOrEmpty(objectOrEmpty(call).used_evidence_by_chapter),
+        })),
         results: arrayOrEmpty(rawGenerationResearch.results).map(result => ({
           ...objectOrEmpty(result),
           attempts: arrayOrEmpty(objectOrEmpty(result).attempts),
@@ -308,10 +373,6 @@ export function normalizeV3WorkspaceSnapshot(payload) {
       items: arrayOrEmpty(materials.items),
     },
     evidence_needs: arrayOrEmpty(raw.evidence_needs),
-    auto_research: {
-      ...objectOrEmpty(raw.auto_research),
-      results: arrayOrEmpty(objectOrEmpty(raw.auto_research).results),
-    },
   }
 }
 
@@ -720,20 +781,29 @@ export function buildV3Command({
   }
 }
 
-export function buildRunPipelineCommand(commandId, expectedRevision) {
+export function buildRunPipelineCommand(commandId, expectedRevision, chapterIds = []) {
   return buildV3Command({
     commandId,
     kind: 'document.run_pipeline',
-    payload: {},
+    payload: {
+      chapter_ids: [...new Set(
+        arrayOrEmpty(chapterIds).map(item => String(item || '').trim()).filter(Boolean),
+      )],
+    },
     expectedRevision,
   })
 }
 
-export function buildPrepareOutlineCommand(commandId, expectedRevision) {
+export function buildPrepareOutlineCommand(commandId, expectedRevision, options = {}) {
+  const reviewFeedback = String(options.reviewFeedback || '').trim()
+  const baseBlueprintHash = String(options.baseBlueprintHash || '').trim()
   return buildV3Command({
     commandId,
     kind: 'document.prepare_outline',
-    payload: {},
+    payload: {
+      ...(reviewFeedback ? { review_feedback: reviewFeedback } : {}),
+      ...(baseBlueprintHash ? { base_blueprint_hash: baseBlueprintHash } : {}),
+    },
     expectedRevision,
   })
 }
@@ -785,4 +855,42 @@ export function selectDeepSeekAttachmentIds(inputs, selectedInputIds) {
       .map(inputId => String(inputId || '').trim())
       .filter(inputId => eligibleIds.has(inputId)),
   )]
+}
+
+export function buildCreateChapterCommand(commandId, expectedRevision, chapterId, title = '', metadata = {}) {
+  return buildV3Command({
+    commandId,
+    kind: 'chapter.workspace.create',
+    payload: {
+      chapter_id: requireText(chapterId, 'chapterId'),
+      metadata: {
+        ...(title ? { title: String(title).trim() } : {}),
+        ...objectOrEmpty(metadata),
+      },
+    },
+    expectedRevision,
+  })
+}
+
+export function buildSaveChapterMetadataCommand(commandId, expectedRevision, chapterId, metadata) {
+  return buildV3Command({
+    commandId,
+    kind: 'chapter.workspace.save_metadata',
+    payload: {
+      chapter_id: requireText(chapterId, 'chapterId'),
+      metadata: objectOrEmpty(metadata),
+    },
+    expectedRevision,
+  })
+}
+
+export function buildArchiveChapterCommand(commandId, expectedRevision, chapterId) {
+  return buildV3Command({
+    commandId,
+    kind: 'chapter.workspace.archive',
+    payload: {
+      chapter_id: requireText(chapterId, 'chapterId'),
+    },
+    expectedRevision,
+  })
 }

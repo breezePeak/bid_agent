@@ -26,7 +26,7 @@ def _parse_bool(value: object, default: bool = False) -> bool:
 def configured_validation_failure_blocks() -> bool:
     """Read the process setting used when a new command is constructed."""
 
-    return _parse_bool(os.environ.get(VALIDATION_FAILURE_BLOCKS_ENV), False)
+    return _parse_bool(os.environ.get(VALIDATION_FAILURE_BLOCKS_ENV), True)
 
 
 def validation_failure_blocks() -> bool:

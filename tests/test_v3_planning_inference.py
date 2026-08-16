@@ -866,7 +866,11 @@ def test_project_understanding_batches_on_score_point_groups() -> None:
     assert result.candidate.scope == []
 
 
-def test_missing_score_condition_fails_without_model_repair() -> None:
+def test_missing_score_condition_fails_after_one_repair() -> None:
+    # Single-batch auto-outline paths now get one controlled repair attempt
+    # (repair_attempts=1, matching template_strict and single-point batches).
+    # The fake always returns the same invalid output, so both the initial call
+    # and the repair call are made before the provider raises the error.
     output = json.dumps(
         _outline_candidate(include_condition=False),
         ensure_ascii=False,
@@ -887,7 +891,7 @@ def test_missing_score_condition_fails_without_model_repair() -> None:
             model_fingerprint="fake-model:v1",
         ).split(_outline_request())
 
-    assert calls == 1
+    assert calls == 2
 
 
 def test_outline_duplicate_local_orders_are_normalized_depth_first() -> None:
@@ -1003,6 +1007,151 @@ def test_large_outline_is_batched_and_cached(tmp_path: Path) -> None:
     assert second_provider.last_batch_summary[
         "outline_batch_reused_count"
     ] == 2
+
+
+def test_batched_outline_reuses_shared_factor_parent_across_fragments() -> None:
+    request_payload = _large_outline_request().model_dump(mode="json")
+    for point in request_payload["score_model"]["points"]:
+        point["outline_path"] = ["技术方法（43分）"]
+        point["response_units"][0]["outline_path"] = ["技术方法（43分）"]
+    request = OutlineDecompositionInput.model_validate(request_payload)
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        frozen = json.loads(
+            messages[1]["content"].split(
+                "只能引用其中已有的 ID 和事实：\n",
+                1,
+            )[1]
+        )
+        nodes = [
+            {
+                "local_id": "root",
+                "parent_local_id": None,
+                "order": 0,
+                "title": "评分组",
+                "purpose": "承接评分组",
+                "confidence": 1.0,
+            },
+            {
+                "local_id": "technical-method",
+                "parent_local_id": "root",
+                "order": 1,
+                "title": "技术方法（43分）",
+                "purpose": "组织技术方法下的评分任务",
+                "primary_response_unit_ids": [
+                    point["response_units"][0]["unit_id"]
+                    for point in frozen["score_model"]["points"]
+                ],
+                "requirement_ids": [
+                    point["response_units"][0]["linked_requirement_ids"][0]
+                    for point in frozen["score_model"]["points"]
+                ],
+                "confidence": 1.0,
+            },
+        ]
+        for point in frozen["score_model"]["points"]:
+            unit = point["response_units"][0]
+            nodes.append(
+                {
+                    "local_id": f"node-{unit['unit_id']}",
+                    "parent_local_id": "technical-method",
+                    "order": len(nodes),
+                    "title": unit["title"],
+                    "purpose": unit["response_expectation"],
+                    "score_condition_ids": unit["condition_ids"],
+                    "confidence": 1.0,
+                }
+            )
+        return json.dumps(
+            {
+                "nodes": nodes,
+                "document_quality_response_unit_ids": [],
+                "review_status": "draft",
+            },
+            ensure_ascii=False,
+        )
+
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    factor_nodes = [
+        node
+        for node in result.candidate.nodes
+        if node.title == "技术方法（43分）"
+    ]
+    assert len(factor_nodes) == 1
+    factor_id = factor_nodes[0].local_id
+    assert set(factor_nodes[0].primary_response_unit_ids) == {
+        f"SP-{index:02d}-U01" for index in range(1, 10)
+    }
+    assert all(
+        node.parent_local_id == factor_id
+        for node in result.candidate.nodes
+        if node.score_condition_ids
+    )
+
+
+def test_outline_rejects_redundant_task_level_after_source_factor_path() -> None:
+    request_payload = _outline_request().model_dump(mode="json")
+    point = request_payload["score_model"]["points"][0]
+    point["outline_path"] = ["核查准备工作（6分）"]
+    point["response_units"][0]["outline_path"] = ["核查准备工作（6分）"]
+    request = OutlineDecompositionInput.model_validate(request_payload)
+    candidate = {
+        "nodes": [
+            {
+                "local_id": "root",
+                "parent_local_id": None,
+                "order": 0,
+                "title": "评分组",
+                "purpose": "承接评分组",
+                "confidence": 1.0,
+            },
+            {
+                "local_id": "preparation",
+                "parent_local_id": "root",
+                "order": 1,
+                "title": "核查准备工作（6分）",
+                "purpose": "承接来源评分因素",
+                "confidence": 1.0,
+            },
+            {
+                "local_id": "redundant-task",
+                "parent_local_id": "preparation",
+                "order": 2,
+                "title": "核查准备与数据检查方法",
+                "purpose": "冗余改写任务层",
+                "primary_response_unit_ids": ["SP-1-U01"],
+                "requirement_ids": ["R-1"],
+                "confidence": 1.0,
+            },
+            {
+                "local_id": "condition",
+                "parent_local_id": "redundant-task",
+                "order": 3,
+                "title": "检查方法",
+                "purpose": "覆盖原子评分条件",
+                "score_condition_ids": ["SP-1-C01"],
+                "confidence": 1.0,
+            },
+        ],
+        "document_quality_response_unit_ids": [],
+        "review_status": "draft",
+    }
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        return json.dumps(candidate, ensure_ascii=False)
+
+    with pytest.raises(
+        PlanningInferenceValidationError,
+        match="未保留 outline_path",
+    ):
+        LLMOutlineDecompositionProvider(
+            chat_callable=fake,
+            model_fingerprint="fake-model:v1",
+        ).split(request)
 
 
 def test_truncated_outline_batch_is_split_and_split_checkpoint_is_reused(
@@ -1147,3 +1296,215 @@ def test_hollow_quality_adjective_heading_fails_closed() -> None:
             chat_callable=fake,
             model_fingerprint="fake-model:v1",
         ).split(_outline_request())
+
+
+def test_multipoint_batch_node_sharing_triggers_one_controlled_repair() -> None:
+    """多点批次首次输出中出现节点共用错误时，必须触发一次受控修复（attempt_count==2）
+    并在修复后的合法输出中正常晋级，而不是直接抛出"未触发全对象修复"。
+    """
+    # 构造一个含 2 个评分点的请求（会生成多点批次 len(spec.point_ids) > 1）
+    request = OutlineDecompositionInput(
+        requirement_ledger={
+            "requirements": [
+                {"requirement_id": "R-01", "severity": "major", "status": "confirmed"},
+                {"requirement_id": "R-02", "severity": "major", "status": "confirmed"},
+            ]
+        },
+        score_model={
+            "groups": [{"group_id": "SG-1", "title": "技术部分"}],
+            "points": [
+                {
+                    "score_point_id": "SP-01",
+                    "group_id": "SG-1",
+                    "max_points": 5,
+                    "linked_requirement_ids": ["R-01"],
+                    "score_conditions": [
+                        {
+                            "condition_id": "SP-01-C01",
+                            "condition_role": "content",
+                            "response_intent": "说明 A",
+                        },
+                        {
+                            "condition_id": "SP-01-C02",
+                            "condition_role": "content",
+                            "response_intent": "说明 B",
+                        },
+                    ],
+                    "response_units": [
+                        {
+                            "unit_id": "SP-01-U01",
+                            "title": "组织结构及成员",
+                            "condition_ids": ["SP-01-C01", "SP-01-C02"],
+                            "linked_requirement_ids": ["R-01"],
+                            "response_scope": "section",
+                        }
+                    ],
+                },
+                {
+                    "score_point_id": "SP-02",
+                    "group_id": "SG-1",
+                    "max_points": 5,
+                    "linked_requirement_ids": ["R-02"],
+                    "score_conditions": [
+                        {
+                            "condition_id": "SP-02-C01",
+                            "condition_role": "content",
+                            "response_intent": "说明 C",
+                        }
+                    ],
+                    "response_units": [
+                        {
+                            "unit_id": "SP-02-U01",
+                            "title": "技术方案",
+                            "condition_ids": ["SP-02-C01"],
+                            "linked_requirement_ids": ["R-02"],
+                            "response_scope": "section",
+                        }
+                    ],
+                },
+            ],
+        },
+    )
+
+    # 第一次输出：SP-01 的两个 condition 共用同一个节点（非法）
+    bad_output = json.dumps(
+        {
+            "nodes": [
+                {
+                    "local_id": "root",
+                    "parent_local_id": None,
+                    "order": 0,
+                    "title": "技术部分",
+                    "purpose": "技术部分根节点",
+                    "primary_response_unit_ids": [],
+                    "score_condition_ids": [],
+                    "requirement_ids": [],
+                    "confidence": 1.0,
+                },
+                {
+                    # 同一个节点塞了 C01 和 C02，触发节点共用错误
+                    "local_id": "org-node",
+                    "parent_local_id": "root",
+                    "order": 1,
+                    "title": "组织结构及成员",
+                    "purpose": "描述项目组织",
+                    "primary_response_unit_ids": ["SP-01-U01"],
+                    "score_condition_ids": ["SP-01-C01", "SP-01-C02"],
+                    "requirement_ids": ["R-01"],
+                    "confidence": 0.9,
+                },
+                {
+                    "local_id": "tech-node",
+                    "parent_local_id": "root",
+                    "order": 2,
+                    "title": "技术方案",
+                    "purpose": "描述技术方案",
+                    "primary_response_unit_ids": ["SP-02-U01"],
+                    "score_condition_ids": ["SP-02-C01"],
+                    "requirement_ids": ["R-02"],
+                    "confidence": 0.9,
+                },
+            ],
+            "document_quality_response_unit_ids": [],
+            "review_status": "draft",
+        },
+        ensure_ascii=False,
+    )
+
+    # 第二次输出（修复后）：C01 和 C02 分别独占独立子节点
+    good_output = json.dumps(
+        {
+            "nodes": [
+                {
+                    "local_id": "root",
+                    "parent_local_id": None,
+                    "order": 0,
+                    "title": "技术部分",
+                    "purpose": "技术部分根节点",
+                    "primary_response_unit_ids": [],
+                    "score_condition_ids": [],
+                    "requirement_ids": [],
+                    "confidence": 1.0,
+                },
+                {
+                    "local_id": "org-parent",
+                    "parent_local_id": "root",
+                    "order": 1,
+                    "title": "组织结构及成员",
+                    "purpose": "描述项目组织",
+                    "primary_response_unit_ids": ["SP-01-U01"],
+                    "score_condition_ids": [],
+                    "requirement_ids": ["R-01"],
+                    "confidence": 0.9,
+                },
+                {
+                    # C01 独占子节点
+                    "local_id": "org-c01",
+                    "parent_local_id": "org-parent",
+                    "order": 2,
+                    "title": "组织结构说明 A",
+                    "purpose": "说明 A",
+                    "primary_response_unit_ids": [],
+                    "score_condition_ids": ["SP-01-C01"],
+                    "requirement_ids": [],
+                    "confidence": 0.9,
+                },
+                {
+                    # C02 独占子节点
+                    "local_id": "org-c02",
+                    "parent_local_id": "org-parent",
+                    "order": 3,
+                    "title": "组织结构说明 B",
+                    "purpose": "说明 B",
+                    "primary_response_unit_ids": [],
+                    "score_condition_ids": ["SP-01-C02"],
+                    "requirement_ids": [],
+                    "confidence": 0.9,
+                },
+                {
+                    "local_id": "tech-node",
+                    "parent_local_id": "root",
+                    "order": 4,
+                    "title": "技术方案",
+                    "purpose": "描述技术方案",
+                    "primary_response_unit_ids": ["SP-02-U01"],
+                    "score_condition_ids": ["SP-02-C01"],
+                    "requirement_ids": ["R-02"],
+                    "confidence": 0.9,
+                },
+            ],
+            "document_quality_response_unit_ids": [],
+            "review_status": "draft",
+        },
+        ensure_ascii=False,
+    )
+
+    outputs = iter([bad_output, good_output])
+    calls: list[list[dict[str, str]]] = []
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        calls.append(messages)
+        return next(outputs)
+
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    # 必须调用了 2 次（初始 + 修复）
+    assert len(calls) == 2, f"预期 2 次调用，实际 {len(calls)} 次"
+    # 修复反馈中应包含节点共用修复指导
+    repair_prompt = calls[1][-1]["content"]
+    assert "节点共用修复" in repair_prompt or "满分条件" in repair_prompt
+    # 最终结果应通过校验
+    node_ids = {node.local_id for node in result.candidate.nodes}
+    assert "org-c01" in node_ids or "org-parent" in node_ids
+    # SP-01 的两个条件最终分布在不同节点上
+    cond_nodes: dict[str, list[str]] = {}
+    for node in result.candidate.nodes:
+        for cid in node.score_condition_ids:
+            cond_nodes.setdefault(cid, []).append(node.local_id)
+    assert cond_nodes.get("SP-01-C01") != cond_nodes.get("SP-01-C02"), (
+        "C01 和 C02 仍然共用了同一节点，修复未生效"
+    )
+

@@ -153,8 +153,8 @@ _NONBLOCKING_OUTLINE_VALIDATION_MARKERS = (
     "缺少唯一 ScoreResponseUnit/primary 链路",
     "未进入其 ScoreResponseUnit",
     "quality condition",
-    "content/evidence 满分条件必须各自形成可检查章节节点",
-    "可成文满分条件必须各自形成可检查章节节点",
+    "标题包含评分式评价语",
+    "标题缺少业务对象",
     "评分组根章节",
     "目录根缺失或混入其他评分组",
     "outline_path",
@@ -225,6 +225,10 @@ class V3StageRunner:
             for item in (chapter_ids or [])
             if str(item).strip()
         ]
+
+    def request_outline_revision(self, feedback: str) -> None:
+        """Bind the next blueprint run to an explicit human review request."""
+        self._outline_review_feedback = str(feedback or "").strip()
 
     def validation_policy_scope(self):
         return validation_policy_scope(
@@ -2064,6 +2068,36 @@ class V3StageRunner:
                 self._score_structure_product(structural_model)
             ]
             score_warnings: list[str] = []
+            # ``analyze_scores`` contains two user-visible operations.  Record
+            # them independently so the workspace never has to infer a green
+            # "评分理解" badge from an old ScoreModel or from the outer command.
+            # The outer stage remains for backward-compatible command history.
+            if operation_id:
+                store.record_stage_run(
+                    operation_id,
+                    "score_structure",
+                    "running",
+                    disposition="v3_score_structure",
+                )
+                store.record_stage_run(
+                    operation_id,
+                    "score_structure",
+                    "succeeded",
+                    disposition="v3_score_structure",
+                    output={"summary": {"score_point_count": len(structural_model.points)}},
+                )
+                store.record_stage_run(
+                    operation_id,
+                    "score_semantic",
+                    "queued",
+                    disposition="v3_score_semantic",
+                )
+                store.record_stage_run(
+                    operation_id,
+                    "score_semantic",
+                    "running",
+                    disposition="v3_score_semantic",
+                )
             self._record_stage_output(
                 operation_id,
                 "analyze_scores",
@@ -2257,57 +2291,36 @@ class V3StageRunner:
                             semantic_input
                         )
                 except ScoreSemanticInferenceError as exc:
-                    score_model = self._deterministic_score_projection(
-                        structural_model,
-                        source_blocks,
-                        semantic_input,
-                    )
-                    score_warnings.append(
-                        "大模型评分理解未形成可用候选"
-                        f"（{exc.code}），已按评分原文生成保守响应任务，"
-                        "标记为需复核并继续生成目录。"
-                    )
-                    fallback_prompt_version = (
-                        f"{SCORE_SEMANTIC_CAPABILITY_ID}."
-                        "program_audit_fallback.v1"
-                    )
-                    fallback_provider_fingerprint = canonical_hash(
-                        {
-                            "adapter": (
-                                "bid_agent.internal_program_audit_fallback"
-                            ),
-                            "capability_id": (
-                                SCORE_SEMANTIC_CAPABILITY_ID
-                            ),
-                            "version": "v1",
-                        }
-                    )
-                    inference_result = self._deterministic_result(
-                        capability_id=SCORE_SEMANTIC_CAPABILITY_ID,
-                        capability_version=score_capability_version,
-                        schema_version=SCORE_SEMANTIC_SCHEMA_VERSION,
-                        candidate={
-                            "mode": "program_audit_fallback",
-                            "trigger_code": exc.code,
-                            "attempt_count": exc.attempts,
-                            "diagnostic_hash": canonical_hash(
-                                list(exc.errors)
-                            ),
-                            "structural_score_model_hash": canonical_hash(
-                                structural_model.model_dump(mode="json")
-                            ),
+                    # A required model stage is not a successful stage merely
+                    # because an older artifact or a program projection exists.
+                    # Persist the sub-stage failure and let the controller stop
+                    # the operation; a later retry may explicitly reuse only
+                    # dependency-compatible predecessors.
+                    if operation_id:
+                        store.record_stage_run(
+                            operation_id,
+                            "score_semantic",
+                            "failed",
+                            disposition="v3_score_semantic",
+                            error={
+                                "code": str(exc.code),
+                                "message": str(exc),
+                                "retryable": bool(getattr(exc, "retryable", True)),
+                                "details": {
+                                    "attempts": int(exc.attempts),
+                                    "diagnostics": [str(item) for item in exc.errors],
+                                },
+                            },
+                        )
+                    raise ControlPlaneError(
+                        str(exc.code),
+                        str(exc),
+                        status_code=409,
+                        details={
+                            "attempts": int(exc.attempts),
+                            "diagnostics": [str(item) for item in exc.errors],
                         },
-                        input_value=semantic_input,
-                        prompt_version=fallback_prompt_version,
-                        model_fingerprint=(
-                            "deterministic_fallback:"
-                            f"{SCORE_SEMANTIC_CAPABILITY_ID}:v1"
-                        ),
-                        provider_fingerprint=(
-                            fallback_provider_fingerprint
-                        ),
-                        execution_mode="program_audit_fallback",
-                    )
+                    ) from exc
                 else:
                     score_warnings.extend(score_inference.warnings)
                     if (
@@ -2354,6 +2367,19 @@ class V3StageRunner:
                     f"发现 {issue_count} 个问题。"
                 )
                 if self.validation_failure_blocks_pipeline:
+                    if operation_id:
+                        store.record_stage_run(
+                            operation_id,
+                            "score_semantic",
+                            "failed",
+                            disposition="v3_score_semantic",
+                            error={
+                                "code": "V3_SCORE_INTEGRITY_BLOCKED",
+                                "message": message,
+                                "retryable": False,
+                                "details": {"blocking_findings": blocking_findings},
+                            },
+                        )
                     raise ControlPlaneError(
                         "V3_SCORE_INTEGRITY_BLOCKED",
                         message,
@@ -2422,6 +2448,14 @@ class V3StageRunner:
                     ),
                 ],
             )
+            if operation_id:
+                store.record_stage_run(
+                    operation_id,
+                    "score_semantic",
+                    "succeeded",
+                    disposition="v3_score_semantic",
+                    output={"summary": {"warning_count": len(score_warnings)}},
+                )
             return promoted_score_model
 
         if stage in ("plan_response", "build_project_model"):
@@ -2756,6 +2790,13 @@ class V3StageRunner:
                 scores,
                 template_structure,
             )
+            outline_feedback = str(
+                getattr(self, "_outline_review_feedback", "") or ""
+            ).strip()
+            if outline_feedback:
+                outline_request = outline_request.model_copy(
+                    update={"review_feedback": outline_feedback}
+                )
             uses_program_outline = (
                 self._uses_deterministic_outline
                 or outline_request.document_mode == "template_strict"
@@ -2839,6 +2880,9 @@ class V3StageRunner:
                 temperature=outline_temperature,
                 optional_kinds=optional_dependencies,
             )
+            if outline_feedback:
+                # The old receipt only approves its exact artifact hash.
+                outline_is_current = False
             if not outline_is_current and not uses_program_outline:
                 (
                     fallback_prompt_version,
@@ -2903,38 +2947,16 @@ class V3StageRunner:
                             outline_request
                         )
                 except PlanningInferenceValidationError as exc:
-                    if not self._outline_validation_can_fallback(exc):
-                        raise
-                    root_error = exc.__cause__ or exc
-                    warning = (
-                        "章节目录大模型结果未通过最终程序语义审核；"
-                        "已使用保守确定性目录继续，需人工复核。原因："
-                        f"{self._outline_warning_detail(root_error)}"
-                    )
-                    blueprint, outline_result = (
-                        self._compile_outline_audit_fallback(
-                            planning_agent=planning_agent,
-                            ledger=ledger,
-                            scores=scores,
-                            template_structure=template_structure,
-                            outline_request=outline_request,
-                            base_revision=base_revision,
-                            capability_version=capability_version,
-                            schema_version=outline_schema_version,
-                            warning=warning,
-                            audit_findings=[
-                                {
-                                    "code": (
-                                        "OUTLINE_INFERENCE_SEMANTIC_INVALID"
-                                    ),
-                                    "message": self._outline_warning_detail(
-                                        root_error
-                                    ),
-                                }
-                            ],
-                        )
-                    )
-                    used_outline_fallback = True
+                    # A model-authored outline is a required artifact.  Do not
+                    # promote a rule-generated substitute after its candidate
+                    # fails validation: that made a failed request appear as a
+                    # completed planning step.
+                    raise ControlPlaneError(
+                        "V3_OUTLINE_INFERENCE_INVALID",
+                        "章节目录模型结果未通过校验，已停止等待修复后重试。",
+                        status_code=409,
+                        details={"cause": self._outline_warning_detail(exc)},
+                    ) from exc
                 else:
                     if (
                         outline_result.capability_id
@@ -2986,53 +3008,15 @@ class V3StageRunner:
                     score_model=scores,
                     template_structure=template_structure,
                 )
-                if (
-                    not bool(blueprint_audit.get("passed"))
-                    and self._blueprint_audit_can_fallback(blueprint_audit)
-                ):
-                    warning = (
-                        "章节目录最终程序语义审核未全部通过；"
-                        "已使用保守确定性目录继续，需人工复核。审核项："
-                        f"{self._outline_warning_detail(blueprint_audit.get('findings'))}"
-                    )
-                    blueprint, outline_result = (
-                        self._compile_outline_audit_fallback(
-                            planning_agent=planning_agent,
-                            ledger=ledger,
-                            scores=scores,
-                            template_structure=template_structure,
-                            outline_request=outline_request,
-                            base_revision=base_revision,
-                            capability_version=capability_version,
-                            schema_version=outline_schema_version,
-                            warning=warning,
-                            audit_findings=[
-                                dict(finding)
-                                for finding in (
-                                    blueprint_audit.get("findings") or []
-                                )
-                                if isinstance(finding, dict)
-                            ],
-                        )
-                    )
-                elif not bool(blueprint_audit.get("passed")):
+                if not bool(blueprint_audit.get("passed")):
                     message = (
                         "章节目录覆盖校验未全部通过："
                         f"{self._outline_warning_detail(blueprint_audit.get('findings'))}"
                     )
-                    if self.validation_failure_blocks_pipeline:
-                        from control_plane import ControlPlaneError
-
-                        raise ControlPlaneError(
-                            "V3_BLUEPRINT_COVERAGE_BLOCKED",
-                            message,
-                            status_code=409,
-                            details={"blueprint_audit": blueprint_audit},
-                        )
-                    self._add_stage_warning(
-                        "compile_chapter_blueprint",
-                        code="V3_BLUEPRINT_COVERAGE_WARNING",
-                        message=message,
+                    raise ControlPlaneError(
+                        "V3_BLUEPRINT_COVERAGE_BLOCKED",
+                        message,
+                        status_code=409,
                         details={"blueprint_audit": blueprint_audit},
                     )
             blueprint_op_id = operation_id or (
@@ -3057,6 +3041,7 @@ class V3StageRunner:
             promoted_blueprint = load_promoted_chapter_blueprint(
                 self.context
             )
+            self._outline_review_feedback = ""
             self._record_stage_output(
                 operation_id,
                 "compile_chapter_blueprint",
