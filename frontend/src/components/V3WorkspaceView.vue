@@ -21,7 +21,8 @@
         <div class="drawer-body">
           <div class="drawer-status-box" :class="`status-${selectedDrawerStage.status}`">
             <strong>步骤状态：{{ pipelineStageStatus(selectedDrawerStage) }}</strong>
-            <span>尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
+            <span>流程尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
+            <span>模型请求 {{ selectedDrawerStage.llm_request_count || 0 }} 次</span>
           </div>
           <dl
             v-if="selectedDrawerStage.started_at || selectedDrawerStage.completed_at"
@@ -446,8 +447,19 @@
             <div><dt>已覆盖响应</dt><dd>{{ planningView.summary.covered_response_unit_count }}</dd></div>
             <div><dt>待处理覆盖</dt><dd>{{ planningView.summary.uncovered_response_unit_count }}</dd></div>
           </dl>
+          <label class="planning-review-feedback">
+            <span>发表修改意见（可选）</span>
+            <textarea
+              v-model="planningReviewFeedback"
+              rows="3"
+              placeholder="例如：调整目录层级，补充某评分项的响应章节"
+            />
+          </label>
           <div class="planning-review-actions">
             <button class="btn" type="button" @click="dismissPlanningReviewPrompt">稍后审核</button>
+            <button class="btn" type="button" :disabled="running || !planningReviewFeedback.trim()" @click="submitPlanningFeedback">
+              提交修改意见
+            </button>
             <button class="btn btn-primary" type="button" @click="openPlanningReview">
               进入审核目录
             </button>
@@ -469,7 +481,7 @@
             </span>
             <div>
               <h3>AI 标书编制助手</h3>
-              <p>智能对话 · 材料投递 · 自动生成编写计划</p>
+              <p>智能对话 · 材料投递 · 目录与正文生成</p>
             </div>
           </div>
           <div class="studio-header-stats">
@@ -498,11 +510,47 @@
                     <p>先准备招标文件，再补充公司资质与参考资料。</p>
                   </div>
                 </div>
-                <span class="workflow-step-status" :class="activeInputs.length ? 'done' : 'pending'">
-                  {{ activeInputs.length ? '已完成' : '待上传' }}
+                <span class="workflow-step-status" :class="initialMaterialsReady ? 'done' : 'pending'">
+                  {{ initialMaterialsReady ? '已完成' : '待上传' }}
                 </span>
               </header>
-              <p class="workflow-step-intro">请在下方选择投递<b>招标文件</b>（必传）及<b>公司资质/参考资料</b>。材料登记后将自动进入下一步。</p>
+              <p class="workflow-step-intro">请上传<b>招标文件</b>和<b>公司资质/参考资料</b>。两类材料都登记完成后，我会先询问您是否进入第二阶段。</p>
+            </div>
+          </div>
+
+          <div v-if="!initialMaterialsReady && !loading" class="chat-msg bot-msg timeline-step-msg upload-start-msg">
+            <div class="msg-avatar material-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M12 10v7M8.5 13.5h7" /></svg>
+            </div>
+            <div class="msg-bubble upload-start-bubble">
+              <span class="workflow-result-kicker">开始投递</span>
+              <h4>请先补齐两类必传材料</h4>
+              <p>仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。</p>
+              <div class="required-upload-zones">
+                <div
+                  v-for="zone in uploadZones"
+                  :key="zone.role"
+                  class="required-upload-zone"
+                  :class="{ complete: inputsForRole(zone.role).length }"
+                >
+                  <label class="required-upload-zone-label">
+                    <input
+                      class="visually-hidden"
+                      type="file"
+                      accept=".pdf,.docx,.md,.txt"
+                      multiple
+                      :disabled="uploading || running"
+                      @change="handleQuickUpload(zone.role, $event)"
+                    />
+                    <span class="required-upload-zone-icon" aria-hidden="true">{{ zone.role === 'tender' ? '▤' : '▦' }}</span>
+                    <span>
+                      <strong>{{ zone.title }} <em>必传</em></strong>
+                      <small>{{ zone.description }}</small>
+                    </span>
+                    <b>{{ inputsForRole(zone.role).length ? `已上传 ${inputsForRole(zone.role).length} 份` : '点击上传' }}</b>
+                  </label>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -535,127 +583,105 @@
             </div>
           </div>
 
-          <!-- 步骤 2：仅在没有有效目录时显示启动卡片 -->
-          <div v-if="hasTender && !hasOutline && !outlineBusy && !planningReadyForReview" class="chat-msg bot-msg timeline-step-msg highlight-msg">
-            <div class="msg-avatar step-avatar" aria-hidden="true">2</div>
+          <div v-if="initialMaterialsReady && !secondStageConfirmed && !hasOutline && !outlineBusy && !planningReadyForReview" class="chat-msg bot-msg timeline-step-msg highlight-msg">
+            <div class="msg-avatar step-avatar" aria-hidden="true">?</div>
             <div class="msg-bubble action-launch-bubble">
               <header class="workflow-step-header">
                 <div class="workflow-step-heading">
-                  <span class="step-tag ready">步骤 2 · 目录规划</span>
+                  <span class="step-tag">材料已就绪</span>
                   <div>
-                    <h4>启动评分解析与编写计划</h4>
-                    <p>把招标要求转换成可审阅、可追踪的章节计划。</p>
+                    <h4>是否继续第二阶段？</h4>
+                    <p>招标文件和公司资质/参考资料均已上传。请在下方回复“继续第二阶段”后，再开始解析评分点并生成目录。</p>
                   </div>
                 </div>
-                <span class="workflow-step-status" :class="planningReadyForReview ? 'done' : 'action'">
-                  {{ planningReadyForReview ? '已完成' : '待启动' }}
-                </span>
+                <span class="workflow-step-status action">等待回复</span>
               </header>
-              <div class="launch-card-content">
-                <p>已准备好 {{ tenderInputs.length }} 份招标文件。点击下方按钮，开始生成评分点精析与项目编写计划大纲。</p>
-                <button
-                  class="btn btn-primary btn-lg launch-plan-btn"
-                  type="button"
-                  :disabled="outlineBusy || running"
-                  @click="prepareOutline"
-                >
-                  <span v-if="outlineBusy" class="spinner" />
-                  {{ outlineBusy ? '正在分析材料并编制目录…' : '生成编写计划' }}
-                </button>
-              </div>
             </div>
           </div>
 
-          <!-- 步骤 2 完成后，以独立消息回传可展开的章节目录 -->
-          <div v-if="planningReadyForReview" class="chat-msg bot-msg timeline-step-msg">
+          <!-- 交互问答历史记录。每条 AI 回复原位展示处理状态与可展开详情。 -->
+          <div
+            v-for="turn in initialChatTurns"
+            :key="turn.id"
+            class="chat-msg"
+            :class="turn.role === 'user' ? 'user-msg' : 'bot-msg'"
+          >
+            <div class="msg-avatar conversation-avatar" aria-hidden="true">{{ turn.role === 'user' ? '你' : 'AI' }}</div>
+            <div class="msg-bubble conversation-bubble">
+              <p>{{ turn.content }}</p>
+            </div>
+          </div>
+
+          <!-- 阶段 2 从开始、失败到完成始终只占一条 AI 消息。 -->
+          <div v-if="showOutlineProcessMessage" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
             <div class="msg-avatar outline-avatar" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v16H7.5A2.5 2.5 0 0 0 5 20.5zm2.5 0H20M9 7h7M9 11h7M9 15h4" /></svg>
             </div>
             <div class="msg-bubble outline-card-bubble">
               <header class="card-title-row">
                 <div>
-                  <span class="workflow-result-kicker">步骤 2 · 目录规划完成</span>
-                  <h4>编写计划已生成（{{ planningView.summary.chapter_count }} 个章节节点）</h4>
+                  <span class="workflow-result-kicker">阶段 2 · 解析评分并生成目录</span>
+                  <h4>{{ outlineWorkflowTitle }}</h4>
                 </div>
-                <span class="material-status-tag ok">✓ 可审阅</span>
               </header>
-              <p class="outline-card-summary">
-                已识别 {{ planningView.summary.score_point_count }} 个评分点和 {{ planningView.summary.response_unit_count }} 个响应任务。
-              </p>
-              <details
-                v-if="!outlineBusy && outlinePipelineActivityMessages.length"
-                class="pipeline-activity-group phase-activity-group phase-2-activity-group"
+              <p class="outline-card-summary">{{ outlineWorkflowDescription }}</p>
+              <AiProcessDisclosure
+                :status="outlineProcessStatus"
+                :seconds="outlineElapsedSeconds"
               >
-                <summary>
-                  <span>{{ outlinePipelineActivitySummaryLabel }}</span>
-                  <svg class="pipeline-group-chevron" aria-hidden="true" viewBox="0 0 24 24">
-                    <path d="m10 8 4 4-4 4" />
-                  </svg>
-                </summary>
-                <div class="pipeline-activity-list" aria-live="polite">
-                  <div
-                    v-for="activity in outlinePipelineActivityMessages"
-                    :key="activity.id"
-                    class="pipeline-activity-msg"
-                    :class="`activity-${activity.status}`"
-                  >
-                    <details class="pipeline-log-entry">
-                      <summary>
-                        <span class="pipeline-log-icon" aria-hidden="true">
-                          <svg v-if="activity.kind === 'llm'" viewBox="0 0 24 24">
-                            <rect x="3" y="4" width="18" height="16" rx="3" />
-                            <path d="m7 9 3 3-3 3M13 15h4" />
-                          </svg>
-                          <svg v-else viewBox="0 0 24 24">
-                            <circle cx="12" cy="12" r="9" />
-                            <path d="m8 12 2.5 2.5L16 9" />
-                          </svg>
-                        </span>
-                        <span class="pipeline-log-line">
-                          <strong>{{ activity.title }}</strong>
-                          <span>{{ activity.detail }}</span>
-                        </span>
-                        <svg class="pipeline-log-chevron" aria-hidden="true" viewBox="0 0 24 24">
-                          <path d="m10 8 4 4-4 4" />
-                        </svg>
-                      </summary>
-                      <div class="pipeline-log-detail">
-                        <p>{{ activity.meta }}</p>
-                        <button v-if="activity.kind === 'llm'" type="button" @click="showLlmModal = true">
-                          查看本次模型请求
-                        </button>
+                <div class="ai-process-overview">
+                  <span>{{ outlineCompletedStageCount }}/{{ pipelineStages.length }} 步完成</span>
+                  <span>{{ outlinePipelineLlmRequestCount }} 次模型调用</span>
+                </div>
+                <ol v-if="pipelineStages.length" class="ai-process-stage-list">
+                  <li v-for="(stage, index) in pipelineStages" :key="stage.stage_id">
+                    <button type="button" @click="openStageDrawer(stage)">
+                      <span class="ai-stage-marker" :class="`stage-${stage.status}`" aria-hidden="true">
+                        <span v-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
+                        <span v-else-if="stage.status === 'failed'">×</span>
+                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
+                        <span v-else>{{ index + 1 }}</span>
+                      </span>
+                      <span class="ai-stage-copy">
+                        <strong>{{ stage.label }}</strong>
+                        <small>{{ pipelineStageStatus(stage) }}</small>
+                      </span>
+                      <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 5 5 5-5 5" /></svg>
+                    </button>
+                  </li>
+                </ol>
+                <p v-else>正在建立阶段 2 执行队列，收到节点状态后会自动更新。</p>
+              </AiProcessDisclosure>
+
+              <template v-if="planningReadyForReview && planningStatus !== 'confirmed'">
+                <details class="chat-outline-details outline-card-details">
+                  <summary>点击查看详细目录（{{ flatOutline.length }} 个章节节点）</summary>
+                  <div class="preview-tree-box full-outline-preview">
+                    <div
+                      v-for="node in flatOutline"
+                      :key="node.chapter_id"
+                      class="tree-preview-item"
+                      :style="{ '--outline-depth': Math.max(0, (node.depth || 1) - 1) }"
+                    >
+                      <span class="node-num">{{ node.number }}</span>
+                      <div class="node-content">
+                        <strong class="node-title">{{ node.title }}</strong>
+                        <small v-if="node.purpose">{{ node.purpose }}</small>
                       </div>
-                    </details>
-                  </div>
-                </div>
-              </details>
-              <details class="chat-outline-details outline-card-details">
-                <summary>点击查看详细目录（{{ flatOutline.length }} 个章节节点）</summary>
-                <div class="preview-tree-box full-outline-preview">
-                  <div
-                    v-for="node in flatOutline"
-                    :key="node.chapter_id"
-                    class="tree-preview-item"
-                    :style="{ '--outline-depth': Math.max(0, (node.depth || 1) - 1) }"
-                  >
-                    <span class="node-num">{{ node.number }}</span>
-                    <div class="node-content">
-                      <strong class="node-title">{{ node.title }}</strong>
-                      <small v-if="node.purpose">{{ node.purpose }}</small>
+                      <span v-if="node.score_point_ids?.length" class="node-coverage">
+                        覆盖 {{ node.score_point_ids.length }} 项
+                      </span>
                     </div>
-                    <span v-if="node.score_point_ids?.length" class="node-coverage">
-                      覆盖 {{ node.score_point_ids.length }} 项
-                    </span>
                   </div>
-                </div>
-              </details>
-              <button class="workflow-result-link" type="button" @click="activeTab = 'planning'">
-                审阅并确认完整目录 →
-              </button>
+                </details>
+                <button class="workflow-result-link" type="button" @click="activeTab = 'planning'">
+                  审阅并确认完整目录 →
+                </button>
+              </template>
             </div>
           </div>
 
-          <!-- 阶段 3 是独立聊天消息，并拥有自己的执行过程。 -->
+          <!-- 阶段 3 也只保留一条消息，详情按需展开。 -->
           <div v-if="showGenerationPipeline" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
             <div class="msg-avatar generation-avatar" aria-hidden="true">3</div>
             <div class="msg-bubble generation-stage-bubble">
@@ -667,64 +693,36 @@
                     <p>基于已确认目录执行材料检查、逐章写作、全文整合、质量审核和 Word 交付。</p>
                   </div>
                 </div>
-                <span class="workflow-step-status" :class="generationWorkflowStatusClass">
-                  {{ generationWorkflowStatusLabel }}
-                </span>
               </header>
               <p class="workflow-step-intro generation-stage-headline">{{ generationHeadline }}</p>
 
-              <details
-                v-if="generationPipelineActivityMessages.length"
-                class="pipeline-activity-group phase-activity-group generation-activity-group"
+              <AiProcessDisclosure
+                :status="generationProcessStatus"
+                :seconds="generationElapsedSeconds"
               >
-                <summary>
-                  <span>{{ generationPipelineActivitySummaryLabel }}</span>
-                  <svg class="pipeline-group-chevron" aria-hidden="true" viewBox="0 0 24 24">
-                    <path d="m10 8 4 4-4 4" />
-                  </svg>
-                </summary>
-                <div class="pipeline-activity-list" aria-live="polite">
-                  <div
-                    v-for="activity in generationPipelineActivityMessages"
-                    :key="activity.id"
-                    class="pipeline-activity-msg"
-                    :class="`activity-${activity.status}`"
-                  >
-                    <details class="pipeline-log-entry">
-                      <summary>
-                        <span class="pipeline-log-icon" aria-hidden="true">
-                          <svg v-if="activity.kind === 'llm'" viewBox="0 0 24 24">
-                            <rect x="3" y="4" width="18" height="16" rx="3" />
-                            <path d="m7 9 3 3-3 3M13 15h4" />
-                          </svg>
-                          <svg v-else viewBox="0 0 24 24">
-                            <circle cx="12" cy="12" r="9" />
-                            <path d="m8 12 2.5 2.5L16 9" />
-                          </svg>
-                        </span>
-                        <span class="pipeline-log-line">
-                          <strong>{{ activity.title }}</strong>
-                          <span>{{ activity.detail }}</span>
-                        </span>
-                        <svg class="pipeline-log-chevron" aria-hidden="true" viewBox="0 0 24 24">
-                          <path d="m10 8 4 4-4 4" />
-                        </svg>
-                      </summary>
-                      <div class="pipeline-log-detail">
-                        <p>{{ activity.meta }}</p>
-                        <button
-                          v-if="activity.kind === 'llm'"
-                          type="button"
-                          @click="showLlmModal = true"
-                        >
-                          查看本次模型请求
-                        </button>
-                      </div>
-                    </details>
-                  </div>
+                <div class="ai-process-overview">
+                  <span>{{ generationCompletedStageCount }}/{{ generationExecutionStages.length }} 步完成</span>
+                  <span>{{ generationPipelineLlmRequestCount }} 次模型调用</span>
                 </div>
-              </details>
-              <p v-else class="generation-queue-note" role="status">正在建立阶段 3 执行队列…</p>
+                <ol v-if="generationExecutionStages.length" class="ai-process-stage-list">
+                  <li v-for="(stage, index) in generationExecutionStages" :key="stage.stage_id">
+                    <button type="button" @click="openStageDrawer(stage)">
+                      <span class="ai-stage-marker" :class="`stage-${stage.status}`" aria-hidden="true">
+                        <span v-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
+                        <span v-else-if="stage.status === 'failed'">×</span>
+                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
+                        <span v-else>{{ index + 1 }}</span>
+                      </span>
+                      <span class="ai-stage-copy">
+                        <strong>{{ stage.label }}</strong>
+                        <small>{{ pipelineStageStatus(stage) }}</small>
+                      </span>
+                      <svg aria-hidden="true" viewBox="0 0 20 20"><path d="m7.5 5 5 5-5 5" /></svg>
+                    </button>
+                  </li>
+                </ol>
+                <p v-else>正在建立阶段 3 执行队列，收到节点状态后会自动更新。</p>
+              </AiProcessDisclosure>
             </div>
           </div>
 
@@ -748,126 +746,6 @@
             <div class="msg-bubble status-bubble"><p>{{ message }}</p></div>
           </div>
 
-          <!-- 交互问答历史记录 -->
-          <div
-            v-for="turn in initialChatTurns"
-            :key="turn.id"
-            class="chat-msg"
-            :class="turn.role === 'user' ? 'user-msg' : 'bot-msg'"
-          >
-            <div class="msg-avatar conversation-avatar" aria-hidden="true">{{ turn.role === 'user' ? '你' : 'AI' }}</div>
-            <div class="msg-bubble">
-              <p>{{ turn.content }}</p>
-            </div>
-          </div>
-
-          <!-- 每次执行都作为对话后的新进度卡展示，而不是占用首个流程卡的位置。 -->
-          <div
-            v-if="showPipelineMonitor"
-            :key="`pipeline-turn-${pipelineActivityVersion}`"
-            class="chat-msg bot-msg pipeline-plan-chat-msg"
-          >
-            <div class="msg-avatar conversation-avatar" aria-hidden="true">AI</div>
-            <section class="pipeline-plan-dock" aria-label="当前执行计划">
-              <header class="pipeline-plan-header">
-                <div>
-                  <span class="pipeline-plan-kicker">当前计划</span>
-                  <strong>{{ topPipelineTitle }}</strong>
-                  <small>{{ topPipelineDescription }}</small>
-                </div>
-                <div class="pipeline-plan-summary">
-                  <span class="pipeline-state-pill" :class="`pipeline-state-${topPipelineStatus}`">
-                    {{ topPipelineStatusLabel }}
-                  </span>
-                  <span>{{ completedPipelineStageCount }}/{{ topPipelineStages.length }} 已完成</span>
-                  <span v-if="remainingPipelineStageCount > 0">还剩 {{ remainingPipelineStageCount }} 步</span>
-                </div>
-              </header>
-
-              <details class="pipeline-processing-summary">
-                <summary>{{ processingSummaryLabel }}</summary>
-                <ul>
-                  <li>已执行 {{ completedPipelineStageCount }} 个流程节点</li>
-                  <li>已发起 {{ pipelineLlmRequestCount }} 次模型调用</li>
-                  <li v-if="planningStatus === 'needs_human'">正在等待您审核目录</li>
-                  <li v-else-if="topPipelineStatus === 'failed'">当前流程已失败，请查看失败节点详情</li>
-                  <li v-else-if="generation.value.status === 'blocked'">当前流程正在等待人工处理</li>
-                </ul>
-              </details>
-
-              <ol v-if="topPipelineStages.length" class="vertical-pipeline-plan">
-                <li v-for="(stage, index) in topPipelineStages" :key="stage.stage_id">
-                  <button
-                    class="vertical-plan-node"
-                    :class="[`stage-${stage.status}`, { 'has-warning': stage.warning_count > 0 }]"
-                    type="button"
-                    :aria-label="`${stage.label}：${pipelineStageStatus(stage)}，查看详情`"
-                    @click="openStageDrawer(stage)"
-                  >
-                    <span class="vertical-plan-marker" aria-hidden="true">
-                      <span v-if="stage.warning_count > 0">!</span>
-                      <span v-else-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
-                      <span v-else-if="stage.status === 'failed'">×</span>
-                      <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
-                      <span v-else>{{ index + 1 }}</span>
-                    </span>
-                    <span class="vertical-plan-copy">
-                      <strong>{{ stage.label }}</strong>
-                      <small>{{ stage.warning_count > 0 ? '需复核' : pipelineStageStatus(stage) }}</small>
-                    </span>
-                    <small v-if="stageResultSummary(stage)" class="vertical-plan-result">
-                      {{ stageResultSummary(stage) }}
-                    </small>
-                  </button>
-                </li>
-              </ol>
-
-              <details v-if="!showGenerationPipeline && outlineBusy && outlinePipelineActivityMessages.length" class="pipeline-activity-group phase-activity-group phase-2-activity-group">
-                <summary>
-                  <span>{{ outlinePipelineActivitySummaryLabel }}</span>
-                  <svg class="pipeline-group-chevron" aria-hidden="true" viewBox="0 0 24 24">
-                    <path d="m10 8 4 4-4 4" />
-                  </svg>
-                </summary>
-                <div class="pipeline-activity-list" aria-live="polite">
-                  <div
-                    v-for="activity in outlinePipelineActivityMessages"
-                    :key="activity.id"
-                    class="pipeline-activity-msg"
-                    :class="`activity-${activity.status}`"
-                  >
-                    <details class="pipeline-log-entry">
-                      <summary>
-                        <span class="pipeline-log-icon" aria-hidden="true">
-                          <svg v-if="activity.kind === 'llm'" viewBox="0 0 24 24">
-                            <rect x="3" y="4" width="18" height="16" rx="3" />
-                            <path d="m7 9 3 3-3 3M13 15h4" />
-                          </svg>
-                          <svg v-else viewBox="0 0 24 24">
-                            <circle cx="12" cy="12" r="9" />
-                            <path d="m8 12 2.5 2.5L16 9" />
-                          </svg>
-                        </span>
-                        <span class="pipeline-log-line">
-                          <strong>{{ activity.title }}</strong>
-                          <span>{{ activity.detail }}</span>
-                        </span>
-                        <svg class="pipeline-log-chevron" aria-hidden="true" viewBox="0 0 24 24">
-                          <path d="m10 8 4 4-4 4" />
-                        </svg>
-                      </summary>
-                      <div class="pipeline-log-detail">
-                        <p>{{ activity.meta }}</p>
-                        <button v-if="activity.kind === 'llm'" type="button" @click="showLlmModal = true">
-                          查看本次模型请求
-                        </button>
-                      </div>
-                    </details>
-                  </div>
-                </div>
-              </details>
-            </section>
-          </div>
           </div>
         </div>
 
@@ -919,7 +797,7 @@
                   accept=".pdf,.docx,.md,.txt"
                   multiple
                   :disabled="uploading || running"
-                  @change="handleQuickUpload('company_fact', $event)"
+                  @change="handleQuickUpload('company', $event)"
                 />
                 <div class="toolbar-attachment-menu">
                   <button
@@ -952,12 +830,12 @@
                 <button
                   class="modern-send-circle-btn"
                   type="button"
-                  :disabled="initialAsking || !initialChatInput.trim()"
+                  :disabled="!initialChatInput.trim()"
                   title="发送消息"
                   aria-label="发送消息"
                   @click="sendInitialChat"
                 >
-                  <span v-if="initialAsking" class="spinner-dot" />
+                  <span v-if="initialAsking && !initialChatInput.trim()" class="spinner-dot" />
                   <svg v-else aria-hidden="true" viewBox="0 0 24 24">
                     <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
@@ -1534,7 +1412,7 @@
         <div class="sticky-bar-actions">
           <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
           <button
-            v-if="!hasOutline && hasTender"
+            v-if="!hasOutline && initialMaterialsReady && secondStageConfirmed"
             class="btn btn-primary"
             type="button"
             :disabled="outlineActionDisabled"
@@ -1552,15 +1430,6 @@
               @click="confirmPlanning"
             >
               确认当前目录
-            </button>
-            <button
-              v-else-if="planningStatus === 'confirmed'"
-              class="btn btn-primary"
-              type="button"
-              :disabled="running || generationBusy"
-              @click="runDocument"
-            >
-              {{ generationBusy || (running && runningAction === 'document') ? '正在生成，不要重复提交' : '生成完整标书' }}
             </button>
             <button
               v-if="deliveryReady"
@@ -1946,6 +1815,7 @@
 defineOptions({ name: 'V3WorkspaceView' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
+import AiProcessDisclosure from './AiProcessDisclosure.vue'
 import {
   chatV3,
   confirmV3Planning,
@@ -1957,6 +1827,7 @@ import {
   prepareV3Outline,
   resolveV3Research,
   runV3Pipeline,
+  subscribeV3Workspace,
   uploadV3Input,
 } from '../api'
 import {
@@ -1981,16 +1852,10 @@ const uploadZones = [
     required: true,
   },
   {
-    role: 'score',
-    title: '评分附件（可选）',
-    description: '评分表单独成文时上传；完整招标文件内嵌评分表无需重复上传。',
-    required: false,
-  },
-  {
     role: 'company',
-    title: '公司资料',
+    title: '公司资质/参考资料',
     description: '企业资质、案例、人员、产品说明和证明文件。',
-    required: false,
+    required: true,
   },
 ]
 const pipelineSummaryLabels = {
@@ -2057,10 +1922,12 @@ const loadedPreviewOperationId = ref('')
 
 const initialChatInput = ref('')
 const initialChatTurns = ref([])
-// 用于让一次“继续/重试”产生新的对话内进度卡，而非复用先前的卡片实例。
-const pipelineActivityVersion = ref(0)
+const secondStageConfirmed = ref(false)
 const dismissedPlanningReviewOperationId = ref('')
-const initialAsking = ref(false)
+const planningReviewFeedback = ref('')
+const initialPendingCount = ref(0)
+const initialAsking = computed(() => initialPendingCount.value > 0)
+const assistantClockNow = ref(Date.now())
 const studioChatBody = ref(null)
 let shouldAutoFollowChat = true
 
@@ -2133,31 +2000,43 @@ function isContinueIntent(message) {
   )
 }
 
+function isSecondStageConfirmation(message) {
+  return /^(继续第二阶段|开始第二阶段|确认进入第二阶段|确认|继续|是|好的|可以)[。！!]?$/u.test(
+    String(message || '').trim(),
+  )
+}
+
+function confirmSecondStage() {
+  secondStageConfirmed.value = true
+  // 长流程只在后台启动，不能占用聊天输入状态。
+  void prepareOutline()
+  return '收到确认，现进入第二阶段：解析评分点并生成章节目录。'
+}
+
 async function continueCurrentWorkflow() {
   await refresh()
 
   if (outlineBusy.value || generationBusy.value) {
-    initialChatTurns.value.push({
-      id: `a-${Date.now()}`,
-      role: 'bot',
-      content: '当前阶段仍在执行，我会继续等待并刷新进度，不会重复提交。',
-    })
-    return
+    return '当前阶段仍在执行，我会继续等待并刷新进度，不会重复提交。'
+  }
+
+  if (!initialMaterialsReady.value) {
+    return hasTender.value
+      ? '还需要上传公司资质或参考资料；两类材料齐全后，我会询问是否进入第二阶段。'
+      : '请先上传招标文件和公司资质/参考资料，再继续执行。'
+  }
+
+  if (!secondStageConfirmed.value && !hasOutline.value && !planningReadyForReview.value) {
+    return confirmSecondStage()
   }
 
   const outlineOperation = latestOutlineOperation()
-  if (hasTender.value && (
+  if (initialMaterialsReady.value && secondStageConfirmed.value && (
     outlineOperation?.status === 'failed'
     || (!planningReadyForReview.value && !hasOutline.value)
   )) {
-    initialChatTurns.value.push({
-      id: `a-${Date.now()}`,
-      role: 'bot',
-      content: '已从目录规划的失败阶段继续，已完成节点会直接复用。',
-    })
-    await scrollChatToLatest(true)
-    await prepareOutline()
-    return
+    void prepareOutline()
+    return '已从目录规划的失败阶段继续，已完成节点会直接复用。'
   }
 
   const generationStatus = String(generation.value.status || 'new')
@@ -2165,21 +2044,17 @@ async function continueCurrentWorkflow() {
     planningStatus.value === 'confirmed'
     && ['new', 'not_started', 'failed', 'cancelled'].includes(generationStatus)
   ) {
-    initialChatTurns.value.push({
-      id: `a-${Date.now()}`,
-      role: 'bot',
-      content: generationStatus === 'failed'
-        ? '已从完整标书生成的失败阶段继续。'
-        : '目录已确认，正在继续生成完整标书。',
-    })
-    await scrollChatToLatest(true)
-    await runDocument()
-    return
+    void runDocument()
+    return generationStatus === 'failed'
+      ? '已从完整标书生成的失败阶段继续。'
+      : '目录已确认，正在继续生成完整标书。'
   }
 
   let content = '当前没有可继续的失败任务。'
-  if (!hasTender.value) {
-    content = '请先上传至少一份招标文件，再继续执行。'
+  if (!initialMaterialsReady.value) {
+    content = hasTender.value
+      ? '请补充公司资质或参考资料，再继续执行。'
+      : '请先上传招标文件和公司资质/参考资料，再继续执行。'
   } else if (planningReadyForReview.value && planningStatus.value !== 'confirmed') {
     content = '目录已经生成，请先审阅并确认目录；确认后即可继续生成完整标书。'
   } else if (['blocked', 'blocked_human'].includes(generationStatus)) {
@@ -2187,7 +2062,7 @@ async function continueCurrentWorkflow() {
   } else if (generation.value.status === 'succeeded') {
     content = '完整标书已经生成完成，可进入写作工作台继续审阅和修改。'
   }
-  initialChatTurns.value.push({ id: `a-${Date.now()}`, role: 'bot', content })
+  return content
 }
 
 function dismissPlanningReviewPrompt() {
@@ -2201,39 +2076,54 @@ function openPlanningReview() {
 
 async function sendInitialChat() {
   const msg = initialChatInput.value.trim()
-  if (!msg || initialAsking.value) return
+  if (!msg) return
   initialChatInput.value = ''
-  const userTurn = { id: `u-${Date.now()}`, role: 'user', content: msg }
+  const startedAt = Date.now()
+  const turnSuffix = `${startedAt}-${initialChatTurns.value.length}`
+  const userTurn = { id: `u-${turnSuffix}`, role: 'user', content: msg }
+  const assistantTurn = reactive({
+    id: `a-${turnSuffix}`,
+    role: 'bot',
+    content: '正在处理您的问题…',
+    processStatus: 'processing',
+    processDetail: '请求已接收，正在检查当前工作区状态并准备回复。',
+    startedAt,
+    finishedAt: 0,
+  })
   initialChatTurns.value.push(userTurn)
-  initialAsking.value = true
+  initialChatTurns.value.push(assistantTurn)
+  initialPendingCount.value += 1
+  await nextTick()
+  await scrollChatToLatest(true)
   try {
+    if (secondStageConfirmationNeeded.value && isSecondStageConfirmation(msg)) {
+      assistantTurn.content = confirmSecondStage()
+      assistantTurn.processDetail = '已记录阶段确认，并在后台启动目录规划；聊天输入保持可用。'
+      assistantTurn.processStatus = 'completed'
+      return
+    }
     if (isContinueIntent(msg)) {
-      // 先在消息流中确认收到“继续”，避免状态刷新或恢复请求等待时界面没有任何反馈。
-      initialChatTurns.value.push({
-        id: `a-thinking-${Date.now()}`,
-        role: 'bot',
-        content: '正在思考，正在检查可复用节点并恢复处理，请稍候……',
-      })
-      await nextTick()
-      await scrollChatToLatest(true)
-      await continueCurrentWorkflow()
+      assistantTurn.content = await continueCurrentWorkflow()
+      assistantTurn.processDetail = '已检查当前任务和可复用节点；需要继续时，长流程已转入后台执行。'
+      assistantTurn.processStatus = 'completed'
       return
     }
     const { data } = await chatV3(props.runId, msg)
     const answer = String(data?.reply || data?.answer || data?.message || '').trim()
-    initialChatTurns.value.push({
-      id: `a-${Date.now()}`,
-      role: 'bot',
-      content: answer || '暂未收到可显示的回复，请稍后重试。',
-    })
+    assistantTurn.content = answer || '暂未收到可显示的回复，请稍后重试。'
+    assistantTurn.processDetail = '服务端回复已返回并显示在当前对话。'
+    assistantTurn.processStatus = 'completed'
   } catch (e) {
     const detail = e?.response?.data?.message || e?.message || String(e)
-    initialChatTurns.value.push({ id: `e-${Date.now()}`, role: 'bot', content: `处理失败：${detail}` })
+    assistantTurn.content = `处理失败：${detail}`
+    assistantTurn.processDetail = `请求未完成：${detail}`
+    assistantTurn.processStatus = 'failed'
   } finally {
-    initialAsking.value = false
+    assistantTurn.finishedAt = Date.now()
+    initialPendingCount.value = Math.max(0, initialPendingCount.value - 1)
   }
 }
-let timer = null
+let closeWorkspaceStream = null
 let stageDetailRequestToken = 0
 
 const selectedDrawerStage = computed(() => (
@@ -2339,6 +2229,15 @@ const activeInputs = computed(() => {
 const tenderInputs = computed(() => activeInputs.value.filter(item => item.role === 'tender'))
 const companyInputs = computed(() => activeInputs.value.filter(item => item.role === 'company'))
 const hasTender = computed(() => tenderInputs.value.length > 0)
+const hasCompanyMaterials = computed(() => companyInputs.value.length > 0)
+const initialMaterialsReady = computed(() => hasTender.value && hasCompanyMaterials.value)
+const secondStageConfirmationNeeded = computed(() => (
+  initialMaterialsReady.value
+  && !secondStageConfirmed.value
+  && !hasOutline.value
+  && !outlineBusy.value
+  && !planningReadyForReview.value
+))
 const document = computed(() => snapshot.value.document || {})
 const generation = computed(() => snapshot.value.generation || {})
 const documentPreviewMarkdown = computed(() => (documentPreview.value?.blocks || [])
@@ -2482,6 +2381,8 @@ const generationTabLabel = computed(() => {
 })
 const evidenceNeeds = computed(() => snapshot.value.evidence_needs || [])
 const planning = computed(() => snapshot.value.planning || {})
+const workflow = computed(() => snapshot.value.workflow || {})
+const pendingReviews = computed(() => workflow.value.pending_reviews || [])
 const planningStatus = computed(() => planning.value.status || 'not_ready')
 const deliveryStatus = computed(() => document.value.delivery?.status || 'new')
 const deliveryReady = computed(() => (
@@ -2489,7 +2390,11 @@ const deliveryReady = computed(() => (
   && Number(generationContent.value.stale_units || 0) === 0
 ))
 const hasScorePoints = computed(() => planningView.value.summary.score_point_count > 0)
-const hasOutline = computed(() => planningView.value.summary.chapter_count > 0)
+const hasOutline = computed(() => (
+  ['planning_review', 'writing'].includes(String(workflow.value.phase || ''))
+  && String(workflow.value.status || '') !== 'failed'
+  && planningView.value.summary.chapter_count > 0
+))
 watch(
   () => [
     deliveryStatus.value,
@@ -2511,7 +2416,11 @@ watch(
 )
 const sourceIndex = computed(() => snapshot.value.analysis?.source_index || {})
 const analysisPipeline = computed(() => snapshot.value.analysis?.pipeline || {})
-const pipelineStages = computed(() => analysisPipeline.value.stages || [])
+const pipelineStages = computed(() => (
+  workflow.value.phase === 'planning' || workflow.value.phase === 'planning_review'
+    ? (workflow.value.stages || analysisPipeline.value.stages || [])
+    : (analysisPipeline.value.stages || [])
+))
 const latestWorkspaceOperation = computed(() => (
   snapshot.value.analysis?.latest_operation || {}
 ))
@@ -2526,6 +2435,10 @@ const latestOutlineOperationBusy = computed(() => (
   && ['queued', 'running', 'processing'].includes(latestOperationStatus.value)
 ))
 const pipelineStatus = computed(() => {
+  const workflowStatus = String(workflow.value.status || '')
+  if (workflowStatus === 'failed') return 'failed'
+  if (workflowStatus === 'blocked_human') return 'blocked_human'
+  if (workflowStatus === 'running') return 'running'
   const status = String(analysisPipeline.value.status || 'not_started')
   if (pipelineStages.value.some(stage => ['running', 'queued'].includes(stage.status))) {
     return 'running'
@@ -2544,13 +2457,15 @@ const outlineActionDisabled = computed(() => (
   || outlineBusy.value
   || generationBusy.value
   || uploading.value
-  || !hasTender.value
+  || !initialMaterialsReady.value
+  || !secondStageConfirmed.value
 ))
 
 // 过程与大模型监控相关（已置于全部依赖变量声明之后，确保安全求值）
 const showLlmModal = ref(false)
 const runningDurationSeconds = ref(0)
 let runningTimer = null
+let assistantClockTimer = null
 
 watch(
   () => (
@@ -2572,6 +2487,22 @@ watch(
         window.clearInterval(runningTimer)
         runningTimer = null
       }
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => initialAsking.value || outlineBusy.value || generationBusy.value,
+  isActive => {
+    if (isActive && !assistantClockTimer) {
+      assistantClockNow.value = Date.now()
+      assistantClockTimer = window.setInterval(() => {
+        assistantClockNow.value = Date.now()
+      }, 1000)
+    } else if (!isActive && assistantClockTimer) {
+      window.clearInterval(assistantClockTimer)
+      assistantClockTimer = null
     }
   },
   { immediate: true },
@@ -2630,11 +2561,7 @@ function formatLlmParameters(req) {
 const showGenerationPipeline = computed(() => (
   hasOutline.value
   && planningStatus.value === 'confirmed'
-  && (
-    (running.value && runningAction.value === 'document')
-    || latestOperationKind.value === 'document.run_pipeline'
-    || Boolean(generation.value.operation_id)
-  )
+  && generationBusy.value
 ))
 // Once Step 3 is visible, Step 2 is necessarily complete and its launch CTA
 // must never be rendered again. Planning status and chapter data cover both
@@ -2659,6 +2586,82 @@ const generationPrerequisiteStages = computed(() => (
 const generationExecutionStages = computed(() => (
   generationStages.value.filter(stage => generationStageIds.has(stage.stage_id))
 ))
+const outlineCompletedStageCount = computed(() => pipelineStages.value.filter(
+  stage => ['succeeded', 'reused', 'completed'].includes(stage.status),
+).length)
+const generationCompletedStageCount = computed(() => generationExecutionStages.value.filter(
+  stage => ['succeeded', 'reused', 'completed'].includes(stage.status),
+).length)
+const outlinePipelineLlmRequestCount = computed(() => pipelineStages.value.reduce(
+  (total, stage) => total + Number(stage.llm_request_count || 0),
+  0,
+))
+const generationPipelineLlmRequestCount = computed(() => generationExecutionStages.value.reduce(
+  (total, stage) => total + Number(stage.llm_request_count || 0),
+  0,
+))
+
+function timestampMilliseconds(value) {
+  const timestamp = Date.parse(String(value || ''))
+  return Number.isFinite(timestamp) ? timestamp : 0
+}
+
+function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0) {
+  const startedAt = stages
+    .map(stage => timestampMilliseconds(stage.started_at))
+    .filter(Boolean)
+  if (!startedAt.length) return fallbackSeconds
+  const completedAt = stages
+    .map(stage => timestampMilliseconds(stage.completed_at))
+    .filter(Boolean)
+  const end = isRunning ? assistantClockNow.value : (Math.max(...completedAt, ...startedAt))
+  return Math.max(0, Math.floor((end - Math.min(...startedAt)) / 1000))
+}
+
+function assistantTurnElapsedSeconds(turn) {
+  const startedAt = Number(turn?.startedAt) || assistantClockNow.value
+  const finishedAt = Number(turn?.finishedAt) || assistantClockNow.value
+  return Math.max(0, Math.floor((finishedAt - startedAt) / 1000))
+}
+
+const outlineElapsedSeconds = computed(() => workflowElapsedSeconds(
+  pipelineStages.value,
+  outlineBusy.value,
+  runningDurationSeconds.value,
+))
+const generationElapsedSeconds = computed(() => workflowElapsedSeconds(
+  generationExecutionStages.value,
+  generationBusy.value,
+  runningDurationSeconds.value,
+))
+const outlineProcessStatus = computed(() => {
+  if (outlineBusy.value) return 'processing'
+  if (pipelineStatus.value === 'failed') return 'failed'
+  if (planningStatus.value === 'needs_human') return 'waiting'
+  return 'completed'
+})
+const generationProcessStatus = computed(() => {
+  if (generationBusy.value) return 'processing'
+  if (['failed', 'blocked'].includes(String(generation.value.status || ''))) return 'failed'
+  return 'completed'
+})
+const showOutlineProcessMessage = computed(() => (
+  hasOutline.value
+  || planningReadyForReview.value
+  || outlineBusy.value
+  || pipelineStages.value.some(stage => stage.status !== 'pending')
+))
+const outlineWorkflowTitle = computed(() => {
+  if (outlineProcessStatus.value === 'processing') return '正在解析评分点并生成目录'
+  if (outlineProcessStatus.value === 'failed') return '评分点解析与目录生成失败'
+  if (outlineProcessStatus.value === 'waiting') return '编写计划已生成，等待您审核'
+  return `编写计划已生成（${planningView.value.summary.chapter_count} 个章节节点）`
+})
+const outlineWorkflowDescription = computed(() => {
+  if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
+  if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
+  return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
+})
 const generationPrerequisiteCompleted = computed(() => (
   generationPrerequisiteStages.value.filter(
     stage => ['succeeded', 'reused'].includes(stage.status),
@@ -2872,7 +2875,6 @@ const generationWorkflowTitle = computed(() => {
 watch(
   () => [
     initialChatTurns.value.length,
-    pipelineActivityVersion.value,
     message.value,
     error.value,
     outlinePipelineActivityMessages.value.length,
@@ -2992,8 +2994,8 @@ const outlineActionLabel = computed(() => (
 const workflowSteps = computed(() => [
   {
     label: '上传资料',
-    description: hasTender.value ? `${activeInputs.value.length} 个文件已登记` : '至少上传一份招标文件',
-    status: hasTender.value ? 'done' : 'active',
+    description: initialMaterialsReady.value ? `${activeInputs.value.length} 个文件已登记` : '请上传招标文件和公司资质/参考资料',
+    status: initialMaterialsReady.value ? 'done' : 'active',
   },
   {
     label: '解析评分点',
@@ -3047,21 +3049,44 @@ async function refresh(resetError = false) {
   loading.value = true
   try {
     const { data } = await fetchV3WorkspaceSnapshot(props.runId)
-    snapshot.value = normalizeV3WorkspaceSnapshot(data)
-    if (activeStageDrawerId.value && !stageDetailLoading.value) {
-      void loadStageDetail(activeStageDrawerId.value)
-    }
-    if (resetError) {
-      clearError()
-    } else if (!error.value) {
-      const latest = latestOutlineOperation()
-      if (latest?.status === 'failed') reportOutlineOperationFailure(latest)
-    }
+    applyWorkspaceSnapshot(data, resetError)
   } catch (cause) {
     reportError(cause, 'V3 工作区状态读取失败。')
   } finally {
     loading.value = false
   }
+}
+
+function applyWorkspaceSnapshot(data, resetError = false) {
+  snapshot.value = normalizeV3WorkspaceSnapshot(data)
+  // Once this workspace has entered planning, a stale outline should expose
+  // the re-planning action immediately after refresh.  Do not require the
+  // user to repeat the conversational "enter phase 2" acknowledgement just
+  // because the old outline was invalidated by a prompt/model update.
+  if (
+    initialMaterialsReady.value
+    && ['outdated', 'blocked', 'needs_human', 'confirmed'].includes(planningStatus.value)
+  ) {
+    secondStageConfirmed.value = true
+  }
+  if (activeStageDrawerId.value && !stageDetailLoading.value) {
+    void loadStageDetail(activeStageDrawerId.value)
+  }
+  if (resetError) {
+    clearError()
+  } else if (!error.value) {
+    const latest = latestOutlineOperation()
+    if (latest?.status === 'failed') reportOutlineOperationFailure(latest)
+  }
+}
+
+function connectWorkspaceStream() {
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
+  if (!props.runId) return
+  closeWorkspaceStream = subscribeV3Workspace(props.runId, {
+    onSnapshot: data => applyWorkspaceSnapshot(data),
+  })
 }
 
 async function uploadRole(role) {
@@ -3092,7 +3117,17 @@ async function uploadRole(role) {
 }
 
 async function prepareOutline() {
-  pipelineActivityVersion.value += 1
+  if (outlineBusy.value || (running.value && runningAction.value === 'outline')) {
+    return
+  }
+  if (!initialMaterialsReady.value) {
+    message.value = '请先上传招标文件和公司资质/参考资料，再进入第二阶段。'
+    return
+  }
+  if (!secondStageConfirmed.value) {
+    message.value = '材料已齐全，请先在对话中回复“继续第二阶段”。'
+    return
+  }
   running.value = true
   runningAction.value = 'outline'
   clearError()
@@ -3135,6 +3170,33 @@ async function prepareOutline() {
   }
 }
 
+async function submitPlanningFeedback() {
+  const feedback = planningReviewFeedback.value.trim()
+  if (!feedback) return
+  const activeReview = pendingReviews.value.find(item => item.kind === 'planning') || {}
+  const baseBlueprintHash = String(activeReview.target_hash || '')
+  if (!baseBlueprintHash) {
+    error.value = '当前目录版本已变化，请刷新后再提交修改意见。'
+    return
+  }
+  running.value = true
+  runningAction.value = 'planning-feedback'
+  clearError()
+  try {
+    const { data } = await prepareV3Outline(props.runId, { reviewFeedback: feedback, baseBlueprintHash })
+    assertCommandAccepted(data, '目录修改失败')
+    planningReviewFeedback.value = ''
+    dismissedPlanningReviewOperationId.value = ''
+    message.value = '已提交修改意见，正在生成新的目录版本。'
+    await refresh()
+  } catch (cause) {
+    reportError(cause, '提交目录修改意见失败')
+  } finally {
+    running.value = false
+    runningAction.value = ''
+  }
+}
+
 async function confirmPlanning() {
   running.value = true
   runningAction.value = 'confirm'
@@ -3158,7 +3220,6 @@ function openWritingWorkbench() {
 }
 
 async function runDocument(chapterIds = []) {
-  pipelineActivityVersion.value += 1
   const normalizedChapterIds = Array.isArray(chapterIds) ? chapterIds.filter(Boolean) : []
   running.value = true
   runningAction.value = normalizedChapterIds.length ? 'selected-chapter' : 'document'
@@ -4057,20 +4118,21 @@ watch(
     pendingUploads.tender.splice(0)
     pendingUploads.score.splice(0)
     pendingUploads.company.splice(0)
+    connectWorkspaceStream()
     refresh()
   },
 )
 
 onMounted(() => {
   refresh()
+  connectWorkspaceStream()
   window.addEventListener('keydown', handleWorkspaceKeydown)
-  timer = window.setInterval(() => {
-    if (!uploading.value && !loading.value) refresh()
-  }, 2000)
 })
 onUnmounted(() => {
-  window.clearInterval(timer)
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
   if (runningTimer) window.clearInterval(runningTimer)
+  if (assistantClockTimer) window.clearInterval(assistantClockTimer)
   window.removeEventListener('keydown', handleWorkspaceKeydown)
 })
 </script>
@@ -6774,6 +6836,32 @@ onUnmounted(() => {
   max-width: 520px;
   background: #f8fafc;
 }
+.upload-start-bubble {
+  width: 100%;
+  max-width: 560px;
+  background: #f8fbff;
+  border-color: #c7d7fe;
+}
+.upload-start-bubble h4 { margin: 2px 0 4px; color: #172554; font-size: 15px; }
+.upload-start-bubble p { margin: 0; color: #475569; font-size: 13px; }
+.upload-start-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+.upload-start-actions .btn { display: inline-flex; align-items: center; cursor: pointer; }
+.upload-start-actions .btn span { margin-left: 6px; font-size: 11px; opacity: .82; }
+.required-upload-zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
+.required-upload-zone { min-width: 0; border: 1px dashed #93c5fd; border-radius: 10px; background: #fff; transition: border-color .2s ease, background .2s ease; }
+.required-upload-zone.complete { border-style: solid; border-color: #86efac; background: #f0fdf4; }
+.required-upload-zone-label { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 9px; padding: 12px; cursor: pointer; }
+.required-upload-zone-label:hover { background: #eff6ff; }
+.required-upload-zone.complete .required-upload-zone-label:hover { background: #dcfce7; }
+.required-upload-zone-icon { display: grid; place-items: center; width: 26px; height: 30px; color: #2563eb; font-size: 22px; }
+.required-upload-zone-label strong { display: block; color: #172554; font-size: 13px; }
+.required-upload-zone-label strong em { margin-left: 4px; color: #dc2626; font-size: 11px; font-style: normal; }
+.required-upload-zone-label small { display: block; margin-top: 3px; color: #64748b; font-size: 11px; line-height: 1.45; }
+.required-upload-zone-label b { grid-column: 2; color: #2563eb; font-size: 12px; }
+.required-upload-zone.complete .required-upload-zone-label b { color: #15803d; }
+@media (max-width: 720px) {
+  .required-upload-zones { grid-template-columns: 1fr; }
+}
 .card-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .card-title-row h4 { margin: 0; font-size: 14px; color: #0f172a; }
 .chat-materials-grid { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
@@ -7852,6 +7940,74 @@ onUnmounted(() => {
   margin-bottom: 0 !important;
 }
 
+.ai-process-overview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.ai-process-overview span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #eef4fb;
+  color: #52627a;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.ai-process-stage-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ai-process-stage-list button {
+  width: 100%;
+  min-height: 44px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 18px;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  color: #45566f;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-process-stage-list button:hover { background: #f1f6fc; }
+.ai-process-stage-list button:focus-visible { outline: 3px solid rgba(59, 130, 246, .22); outline-offset: 1px; }
+.ai-process-stage-list button > svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.ai-stage-marker {
+  width: 20px;
+  height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid #cbd8e8;
+  border-radius: 50%;
+  color: #60738e;
+  background: #fff;
+  font-size: 11px;
+  font-weight: 800;
+}
+.ai-stage-marker.stage-succeeded,
+.ai-stage-marker.stage-reused { border-color: #6fcf97; color: #fff; background: #229b5f; }
+.ai-stage-marker.stage-failed { border-color: #f1a9a9; color: #fff; background: #cf4545; }
+.ai-stage-marker.stage-running,
+.ai-stage-marker.stage-processing,
+.ai-stage-marker.stage-queued { border-color: #a8c6f5; color: #2f6fed; background: #edf5ff; }
+.ai-stage-copy { min-width: 0; }
+.ai-stage-copy strong,
+.ai-stage-copy small { display: block; }
+.ai-stage-copy strong { color: #33465f; font-size: 12px; }
+.ai-stage-copy small { overflow: hidden; color: #73839a; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+
 .generation-queue-note {
   margin: 12px 0 0;
   color: #64748b;
@@ -8391,6 +8547,8 @@ onUnmounted(() => {
 .planning-review-metrics div { padding: 12px; border: 1px solid #e0e7ff; border-radius: 11px; background: #f8faff; }
 .planning-review-metrics dt { color: #64748b; font-size: 12px; }
 .planning-review-metrics dd { margin: 4px 0 0; color: #1d4ed8; font-size: 20px; font-weight: 800; }
+.planning-review-feedback { display: grid; gap: 6px; margin: 0 0 18px; color: #334155; font-size: 13px; font-weight: 700; }
+.planning-review-feedback textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #bfdbfe; border-radius: 9px; color: #172554; font: inherit; font-weight: 400; line-height: 1.5; }
 .planning-review-actions { display: flex; justify-content: flex-end; gap: 10px; }
 
 /* 执行计划固定在输入框上方；实时动作作为普通聊天消息进入消息流。 */
@@ -8698,7 +8856,7 @@ onUnmounted(() => {
 
 /* 对话统一为浅色消息流，用户与 AI 的内容在时间线上清晰区分。 */
 .legacy-chat-stream > .chat-msg.user-msg { justify-content: flex-end; }
-.legacy-chat-stream > .chat-msg.user-msg .msg-avatar { order: 2; }
+.legacy-chat-stream > .chat-msg.user-msg .msg-avatar { order: initial; }
 .legacy-chat-stream > .chat-msg.user-msg .msg-bubble {
   max-width: min(760px, 88%);
   border: 1px solid #bfdbfe;

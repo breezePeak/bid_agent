@@ -15,6 +15,7 @@ from .contracts import RequirementLedger, ScoreModel, TemplateStructureContract
 from .planning_inference import ChapterOutlineCandidate, ChapterOutlineNodeCandidate
 from .scoring_outline_policy import (
     full_score_condition_heading,
+    is_contextless_heading,
     is_hollow_quality_heading,
     is_sectionable_quality_condition,
     outline_subject,
@@ -48,7 +49,7 @@ def _path_for_unit(unit: object, point: object, group_title: str) -> list[str]:
 def _condition_title(condition: object, index: int) -> str:
     subject = str(getattr(condition, "subject", "") or "").strip()
     if subject and not is_hollow_quality_heading(subject):
-        return subject[:56]
+        return full_score_condition_heading(subject, index)
     text = str(
         getattr(condition, "normalized_condition", "")
         or getattr(condition, "text", "")
@@ -277,27 +278,69 @@ def build_deterministic_outline_candidate(
                 }
             )
             primary_subject = outline_subject(nodes[primary_index].title)
+            section_node_index_by_subject: dict[str, int] = {}
             for index, condition_id in enumerate(sectionable_ids, start=1):
                 condition = conditions_by_id[condition_id]
                 title = _condition_title(condition, index)
-                # Do not manufacture a duplicate child whose only topic is the
-                # already existing primary title — but only when the primary node
-                # does not yet carry any other sectionable condition. If two or
-                # more sectionable conditions share the primary title they must
-                # each get an independently keyed child node to satisfy the
-                # constraint that every substantive condition occupies its own
-                # checkable chapter node.
-                primary_has_sectionable = any(
-                    cid in sectionable_ids
-                    for cid in nodes[primary_index].score_condition_ids
-                )
-                if outline_subject(title) == primary_subject and not primary_has_sectionable:
+                topic_key = outline_subject(title)
+                # Conditions are traceable independently through their IDs, but
+                # a table of contents is organised by business topic.  Reuse an
+                # existing node when two conditions resolve to the same topic.
+                if topic_key == primary_subject:
                     nodes[primary_index] = nodes[primary_index].model_copy(
                         update={
                             "score_condition_ids": [
                                 *nodes[primary_index].score_condition_ids,
                                 condition_id,
                             ]
+                        }
+                    )
+                    continue
+                if is_contextless_heading(title):
+                    primary = nodes[primary_index]
+                    nodes[primary_index] = primary.model_copy(
+                        update={
+                            "score_condition_ids": [
+                                *primary.score_condition_ids,
+                                condition_id,
+                            ],
+                            "writing_objectives": list(
+                                dict.fromkeys(
+                                    [
+                                        *primary.writing_objectives,
+                                        condition.response_intent,
+                                    ]
+                                )
+                            ),
+                        }
+                    )
+                    continue
+                existing_index = section_node_index_by_subject.get(topic_key)
+                if existing_index is not None:
+                    existing = nodes[existing_index]
+                    objectives = [
+                        *existing.writing_objectives,
+                        condition.response_intent,
+                    ]
+                    nodes[existing_index] = existing.model_copy(
+                        update={
+                            "score_condition_ids": [
+                                *existing.score_condition_ids,
+                                condition_id,
+                            ],
+                            "writing_objectives": list(dict.fromkeys(objectives)),
+                            "planned_tables": list(
+                                dict.fromkeys(
+                                    [
+                                        *existing.planned_tables,
+                                        *(
+                                            ["证明材料清单"]
+                                            if condition.condition_role == "evidence"
+                                            else []
+                                        ),
+                                    ]
+                                )
+                            ),
                         }
                     )
                     continue
@@ -322,6 +365,7 @@ def build_deterministic_outline_candidate(
                     target_size=600,
                     confidence=condition.confidence,
                 )
+                section_node_index_by_subject[topic_key] = len(nodes) - 1
 
     if not nodes:
         append(

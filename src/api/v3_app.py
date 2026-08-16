@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import hashlib
 import json
 import os
 import re
 import secrets
+import shutil
 import threading
 import time
 import uuid
@@ -44,6 +46,51 @@ _SESSION_LOCK = threading.Lock()
 SETTINGS = SettingsService(ROOT)
 
 
+def _remove_tree_with_retries(root: Path, *, attempts: int = 8) -> OSError | None:
+    """Return the final filesystem error, if Windows still holds a handle."""
+    last_error: OSError | None = None
+    for attempt in range(attempts):
+        try:
+            shutil.rmtree(root)
+            return None
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.15 * (attempt + 1))
+    return last_error
+
+
+def _purge_tombstone_in_background(root: Path) -> None:
+    """Finish a deletion after transient SQLite/antivirus file handles close."""
+    for _ in range(60):
+        if not root.exists():
+            return
+        if _remove_tree_with_retries(root, attempts=4) is None:
+            return
+        time.sleep(1)
+
+
+def _schedule_tombstone_purge(root: Path) -> None:
+    threading.Thread(
+        target=_purge_tombstone_in_background,
+        args=(root,),
+        daemon=True,
+        name=f"workspace-purge-{root.name[-12:]}",
+    ).start()
+
+
+def _cleanup_pending_workspace_deletions() -> None:
+    """Resume interrupted deletions left by a previous server process."""
+    if not RUNS_DIR.is_dir():
+        return
+    for root in RUNS_DIR.glob(".deleting-*"):
+        if not root.is_dir():
+            continue
+        if _remove_tree_with_retries(root, attempts=4) is not None:
+            _schedule_tombstone_purge(root)
+
+
 def _reconcile_interrupted_workspaces() -> list[dict[str, Any]]:
     """Close durable operations whose worker lease died before this boot."""
     recovered: list[dict[str, Any]] = []
@@ -73,6 +120,7 @@ async def _runtime_settings_lifespan(_app: FastAPI):
     previous = SETTINGS.capture_runtime_environment("BID_AGENT_CONFIG_ROOT")
     os.environ["BID_AGENT_CONFIG_ROOT"] = str(ROOT)
     SETTINGS.apply_runtime_settings()
+    _cleanup_pending_workspace_deletions()
     _reconcile_interrupted_workspaces()
     try:
         yield
@@ -528,6 +576,53 @@ def _validate_upload_type(role: InputRole, filename: str) -> None:
         )
 
 
+def _delete_workspace_root(workspace_id: str) -> None:
+    """Delete only a real V3 workspace contained by ``RUNS_DIR``."""
+    context = _context(workspace_id)
+    root = context.root
+    runs_root = RUNS_DIR.resolve()
+    try:
+        root.resolve().relative_to(runs_root)
+    except ValueError as exc:
+        raise ControlPlaneError(
+            "WORKSPACE_DELETE_FORBIDDEN",
+            "工作空间目录不在允许删除的范围内",
+            status_code=403,
+        ) from exc
+    if not root.is_dir() or not (root / "workspace" / "v3").is_dir():
+        raise ControlPlaneError(
+            "WORKSPACE_NOT_FOUND",
+            "工作空间不存在或已被删除",
+            status_code=404,
+        )
+    # Move the directory out of its public location first. This makes every
+    # subsequent snapshot/poll request fail before it can recreate or lock a
+    # file while Windows is deleting the workspace tree.
+    tombstone = RUNS_DIR / f".deleting-{workspace_id}-{uuid.uuid4().hex}"
+    rename_error: OSError | None = None
+    for attempt in range(8):
+        try:
+            root.replace(tombstone)
+            rename_error = None
+            break
+        except OSError as exc:
+            rename_error = exc
+            time.sleep(0.15 * (attempt + 1))
+    if rename_error is not None:
+        raise ControlPlaneError(
+            "WORKSPACE_DELETE_FAILED",
+            "工作空间正在被使用，暂时无法开始删除",
+            status_code=409,
+            details={"error": f"{type(rename_error).__name__}: {rename_error}"[:500]},
+        ) from rename_error
+
+    # A request that began before the rename may still be closing a SQLite/WAL
+    # handle. The workspace is already hidden from every public API at this
+    # point, so complete any delayed filesystem cleanup in the background.
+    if _remove_tree_with_retries(tombstone) is not None:
+        _schedule_tombstone_purge(tombstone)
+
+
 @app.post("/api/v3/workspaces")
 async def create_workspace(request: Request) -> JSONResponse:
     try:
@@ -541,7 +636,16 @@ async def create_workspace(request: Request) -> JSONResponse:
 @app.get("/api/v3/workspaces")
 def list_workspaces(request: Request) -> JSONResponse:
     items = []
-    for root in sorted((p for p in RUNS_DIR.glob("*") if (p / "workspace" / "v3").is_dir()), key=lambda p: p.stat().st_mtime, reverse=True):
+    for root in sorted(
+        (
+            path
+            for path in RUNS_DIR.glob("*")
+            if not path.name.startswith(".")
+            and (path / "workspace" / "v3").is_dir()
+        ),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    ):
         try: _acl(_context(root.name), _principal(request), write=False)
         except ControlPlaneError: continue
         snapshot = V3WorkspaceSnapshotBuilder(_context(root.name)).build()
@@ -572,6 +676,26 @@ def list_workspaces(request: Request) -> JSONResponse:
             }
         )
     return JSONResponse({"ok": True, "workspaces": items})
+
+
+@app.delete("/api/v3/workspaces/{workspace_id}")
+async def delete_workspace(workspace_id: str) -> JSONResponse:
+    try:
+        # The authentication middleware has already verified write access for
+        # this workspace before the destructive operation reaches this route.
+        await run_in_threadpool(_delete_workspace_root, workspace_id)
+        return JSONResponse({"ok": True, "workspace_id": workspace_id})
+    except ControlPlaneError as exc:
+        return _error(exc)
+    except OSError as exc:
+        return _error(
+            ControlPlaneError(
+                "WORKSPACE_DELETE_FAILED",
+                "工作空间删除失败，请关闭占用该工作空间的程序后重试",
+                status_code=500,
+                details={"error": f"{type(exc).__name__}: {exc}"[:500]},
+            )
+        )
 
 
 @app.post("/api/v3/workspaces/{workspace_id}/uploads")
@@ -692,6 +816,70 @@ def snapshot(workspace_id: str) -> JSONResponse:
     except ControlPlaneError:
         payload["global_project_context"] = None
     return JSONResponse({"ok": True, "snapshot": payload})
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/stream")
+async def workspace_stream(
+    workspace_id: str,
+    request: Request,
+) -> StreamingResponse:
+    """Push workspace snapshots over one long-lived SSE connection."""
+    context = _context(workspace_id)
+
+    def encode(event: str, payload: dict[str, Any]) -> str:
+        return (
+            f"event: {event}\n"
+            f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n"
+        )
+
+    async def events():
+        last_seq = 0
+        try:
+            initial = await run_in_threadpool(
+                V3WorkspaceSnapshotBuilder(context).build
+            )
+            yield encode("snapshot", {"ok": True, "snapshot": initial})
+            latest = await run_in_threadpool(
+                ControlStore(context).recent_events, limit=1
+            )
+            last_seq = max((int(row.get("seq") or 0) for row in latest), default=0)
+        except Exception:
+            yield encode("closed", {"ok": False, "reason": "workspace_unavailable"})
+            return
+
+        while not await request.is_disconnected():
+            # The browser keeps one connection open; it never polls this
+            # endpoint.  We only build and send a new snapshot after a durable
+            # workspace event has been committed.
+            if not context.root.is_dir():
+                yield encode("closed", {"ok": False, "reason": "workspace_deleted"})
+                return
+            try:
+                changed = await run_in_threadpool(
+                    ControlStore(context).events,
+                    last_seq,
+                    limit=200,
+                )
+                if changed:
+                    last_seq = max(int(row.get("seq") or 0) for row in changed)
+                    current = await run_in_threadpool(
+                        V3WorkspaceSnapshotBuilder(context).build
+                    )
+                    yield encode("snapshot", {"ok": True, "snapshot": current})
+                await asyncio.sleep(0.25)
+            except Exception:
+                yield encode("closed", {"ok": False, "reason": "workspace_unavailable"})
+                return
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.get("/api/v3/workspaces/{workspace_id}/global-project-context")

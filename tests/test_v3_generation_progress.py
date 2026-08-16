@@ -208,6 +208,65 @@ class V3GenerationProgressTests(TestCase):
                 "generation-request",
             )
 
+    def test_confirmed_planning_marks_the_outline_human_gate_complete(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+
+            class _Control:
+                @staticmethod
+                def stage_runs(_operation_id: str):
+                    return [
+                        {
+                            "stage_command": "confirm_planning",
+                            "status": "blocked_human",
+                            "attempt": 1,
+                        }
+                    ]
+
+                @staticmethod
+                def llm_requests(_operation_id: str):
+                    return []
+
+            pipeline = V3WorkspaceSnapshotBuilder(context)._analysis_pipeline(
+                _Control(),
+                {},
+                {},
+                {"operation_id": "outline-operation", "status": "blocked_human"},
+                planning_confirmed=True,
+            )
+            confirmation = next(
+                stage for stage in pipeline["stages"]
+                if stage["stage_id"] == "confirm_planning"
+            )
+            self.assertEqual(confirmation["status"], "succeeded")
+
+    def test_empty_outline_does_not_expose_a_stale_human_confirmation_gate(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+
+            class _Control:
+                @staticmethod
+                def stage_runs(_operation_id: str):
+                    return [{"stage_command": "confirm_planning", "status": "blocked_human"}]
+
+                @staticmethod
+                def llm_requests(_operation_id: str):
+                    return []
+
+            pipeline = V3WorkspaceSnapshotBuilder(context)._analysis_pipeline(
+                _Control(),
+                {},
+                {},
+                {"operation_id": "outline-operation", "status": "blocked_human"},
+                planning_status="blocked",
+            )
+            confirmation = next(
+                stage for stage in pipeline["stages"]
+                if stage["stage_id"] == "confirm_planning"
+            )
+            self.assertEqual(confirmation["status"], "pending")
+            self.assertEqual(pipeline["status"], "failed")
+
     def test_pipeline_records_queued_running_and_terminal_for_every_stage(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context = self._context(Path(temporary))

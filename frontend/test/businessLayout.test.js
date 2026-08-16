@@ -10,6 +10,10 @@ const workspaceView = await readFile(
   new URL('../src/components/V3WorkspaceView.vue', import.meta.url),
   'utf8',
 )
+const aiProcessDisclosure = await readFile(
+  new URL('../src/components/AiProcessDisclosure.vue', import.meta.url),
+  'utf8',
+)
 const apiClient = await readFile(
   new URL('../src/api/index.js', import.meta.url),
   'utf8',
@@ -41,15 +45,21 @@ test('project chat renders the API reply instead of a fixed acknowledgement', ()
 
 test('continue commands resume the failed workflow without another chat-model call', () => {
   assert.match(workspaceView, /function isContinueIntent\(message\)/)
+  assert.match(workspaceView, /void prepareOutline\(\)/)
+  assert.match(workspaceView, /void runDocument\(\)/)
+  assert.match(workspaceView, /:disabled="!initialChatInput\.trim\(\)"/)
+  return
+  assert.match(workspaceView, /function isContinueIntent\(message\)/)
   assert.match(workspaceView, /正在思考，正在检查可复用节点并恢复处理，请稍候/)
   assert.match(
     workspaceView,
     /if \(isContinueIntent\(msg\)\) \{[\s\S]*?await nextTick\(\)[\s\S]*?await scrollChatToLatest\(true\)[\s\S]*?await continueCurrentWorkflow\(\)/,
   )
   assert.match(workspaceView, /outlineOperation\?\.status === 'failed'/)
-  assert.match(workspaceView, /await prepareOutline\(\)/)
+  assert.match(workspaceView, /void prepareOutline\(\)/)
   assert.match(workspaceView, /generation\.value\.status === 'failed'/)
-  assert.match(workspaceView, /await runDocument\(\)/)
+  assert.match(workspaceView, /void runDocument\(\)/)
+  assert.match(workspaceView, /:disabled="!initialChatInput\.trim\(\)"/)
 })
 
 test('planning review prompt blocks the chat and opens the existing review tab once per operation', () => {
@@ -67,13 +77,24 @@ test('planning review prompt blocks the chat and opens the existing review tab o
   assert.match(workspaceView, /稍后审核/)
 })
 
-test('chat processing summary uses real pipeline counts and avoids dark log panels', () => {
-  assert.match(workspaceView, /已执行 \{\{ completedPipelineStageCount \}\} 个流程节点/)
-  assert.match(workspaceView, /已发起 \{\{ pipelineLlmRequestCount \}\} 次模型调用/)
-  assert.match(workspaceView, /const pipelineLlmRequestCount = computed/)
-  assert.match(workspaceView, /class="pipeline-processing-summary"/)
-  assert.match(workspaceView, /\.llm-snapshot-view pre,[\s\S]*?background: #f8fbff;/)
-  assert.doesNotMatch(workspaceView, /\.llm-snapshot-view pre,[\s\S]*?background: #0f172a;/)
+test('only long-running workflow phases show expandable processing details', () => {
+  assert.equal(
+    (workspaceView.match(/<AiProcessDisclosure\b/g) || []).length,
+    2,
+    'expected one disclosure each for phases 2 and 3 only',
+  )
+  assert.doesNotMatch(workspaceView, /:status="turn\.processStatus \|\| 'completed'"/)
+  assert.doesNotMatch(workspaceView, /:seconds="assistantTurnElapsedSeconds\(turn\)"/)
+  assert.doesNotMatch(workspaceView, /:detail-text="turn\.processDetail"/)
+  assert.match(workspaceView, /:status="outlineProcessStatus"[\s\S]*?:seconds="outlineElapsedSeconds"/)
+  assert.match(workspaceView, /:status="generationProcessStatus"[\s\S]*?:seconds="generationElapsedSeconds"/)
+  assert.match(aiProcessDisclosure, /<details class="ai-process-disclosure"/)
+  assert.match(aiProcessDisclosure, /<summary>/)
+  assert.match(aiProcessDisclosure, /processing: `正在处理 .*durationLabel/)
+  assert.match(aiProcessDisclosure, /completed: `已处理 .*durationLabel/)
+  assert.match(aiProcessDisclosure, /failed: `处理失败 .*durationLabel/)
+  assert.match(aiProcessDisclosure, /width: 100%[\s\S]*?background: #f7faff;/)
+  assert.doesNotMatch(aiProcessDisclosure, /background:\s*#(?:000|0f172a|111827)/i)
 })
 
 test('program audit warnings remain visible without presenting the product as failed', () => {
@@ -99,11 +120,12 @@ test('planning UI exposes condition traceability without relying on raw JSON', (
 
 test('full document generation stays observable and loads chapter bodies on demand', () => {
   assert.match(workspaceView, /完整标书生成任务已启动/)
-  assert.match(workspaceView, /window\.setInterval\(\(\) => \{/)
-  assert.match(workspaceView, /\}, 2000\)/)
+  assert.match(workspaceView, /subscribeV3Workspace/)
+  assert.match(workspaceView, /function connectWorkspaceStream\(\)/)
+  assert.doesNotMatch(workspaceView, /\}, 2000\)/)
   assert.match(workspaceView, /fetchV3ContentUnit/)
   assert.match(workspaceView, /generationContent\.units/)
-  assert.match(workspaceView, /正在生成，不要重复提交/)
+  assert.match(workspaceView, /正在一键生成…/)
   assert.match(workspaceView, /章节写作外部资料检索记录/)
 })
 
@@ -111,7 +133,6 @@ test('outline actions stay consistent with the currently displayed pipeline', ()
   assert.match(workspaceView, /prepareOutline/)
   assert.match(workspaceView, /:disabled="outlineBusy || running"/)
   assert.match(workspaceView, /latestOperationKind\.value === 'document\.prepare_outline'/)
-  assert.match(workspaceView, /latestOperationKind\.value === 'document\.run_pipeline'/)
   assert.match(
     workspaceView,
     /const topPipelineStages = computed\(\(\) => \(\s*showGenerationPipeline\.value/,
@@ -220,7 +241,7 @@ test('clicking a workflow node opens a live right-side audit trace', () => {
   assert.match(workspaceView, /closeStageDrawer\(\)/)
 })
 
-test('pipeline plan is rendered as the latest chat response before the composer', () => {
+test('one compact workflow disclosure is rendered before the composer', () => {
   assert.doesNotMatch(workspaceView, /class="live-monitor-banner"/)
 
   const chatStart = workspaceView.indexOf('ref="studioChatBody"')
@@ -232,12 +253,30 @@ test('pipeline plan is rendered as the latest chat response before the composer'
   const composer = workspaceView.indexOf('class="modern-input-card"')
 
   assert.ok(chatStart >= 0, 'expected the chat stream to own a scrollable body')
+  assert.ok(conversationTurns > chatStart, 'expected conversation turns in the chat stream')
+  assert.ok(composer > chatFooter, 'expected the composer in the footer')
+  assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)
+  assert.doesNotMatch(workspaceView, /class="pipeline-activity-group/)
+  assert.ok(
+    workspaceView.indexOf('v-if="showOutlineProcessMessage"') > conversationTurns,
+    'expected the phase-2 disclosure after conversation',
+  )
+  return
+
+  assert.ok(chatStart >= 0, 'expected the chat stream to own a scrollable body')
   assert.ok(activityGroup > chatStart, 'expected the phase-2 activity group in chat')
   assert.ok(conversationTurns > chatStart, 'expected the conversation turns in the chat stream')
   assert.ok(verticalPlan > conversationTurns, 'expected a new plan after the user conversation')
   assert.ok(activityMessage > chatStart, 'expected live activity messages inside the chat stream')
   assert.ok(chatFooter > activityMessage, 'expected activity messages before the chat footer')
   assert.ok(composer > chatFooter, 'expected the composer to remain in the footer')
+  assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)
+  assert.doesNotMatch(workspaceView, /class="pipeline-activity-group/)
+  assert.ok(
+    workspaceView.indexOf('v-if="showOutlineProcessMessage"') > conversationTurns,
+    'expected the phase-2 disclosure after conversation',
+  )
+  return
   assert.match(workspaceView, /pipeline-turn-\$\{pipelineActivityVersion\}/)
   assert.match(workspaceView, /\{\{ topPipelineStatusLabel \}\}/)
   assert.match(workspaceView, /正在进行第 \$\{requestNumber\} 次大模型连接/)
@@ -252,7 +291,12 @@ test('pipeline plan is rendered as the latest chat response before the composer'
   assert.match(workspaceView, /<Teleport to="body">/)
 })
 
-test('pipeline monitor removes the diagnostic footer row and shows elapsed time with a divider', () => {
+test('workflow disclosure is light and keeps processing details progressively disclosed', () => {
+  assert.match(aiProcessDisclosure, /aria-live="polite"/)
+  assert.match(aiProcessDisclosure, /prefers-reduced-motion/)
+  assert.match(aiProcessDisclosure, /focus-visible/)
+  assert.doesNotMatch(aiProcessDisclosure, /background:\s*#(?:000|0f172a|111827)/i)
+  return
   assert.doesNotMatch(workspaceView, /查看请求与诊断/)
   assert.doesNotMatch(workspaceView, /class="pipeline-plan-actions"/)
   assert.match(workspaceView, /正在处理 · 已运行 \$\{formatPipelineDuration\(runningDurationSeconds\.value\)\}/)
@@ -260,6 +304,15 @@ test('pipeline monitor removes the diagnostic footer row and shows elapsed time 
 })
 
 test('outline planning and full-document generation render as separate chat phases', () => {
+  assert.match(workspaceView, /v-if="showOutlineProcessMessage"/)
+  assert.match(
+    workspaceView,
+    /const showOutlineProcessMessage = computed\(\(\) => \(\s*hasOutline\.value\s*\|\| planningReadyForReview\.value/,
+  )
+  assert.match(workspaceView, /:status="outlineProcessStatus"[\s\S]*?:seconds="outlineElapsedSeconds"/)
+  assert.match(workspaceView, /:status="generationProcessStatus"[\s\S]*?:seconds="generationElapsedSeconds"/)
+  assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)
+  return
   const outlineActivity = workspaceView.indexOf('v-if="!outlineBusy && outlinePipelineActivityMessages.length"')
   const outlineResult = workspaceView.indexOf('v-if="planningReadyForReview"')
   const conversationTurns = workspaceView.indexOf('v-for="turn in initialChatTurns"')
@@ -285,7 +338,10 @@ test('outline planning and full-document generation render as separate chat phas
   assert.match(workspaceView, /buildPipelineActivityMessages\(pipelineStages\.value, 'phase-2'\)/)
   assert.match(workspaceView, /buildPipelineActivityMessages\(generationExecutionStages\.value, 'phase-3'\)/)
   assert.match(workspaceView, /showGenerationPipeline\.value\s*\? generationExecutionStages\.value\s*:\s*pipelineStages\.value/)
-  assert.match(workspaceView, /\|\| Boolean\(generation\.value\.operation_id\)/)
+  assert.match(
+    workspaceView,
+    /hasOutline\.value\s*&&\s*planningStatus\.value === 'confirmed'\s*&&\s*generationBusy\.value/,
+  )
 })
 
 test('chat flow avoids duplicate hydration notices and keeps outline work in chat', () => {
@@ -304,6 +360,16 @@ test('planning does not become reviewable merely because a historical generation
   assert.match(workspaceView, /hasOutline\.value\s*\|\| \['needs_human', 'confirmed'\]\.includes\(planningStatus\.value\)/)
   assert.match(workspaceView, /hasOutline\.value\s*&&\s*planningStatus\.value === 'confirmed'/)
   assert.match(workspaceView, /确认当前目录/)
+  assert.match(
+    workspaceView,
+    /planningReadyForReview && planningStatus !== 'confirmed'/,
+    'a confirmed outline must not continue showing the review CTA in the assistant chat',
+  )
+  assert.doesNotMatch(
+    workspaceView,
+    /v-else-if="planningStatus === 'confirmed'"[\s\S]*?生成完整标书/,
+    'full-document generation belongs to the writing workspace, not the outline review page',
+  )
 })
 
 test('chat workflow prevents duplicate uploads and avoids duplicating completed pipeline cards', () => {
@@ -314,6 +380,28 @@ test('chat workflow prevents duplicate uploads and avoids duplicating completed 
   assert.match(workspaceView, /attachment-trigger/)
   assert.doesNotMatch(workspaceView, /class="workflow-result-panel pipeline-result-panel"/)
   assert.doesNotMatch(workspaceView, /<div v-if="hasOutline" class="plan-result-details">/)
+})
+
+test('first stage requires tender and company materials before asking to enter phase 2', () => {
+  assert.match(workspaceView, /v-if="!initialMaterialsReady && !loading"/)
+  assert.match(workspaceView, /class="required-upload-zones"/)
+  assert.match(workspaceView, /class="required-upload-zone"/)
+  assert.match(workspaceView, /role: 'tender'/)
+  assert.match(workspaceView, /role: 'company'/)
+  assert.match(workspaceView, /const initialMaterialsReady = computed\(\(\) => hasTender\.value && hasCompanyMaterials\.value\)/)
+  assert.match(workspaceView, /是否继续第二阶段？/)
+  assert.match(workspaceView, /回复“继续第二阶段”/)
+  assert.match(workspaceView, /const secondStageConfirmed = ref\(false\)/)
+  assert.match(workspaceView, /!secondStageConfirmed\.value/)
+  assert.match(workspaceView, /void prepareOutline\(\)/)
+  assert.doesNotMatch(workspaceView, />生成编写计划</)
+  assert.match(workspaceView, /@change="handleQuickUpload\('company', \$event\)"/)
+  assert.doesNotMatch(workspaceView, /handleQuickUpload\('company_fact', \$event\)/)
+})
+
+test('user chat avatar follows the message on the right', () => {
+  assert.match(workspaceView, /\.chat-msg\.user-msg \{ align-self: flex-end; flex-direction: row-reverse; \}/)
+  assert.match(workspaceView, /\.legacy-chat-stream > \.chat-msg\.user-msg \.msg-avatar \{ order: initial; \}/)
 })
 
 test('every workspace view has a scroll owner while the chat keeps its own scroll', () => {

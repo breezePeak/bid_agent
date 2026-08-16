@@ -43,6 +43,8 @@ from .scoring_outline_policy import (
     document_quality_check_items,
     document_quality_criteria,
     full_score_condition_heading,
+    is_contextless_heading,
+    is_evaluative_sentence_heading,
     is_hollow_quality_heading,
     is_document_quality_score,
     outline_subject,
@@ -1322,6 +1324,14 @@ class PlanningAgent:
                     f"章节 {node.local_id} 标题仅包含空洞质量形容词: "
                     f"{node.title}"
                 )
+            if template_structure is None and is_evaluative_sentence_heading(node.title):
+                raise PlanningCandidateCompilationError(
+                    f"章节 {node.local_id} 标题包含评分式评价语: {node.title}"
+                )
+            if template_structure is None and is_contextless_heading(node.title):
+                raise PlanningCandidateCompilationError(
+                    f"章节 {node.local_id} 标题缺少业务对象: {node.title}"
+                )
             if (
                 node.parent_local_id is not None
                 and local_nodes[node.parent_local_id].order >= node.order
@@ -1459,7 +1469,6 @@ class PlanningAgent:
                     f"{sorted(missing)}"
                 )
 
-        substantive_nodes_by_unit: dict[str, list[str]] = defaultdict(list)
         for condition_id in visible_condition_ids:
             unit_id = condition_owner_unit[condition_id]
             primary_node_id = primary_node_by_unit.get(unit_id)
@@ -1498,40 +1507,6 @@ class PlanningAgent:
                     f"{unit_id} 的 primary 章节并转为写作要求，"
                     "不得单独生成空洞质量章节"
                 )
-            if role in {"content", "evidence"} or sectionable_quality:
-                substantive_nodes_by_unit[unit_id].extend(
-                    sorted(covered_nodes)
-                )
-        for unit_id, bound_node_ids in substantive_nodes_by_unit.items():
-            seen_nodes: set[str] = set()
-            for node_id in bound_node_ids:
-                if node_id in seen_nodes:
-                    # 诊断：找出哪些 condition 共用了该节点
-                    primary_nid = primary_node_by_unit.get(unit_id, "")
-                    conflicting = [
-                        cid
-                        for cid in visible_condition_ids
-                        if (
-                            condition_owner_unit.get(cid) == unit_id
-                            and node_id
-                            in {
-                                n
-                                for n in subtree_ids(primary_nid)
-                                if cid in local_nodes[n].score_condition_ids
-                            }
-                        )
-                    ]
-                    raise PlanningCandidateCompilationError(
-                        f"ScoreResponseUnit {unit_id} 的可成文满分条件共用了节点 "
-                        f"{node_id!r}"
-                        f"（标题: {local_nodes[node_id].title!r}）；"
-                        f"冲突的 condition_id: {conflicting}。"
-                        "满分条件必须各自形成可检查章节节点，"
-                        "不得将多项实质性条件塞回同一个节点"
-                    )
-                seen_nodes.add(node_id)
-
-
         template_node_by_local: dict[str, ContractNode] = {}
         if template_structure is None:
             nodes_with_slots = [

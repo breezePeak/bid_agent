@@ -19,7 +19,12 @@ from typing import Any, Callable, Generic, Literal, Mapping, Protocol, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .canonicalization import canonical_hash
-from .scoring_outline_policy import is_hollow_quality_heading, is_sectionable_quality_condition
+from .scoring_outline_policy import (
+    is_contextless_heading,
+    is_evaluative_sentence_heading,
+    is_hollow_quality_heading,
+    is_sectionable_quality_condition,
+)
 
 PROJECT_PROMPT_FILE = "v3_planning_agent_project.md"
 TOPIC_PROMPT_FILE = "v3_planning_agent_topics.md"
@@ -27,11 +32,11 @@ OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
 
 PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v1.6"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
-OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v2.5"
+OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v3.0"
 
 PROJECT_CAPABILITY_VERSION = "1.6.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
-OUTLINE_CAPABILITY_VERSION = "2.5.0"
+OUTLINE_CAPABILITY_VERSION = "3.0.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v3"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
@@ -125,6 +130,7 @@ class OutlineDecompositionInput(StrictPlanningModel):
     score_model: dict[str, Any]
     template_structure: dict[str, Any] | None = None
     document_mode: Literal["auto_outline", "template_strict"] = "auto_outline"
+    review_feedback: str = ""
 
 
 class CitedStatementCandidate(StrictPlanningModel):
@@ -661,16 +667,13 @@ class _StructuredLLMProvider(Generic[CandidateT]):
         while current is not None and id(current) not in seen:
             seen.add(id(current))
             if isinstance(current, json.JSONDecodeError):
-                message = str(current).lower()
-                return any(
-                    marker in message
-                    for marker in (
-                        "unterminated",
-                        "expecting value",
-                        "expecting ',' delimiter",
-                        "expecting property name",
-                    )
-                )
+                # A malformed JSON object is just as sensitive to request
+                # size as an explicitly truncated one.  After the single
+                # permitted repair has also produced invalid JSON, split a
+                # multi-score batch rather than surfacing a dead-end error.
+                # In particular, ``Expecting ':' delimiter`` is common when
+                # an otherwise complete, large object loses one separator.
+                return True
             if isinstance(current, PlanningInferenceOutputTruncatedError):
                 return True
             current = current.__cause__
@@ -2292,17 +2295,12 @@ class LLMOutlineDecompositionProvider(
         base = super()._repair_feedback(error, candidate, request)
         error_text = str(error)
         hints: list[str] = []
-        if (
-            "满分条件必须各自形成可检查章节节点" in error_text
-            or "可成文满分条件共用了节点" in error_text
-            or "满分条件共用了节点" in error_text
-        ):
+        if "章节标题包含评分式评价语" in error_text or "章节标题缺少业务对象" in error_text:
             hints.append(
-                "节点共用修复：每个 content/evidence 类型的 condition_id 必须"
-                "在其所属 ScoreResponseUnit 的 primary 子树中绑定到唯一的章节节点，"
-                "不得让多个不同的 condition_id 的 score_condition_ids 指向同一节点。"
-                "请为每个 condition 创建或指定独立的子节点，"
-                "确保同一 Unit 下的各个可成文满分条件所覆盖的节点集合互不相交。"
+                "标题修复：章节标题只写业务对象、任务、方法、过程或成果；"
+                "将“科学、合理、细致、条理清楚、重点突出、可操作性强”等"
+                "评分评价语移入 writing_objectives。相关 condition_id 可以绑定同一"
+                "业务章节，不必为每个条件复制一个评分句式标题。"
             )
         if "未进入其 ScoreResponseUnit" in error_text or "未进入其主责章节子树" in error_text:
             hints.append(
@@ -2528,16 +2526,11 @@ class LLMOutlineDecompositionProvider(
         while current is not None and id(current) not in seen:
             seen.add(id(current))
             if isinstance(current, json.JSONDecodeError):
-                message = str(current).lower()
-                return any(
-                    marker in message
-                    for marker in (
-                        "unterminated",
-                        "expecting value",
-                        "expecting ',' delimiter",
-                        "expecting property name",
-                    )
-                )
+                # After the one allowed repair, any invalid JSON from a
+                # multi-score batch is recoverable by splitting the request.
+                # This also covers a missing ':' delimiter in an otherwise
+                # complete large object.
+                return True
             if isinstance(current, PlanningInferenceOutputTruncatedError):
                 return True
             current = current.__cause__
@@ -3286,6 +3279,14 @@ class LLMOutlineDecompositionProvider(
                     f"章节 {node.local_id} 标题仅包含空洞质量形容词: "
                     f"{node.title}"
                 )
+            if request.document_mode == "auto_outline" and is_evaluative_sentence_heading(node.title):
+                raise ValueError(
+                    f"章节 {node.local_id} 标题包含评分式评价语: {node.title}"
+                )
+            if request.document_mode == "auto_outline" and is_contextless_heading(node.title):
+                raise ValueError(
+                    f"章节 {node.local_id} 标题缺少业务对象: {node.title}"
+                )
             referenced_units = (
                 *node.primary_response_unit_ids,
                 *node.supporting_response_unit_ids,
@@ -3494,7 +3495,6 @@ class LLMOutlineDecompositionProvider(
                     f"{sorted(missing)}"
                 )
 
-        substantive_nodes_by_unit: dict[str, list[str]] = {}
         for condition_id in catalog["visible_condition_ids"]:
             unit_id = catalog["condition_owner_unit"].get(condition_id)
             primary_node = primary_by_unit.get(unit_id or "")
@@ -3535,40 +3535,6 @@ class LLMOutlineDecompositionProvider(
                     f"{unit_id} 的 primary 章节并转为写作要求，"
                     "不得单独生成空洞质量章节"
                 )
-            if role in {"content", "evidence"} or sectionable_quality:
-                substantive_nodes_by_unit.setdefault(
-                    unit_id,
-                    [],
-                ).extend(sorted(covered_nodes))
-        for unit_id, bound_node_ids in substantive_nodes_by_unit.items():
-            seen_nodes: set[str] = set()
-            for node_id in bound_node_ids:
-                if node_id in seen_nodes:
-                    # 诊断：找出哪些 condition 共用了该节点
-                    conflicting = [
-                        cid
-                        for cid in catalog["visible_condition_ids"]
-                        if (
-                            catalog["condition_owner_unit"].get(cid) == unit_id
-                            and node_id
-                            in {
-                                n
-                                for n in subtree(
-                                    primary_by_unit.get(unit_id, "")
-                                )
-                                if cid in node_by_id[n].score_condition_ids
-                            }
-                        )
-                    ]
-                    raise ValueError(
-                        f"ScoreResponseUnit {unit_id} 的可成文满分条件共用了节点 "
-                        f"{node_id!r}"
-                        f"（标题: {node_by_id[node_id].title!r}）；"
-                        f"冲突的 condition_id: {conflicting}。"
-                        "满分条件必须各自形成可检查章节节点，"
-                        "不得将多项实质性条件塞回同一个节点"
-                    )
-                seen_nodes.add(node_id)
         template = request.template_structure
         if request.document_mode == "template_strict" and template is None:
             raise ValueError(

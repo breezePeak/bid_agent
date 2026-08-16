@@ -223,6 +223,7 @@ export function normalizeV3WorkspaceSnapshot(payload) {
   const rawGeneration = objectOrEmpty(raw.generation)
   const rawGenerationContent = objectOrEmpty(rawGeneration.content)
   const rawGenerationResearch = objectOrEmpty(rawGeneration.research)
+  const rawWorkflow = objectOrEmpty(raw.workflow)
   const rawGlobalProjectContext = objectOrEmpty(raw.global_project_context)
   const globalProjectContext = {
     ...rawGlobalProjectContext,
@@ -290,6 +291,28 @@ export function normalizeV3WorkspaceSnapshot(payload) {
     global_project_context: globalProjectContext,
     analysis,
     planning: objectOrEmpty(raw.planning),
+    workflow: {
+      ...rawWorkflow,
+      phase: String(rawWorkflow.phase || 'materials'),
+      status: String(rawWorkflow.status || 'not_started'),
+      operation_id: String(rawWorkflow.operation_id || ''),
+      attempt: Number(rawWorkflow.attempt) || 0,
+      current_stage_id: String(rawWorkflow.current_stage_id || ''),
+      can_resume: rawWorkflow.can_resume === true,
+      stages: arrayOrEmpty(rawWorkflow.stages).map(stage => ({
+        ...objectOrEmpty(stage),
+        attempt: Number(objectOrEmpty(stage).attempt) || 0,
+        llm_request_count: Number(objectOrEmpty(stage).llm_request_count) || 0,
+        llm_requests: arrayOrEmpty(objectOrEmpty(stage).llm_requests),
+      })),
+      pending_reviews: arrayOrEmpty(rawWorkflow.pending_reviews).map(review => ({
+        ...objectOrEmpty(review),
+        review_id: String(objectOrEmpty(review).review_id || ''),
+        kind: String(objectOrEmpty(review).kind || ''),
+        status: String(objectOrEmpty(review).status || 'pending'),
+        items: arrayOrEmpty(objectOrEmpty(review).items),
+      })),
+    },
     document,
     generation: {
       ...rawGeneration,
@@ -771,11 +794,16 @@ export function buildRunPipelineCommand(commandId, expectedRevision, chapterIds 
   })
 }
 
-export function buildPrepareOutlineCommand(commandId, expectedRevision) {
+export function buildPrepareOutlineCommand(commandId, expectedRevision, options = {}) {
+  const reviewFeedback = String(options.reviewFeedback || '').trim()
+  const baseBlueprintHash = String(options.baseBlueprintHash || '').trim()
   return buildV3Command({
     commandId,
     kind: 'document.prepare_outline',
-    payload: {},
+    payload: {
+      ...(reviewFeedback ? { review_feedback: reviewFeedback } : {}),
+      ...(baseBlueprintHash ? { base_blueprint_hash: baseBlueprintHash } : {}),
+    },
     expectedRevision,
   })
 }

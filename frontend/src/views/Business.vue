@@ -49,7 +49,7 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import WorkspaceSelector from '../components/WorkspaceSelector.vue'
 import TopBar from '../components/TopBar.vue'
@@ -57,7 +57,7 @@ import CreateWorkspaceDialog from '../components/CreateWorkspaceDialog.vue'
 import SettingsDialog from '../components/SettingsDialog.vue'
 import V3WorkspaceView from '../components/V3WorkspaceView.vue'
 import ChapterWorkbenchView from '../components/ChapterWorkbenchView.vue'
-import { fetchChapters, fetchRuns, fetchV3WorkspaceSnapshot, deleteRun } from '../api'
+import { fetchRuns, fetchV3WorkspaceSnapshot, deleteRun, subscribeV3Workspace } from '../api'
 
 const route = useRoute()
 const router = useRouter()
@@ -67,13 +67,22 @@ const runsLoading = ref(false)
 const showCreateDialog = ref(false)
 const showSettingsDialog = ref(false)
 const hasOutline = ref(false)
+const workflowPhase = ref('materials')
+const workflowStatus = ref('not_started')
 const outlineProbing = ref(false)
-let outlineTimer = null
+let closeWorkspaceStream = null
 
 const chapterId = computed(() => String(route.params.chapterId || ''))
 const shellMode = computed(() => {
   if (route.name === 'WorkspacePipeline') return 'pipeline'
-  return hasOutline.value ? 'workbench' : 'pipeline'
+  // A historical ChapterBlueprint is not a routing signal.  The workbench is
+  // reachable only after the current H1 receipt has confirmed that exact
+  // directory version.
+  // H1 confirmation is the routing boundary.  A later writing failure still
+  // belongs to the chapter workbench, where its retry and review actions live.
+  return workflowPhase.value === 'writing'
+    ? 'workbench'
+    : 'pipeline'
 })
 
 const activeRun = computed(() => {
@@ -106,6 +115,22 @@ function blueprintNodesFromSnapshot(snapshot) {
   return promoted.find(item => item?.artifact_kind === 'ChapterBlueprint')?.payload?.nodes || []
 }
 
+function applyWorkflowRouteState(snapshot) {
+  const current = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  const workflow = current.workflow && typeof current.workflow === 'object'
+    ? current.workflow
+    : {}
+  workflowPhase.value = String(
+    workflow.phase || (current.planning?.status === 'confirmed' ? 'writing' : 'planning'),
+  )
+  workflowStatus.value = String(
+    workflow.status || (current.planning?.status === 'confirmed' ? 'ready' : 'not_started'),
+  )
+  // Retain this value for the list display, but never use it to open the
+  // workbench before the current planning receipt exists.
+  hasOutline.value = blueprintNodesFromSnapshot(current).length > 0
+}
+
 async function probeOutline(workspaceId) {
   if (!workspaceId) {
     hasOutline.value = false
@@ -117,36 +142,41 @@ async function probeOutline(workspaceId) {
     try {
       const { data } = await fetchV3WorkspaceSnapshot(workspaceId)
       const snapshot = data?.snapshot || data
-      ready = blueprintNodesFromSnapshot(snapshot).length > 0
+      applyWorkflowRouteState(snapshot)
+      ready = workflowPhase.value === 'writing'
     } catch (_) {
       /* A new workspace may not have a snapshot yet. */
     }
-    if (!ready) {
-      try {
-        const { data } = await fetchChapters(workspaceId, true)
-        ready = Boolean(data?.chapters?.items?.length)
-      } catch (_) {
-        /* Chapters are unavailable before the outline is created. */
-      }
-    }
-    hasOutline.value = ready
+    // Do not fall back to the chapter list here: old chapter rows are exactly
+    // what previously routed a failed or unreviewed outline into the workbench.
     return ready
   } finally {
     outlineProbing.value = false
   }
 }
 
-function startOutlinePolling() {
-  stopOutlinePolling()
-  outlineTimer = setInterval(() => {
-    if (activeRunId.value) probeOutline(activeRunId.value)
-  }, hasOutline.value ? 8000 : 2500)
+function connectWorkspaceStream(workspaceId) {
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
+  if (!workspaceId) return
+  closeWorkspaceStream = subscribeV3Workspace(workspaceId, {
+    onSnapshot: payload => {
+      const current = payload?.snapshot || payload || {}
+      applyWorkflowRouteState(current)
+    },
+    onClosed: () => {
+      if (activeRunId.value === workspaceId) {
+        hasOutline.value = false
+        workflowPhase.value = 'materials'
+        workflowStatus.value = 'not_started'
+      }
+    },
+  })
 }
 
-function stopOutlinePolling() {
-  if (!outlineTimer) return
-  clearInterval(outlineTimer)
-  outlineTimer = null
+function disconnectWorkspaceStream() {
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
 }
 
 async function loadRuns() {
@@ -173,11 +203,17 @@ function handleSelectRun(runId) {
 async function handleDeleteRun(runId) {
   if (!confirm(`确定要删除工作空间 "${extractName(runId)}" 吗？`)) return
   try {
-    await deleteRun(runId)
+    // Stop every workspace poll before the destructive request. Otherwise a
+    // just-started snapshot request can keep SQLite/WAL files open on Windows
+    // and make recursive deletion intermittently fail.
     if (activeRunId.value === runId) {
+      disconnectWorkspaceStream()
       activeRunId.value = ''
-      router.push('/business')
+      hasOutline.value = false
+      await router.replace('/business')
+      await nextTick()
     }
+    await deleteRun(runId)
     await loadRuns()
   } catch (e) {
     alert('删除工作空间失败: ' + (e?.response?.data?.message || e?.message || '未知错误'))
@@ -203,17 +239,18 @@ watch(
 
 watch(activeRunId, async id => {
   hasOutline.value = false
+  workflowPhase.value = 'materials'
+  workflowStatus.value = 'not_started'
+  connectWorkspaceStream(id)
   if (id) await probeOutline(id)
-  startOutlinePolling()
 })
 
 onMounted(() => {
   loadRuns()
-  startOutlinePolling()
 })
 
 onUnmounted(() => {
-  stopOutlinePolling()
+  disconnectWorkspaceStream()
 })
 </script>
 

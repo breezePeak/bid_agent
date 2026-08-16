@@ -22,6 +22,28 @@
         <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="openCreateModal">
           + 新建章节
         </button>
+        <button
+          v-if="!isSelectingChapters"
+          type="button"
+          class="btn btn-sm"
+          :disabled="busy || !writableLeafChapters.length"
+          @click="beginChapterSelection"
+        >
+          选择章节编写
+        </button>
+        <button
+          v-else
+          type="button"
+          class="btn btn-sm btn-primary"
+          :disabled="busy || !selectedWritingChapterIds.length"
+          @click="writeSelectedChapters"
+        >
+          编写 {{ selectedWritingChapterIds.length }} 章
+        </button>
+        <button v-if="isSelectingChapters" type="button" class="btn btn-sm" :disabled="busy" @click="cancelChapterSelection">取消选择</button>
+        <button v-if="!isSelectingChapters" type="button" class="btn btn-sm btn-primary" :disabled="busy || !selectedIsLeaf" @click="writeCurrentChapter">
+          一键编写
+        </button>
         <button type="button" class="btn btn-sm" :disabled="busy" @click="composeCheck">检查组装</button>
         <button type="button" class="btn btn-sm" :disabled="busy || !treeItems.length" @click="exportMarkdownOutline">
           导出 MD
@@ -44,12 +66,22 @@
           :class="{
             active: item.chapter_id === selectedId,
             archived: item.status === 'archived',
-            editing: editingChapterId === item.chapter_id
+            editing: editingChapterId === item.chapter_id,
+            'writing-selecting': isSelectingChapters && item.status !== 'archived',
           }"
           :style="{ '--tree-depth': item.depth || 0 }"
           @click="selectChapter(item.chapter_id)"
         >
           <span class="tree-indent" aria-hidden="true" />
+          <input
+            v-if="isSelectingChapters && item.status !== 'archived'"
+            class="tree-write-checkbox"
+            type="checkbox"
+            :checked="isChapterWritingSelected(item)"
+            :aria-label="`选择编写 ${item.title || item.chapter_id}`"
+            @click.stop
+            @change="toggleChapterWritingSelection(item, $event)"
+          />
           <span class="tree-dot" :class="statusClass(item)" />
 
           <template v-if="editingChapterId === item.chapter_id">
@@ -67,7 +99,7 @@
             <span class="tree-title" :title="item.title || item.chapter_id" @dblclick="startRenameChapter(item, $event)">
               {{ item.title || item.chapter_id }}
             </span>
-            <span class="tree-meta">{{ shortStatus(item) }}</span>
+            <span v-if="isLeafChapter(item)" class="tree-meta">{{ shortStatus(item) }}</span>
             <div class="tree-item-actions" @click.stop>
               <button
                 type="button"
@@ -132,7 +164,7 @@
           <p class="kicker">文档生成</p>
           <h3>{{ selectedChapter?.title || selectedId || '选择左侧章节' }}</h3>
           <div v-if="selectedChapter" class="doc-sub">
-            <span class="pill" :class="statusClass(selectedChapter)">{{ shortStatus(selectedChapter) }}</span>
+            <span v-if="selectedIsLeaf" class="pill" :class="statusClass(selectedChapter)">{{ shortStatus(selectedChapter) }}</span>
             <span>rev {{ chapterDetail?.chapter_revision || selectedChapter.chapter_revision || 0 }}</span>
             <span>head {{ chapterDetail?.head_content_revision || selectedChapter.head_content_revision || 0 }}</span>
             <span>formal {{ chapterDetail?.formal_content_revision || selectedChapter.formal_content_revision || 0 }}</span>
@@ -164,6 +196,11 @@
 
       <div v-if="actionError" class="banner error">{{ actionError }}</div>
       <div v-if="actionMessage" class="banner ok">{{ actionMessage }}</div>
+      <div v-if="chapterWriteJob && chapterWriteJob.status !== 'succeeded'" class="banner" :class="chapterWriteJob.status === 'blocked' || chapterWriteJob.status === 'failed' ? 'error' : 'ok'">
+        批量编写：{{ chapterWriteJob.status }}
+        <span v-if="chapterWriteJob.current_chapter_id">，正在编写 {{ chapterWriteJob.current_chapter_id }}</span>
+        <span>；已完成 {{ chapterWriteJob.completed_count || 0 }} 章</span>
+      </div>
 
       <div ref="docBodyEl" class="chapter-doc-body">
         <div class="document-stage">
@@ -559,6 +596,7 @@
         </footer>
       </div>
     </div>
+
   </div>
 </template>
 
@@ -582,6 +620,7 @@ import {
   streamChapterChat,
   saveChapterChatTurn,
   saveChapterChatAuthority,
+  subscribeV3Workspace,
 } from '../api'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
@@ -652,6 +691,7 @@ const revisions = ref([])
 const composeResult = ref(null)
 const workspaceRevision = ref(0)
 const globalProjectContext = ref({})
+const chapterWriteJob = ref(null)
 
 const busy = ref(false)
 const busyAction = ref('')
@@ -673,6 +713,8 @@ let draftAbortController = null
 const showCreateModal = ref(false)
 const newChapterId = ref('')
 const newChapterTitle = ref('')
+const isSelectingChapters = ref(false)
+const selectedWritingChapterIds = ref([])
 
 const editingChapterId = ref('')
 const editingTitle = ref('')
@@ -847,7 +889,7 @@ const editorRef = ref(null)
 const chatByChapter = new Map()
 let chatLoadToken = 0
 
-let pollTimer = null
+let closeWorkspaceStream = null
 
 const selectedChapter = computed(() =>
   items.value.find(item => item.chapter_id === selectedId.value) || null,
@@ -1002,8 +1044,166 @@ const treeItems = computed(() => {
   return ordered
 })
 
+function isLeafChapter(item) {
+  if (!item) return false
+  if (item.has_children) return false
+  if (typeof item.is_leaf === 'boolean') return item.is_leaf
+  return !items.value.some(candidate => candidate.parent_chapter_id === item.chapter_id)
+}
+
+const writableLeafChapters = computed(() => treeItems.value.filter(item => (
+  item.status !== 'archived' && isLeafChapter(item)
+)))
+
+function beginChapterSelection() {
+  selectedWritingChapterIds.value = selectedIsLeaf.value && selectedId.value
+    ? [selectedId.value]
+    : []
+  isSelectingChapters.value = true
+}
+
+function cancelChapterSelection() {
+  isSelectingChapters.value = false
+  selectedWritingChapterIds.value = []
+}
+
+function leafIdsForChapter(chapter) {
+  if (!chapter || chapter.status === 'archived') return []
+  if (isLeafChapter(chapter)) return [chapter.chapter_id]
+  const descendants = []
+  const queue = [chapter.chapter_id]
+  while (queue.length) {
+    const parentId = queue.shift()
+    const children = items.value.filter(item => (
+      item.status !== 'archived' && item.parent_chapter_id === parentId
+    ))
+    for (const child of children) {
+      if (isLeafChapter(child)) descendants.push(child.chapter_id)
+      else queue.push(child.chapter_id)
+    }
+  }
+  return descendants
+}
+
+function isChapterWritingSelected(chapter) {
+  const leafIds = leafIdsForChapter(chapter)
+  return leafIds.length > 0 && leafIds.every(id => selectedWritingChapterIds.value.includes(id))
+}
+
+function toggleChapterWritingSelection(chapter, event) {
+  const leafIds = leafIdsForChapter(chapter)
+  const selected = new Set(selectedWritingChapterIds.value)
+  if (event.target.checked) leafIds.forEach(id => selected.add(id))
+  else leafIds.forEach(id => selected.delete(id))
+  selectedWritingChapterIds.value = [...selected]
+}
+
+async function startWritingChapters(chapterIds, { autoReview = false } = {}) {
+  const ids = [...new Set(chapterIds)].filter(id => (
+    writableLeafChapters.value.some(chapter => chapter.chapter_id === id)
+  ))
+  if (!ids.length) {
+    actionError.value = '没有可编写的叶子章节。'
+    return
+  }
+  if (editorRef.value?.dirty) {
+    actionError.value = '当前章节有未保存修改，请先保存正文再批量编写。'
+    return
+  }
+  busy.value = true
+  busyAction.value = 'batch-draft'
+  actionError.value = ''
+  actionMessage.value = ''
+  try {
+    // 章节工作台已有独立的正文落盘流。批量编写沿用该流，避免重新触发
+    // 全局 ScoreModel/Blueprint 推理；后者在模型配置更新后会要求重新规划。
+    let completed = 0
+    const failed = []
+    for (const chapterId of ids) {
+      selectChapter(chapterId)
+      await loadChapterDetail({ force: true })
+      // 批量编写由章节 Agent 自主完成提纲审核与正文生成，不能因为
+      // 新章节默认的“用户审核”模式而停在等待确认状态。
+      if (autoReview) {
+        const { data: authorityData } = await saveChapterChatAuthority(props.workspaceId, chapterId, {
+          mode: 'full_authority',
+          scope: 'chapter',
+        })
+        if (!authorityData?.ok) {
+          throw new Error(authorityData?.message || '设置章节自动审核权限失败')
+        }
+        applyChatAuthority(authorityData.authority)
+      }
+      const revisionBefore = Number(chapterDetail.value?.head_content_revision || 0)
+      actionError.value = ''
+      await generateDraft()
+      // 不以“流连接结束”作为完成标准：必须重新读取到已落盘的正文版本，
+      // 当前章节确认保存后，队列才会进入下一章。
+      await loadChapterDetail({ force: true })
+      const revisionAfter = Number(chapterDetail.value?.head_content_revision || 0)
+      const hasSavedBlocks = Array.isArray(chapterDetail.value?.content?.blocks)
+        && chapterDetail.value.content.blocks.length > 0
+      if (actionError.value || revisionAfter <= revisionBefore || !hasSavedBlocks) {
+        failed.push(chapterId)
+        if (!actionError.value) {
+          actionError.value = '本章正文未确认写入中间文档，已停止队列，未开始下一章。'
+        }
+        break
+      }
+      completed += 1
+    }
+    actionMessage.value = failed.length
+      ? `已完成 ${completed} 章；${failed.length} 章未完成，请在目录中查看错误提示。`
+      : `已完成 ${completed} 个章节的编写。`
+    await loadChapterList()
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e?.response?.data?.error?.message || e.message || String(e)
+  } finally {
+    busy.value = false
+    busyAction.value = ''
+  }
+}
+
+async function writeSelectedChapters() {
+  const ids = [...selectedWritingChapterIds.value]
+  isSelectingChapters.value = false
+  if (!ids.length) return
+  busy.value = true
+  busyAction.value = 'batch-draft'
+  actionError.value = ''
+  actionMessage.value = ''
+  try {
+    await refreshSnapshotRevision()
+    const { data } = await submitV3Command(props.workspaceId, {
+      kind: 'chapter.batch.generate',
+      payload: { chapter_ids: ids },
+      expected_revision: workspaceRevision.value,
+      idempotency_key: `chapter.batch.generate-${Date.now()}`,
+    })
+    if (!data?.ok) {
+      throw new Error(data?.receipt?.error?.message || data?.message || '批量章节编写失败')
+    }
+    await reloadAll()
+    actionMessage.value = data.message || data.receipt?.message || '批量章节编写已完成。'
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e?.response?.data?.error?.message || e.message || String(e)
+  } finally {
+    busy.value = false
+    busyAction.value = ''
+  }
+}
+
+async function writeCurrentChapter() {
+  if (!selectedIsLeaf.value || !selectedId.value) {
+    actionError.value = '请先在目录中选择一个叶子章节，或使用“选择章节编写”勾选多个章节。'
+    return
+  }
+  await startWritingChapters([selectedId.value])
+}
+
 function shortStatus(item) {
   if (!item) return ''
+  if (!isLeafChapter(item)) return ''
   if (item.status === 'archived') return '归档'
   if (item.approval_status === 'approved' || Number(item.formal_content_revision || 0) > 0) return '正式'
   if (Number(item.head_content_revision || 0) > 0) return '草稿'
@@ -1041,6 +1241,7 @@ async function refreshSnapshotRevision() {
   if (snap.data?.ok) {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
     globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
+    chapterWriteJob.value = snap.data.snapshot?.chapter_write_job || null
   }
 }
 
@@ -1693,6 +1894,7 @@ async function sendChat() {
 
   try {
     let completedTurns = null
+    let documentWriteRequested = false
     await streamChapterChat(props.workspaceId, chapterId, text, {
       onEvent: async (event) => {
         const type = String(event?.type || '').toLowerCase()
@@ -1709,6 +1911,7 @@ async function sendChat() {
           if (selectedId.value === chapterId) await scrollChatToBottom()
         } else if (type === 'authority') {
           applyChatAuthority(event)
+          documentWriteRequested = documentWriteRequested || event.document_write_requested === true
         } else if (type === 'thinking_delta') {
           const delta = String(event.delta || '')
           if (!delta) return
@@ -1727,6 +1930,7 @@ async function sendChat() {
           })
           if (selectedId.value === chapterId) await scrollChatToBottom()
         } else if (type === 'done') {
+          documentWriteRequested = documentWriteRequested || event.document_write_requested === true
           if (Array.isArray(event.turns) && event.turns.length) {
             completedTurns = mapChatTurns(event.turns)
           } else {
@@ -1758,6 +1962,9 @@ async function sendChat() {
         if (!turn.content) turn.content = '（无回复）'
       })
     }
+    if (documentWriteRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
+      await generateDraft()
+    }
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
     if (selectedId.value !== chapterId) {
@@ -1787,6 +1994,20 @@ async function sendChat() {
   }
 }
 
+function connectWorkspaceStream() {
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = subscribeV3Workspace(props.workspaceId, {
+    onSnapshot: payload => {
+      const snapshot = payload?.snapshot || payload || {}
+      const nextItems = snapshot?.chapters?.items
+      if (Array.isArray(nextItems)) items.value = nextItems
+      if (selectedId.value && !streamingDraft.value) {
+        void loadChapterDetail({ force: false, background: true })
+      }
+    },
+  })
+}
+
 watch(
   () => selectedId.value,
   async (id, prev) => {
@@ -1810,18 +2031,12 @@ watch(
 onMounted(async () => {
   if (props.initialChapterId) selectedId.value = props.initialChapterId
   await reloadAll()
-  pollTimer = setInterval(async () => {
-    try {
-      const { data } = await fetchChapters(props.workspaceId)
-      if (data?.ok) items.value = data.chapters?.items || items.value
-    } catch (_) {
-      /* ignore */
-    }
-  }, 15000)
+  connectWorkspaceStream()
 })
 
 onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
+  closeWorkspaceStream?.()
+  closeWorkspaceStream = null
   draftAbortController?.abort()
 })
 </script>
@@ -2540,6 +2755,21 @@ onUnmounted(() => {
 .tree-item > .tree-item-input { grid-column: 3; }
 .tree-item > .tree-meta,
 .tree-item > .tree-item-actions { grid-column: 4; justify-self: end; }
+.tree-item.writing-selecting {
+  grid-template-columns: calc(var(--tree-depth) * 20px) 16px 10px minmax(0, 1fr) auto;
+}
+.tree-item.writing-selecting > .tree-write-checkbox { grid-column: 2; }
+.tree-item.writing-selecting > .tree-dot { grid-column: 3; }
+.tree-item.writing-selecting > .tree-title,
+.tree-item.writing-selecting > .tree-item-input { grid-column: 4; }
+.tree-item.writing-selecting > .tree-meta,
+.tree-item.writing-selecting > .tree-item-actions { grid-column: 5; }
+.tree-write-checkbox {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  cursor: pointer;
+}
 .tree-item:hover {
   background: #f1f5f9;
 }

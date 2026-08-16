@@ -119,6 +119,18 @@ class V3WorkspaceSnapshotBuilder:
                         else "artifact_dependencies_stale"
                     ),
                 }
+            elif not any(
+                isinstance(item, dict) and str(item.get("chapter_id") or "").strip()
+                for item in (plan or {}).get("nodes", [])
+            ):
+                # An empty blueprint cannot be meaningfully reviewed or
+                # confirmed.  Do not expose the H1 gate as actionable until
+                # the directory-generation result contains chapter nodes.
+                planning = {
+                    "status": "blocked",
+                    "reason": "PLANNING_OUTLINE_EMPTY",
+                    "message": "目录未生成任何章节，无法人工确认；请重新生成目录。",
+                }
             else:
                 from .artifact_promotion import HumanGateService
 
@@ -129,6 +141,19 @@ class V3WorkspaceSnapshotBuilder:
                 except Exception:
                     try:
                         planning = {"status": "needs_human", "snapshot": service.planning_snapshot()}
+                    except ControlPlaneError as exc:
+                        # A changed planning runtime means the existing outline
+                        # is intentionally no longer confirmable.  Project this
+                        # as an outdated result instead of a generic "blocked"
+                        # state: the latter hides both the confirmation and the
+                        # re-planning actions, leaving the user at a dead end.
+                        planning = {
+                            "status": "outdated"
+                            if exc.code == "PLANNING_CONFIRM_STALE"
+                            else "blocked",
+                            "reason": exc.code,
+                            "message": exc.message,
+                        }
                     except Exception:
                         planning = {"status": "blocked"}
         scheduled_needs = {
@@ -183,6 +208,22 @@ class V3WorkspaceSnapshotBuilder:
             writer_research=(writer_research if isinstance(writer_research, dict) else {}),
             delivery=delivery or {},
         )
+        analysis_pipeline = self._analysis_pipeline(
+            control,
+            artifacts,
+            artifact_states,
+            latest_analysis_operation,
+            planning_confirmed=planning.get("status") == "confirmed",
+            planning_status=str(planning.get("status") or "not_ready"),
+        )
+        chapters = self._chapters_snapshot(control, plan or {})
+        workflow = self._workflow_projection(
+            planning=planning,
+            analysis_pipeline=analysis_pipeline,
+            generation=generation,
+            chapters=chapters,
+            blueprint_artifact=artifacts.get("ChapterBlueprint") or {},
+        )
         return {
             "schema_version": "v3",
             "workspace_id": self.context.workspace_id,
@@ -215,24 +256,149 @@ class V3WorkspaceSnapshotBuilder:
                 "current_input_manifest_revision": int((payload("InputManifest") or {}).get("revision") or 0),
                 "source_input_manifest_revision": int((source_index or {}).get("input_manifest_revision") or 0),
                 "latest_operation": latest_analysis_operation or None,
-                "pipeline": self._analysis_pipeline(
-                    control,
-                    artifacts,
-                    artifact_states,
-                    latest_analysis_operation,
-                ),
+                "pipeline": analysis_pipeline,
             },
             "planning": planning,
+            "workflow": workflow,
             "evidence_needs": projected_needs,
             "generation": generation,
+            "chapter_write_job": (
+                control.agent_activity_state()
+                if (control.agent_activity_state() or {}).get("control_source") == "chapter_batch"
+                else None
+            ),
             "materials": payload("EvidenceRepository"),
             "content_units": (content_blocks or {}).get("units", []),
-            "chapters": self._chapters_snapshot(control, plan or {}),
+            "chapters": chapters,
             "quality": {
                 "coverage": (quality or {}).get("coverage"),
                 "report": quality,
                 "gates": control.latest_gate_evaluations(),
             },
+        }
+
+    @staticmethod
+    def _workflow_projection(
+        *,
+        planning: dict[str, Any],
+        analysis_pipeline: dict[str, Any],
+        generation: dict[str, Any],
+        chapters: dict[str, Any],
+        blueprint_artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """The single UI-facing workflow truth.
+
+        Historical artifacts remain visible through their legacy projections,
+        but this value is deliberately driven by the latest operation and the
+        current review receipts only.
+        """
+        planning_status = str(planning.get("status") or "not_ready")
+        analysis_status = str(analysis_pipeline.get("status") or "not_started")
+        generation_status = str(generation.get("status") or "not_started")
+        operation_id = str(analysis_pipeline.get("operation_id") or "")
+        stages = list(analysis_pipeline.get("stages") or [])
+        phase = "materials"
+        status = "not_started"
+        current_stage_id = ""
+        pending_reviews: list[dict[str, Any]] = []
+
+        active_stage = next(
+            (
+                item for item in stages
+                if isinstance(item, dict)
+                and str(item.get("status") or "") in {"queued", "running"}
+            ),
+            None,
+        )
+        if active_stage:
+            current_stage_id = str(active_stage.get("stage_id") or "")
+
+        if planning_status == "confirmed":
+            phase = "writing"
+            status = generation_status if generation_status != "not_started" else "ready"
+            operation_id = str(generation.get("operation_id") or operation_id)
+            current_stage_id = str(generation.get("current_stage_id") or "")
+        elif planning_status == "needs_human":
+            phase = "planning_review"
+            status = "blocked_human"
+            payload = blueprint_artifact.get("payload") or {}
+            pending_reviews.append(
+                {
+                    "review_id": "planning:"
+                    + str(blueprint_artifact.get("artifact_hash") or payload.get("artifact_hash") or "current"),
+                    "kind": "planning",
+                    "status": "pending",
+                    "title": "目录已生成，等待审核",
+                    "summary": "请核验评分点覆盖、章节结构和响应任务。",
+                    "target_revision": int(blueprint_artifact.get("revision") or payload.get("revision") or 0),
+                    "target_hash": str(blueprint_artifact.get("artifact_hash") or ""),
+                    "items": [
+                        {
+                            "label": "章节节点",
+                            "value": len(payload.get("nodes") or []),
+                        }
+                    ],
+                }
+            )
+        elif analysis_status == "failed" or any(
+            str(item.get("status") or "") == "failed"
+            for item in stages
+            if isinstance(item, dict)
+        ):
+            phase = "planning"
+            status = "failed"
+        elif analysis_status in {"queued", "running", "processing"}:
+            phase = "planning"
+            status = "running"
+
+        for chapter in (chapters.get("items") or []):
+            if not isinstance(chapter, dict):
+                continue
+            if str(chapter.get("approval_status") or "") not in {
+                "pending",
+                "draft",
+            }:
+                continue
+            chapter_id = str(chapter.get("chapter_id") or "")
+            if not chapter_id:
+                continue
+            pending_reviews.append(
+                {
+                    "review_id": f"chapter:{chapter_id}:{int(chapter.get('head_content_revision') or 0)}",
+                    "kind": "chapter_content",
+                    "status": "pending",
+                    "title": f"章节待审核：{chapter.get('title') or chapter_id}",
+                    "summary": "确认当前正文版本，或提交修改意见。",
+                    "chapter_id": chapter_id,
+                    "target_revision": int(chapter.get("head_content_revision") or 0),
+                    "target_hash": str(chapter.get("head_content_hash") or ""),
+                    "items": [],
+                }
+            )
+
+        return {
+            "phase": phase,
+            "status": status,
+            "operation_id": operation_id,
+            "attempt": max(
+                (int(item.get("attempt") or 0) for item in stages if isinstance(item, dict)),
+                default=0,
+            ),
+            "current_stage_id": current_stage_id,
+            "stages": stages,
+            "pending_reviews": pending_reviews,
+            "can_resume": status == "failed",
+            "current_artifact": {
+                "kind": "ChapterBlueprint",
+                "revision": int(blueprint_artifact.get("revision") or 0),
+                "hash": str(blueprint_artifact.get("artifact_hash") or ""),
+                "is_current": planning_status in {"needs_human", "confirmed"},
+            },
+            "invalidation_reason": str(
+                planning.get("reason")
+                or planning.get("message")
+                or ""
+            ),
         }
 
     def _chapters_snapshot(
@@ -1420,6 +1586,9 @@ class V3WorkspaceSnapshotBuilder:
         artifacts: dict[str, dict[str, Any]],
         artifact_states: dict[str, bool],
         latest_operation: dict[str, Any],
+        *,
+        planning_confirmed: bool = False,
+        planning_status: str = "not_ready",
     ) -> dict[str, Any]:
         operation_id = str(latest_operation.get("operation_id") or "")
         raw_runs = (
@@ -1445,6 +1614,32 @@ class V3WorkspaceSnapshotBuilder:
                 previous.get("attempt") or 0
             ):
                 runs_by_stage[stage] = item
+
+        # The outline operation deliberately stops at the human gate, so its
+        # final stage remains ``blocked_human`` in that operation's history.
+        # A later explicit confirmation is recorded by a separate command.
+        # Project the current confirmed planning state back onto this timeline
+        # so the UI accurately marks the final "人工确认" node as complete.
+        if planning_confirmed:
+            previous = runs_by_stage.get("confirm_planning") or {}
+            runs_by_stage["confirm_planning"] = {
+                **previous,
+                "stage_command": "confirm_planning",
+                "status": "succeeded",
+                "attempt": max(1, int(previous.get("attempt") or 0)),
+                "disposition": "explicit_human_confirmation",
+            }
+        elif planning_status != "needs_human":
+            previous = runs_by_stage.get("confirm_planning") or {}
+            if str(previous.get("status") or "") == "blocked_human":
+                # The historical outline operation stops at H1 by design.
+                # If no reviewable outline is currently available, that old
+                # pause must not be presented as an actionable confirmation.
+                runs_by_stage["confirm_planning"] = {
+                    **previous,
+                    "stage_command": "confirm_planning",
+                    "status": "pending",
+                }
 
         operation_status = str(latest_operation.get("status") or "")
         operation_error = latest_operation.get("error")
@@ -1493,6 +1688,8 @@ class V3WorkspaceSnapshotBuilder:
             )
 
         analyze_run = runs_by_stage.get("analyze_scores") or {}
+        score_structure_run = runs_by_stage.get("score_structure") or {}
+        score_semantic_run = runs_by_stage.get("score_semantic") or {}
         analyze_output = (
             analyze_run.get("output")
             if isinstance(analyze_run.get("output"), dict)
@@ -1520,7 +1717,9 @@ class V3WorkspaceSnapshotBuilder:
             analyze_status == "failed"
             and "score_semantic_" in analyze_message
         )
-        if structure_ready:
+        if score_structure_run:
+            score_structure_status = status_for("score_structure")
+        elif structure_ready:
             score_structure_status = "succeeded"
         elif analyze_status in {"running", "failed"}:
             score_structure_status = analyze_status
@@ -1530,7 +1729,9 @@ class V3WorkspaceSnapshotBuilder:
                 if analyze_status in {"succeeded", "reused"}
                 else "pending"
             )
-        if analyze_status == "running" and not structure_ready:
+        if score_semantic_run:
+            score_semantic_status = status_for("score_semantic")
+        elif analyze_status == "running" and not structure_ready:
             score_semantic_status = "pending"
         else:
             score_semantic_status = analyze_status
@@ -1551,13 +1752,13 @@ class V3WorkspaceSnapshotBuilder:
             self._pipeline_stage(
                 "score_structure",
                 score_structure_status,
-                analyze_run,
+                score_structure_run or analyze_run,
                 llm_requests_by_stage,
             ),
             self._pipeline_stage(
                 "score_semantic",
                 score_semantic_status,
-                analyze_run,
+                score_semantic_run or analyze_run,
                 llm_requests_by_stage,
             ),
             self._pipeline_stage(
@@ -1579,9 +1780,12 @@ class V3WorkspaceSnapshotBuilder:
             raw_runs,
             latest_operation,
         )
+        projected_status = operation_status or "not_started"
+        if planning_status == "blocked" and projected_status == "blocked_human":
+            projected_status = "failed"
         return {
             "operation_id": operation_id,
-            "status": operation_status or "not_started",
+            "status": projected_status,
             "stages": stage_rows,
             "products": products,
         }
@@ -1609,6 +1813,11 @@ class V3WorkspaceSnapshotBuilder:
             "stage_id": stage_id,
             "label": self._PIPELINE_STAGE_LABELS[stage_id],
             "status": status or "pending",
+            "result": (
+                "produced" if status == "succeeded"
+                else str(status or "pending")
+            ),
+            "operation_id": str(value.get("operation_id") or ""),
             "attempt": int(value.get("attempt") or 0),
             "started_at": str(value.get("started_at") or ""),
             "completed_at": str(value.get("completed_at") or ""),

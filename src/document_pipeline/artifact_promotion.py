@@ -1068,9 +1068,16 @@ class HumanGateService:
             if isinstance(blueprint.get("payload"), dict)
             else {}
         )
-        planning_model = str(
-            blueprint_payload.get("planning_model") or "topic_graph"
-        )
+        # Older score-direct blueprints did not persist planning_model.  They
+        # must remain confirmable: requiring the legacy topic graph dependencies
+        # hides the confirmation CTA and leaves the workspace in a dead end.
+        planning_model = str(blueprint_payload.get("planning_model") or "")
+        if not planning_model:
+            planning_model = (
+                "score_direct"
+                if self.store.v3_active_artifact("ProjectModel") is None
+                else "topic_graph"
+            )
         dependency_kinds = (
             self._SCORE_DIRECT_PLANNING_DEPENDENCIES
             if planning_model == "score_direct"

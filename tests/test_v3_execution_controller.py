@@ -62,12 +62,12 @@ class V3ExecutionControllerTests(unittest.TestCase):
    self.assertEqual(snapshot['content_units'], [])
    stage_runs=ControlStore(context).stage_runs(str(receipt.operation_id))
    self.assertEqual(
-    {item['stage_command'] for item in stage_runs},
-    {
-     'ingest_inputs','normalize_sources','compile_template_structure',
-     'build_requirement_ledger','analyze_scores','compile_chapter_blueprint',
-     'confirm_planning',
-    },
+       {item['stage_command'] for item in stage_runs},
+       {
+        'ingest_inputs','normalize_sources','compile_template_structure',
+        'build_requirement_ledger','analyze_scores','compile_chapter_blueprint',
+        'score_structure','score_semantic','confirm_planning',
+       },
    )
    self.assertEqual(next(item for item in stage_runs if item['stage_command']=='confirm_planning')['status'],'blocked_human')
    store=ControlStore(context);store.grant_workspace_access('owner')
@@ -106,7 +106,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
    stages={item['stage_command'] for item in store.stage_runs(str(receipt.operation_id))}
    self.assertEqual(stages,{
      'ingest_inputs','normalize_sources','compile_template_structure',
-      'build_requirement_ledger','analyze_scores',
+      'build_requirement_ledger','analyze_scores','score_structure','score_semantic',
      'compile_chapter_blueprint','confirm_planning',
     })
    self.assertNotIn('execute_content_plan',stages)

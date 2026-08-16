@@ -833,7 +833,7 @@ def test_score_program_audit_warning_does_not_block_outline(
     )
 
 
-def test_invalid_score_candidate_uses_conservative_fallback_and_continues(
+def test_invalid_score_candidate_fails_operation_without_rule_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -879,44 +879,14 @@ def test_invalid_score_candidate_uses_conservative_fallback_and_continues(
         disposition="started",
     )
 
-    score_model = runner.run("analyze_scores", operation_id=operation_id)
-    blueprint = runner.run("compile_chapter_blueprint")
+    with pytest.raises(ControlPlaneError, match="score_semantic_candidate_invalid"):
+        runner.run("analyze_scores", operation_id=operation_id)
 
-    assert calls == ["score", "outline"]
-    assert score_model.points
-    assert all(
-        point.review_status == "needs_review"
-        for point in score_model.points
-    )
-    assert blueprint.nodes
-    active = store.v3_active_artifact("ScoreModel")
-    assert active is not None
-    proposal = store.v3_proposal(str(active["proposal_id"]))
-    assert proposal is not None
-    receipt_ref = proposal["inference_receipt_refs"][0]
-    receipt = store.v3_inference_receipt(receipt_ref["receipt_id"])
-    assert receipt is not None
-    assert receipt["prompt_version"] == (
-        f"{SCORE_SEMANTIC_CAPABILITY_ID}.program_audit_fallback.v1"
-    )
-    assert receipt["model_fingerprint"] == (
-        f"deterministic_fallback:{SCORE_SEMANTIC_CAPABILITY_ID}:v1"
-    )
-    first_revision = score_model.revision
-    stage_run = store.latest_stage_run(operation_id, "analyze_scores") or {}
-    semantic_product = next(
-        item
-        for item in (stage_run.get("output") or {}).get("products") or []
-        if item.get("kind") == "ScoreSemanticResult"
-    )
-    assert semantic_product["status"] == "warning"
-    assert any(
-        "保守响应任务" in warning
-        for warning in semantic_product["warnings"]
-    )
-    retried_score_model = runner.run("analyze_scores")
-    assert calls == ["score", "outline", "score"]
-    assert retried_score_model.revision == first_revision + 1
+    assert calls == ["score"]
+    assert store.v3_active_artifact("ScoreModel") is None
+    semantic_run = store.latest_stage_run(operation_id, "score_semantic") or {}
+    assert semantic_run["status"] == "failed"
+    assert semantic_run["error"]["code"] == "score_semantic_candidate_invalid"
 
 
 def _score_direct_fixture(
@@ -1351,6 +1321,58 @@ def test_g2_requires_section_quality_condition_writing_objective() -> None:
     assert {
         finding["code"] for finding in audit["findings"]
     } >= {"QUALITY_CONDITION_OBJECTIVE_MISSING"}
+
+
+def test_related_conditions_can_share_one_business_chapter() -> None:
+    scores, ledger, condition_ids = _score_direct_fixture(
+        score_point_id="SP-shared-topic",
+        point_title="样本影像",
+        group_title="技术部分",
+        condition_texts=["核查样本影像分类方法合理", "核查样本影像使用说明细致"],
+        max_points=4,
+    )
+    candidate = ChapterOutlineCandidate(
+        nodes=[
+            ChapterOutlineNodeCandidate(
+                local_id="technical-group",
+                order=0,
+                title="技术部分",
+                purpose="组织技术评分响应",
+                confidence=1.0,
+            ),
+            ChapterOutlineNodeCandidate(
+                local_id="topic",
+                parent_local_id="technical-group",
+                order=1,
+                title="样本影像",
+                purpose="响应样本影像评分任务",
+                primary_response_unit_ids=["SP-shared-topic-U01"],
+                confidence=1.0,
+            ),
+            ChapterOutlineNodeCandidate(
+                local_id="classification-and-use",
+                parent_local_id="topic",
+                order=2,
+                title="核查样本影像分类与使用",
+                purpose="说明分类方法和使用方式",
+                supporting_response_unit_ids=["SP-shared-topic-U01"],
+                score_condition_ids=condition_ids,
+                writing_objectives=["分类方法合理", "使用说明细致"],
+                confidence=1.0,
+            ),
+        ]
+    )
+
+    blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
+        candidate,
+        ledger,
+        scores,
+        revision=1,
+    )
+
+    chapter = next(node for node in blueprint.nodes if node.title == "核查样本影像分类与使用")
+    assert chapter.score_condition_ids == condition_ids
+    assert audit_chapter_blueprint(blueprint, ledger, scores)["passed"] is True
 
 
 def test_mixed_score_point_routes_only_document_unit_to_quality_gate() -> None:

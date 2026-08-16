@@ -108,6 +108,26 @@ export function fetchV3WorkspaceSnapshot(runId) {
   return api.get(v3WorkspacePath(runId, 'snapshot'), { headers: { 'Cache-Control': 'no-cache' } })
 }
 
+/** Subscribe to pushed workspace snapshots. Returns a function that closes the stream. */
+export function subscribeV3Workspace(runId, { onSnapshot, onClosed } = {}) {
+  const stream = new EventSource(`/api${v3WorkspacePath(runId, 'stream')}`)
+  stream.addEventListener('snapshot', event => {
+    try {
+      const payload = JSON.parse(event.data)
+      onSnapshot?.(payload)
+    } catch (_) {
+      // Ignore one malformed transport frame; EventSource will stay connected.
+    }
+  })
+  stream.addEventListener('closed', event => {
+    let payload = {}
+    try { payload = JSON.parse(event.data) } catch (_) {}
+    stream.close()
+    onClosed?.(payload)
+  })
+  return () => stream.close()
+}
+
 /** Read the exact frozen snapshot required for the H1 planning confirmation. */
 export function fetchV3PlanningConfirmation(runId) {
   return api.get(v3WorkspacePath(runId, 'planning/confirmation'), {
@@ -150,16 +170,19 @@ export async function runV3Pipeline(runId, chapterIds = []) {
   return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 900000 })
 }
 
-export async function prepareV3Outline(runId) {
+export async function prepareV3Outline(runId, options = {}) {
   const snapshot = await fetchV3WorkspaceSnapshot(runId)
   const commandId = newCommandId()
   const command = buildPrepareOutlineCommand(
     commandId,
     workspaceRevisionFromV3Payload(snapshot?.data),
+    options,
   )
-  // Score semantics may need an initial response plus one controlled repair;
-  // the backend model timeout alone can be 300 seconds per attempt.
-  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 720000 })
+  // A malformed multi-score response is adaptively split into smaller batches.
+  // That can legitimately take longer than a fixed browser deadline while the
+  // workspace stream continues to report progress.  Never turn a live server
+  // operation into a misleading client-side "failed" state at 12 minutes.
+  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 0 })
 }
 
 export async function confirmV3Planning(runId, planningSnapshot) {
