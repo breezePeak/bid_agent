@@ -1947,7 +1947,7 @@ async def stream_chapter_draft(
                     chapter_context_record.get("context_revision") or 0
                 ),
                 chapter_context_hash=str(
-                    chapter_context_record.get("context_hash") or ""
+                    chapter_context_record.get("content_hash") or ""
                 ),
             )
             _assert_requested_chapter_context(body, chapter_grounding_context)

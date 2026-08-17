@@ -26,6 +26,7 @@ from .contracts import (
     ScoreModel,
     SourceAnchor,
     SourceBlock,
+    SourceIndex,
     TemplateStructureContract,
     TopicChapterAssignment,
     TopicEdge,
@@ -34,9 +35,11 @@ from .planning_inference import (
     ChapterOutlineCandidate,
     ProjectUnderstandingCandidate,
     TopicDutyPlanningCandidate,
+    _normalize_project_source_refs,
 )
 from .proposals import DependencyRef, ProposalEnvelope
 from .proposals import InferenceReceiptRef
+from .project_model import is_enterprise_claim
 from .scoring_outline_policy import (
     SCORING_OUTLINE_POLICY_VERSION,
     is_sectionable_quality_condition,
@@ -179,6 +182,25 @@ def _reference_catalog(
     return catalog
 
 
+def _project_reference_catalog(
+    ledger: RequirementLedger,
+    source_blocks: list[SourceBlock],
+) -> dict[str, list[SourceAnchor]]:
+    """References allowed in the score-independent ProjectModel stage."""
+
+    catalog: dict[str, list[SourceAnchor]] = {
+        f"RequirementLedger:{item.requirement_id}": [item.source_anchor]
+        for item in ledger.requirements
+    }
+    for block in source_blocks:
+        anchors = [block.source_anchor]
+        catalog[f"SourceIndex:{block.block_id}"] = anchors
+        catalog[
+            f"SourceIndex:{block.input_id}:{block.source_anchor.chunk_id}"
+        ] = anchors
+    return catalog
+
+
 def _anchors_for_refs(
     refs: list[str],
     catalog: dict[str, list[SourceAnchor]],
@@ -244,13 +266,31 @@ class PlanningAgent:
         self,
         candidate: ProjectUnderstandingCandidate,
         ledger: RequirementLedger,
-        scores: ScoreModel,
-        source_blocks: list[SourceBlock],
+        source_index: SourceIndex,
         *,
         revision: int,
     ) -> ProjectModel:
         """Compile a source-grounded understanding without rewriting its prose."""
 
+        source_blocks = list(source_index.blocks)
+
+        # Accept the documented bare SourceIndex shorthand only when it maps to
+        # one exact block/chunk in the authoritative frozen SourceIndex.  The
+        # normalized candidate is then subject to the existing strict catalog
+        # and anchor checks below.
+        candidate = ProjectUnderstandingCandidate.model_validate(
+            _normalize_project_source_refs(
+                candidate.model_dump(mode="json"),
+                [
+                    {
+                        "block_id": block.block_id,
+                        "input_id": block.input_id,
+                        "source_anchor": block.source_anchor.model_dump(mode="json"),
+                    }
+                    for block in source_blocks
+                ],
+            )
+        )
         if candidate.review_status == "blocked":
             raise PlanningCandidateCompilationError(
                 "ProjectUnderstandingCandidate 已标记 blocked"
@@ -260,31 +300,9 @@ class PlanningAgent:
             for item in ledger.requirements
             if item.status not in {"blocked", "waived"}
         }
-        score_point_ids = {point.score_point_id for point in scores.points}
-        _require_unique(
-            candidate.covered_requirement_ids,
-            owner="ProjectUnderstandingCandidate.covered_requirement_ids",
-        )
-        _require_unique(
-            candidate.covered_score_point_ids,
-            owner="ProjectUnderstandingCandidate.covered_score_point_ids",
-        )
-        if set(candidate.covered_requirement_ids) != active_requirement_ids:
-            missing = active_requirement_ids - set(candidate.covered_requirement_ids)
-            extra = set(candidate.covered_requirement_ids) - active_requirement_ids
-            raise PlanningCandidateCompilationError(
-                "项目理解未精确覆盖有效 Requirement；"
-                f"missing={sorted(missing)}, extra={sorted(extra)}"
-            )
-        if set(candidate.covered_score_point_ids) != score_point_ids:
-            missing = score_point_ids - set(candidate.covered_score_point_ids)
-            extra = set(candidate.covered_score_point_ids) - score_point_ids
-            raise PlanningCandidateCompilationError(
-                "项目理解未精确覆盖 ScorePoint；"
-                f"missing={sorted(missing)}, extra={sorted(extra)}"
-            )
+        # Requirement and score coverage are compiler-owned metadata.
 
-        catalog = _reference_catalog(ledger, scores, source_blocks)
+        catalog = _project_reference_catalog(ledger, source_blocks)
         cited_statements: list[tuple[str, object]] = []
         if candidate.project_name is not None:
             cited_statements.append(("project_name", candidate.project_name))
@@ -339,22 +357,12 @@ class PlanningAgent:
                 ]
             )
         )
-        required_semantic_refs = {
-            *(
-                f"RequirementLedger:{requirement_id}"
-                for requirement_id in active_requirement_ids
-            ),
-            *(
-                f"ScoreModel:{score_point_id}"
-                for score_point_id in score_point_ids
-            ),
-        }
-        if missing_refs := required_semantic_refs - set(
-            semantic_upstream_refs
+        if forbidden := sorted(
+            ref for ref in semantic_upstream_refs if ref.startswith("ScoreModel:")
         ):
             raise PlanningCandidateCompilationError(
-                "项目理解仅声明 covered ID、未形成对应的带来源语义结论或"
-                f" EvidenceNeed: {sorted(missing_refs)}"
+                "ProjectModel 新候选不允许引用 ScoreModel: "
+                f"{forbidden}"
             )
         for owner, item in cited_statements:
             _anchors_for_refs(
@@ -413,6 +421,11 @@ class PlanningAgent:
 
         explicit_statements = {fact.statement for fact in candidate.facts}
         derived_confirmed_facts: list[ProjectFact] = []
+        derived_inference_facts: list[ProjectFact] = []
+        source_roles_by_anchor = {
+            (block.input_id, block.source_anchor.chunk_id): block.input_role
+            for block in source_blocks
+        }
         for owner, item in cited_statements:
             statement = getattr(item, "text", None) or getattr(
                 item,
@@ -433,15 +446,34 @@ class PlanningAgent:
                 for ref in item.upstream_refs
                 if ref.startswith("RequirementLedger:")
             ]
-            derived_confirmed_facts.append(
+            has_company_source = any(
+                source_roles_by_anchor.get(
+                    (anchor.source_input_id, anchor.chunk_id)
+                ) is InputRole.COMPANY
+                for anchor in anchors
+            )
+            unverified_enterprise_claim = (
+                is_enterprise_claim(statement) and not has_company_source
+            )
+            target_facts = (
+                derived_inference_facts
+                if unverified_enterprise_claim
+                else derived_confirmed_facts
+            )
+            compiled_statement = (
+                f"待企业材料核验：{statement}"
+                if unverified_enterprise_claim
+                else statement
+            )
+            target_facts.append(
                 ProjectFact(
                     fact_id=_stable_planning_id(
                         "F",
                         owner,
-                        statement,
+                        compiled_statement,
                         *item.upstream_refs,
                     ),
-                    statement=statement,
+                    statement=compiled_statement,
                     source_anchor=anchors[0] if anchors else None,
                     requirement_ids=requirement_refs,
                     upstream_refs=list(item.upstream_refs),
@@ -450,7 +482,7 @@ class PlanningAgent:
 
         fact_groups: dict[str, list[ProjectFact]] = {
             "confirmed": derived_confirmed_facts,
-            "inference": [],
+            "inference": derived_inference_facts,
             "conflict": [],
         }
         for fact in candidate.facts:
@@ -459,16 +491,38 @@ class PlanningAgent:
                 catalog,
                 owner=f"ProjectFactCandidate {fact.local_id}",
             )
-            fact_groups[fact.classification].append(
+            has_company_source = any(
+                source_roles_by_anchor.get(
+                    (anchor.source_input_id, anchor.chunk_id)
+                ) is InputRole.COMPANY
+                for anchor in anchors
+            )
+            unverified_enterprise_claim = (
+                is_enterprise_claim(fact.statement) and not has_company_source
+            )
+            classification = (
+                "inference"
+                if unverified_enterprise_claim
+                and fact.classification == "confirmed"
+                else fact.classification
+            )
+            statement = (
+                f"待企业材料核验：{fact.statement}"
+                if unverified_enterprise_claim
+                and fact.classification != "conflict"
+                and not fact.statement.startswith("待企业材料核验：")
+                else fact.statement
+            )
+            fact_groups[classification].append(
                 ProjectFact(
                     fact_id=_stable_planning_id(
                         "F",
-                        fact.classification,
+                        classification,
                         fact.local_id,
-                        fact.statement,
+                        statement,
                         *fact.upstream_refs,
                     ),
-                    statement=fact.statement,
+                    statement=statement,
                     source_anchor=anchors[0] if anchors else None,
                     requirement_ids=fact.requirement_ids,
                     upstream_refs=list(fact.upstream_refs),
@@ -492,25 +546,9 @@ class PlanningAgent:
             )
             for item in candidate.evidence_needs
         ]
-        evidence_needs.extend(
-            [
-            EvidenceNeed(
-                need_id=item.need_id,
-                question=item.question,
-                topic_id=f"score:{item.score_point_id}",
-                priority=item.priority,
-                blocking_scope=(
-                    "content_unit" if item.priority == "blocking" else "none"
-                ),
-                deadline_stage="execute_content_plan",
-                query_budget=0,
-            )
-            for item in scores.evidence_need_candidates
-            ]
-        )
         source_hashes = _merged_source_hashes(
             ledger.source_hashes,
-            scores.source_hashes,
+            source_index.source_hashes,
         )
         candidate_hash = hashlib.sha256(
             candidate.model_dump_json().encode("utf-8")
@@ -521,7 +559,7 @@ class PlanningAgent:
             project_id=_stable_planning_id(
                 "project",
                 ledger.revision,
-                scores.revision,
+                source_index.revision,
                 candidate_hash,
             ),
             identity=identity,
@@ -537,8 +575,8 @@ class PlanningAgent:
             inferences=fact_groups["inference"],
             conflicts=fact_groups["conflict"],
             unknowns=candidate.unknowns,
-            requirement_ids=candidate.covered_requirement_ids,
-            score_point_ids=candidate.covered_score_point_ids,
+            requirement_ids=sorted(active_requirement_ids),
+            score_point_ids=[],
             semantic_upstream_refs=semantic_upstream_refs,
             evidence_needs=evidence_needs,
         )

@@ -30,15 +30,15 @@ PROJECT_PROMPT_FILE = "v3_planning_agent_project.md"
 TOPIC_PROMPT_FILE = "v3_planning_agent_topics.md"
 OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
 
-PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v1.6"
+PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v1.9"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
 OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v3.0"
 
-PROJECT_CAPABILITY_VERSION = "1.6.0"
+PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
 OUTLINE_CAPABILITY_VERSION = "3.0.0"
 
-PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v3"
+PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
 OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_candidate.v2"
 
@@ -47,6 +47,8 @@ DEFAULT_TEMPERATURE = 0.1
 MAX_REPAIR_ATTEMPTS = 1
 OUTLINE_BATCH_MAX_ITEMS = 8
 OUTLINE_BATCH_MAX_INPUT_CHARS = 12_000
+PROJECT_INPUT_MAX_CHARS = 16_000
+PROJECT_INPUT_PROJECTION_VERSION = "v3.project_input.v3"
 
 _PROJECT_CITED_LIST_FIELDS = (
     "background",
@@ -110,8 +112,9 @@ class ProjectUnderstandingInput(StrictPlanningModel):
     """Frozen promoted artifacts and selected source context for understanding."""
 
     requirement_ledger: dict[str, Any]
-    score_model: dict[str, Any]
     source_context: list[dict[str, Any]] = Field(default_factory=list)
+    scanned_source_block_count: int = Field(default=0, ge=0)
+    review_feedback: str = ""
 
 
 class TopicDutyPlanningInput(StrictPlanningModel):
@@ -214,8 +217,6 @@ class ProjectUnderstandingCandidate(StrictPlanningModel):
         default_factory=list
     )
     unknowns: list[str] = Field(default_factory=list)
-    covered_requirement_ids: list[str] = Field(default_factory=list)
-    covered_score_point_ids: list[str] = Field(default_factory=list)
     review_status: Literal["confirmed", "needs_review", "blocked"] = "confirmed"
 
     @model_validator(mode="after")
@@ -488,6 +489,8 @@ class StructuredInferenceResult(Generic[CandidateT]):
     provider_fingerprint: str
     model_fingerprint: str
     temperature: float
+    normalized_reference_count: int = 0
+    validation_errors: tuple[str, ...] = ()
 
 
 class ProjectUnderstandingProvider(Protocol):
@@ -549,6 +552,50 @@ def _canonical_json(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def _count_normalized_references(before: Any, after: Any) -> int:
+    if isinstance(before, dict) and isinstance(after, dict):
+        count = 0
+        for key, value in before.items():
+            if key not in after:
+                continue
+            if key == "upstream_refs" and isinstance(value, list):
+                normalized = after[key]
+                if isinstance(normalized, list):
+                    count += sum(
+                        left != right
+                        for left, right in zip(value, normalized, strict=False)
+                    )
+            else:
+                count += _count_normalized_references(value, after[key])
+        return count
+    if isinstance(before, list) and isinstance(after, list):
+        return abs(len(before) - len(after)) + sum(
+            _count_normalized_references(left, right)
+            for left, right in zip(before, after, strict=False)
+        )
+    return 0
+
+
+def _project_input_evidence_error(request: ProjectUnderstandingInput) -> str | None:
+    has_source_text = any(
+        str(item.get("content") or "").strip()
+        for item in request.source_context
+        if isinstance(item, dict)
+    )
+    has_requirement_text = any(
+        str(
+            item.get("normalized_requirement")
+            or item.get("original_text")
+            or ""
+        ).strip()
+        for item in request.requirement_ledger.get("requirements", [])
+        if isinstance(item, dict)
+    )
+    if not has_source_text and not has_requirement_text:
+        return "ProjectUnderstandingInput 缺少可用于项目理解的招标正文或项目要求"
+    return None
 
 
 def _prompt_path(filename: str) -> Path:
@@ -619,7 +666,7 @@ def _callable_fingerprint(chat_callable: ChatCallable) -> str:
 
 
 class _StructuredLLMProvider(Generic[CandidateT]):
-    """Shared strict-JSON invocation with exactly one optional repair call."""
+    """Shared strict-JSON invocation with a capability-bounded repair loop."""
 
     capability_id: str
     prompt_file: str
@@ -666,14 +713,6 @@ class _StructuredLLMProvider(Generic[CandidateT]):
         seen: set[int] = set()
         while current is not None and id(current) not in seen:
             seen.add(id(current))
-            if isinstance(current, json.JSONDecodeError):
-                # A malformed JSON object is just as sensitive to request
-                # size as an explicitly truncated one.  After the single
-                # permitted repair has also produced invalid JSON, split a
-                # multi-score batch rather than surfacing a dead-end error.
-                # In particular, ``Expecting ':' delimiter`` is common when
-                # an otherwise complete, large object loses one separator.
-                return True
             if isinstance(current, PlanningInferenceOutputTruncatedError):
                 return True
             current = current.__cause__
@@ -687,6 +726,28 @@ class _StructuredLLMProvider(Generic[CandidateT]):
         repair_attempts: int | None = None,
     ) -> StructuredInferenceResult[CandidateT]:
         input_snapshot = _canonical_json(request)
+        if (
+            isinstance(request, ProjectUnderstandingInput)
+            and len(input_snapshot) > PROJECT_INPUT_MAX_CHARS
+        ):
+            raise PlanningInferenceError(
+                "ProjectUnderstandingInput exceeds the deterministic 16000-character budget"
+            )
+        if isinstance(request, ProjectUnderstandingInput):
+            if evidence_error := _project_input_evidence_error(request):
+                failure = PlanningInferenceError(evidence_error)
+                failure.code = "PROJECT_INPUT_MISSING_TENDER_EVIDENCE"
+                failure.retryable = True
+                failure.details = {
+                    "input_chars": len(input_snapshot),
+                    "source_block_count": len(request.source_context),
+                    "scanned_source_block_count": (
+                        request.scanned_source_block_count
+                    ),
+                    "normalized_reference_count": 0,
+                    "missing": "tender_project_evidence",
+                }
+                raise failure
         schema_json = json.dumps(
             self.candidate_model.model_json_schema(),
             ensure_ascii=False,
@@ -715,6 +776,8 @@ class _StructuredLLMProvider(Generic[CandidateT]):
         first_candidate: CandidateT | None = None
         last_candidate: CandidateT | None = None
         attempt_count = 0
+        validation_errors: list[str] = []
+        normalized_reference_count = 0
 
         allowed_repair_attempts = (
             self.max_repair_attempts
@@ -772,9 +835,14 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                         f"模型输出因长度限制被截断: finish_reason={finish_reason}"
                     )
                 candidate_payload = json.loads(raw_output)
+                original_payload = candidate_payload
                 candidate_payload = self._prepare_candidate_payload(
                     candidate_payload,
                     request,
+                )
+                normalized_reference_count += _count_normalized_references(
+                    original_payload,
+                    candidate_payload,
                 )
                 candidate = self.candidate_model.model_validate(
                     candidate_payload,
@@ -788,6 +856,7 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                 self._validate_candidate(candidate, request)
             except (ValidationError, ValueError) as exc:
                 last_error = exc
+                validation_errors.append(str(exc))
                 if (
                     attempt_index >= allowed_repair_attempts
                     or self._is_truncated_json_error(exc)
@@ -800,8 +869,9 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                             "role": "user",
                             "content": (
                                 "上一个输出未通过严格 JSON/Pydantic 校验。"
-                                "这是唯一一次受控修复机会；不得改变输入事实或虚构 ID。"
+                                "这是受控修复；不得改变输入事实或虚构 ID。"
                                 "请只返回修复后的完整 JSON 对象。\n"
+                                + f"\n当前为第 {attempt_index + 1}/{allowed_repair_attempts} 次受控修复。\n"
                                 + self._repair_feedback(
                                     exc,
                                     candidate_for_feedback,
@@ -827,6 +897,8 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                 provider_fingerprint=self.provider_fingerprint,
                 model_fingerprint=self.model_fingerprint,
                 temperature=self.temperature,
+                normalized_reference_count=normalized_reference_count,
+                validation_errors=tuple(validation_errors),
             )
 
         recovered_candidate = self._recover_candidate(
@@ -855,6 +927,8 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                     provider_fingerprint=self.provider_fingerprint,
                     model_fingerprint=self.model_fingerprint,
                     temperature=self.temperature,
+                    normalized_reference_count=normalized_reference_count,
+                    validation_errors=tuple(validation_errors),
                 )
 
         last_error_summary = str(last_error or "未知校验错误")
@@ -870,13 +944,30 @@ class _StructuredLLMProvider(Generic[CandidateT]):
                 else f"在 {allowed_repair_attempts} 次受控修复后"
             )
         )
-        raise PlanningInferenceValidationError(
+        failure = PlanningInferenceValidationError(
             f"{self.capability_id} 输出{repair_summary}仍未通过 "
             f"{self.schema_version} 严格校验；未生成可晋级候选。"
             f"{batch_summary}"
             f"最后输出长度={len(last_raw)}，reasoning长度={len(last_reasoning)}；"
             f"最后校验错误：{last_error_summary}"
-        ) from last_error
+        )
+        failure.attempts = attempt_count
+        failure.errors = tuple(validation_errors)
+        failure.details = {
+            "input_chars": len(input_snapshot),
+            "source_block_count": len(
+                getattr(request, "source_context", []) or []
+            ),
+            "scanned_source_block_count": int(
+                getattr(request, "scanned_source_block_count", 0) or 0
+            ),
+            "normalized_reference_count": normalized_reference_count,
+            "attempts": attempt_count,
+        }
+        if isinstance(request, ProjectUnderstandingInput):
+            failure.code = "PROJECT_UNDERSTANDING_ACTION_REQUIRED"
+            failure.retryable = True
+        raise failure from last_error
 
     def _prepare_candidate(
         self,
@@ -987,6 +1078,126 @@ def _planning_reference_ids(
     return refs
 
 
+def _normalize_project_source_refs(
+    payload: Any,
+    source_context: list[dict[str, Any]],
+) -> Any:
+    """Canonicalize the one harmless shorthand accepted at the JSON boundary.
+
+    Models occasionally return a SourceIndex block ID (``B-17``) instead of
+    the namespaced reference required by the compiler.  Resolve only exact,
+    unique block/chunk matches from this request's frozen source context.  No
+    fuzzy matching is allowed: unknown or ambiguous values remain unchanged
+    and are rejected by the ordinary reference validator.
+    """
+
+    if not isinstance(payload, (dict, list)):
+        return payload
+    block_matches: dict[str, list[str]] = defaultdict(list)
+    chunk_matches: dict[str, list[str]] = defaultdict(list)
+    for block in source_context:
+        block_id = str(block.get("block_id") or "").strip()
+        if block_id:
+            block_matches[block_id].append(f"SourceIndex:{block_id}")
+        anchor = block.get("source_anchor") or {}
+        input_id = str(block.get("input_id") or anchor.get("source_input_id") or "").strip()
+        chunk_id = str(anchor.get("chunk_id") or "").strip()
+        if input_id and chunk_id:
+            key = f"{input_id}:{chunk_id}"
+            chunk_matches[key].append(f"SourceIndex:{key}")
+
+    def normalize_ref(value: Any) -> Any:
+        if not isinstance(value, str) or value.startswith("SourceIndex:"):
+            return value
+        block_values = block_matches.get(value, [])
+        if len(block_values) == 1:
+            return block_values[0]
+        chunk_values = chunk_matches.get(value, [])
+        if len(chunk_values) == 1:
+            return chunk_values[0]
+        return value
+
+    def walk(value: Any, *, in_upstream_refs: bool = False) -> Any:
+        if isinstance(value, list):
+            return [walk(item, in_upstream_refs=in_upstream_refs) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: (
+                    [normalize_ref(item) for item in raw]
+                    if key == "upstream_refs" and isinstance(raw, list)
+                    else walk(raw, in_upstream_refs=(key == "upstream_refs"))
+                )
+                for key, raw in value.items()
+            }
+        return normalize_ref(value) if in_upstream_refs else value
+
+    return walk(payload)
+
+
+def _sanitize_project_candidate_payload(
+    payload: Any,
+    source_context: list[dict[str, Any]],
+) -> Any:
+    """Keep only facts grounded in raw blocks from this exact invocation."""
+
+    if not isinstance(payload, dict):
+        return payload
+    known_refs = {
+        ref
+        for block in source_context
+        for ref in (
+            (
+                f"SourceIndex:{block.get('block_id')}"
+                if block.get("block_id")
+                else ""
+            ),
+            (
+                "SourceIndex:"
+                f"{block.get('input_id')}:"
+                f"{(block.get('source_anchor') or {}).get('chunk_id')}"
+                if block.get("input_id")
+                and (block.get("source_anchor") or {}).get("chunk_id")
+                else ""
+            ),
+        )
+        if ref
+    }
+
+    def clean_item(item: Any) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        refs = [
+            str(ref)
+            for ref in item.get("upstream_refs", [])
+            if str(ref) in known_refs
+        ]
+        if not refs:
+            return None
+        value = {**item, "upstream_refs": list(dict.fromkeys(refs))}
+        if "requirement_ids" in value:
+            value["requirement_ids"] = []
+        return value
+
+    value = dict(payload)
+    if value.get("project_name") is not None:
+        value["project_name"] = clean_item(value.get("project_name"))
+    for field_name in (
+        "identity",
+        *_PROJECT_CITED_LIST_FIELDS,
+        "terminology",
+        "facts",
+        "evidence_needs",
+    ):
+        items = value.get(field_name)
+        if isinstance(items, list):
+            value[field_name] = [
+                cleaned
+                for item in items
+                if (cleaned := clean_item(item)) is not None
+            ]
+    return value
+
+
 def _project_candidate_refs(
     candidate: ProjectUnderstandingCandidate,
 ) -> list[str]:
@@ -1046,49 +1257,6 @@ def _project_reference_texts(
                 item.get("original_text"),
                 item.get("normalized_requirement"),
             )
-    for group in request.score_model.get("groups", []):
-        group_id = group.get("group_id")
-        if group_id:
-            add(
-                f"ScoreModel:{group_id}",
-                group.get("name"),
-                group.get("title"),
-            )
-    for point in request.score_model.get("points", []):
-        point_id = point.get("score_point_id")
-        if not point_id:
-            continue
-        add(
-            f"ScoreModel:{point_id}",
-            point.get("title"),
-            point.get("criterion"),
-            point.get("response_expectation"),
-            *(point.get("full_score_conditions") or []),
-            *(
-                level.get("criterion")
-                for level in point.get("scoring_levels", [])
-                if isinstance(level, dict)
-            ),
-        )
-        for condition in point.get("score_conditions", []):
-            condition_id = condition.get("condition_id")
-            if condition_id:
-                add(
-                    f"ScoreModel:{condition_id}",
-                    condition.get("text"),
-                    condition.get("source_excerpt"),
-                    condition.get("subject"),
-                    condition.get("response_intent"),
-                )
-        for unit in point.get("response_units", []):
-            unit_id = unit.get("unit_id")
-            if unit_id:
-                add(
-                    f"ScoreModel:{unit_id}",
-                    unit.get("title"),
-                    unit.get("source_excerpt"),
-                    unit.get("response_expectation"),
-                )
     for block in request.source_context:
         content = block.get("content")
         if block.get("block_id"):
@@ -1348,6 +1516,35 @@ class LLMProjectUnderstandingProvider(
     prompt_version = PROJECT_PROMPT_VERSION
     schema_version = PROJECT_SCHEMA_VERSION
     candidate_model = ProjectUnderstandingCandidate
+    # One raw-source call normally suffices.  Only malformed JSON or an empty
+    # core understanding receives one controlled repair.
+    max_repair_attempts = 1
+
+    @staticmethod
+    def _raw_source_mode(request: BaseModel) -> bool:
+        return bool(
+            isinstance(request, ProjectUnderstandingInput)
+            and request.requirement_ledger.get("projection_version")
+            == PROJECT_INPUT_PROJECTION_VERSION
+        )
+
+    def _prepare_candidate_payload(
+        self,
+        payload: Any,
+        request: BaseModel,
+    ) -> Any:
+        if not isinstance(request, ProjectUnderstandingInput):
+            return payload
+        normalized = _normalize_project_source_refs(
+            payload,
+            request.source_context,
+        )
+        if not self._raw_source_mode(request):
+            return normalized
+        return _sanitize_project_candidate_payload(
+            normalized,
+            request.source_context,
+        )
 
     def _prepare_candidate(
         self,
@@ -1356,13 +1553,7 @@ class LLMProjectUnderstandingProvider(
     ) -> ProjectUnderstandingCandidate:
         if not isinstance(request, ProjectUnderstandingInput):
             return candidate
-        if request.requirement_ledger.get("batch_kind") != "score_points":
-            return candidate
-
-        updates: dict[str, Any] = {}
-        for field in _SCORE_BATCH_PROJECT_CORE_FIELDS:
-            updates[field] = None if field == "project_name" else []
-        return candidate.model_copy(update=updates, deep=True)
+        return candidate
 
     def _recover_candidate(
         self,
@@ -1403,376 +1594,10 @@ class LLMProjectUnderstandingProvider(
         self,
         request: ProjectUnderstandingInput,
     ) -> StructuredInferenceResult[ProjectUnderstandingCandidate]:
-        score_points = request.score_model.get("points", [])
-        if len(score_points) <= 1:
-            return self._invoke(
-                request,
-                logical_batch_id="project-single",
-            )
-
-        batch_results = [
-            (
-                batch_id,
-                self._invoke(
-                    batch_request,
-                    logical_batch_id=batch_id,
-                ),
-            )
-            for batch_id, batch_request in self._score_point_batches(request)
-        ]
-        merged = self._merge_batch_candidates(
+        return self._invoke(
             request,
-            batch_results,
-        )
-        self._validate_candidate(merged, request)
-        raw_output = _canonical_json(
-            {
-                "batch_outputs": [
-                    {
-                        "batch_id": batch_id,
-                        "raw_output": result.raw_output,
-                    }
-                    for batch_id, result in batch_results
-                ],
-                "merged_candidate": merged.model_dump(mode="json"),
-            }
-        )
-        reasoning = "\n\n".join(
-            f"[{batch_id}]\n{result.reasoning}"
-            for batch_id, result in batch_results
-            if result.reasoning
-        )
-        return StructuredInferenceResult(
-            candidate=merged,
-            raw_output=raw_output,
-            normalized_output=_canonical_json(merged),
-            reasoning=reasoning,
-            input_snapshot=_canonical_json(request),
-            attempt_count=sum(
-                result.attempt_count for _, result in batch_results
-            ),
-            capability_id=self.capability_id,
-            prompt_version=self.prompt_version,
-            prompt_hash=self.prompt_hash,
-            schema_version=self.schema_version,
-            provider_fingerprint=self.provider_fingerprint,
-            model_fingerprint=self.model_fingerprint,
-            temperature=self.temperature,
-        )
-
-    def _score_point_batches(
-        self,
-        request: ProjectUnderstandingInput,
-    ) -> list[tuple[str, ProjectUnderstandingInput]]:
-        """Build semantic batches on score-group/score-point boundaries only."""
-
-        requirements = list(
-            request.requirement_ledger.get("requirements", [])
-        )
-        points = list(request.score_model.get("points", []))
-        groups = list(request.score_model.get("groups", []))
-        evidence_needs = list(
-            request.score_model.get("evidence_need_candidates", [])
-        )
-        point_ids = {
-            str(point.get("score_point_id"))
-            for point in points
-            if point.get("score_point_id")
-        }
-        score_chunk_ids = {
-            str(anchor.get("chunk_id"))
-            for point in points
-            for anchor in point.get("source_anchors", [])
-            if isinstance(anchor, dict) and anchor.get("chunk_id")
-        }
-        core_source_context = [
-            block
-            for block in request.source_context
-            if str((block.get("source_anchor") or {}).get("chunk_id"))
-            not in score_chunk_ids
-        ]
-        if not core_source_context:
-            core_source_context = list(request.source_context)
-
-        batches: list[tuple[str, ProjectUnderstandingInput]] = [
-            (
-                "project-core",
-                ProjectUnderstandingInput(
-                    requirement_ledger={
-                        "batch_kind": "project_core",
-                        "requirements": [],
-                    },
-                    score_model=self._score_model_batch(
-                        request.score_model,
-                        groups=[],
-                        points=[],
-                        evidence_needs=[],
-                    ),
-                    source_context=core_source_context,
-                ),
-            )
-        ]
-
-        groups_by_id = {
-            str(group.get("group_id")): group
-            for group in groups
-            if group.get("group_id")
-        }
-        ordered_group_ids: list[str] = []
-        for point in points:
-            group_id = str(
-                point.get("group_id")
-                or f"ungrouped:{point.get('score_point_id')}"
-            )
-            if group_id not in ordered_group_ids:
-                ordered_group_ids.append(group_id)
-
-        for group_id in ordered_group_ids:
-            group_points = [
-                point
-                for point in points
-                if str(
-                    point.get("group_id")
-                    or f"ungrouped:{point.get('score_point_id')}"
-                )
-                == group_id
-            ]
-            group_point_ids = {
-                str(point.get("score_point_id"))
-                for point in group_points
-                if point.get("score_point_id")
-            }
-            linked_requirement_ids = {
-                str(requirement_id)
-                for point in group_points
-                for requirement_id in point.get(
-                    "linked_requirement_ids",
-                    [],
-                )
-            }
-            group_requirements = [
-                item
-                for item in requirements
-                if str(item.get("requirement_id"))
-                in linked_requirement_ids
-            ]
-            group_chunk_ids = {
-                str(anchor.get("chunk_id"))
-                for point in group_points
-                for anchor in point.get("source_anchors", [])
-                if isinstance(anchor, dict) and anchor.get("chunk_id")
-            }
-            group_source_context = [
-                block
-                for block in request.source_context
-                if str((block.get("source_anchor") or {}).get("chunk_id"))
-                in group_chunk_ids
-            ]
-            group_value = groups_by_id.get(group_id)
-            batch_id = (
-                f"score-group:{group_id}"
-                if group_value is not None
-                else f"score-point:{next(iter(group_point_ids))}"
-            )
-            batches.append(
-                (
-                    batch_id,
-                    ProjectUnderstandingInput(
-                        requirement_ledger={
-                            "batch_kind": "score_points",
-                            "score_point_ids": sorted(group_point_ids),
-                            "requirements": group_requirements,
-                        },
-                        score_model=self._score_model_batch(
-                            request.score_model,
-                            groups=(
-                                [group_value]
-                                if group_value is not None
-                                else []
-                            ),
-                            points=group_points,
-                            evidence_needs=[
-                                item
-                                for item in evidence_needs
-                                if str(item.get("score_point_id"))
-                                in group_point_ids
-                            ],
-                        ),
-                        source_context=group_source_context,
-                    ),
-                )
-            )
-
-        covered_point_ids = {
-            str(point.get("score_point_id"))
-            for _, batch in batches
-            for point in batch.score_model.get("points", [])
-            if point.get("score_point_id")
-        }
-        if covered_point_ids != point_ids:
-            raise PlanningInferenceError(
-                "项目理解评分点分批不完整；"
-                f"missing={sorted(point_ids - covered_point_ids)}, "
-                f"extra={sorted(covered_point_ids - point_ids)}"
-            )
-        return batches
-
-    @staticmethod
-    def _score_model_batch(
-        score_model: dict[str, Any],
-        *,
-        groups: list[dict[str, Any]],
-        points: list[dict[str, Any]],
-        evidence_needs: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        value = dict(score_model)
-        value["groups"] = groups
-        value["points"] = points
-        value["evidence_need_candidates"] = evidence_needs
-        return value
-
-    def _merge_batch_candidates(
-        self,
-        request: ProjectUnderstandingInput,
-        batch_results: list[
-            tuple[
-                str,
-                StructuredInferenceResult[ProjectUnderstandingCandidate],
-            ]
-        ],
-    ) -> ProjectUnderstandingCandidate:
-        candidates = [
-            (batch_id, result.candidate)
-            for batch_id, result in batch_results
-        ]
-        project_names = [
-            candidate.project_name
-            for _, candidate in candidates
-            if candidate.project_name is not None
-        ]
-        project_name = (
-            max(project_names, key=lambda item: item.confidence).model_copy(
-                deep=True
-            )
-            if project_names
-            else None
-        )
-
-        identity_by_field: dict[str, IdentityFieldCandidate] = {}
-        for _, candidate in candidates:
-            for item in candidate.identity:
-                current = identity_by_field.get(item.field)
-                if current is None or item.confidence > current.confidence:
-                    identity_by_field[item.field] = item.model_copy(deep=True)
-
-        def merge_items(field: str, text_attr: str) -> list[Any]:
-            merged: list[Any] = []
-            seen: set[str] = set()
-            for _, candidate in candidates:
-                for item in getattr(candidate, field):
-                    key = "".join(
-                        str(getattr(item, text_attr)).split()
-                    ).casefold()
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    merged.append(item.model_copy(deep=True))
-            return merged
-
-        semantic_fields = (
-            "background",
-            "goals",
-            "scope",
-            "boundaries",
-            "work_packages",
-            "dependencies",
-            "inputs",
-            "processing",
-            "outputs",
-            "deliverables",
-            "acceptance_conditions",
-            "milestones",
-            "roles",
-            "risks",
-            "constraints",
-        )
-        values: dict[str, Any] = {
-            field: merge_items(field, "text")
-            for field in semantic_fields
-        }
-        values["terminology"] = merge_items("terminology", "term")
-
-        facts: list[ProjectFactCandidate] = []
-        evidence_needs: list[ProjectEvidenceNeedCandidate] = []
-        for batch_id, candidate in candidates:
-            safe_batch_id = batch_id.replace(":", "-")
-            for fact in candidate.facts:
-                value = fact.model_copy(deep=True)
-                value.local_id = f"{safe_batch_id}-{value.local_id}"
-                facts.append(value)
-            for need in candidate.evidence_needs:
-                value = need.model_copy(deep=True)
-                value.local_id = f"{safe_batch_id}-{value.local_id}"
-                evidence_needs.append(value)
-
-        active_requirement_ids = sorted(
-            _active_requirement_ids(request.requirement_ledger)
-        )
-        score_point_ids = sorted(_score_ids(request.score_model))
-        required_refs = [
-            *(
-                f"RequirementLedger:{requirement_id}"
-                for requirement_id in active_requirement_ids
-            ),
-            *(f"ScoreModel:{score_id}" for score_id in score_point_ids),
-        ]
-        merged_refs = {
-            ref
-            for _, candidate in candidates
-            for ref in _project_candidate_refs(candidate)
-        }
-        missing_refs = [
-            ref for ref in required_refs if ref not in merged_refs
-        ]
-        if missing_refs:
-            facts.append(
-                ProjectFactCandidate(
-                    local_id="semantic-coverage",
-                    statement=(
-                        "基于全部已晋级需求与评分点形成项目目标、范围、"
-                        "工作包、交付、验收与响应重点的整体理解。"
-                    ),
-                    classification="inference",
-                    upstream_refs=missing_refs,
-                    requirement_ids=[],
-                    confidence=1.0,
-                )
-            )
-
-        review_status = (
-            "needs_review"
-            if any(
-                candidate.review_status == "needs_review"
-                for _, candidate in candidates
-            )
-            else "confirmed"
-        )
-        return ProjectUnderstandingCandidate(
-            project_name=project_name,
-            identity=list(identity_by_field.values()),
-            **values,
-            facts=facts,
-            evidence_needs=evidence_needs,
-            unknowns=list(
-                dict.fromkeys(
-                    item
-                    for _, candidate in candidates
-                    for item in candidate.unknowns
-                )
-            ),
-            covered_requirement_ids=active_requirement_ids,
-            covered_score_point_ids=score_point_ids,
-            review_status=review_status,
+            logical_batch_id="project-single",
+            repair_attempts=(1 if self._raw_source_mode(request) else 2),
         )
 
     def _repair_feedback(
@@ -1787,28 +1612,33 @@ class LLMProjectUnderstandingProvider(
         active_requirement_ids = sorted(
             _active_requirement_ids(request.requirement_ledger)
         )
-        score_point_ids = sorted(_score_ids(request.score_model))
-        semantic_upstream_refs = [
-            *(
-                f"RequirementLedger:{requirement_id}"
-                for requirement_id in active_requirement_ids
-            ),
-            *(f"ScoreModel:{score_id}" for score_id in score_point_ids),
-        ]
         candidate_diagnostics: list[str] = []
         if isinstance(candidate, ProjectUnderstandingCandidate):
+            raw_source_mode = self._raw_source_mode(request)
             known_refs = _planning_reference_ids(
-                ledger=request.requirement_ledger,
-                score_model=request.score_model,
+                ledger=(
+                    {}
+                    if raw_source_mode
+                    else request.requirement_ledger
+                ),
+                score_model={},
                 source_context=request.source_context,
             )
             candidate_refs = set(_project_candidate_refs(candidate))
             if unknown_refs := sorted(candidate_refs - known_refs):
+                allowed_source_refs = sorted(
+                    ref
+                    for ref in known_refs
+                    if ref.startswith("SourceIndex:")
+                )
                 candidate_diagnostics.extend(
                     [
                         "当前候选含以下未知 upstream_refs，必须删除或替换为输入中"
                         "真实存在的正式引用：",
                         json.dumps(unknown_refs, ensure_ascii=False),
+                        "本批允许使用的 SourceIndex 引用如下；不得保留或新造"
+                        "清单外的 SourceIndex ID：",
+                        json.dumps(allowed_source_refs, ensure_ascii=False),
                     ]
                 )
 
@@ -1835,9 +1665,13 @@ class LLMProjectUnderstandingProvider(
                     ]
                 )
 
-            unsupported_items = _unsupported_project_candidate_items(
-                candidate,
-                request,
+            unsupported_items = (
+                []
+                if raw_source_mode
+                else _unsupported_project_candidate_items(
+                    candidate,
+                    request,
+                )
             )
             if unsupported_items:
                 candidate_diagnostics.extend(
@@ -1854,7 +1688,7 @@ class LLMProjectUnderstandingProvider(
             blocked_needs = sorted(
                 need.local_id
                 for need in candidate.evidence_needs
-                if need.review_status == "blocked"
+                if not raw_source_mode and need.review_status == "blocked"
             )
             if blocked_needs:
                 candidate_diagnostics.extend(
@@ -1867,22 +1701,12 @@ class LLMProjectUnderstandingProvider(
 
         details = [
             f"校验错误：{error}",
-            "必须一次性完成以下修复；不要省略、概括或截断任何 ID：",
+            "必须在受控修复中完成以下修复；不得改变输入事实或虚构 ID：",
             *candidate_diagnostics,
-            "1. covered_requirement_ids 必须与下面 JSON 数组完全相同，"
-            "不得包含 blocked/waived Requirement：",
-            json.dumps(active_requirement_ids, ensure_ascii=False),
-            "2. covered_score_point_ids 必须与下面 JSON 数组完全相同：",
-            json.dumps(score_point_ids, ensure_ascii=False),
-            "3. 下列每个正式引用必须至少出现在一个语义项的 upstream_refs 中。"
-            "数量较多时，新增一个 classification=inference、"
-            "local_id=semantic-coverage 的 facts 项集中承接全部引用即可；"
-            "该项 requirement_ids 可留空：",
-            json.dumps(semantic_upstream_refs, ensure_ascii=False),
-            "4. 删除所有不在输入快照中的 upstream_refs 和 requirement_ids；"
+            "1. 删除所有不在输入快照中的 upstream_refs 和 requirement_ids；"
             "SourceIndex 引用必须使用 SourceIndex:<block_id> 或 "
             "SourceIndex:<input_id>:<chunk_id> 格式。",
-            "5. 保留已有的项目名称、目标、范围、工作包、交付物、验收、"
+            "2. 保留已有的项目名称、目标、范围、工作包、交付物、验收、"
             "风险和证据缺口等有效语义内容，只修复覆盖数组、引用和明确的校验问题。",
         ]
         return "\n".join(details)
@@ -1894,25 +1718,14 @@ class LLMProjectUnderstandingProvider(
     ) -> None:
         if not isinstance(request, ProjectUnderstandingInput):
             raise ValueError("ProjectUnderstandingProvider 输入类型错误")
-        active_requirements = _active_requirement_ids(
-            request.requirement_ledger
-        )
-        score_ids = _score_ids(request.score_model)
-        if set(candidate.covered_requirement_ids) != active_requirements:
-            raise ValueError(
-                "项目理解未精确覆盖有效 Requirement；"
-                f"missing={sorted(active_requirements - set(candidate.covered_requirement_ids))}, "
-                f"extra={sorted(set(candidate.covered_requirement_ids) - active_requirements)}"
-            )
-        if set(candidate.covered_score_point_ids) != score_ids:
-            raise ValueError(
-                "项目理解未精确覆盖 ScorePoint；"
-                f"missing={sorted(score_ids - set(candidate.covered_score_point_ids))}, "
-                f"extra={sorted(set(candidate.covered_score_point_ids) - score_ids)}"
-            )
+        raw_source_mode = self._raw_source_mode(request)
         known_refs = _planning_reference_ids(
-            ledger=request.requirement_ledger,
-            score_model=request.score_model,
+            ledger=(
+                {}
+                if raw_source_mode
+                else request.requirement_ledger
+            ),
+            score_model={},
             source_context=request.source_context,
         )
         candidate_refs = set(_project_candidate_refs(candidate))
@@ -1921,33 +1734,23 @@ class LLMProjectUnderstandingProvider(
             raise ValueError(
                 f"项目理解引用未知上游 ID: {sorted(unknown_refs)}"
             )
-        required_semantic_refs = {
-            *(
-                f"RequirementLedger:{requirement_id}"
-                for requirement_id in active_requirements
-            ),
-            *(f"ScoreModel:{score_id}" for score_id in score_ids),
-        }
-        if missing_refs := required_semantic_refs - candidate_refs:
-            raise ValueError(
-                "项目理解仅声明 covered ID、未形成对应的带来源语义结论或"
-                f" evidence_need: {sorted(missing_refs)}"
-            )
-        if required_semantic_refs and not any(
+        if not any(
             (
+                candidate.project_name is not None,
                 candidate.goals,
                 candidate.scope,
                 candidate.work_packages,
-                candidate.evidence_needs,
-                candidate.unknowns,
+                candidate.evidence_needs if not raw_source_mode else [],
+                candidate.unknowns if not raw_source_mode else [],
             )
         ):
             raise ValueError(
                 "项目理解未形成目标、范围、工作包，也未明确 unknown/evidence_need"
             )
-        unsupported_items = _unsupported_project_candidate_items(
-            candidate,
-            request,
+        unsupported_items = (
+            []
+            if raw_source_mode
+            else _unsupported_project_candidate_items(candidate, request)
         )
         if unsupported_items:
             owners = [item["owner"] for item in unsupported_items]
@@ -1972,12 +1775,12 @@ class LLMProjectUnderstandingProvider(
             raise ValueError(
                 f"项目事实引用未知 Requirement: {sorted(unknown)}"
             )
-        if any(
+        if not raw_source_mode and any(
             need.review_status == "blocked"
             for need in candidate.evidence_needs
         ):
             raise ValueError("项目理解包含 blocked EvidenceNeed 候选")
-        if candidate.review_status == "blocked":
+        if not raw_source_mode and candidate.review_status == "blocked":
             raise ValueError("项目理解候选标记为 blocked")
         semantic_lists = {
             name: [
@@ -1993,7 +1796,7 @@ class LLMProjectUnderstandingProvider(
         ):
             left_values = semantic_lists[left]
             right_values = semantic_lists[right]
-            if (
+            if not raw_source_mode and (
                 left_values
                 and right_values
                 and (

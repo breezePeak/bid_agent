@@ -30,6 +30,7 @@ class V3WorkspaceSnapshotBuilder:
         "SourceIndex",
         "RequirementLedger",
         "ScoreModel",
+        "ProjectModel",
         "ChapterBlueprint",
     )
     _PIPELINE_STAGE_LABELS = {
@@ -37,6 +38,7 @@ class V3WorkspaceSnapshotBuilder:
         "build_requirement_ledger": "招标需求提取",
         "score_structure": "评分结构解析",
         "score_semantic": "评分理解批次",
+        "plan_response": "全局项目事实生成",
         # Historical telemetry remains readable even though these stages are
         # no longer members of the automatic pipeline.
         "project_understanding": "项目整体理解（历史）",
@@ -50,6 +52,7 @@ class V3WorkspaceSnapshotBuilder:
         "compile_template_structure": "模板处理",
         "build_requirement_ledger": "需求提取",
         "analyze_scores": "评分理解",
+        "plan_response": "全局项目事实",
         "compile_chapter_blueprint": "目录生成",
         "confirm_planning": "目录确认",
         "sync_material_requirements": "检查材料与证据缺口",
@@ -156,6 +159,19 @@ class V3WorkspaceSnapshotBuilder:
                         }
                     except Exception:
                         planning = {"status": "blocked"}
+        # A confirmed directory without its shared ProjectModel is a legacy
+        # partial run, not a writable workspace.  Keep the old directory for
+        # audit, but send the user back through planning so the missing stage
+        # can be generated and recorded in a new operation.
+        if (
+            planning.get("status") == "confirmed"
+            and artifact_states.get("ProjectModel") is not True
+        ):
+            planning = {
+                "status": "outdated",
+                "reason": "PROJECT_MODEL_REQUIRED",
+                "message": "当前目录缺少全局项目事实，请重新进入目录流程补齐后再编写章节。",
+            }
         scheduled_needs = {
             str(item.get("need_id") or ""): item
             for item in control.evidence_needs()
@@ -223,6 +239,7 @@ class V3WorkspaceSnapshotBuilder:
             generation=generation,
             chapters=chapters,
             blueprint_artifact=artifacts.get("ChapterBlueprint") or {},
+            project_model_current=artifact_states.get("ProjectModel") is True,
         )
         return {
             "schema_version": "v3",
@@ -285,6 +302,7 @@ class V3WorkspaceSnapshotBuilder:
         generation: dict[str, Any],
         chapters: dict[str, Any],
         blueprint_artifact: dict[str, Any],
+        project_model_current: bool,
     ) -> dict[str, Any]:
         """The single UI-facing workflow truth.
 
@@ -313,7 +331,37 @@ class V3WorkspaceSnapshotBuilder:
         if active_stage:
             current_stage_id = str(active_stage.get("stage_id") or "")
 
-        if planning_status == "confirmed":
+        # The latest operation wins over historical artifacts and receipts.
+        # In particular, an old confirmed directory must never hide a failed
+        # or paused plan_response attempt from the current operation.
+        if analysis_status == "failed" or any(
+            str(item.get("status") or "") == "failed"
+            for item in stages
+            if isinstance(item, dict)
+        ):
+            phase = "planning"
+            status = "failed"
+        elif analysis_status in {"blocked", "paused"} or any(
+            str(item.get("status") or "") in {"blocked", "paused"}
+            for item in stages
+            if isinstance(item, dict)
+        ):
+            phase = "planning"
+            status = "needs_handling"
+            paused_stage = next(
+                (
+                    item for item in stages
+                    if isinstance(item, dict)
+                    and str(item.get("status") or "") in {"blocked", "paused"}
+                ),
+                None,
+            )
+            if paused_stage:
+                current_stage_id = str(paused_stage.get("stage_id") or "")
+        elif analysis_status in {"queued", "running", "processing"}:
+            phase = "planning"
+            status = "running"
+        elif planning_status == "confirmed" and project_model_current:
             phase = "writing"
             status = generation_status if generation_status != "not_started" else "ready"
             operation_id = str(generation.get("operation_id") or operation_id)
@@ -340,16 +388,10 @@ class V3WorkspaceSnapshotBuilder:
                     ],
                 }
             )
-        elif analysis_status == "failed" or any(
-            str(item.get("status") or "") == "failed"
-            for item in stages
-            if isinstance(item, dict)
-        ):
+        elif planning_status == "outdated":
             phase = "planning"
             status = "failed"
-        elif analysis_status in {"queued", "running", "processing"}:
-            phase = "planning"
-            status = "running"
+            current_stage_id = "plan_response" if not project_model_current else "compile_chapter_blueprint"
 
         for chapter in (chapters.get("items") or []):
             if not isinstance(chapter, dict):
@@ -387,12 +429,15 @@ class V3WorkspaceSnapshotBuilder:
             "current_stage_id": current_stage_id,
             "stages": stages,
             "pending_reviews": pending_reviews,
-            "can_resume": status == "failed",
+            "can_resume": status in {"failed", "needs_handling"},
             "current_artifact": {
                 "kind": "ChapterBlueprint",
                 "revision": int(blueprint_artifact.get("revision") or 0),
                 "hash": str(blueprint_artifact.get("artifact_hash") or ""),
-                "is_current": planning_status in {"needs_human", "confirmed"},
+                "is_current": (
+                    phase in {"planning_review", "writing"}
+                    and planning_status in {"needs_human", "confirmed"}
+                ),
             },
             "invalidation_reason": str(
                 planning.get("reason")
@@ -1161,6 +1206,7 @@ class V3WorkspaceSnapshotBuilder:
             "analyze_scores": "ScoreModel",
             "score_structure": "ScoreModel",
             "score_semantic": "ScoreModel",
+            "plan_response": "ProjectModel",
             "compile_chapter_blueprint": "ChapterBlueprint",
         }.get(normalized)
         if artifact_kind:
@@ -1172,6 +1218,13 @@ class V3WorkspaceSnapshotBuilder:
                 ),
                 None,
             )
+            if (
+                artifact_kind == "ProjectModel"
+                and str(stage.get("status") or "") not in {"succeeded", "reused"}
+            ):
+                # A failed/paused current attempt must not hydrate this drawer
+                # with an older promoted ProjectModel and make it look current.
+                artifact = None
             payload = (
                 artifact.get("payload")
                 if isinstance(artifact, dict)
@@ -1246,6 +1299,43 @@ class V3WorkspaceSnapshotBuilder:
                     )
                     if isinstance(item, dict)
                 ]
+            elif artifact_kind == "ProjectModel":
+                identity = (
+                    payload.get("identity")
+                    if isinstance(payload.get("identity"), dict)
+                    else {}
+                )
+                details.update(
+                    {
+                        "project_id": str(payload.get("project_id") or ""),
+                        "confirmed_fact_count": len(
+                            payload.get("confirmed_facts") or []
+                        ),
+                        "inference_count": len(payload.get("inferences") or []),
+                        "unknown_count": len(payload.get("unknowns") or []),
+                    }
+                )
+                items = [
+                    {
+                        "id": f"identity:{key}",
+                        "title": str(key),
+                        "status": "confirmed",
+                        "description": str(value),
+                    }
+                    for key, value in identity.items()
+                    if str(value).strip()
+                ]
+                items.extend(
+                    {
+                        "id": f"{field}:{index}",
+                        "title": field,
+                        "status": "confirmed",
+                        "description": str(value),
+                    }
+                    for field in ("goals", "scope", "work_packages", "deliverables")
+                    for index, value in enumerate(payload.get(field) or [], start=1)
+                    if str(value).strip()
+                )
             elif artifact_kind == "ChapterBlueprint":
                 items = [
                     {
@@ -1420,9 +1510,84 @@ class V3WorkspaceSnapshotBuilder:
             details = dict(delivery)
         else:
             details = dict(stage.get("summary") or {})
+        # Keep the stage drawer self-contained for planning failures and
+        # successful/reused runs.  These fields come from the backend
+        # snapshot; the client must not infer token/input/request counts.
+        if normalized == "plan_response":
+            details = {
+                **details,
+                "input_chars": int(stage.get("input_chars") or details.get("input_chars") or 0),
+                "source_block_count": int(
+                    stage.get("source_block_count")
+                    or details.get("source_block_count")
+                    or 0
+                ),
+                "scanned_source_block_count": int(
+                    stage.get("scanned_source_block_count")
+                    or details.get("scanned_source_block_count")
+                    or 0
+                ),
+                "llm_request_count": int(stage.get("llm_request_count") or 0),
+                "normalized_reference_count": int(
+                    stage.get("normalized_reference_count")
+                    or details.get("normalized_reference_count")
+                    or 0
+                ),
+            }
+            summary = stage.get("summary")
+            if not isinstance(summary, dict) or not summary:
+                summary = {
+                    "project_name": str(
+                        (payload.get("identity") or {}).get("project_name")
+                        or (payload.get("identity") or {}).get("项目名称")
+                        or ""
+                    )
+                    if isinstance(payload.get("identity"), dict)
+                    else "",
+                    "fact_count": sum(
+                        len(payload.get(field) or [])
+                        for field in ("confirmed_facts", "inferences", "conflicts")
+                    ),
+                    "evidence_need_count": len(payload.get("evidence_needs") or []),
+                }
+            details["project_summary"] = summary
+            for index, item in enumerate(stage.get("validation_errors") or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                items.append(
+                    {
+                        "id": str(item.get("code") or item.get("rule") or f"validation:{index}"),
+                        "title": str(item.get("code") or item.get("rule") or f"第 {index} 轮校验"),
+                        "status": "failed",
+                        "description": str(item.get("message") or item.get("error") or item),
+                        "meta": {
+                            "attempt": item.get("attempt") or index,
+                        },
+                    }
+                )
+            for index, item in enumerate(stage.get("repair_history") or [], start=1):
+                if not isinstance(item, dict):
+                    continue
+                items.append(
+                    {
+                        "id": str(item.get("attempt") or f"repair:{index}"),
+                        "title": f"自动修复第 {item.get('attempt') or index} 轮",
+                        "status": str(item.get("status") or "failed"),
+                        "description": str(
+                            item.get("message")
+                            or item.get("error")
+                            or item.get("summary")
+                            or "已记录该轮校验结果"
+                        ),
+                        "meta": {
+                            "attempt": item.get("attempt") or index,
+                        },
+                    }
+                )
         return {
             **stage,
             "details": details,
+            "summary": details.get("project_summary") if normalized == "plan_response" else stage.get("summary") or {},
             "items": items,
             "research_trace": research_trace,
             "trace_disclosure": trace_disclosure,
@@ -1603,9 +1768,13 @@ class V3WorkspaceSnapshotBuilder:
         )
         llm_requests_by_stage: dict[str, list[dict[str, Any]]] = {}
         for request in llm_requests:
-            llm_requests_by_stage.setdefault(
-                str(request.get("stage_id") or ""), []
-            ).append(request)
+            request_stage = str(request.get("stage_id") or "")
+            # Older runs recorded the two sub-capabilities separately even
+            # though the user sees one "全局项目事实" node.  Project both old
+            # and new telemetry onto that node so its drawer never looks empty.
+            if request_stage in {"project_understanding", "topic_duty_planning"}:
+                request_stage = "plan_response"
+            llm_requests_by_stage.setdefault(request_stage, []).append(request)
         runs_by_stage: dict[str, dict[str, Any]] = {}
         for item in raw_runs:
             stage = str(item.get("stage_command") or "")
@@ -1762,6 +1931,12 @@ class V3WorkspaceSnapshotBuilder:
                 llm_requests_by_stage,
             ),
             self._pipeline_stage(
+                "plan_response",
+                status_for("plan_response"),
+                runs_by_stage.get("plan_response"),
+                llm_requests_by_stage,
+            ),
+            self._pipeline_stage(
                 "compile_chapter_blueprint",
                 status_for("compile_chapter_blueprint"),
                 runs_by_stage.get("compile_chapter_blueprint"),
@@ -1809,6 +1984,95 @@ class V3WorkspaceSnapshotBuilder:
             for item in (output.get("warnings") or [])
             if isinstance(item, dict)
         ]
+        error_value = value.get("error") if isinstance(value.get("error"), dict) else {}
+        error_details = (
+            error_value.get("details")
+            if isinstance(error_value.get("details"), dict)
+            else {}
+        )
+        # Planning stages now persist the compact input/validation telemetry
+        # alongside the stage run.  Keep the projection tolerant of older
+        # runs (which only recorded ``output`` and ``error``) so the drawer
+        # remains useful after a refresh and never invents values in the UI.
+        metrics = output.get("metrics") if isinstance(output.get("metrics"), dict) else {}
+        input_chars = output.get(
+            "input_chars",
+            metrics.get(
+                "input_chars",
+                error_details.get("input_chars", value.get("input_chars", 0)),
+            ),
+        )
+        source_block_count = output.get(
+            "source_block_count",
+            metrics.get(
+                "source_block_count",
+                error_details.get(
+                    "source_block_count",
+                    value.get("source_block_count", 0),
+                ),
+            ),
+        )
+        scanned_source_block_count = output.get(
+            "scanned_source_block_count",
+            metrics.get(
+                "scanned_source_block_count",
+                error_details.get(
+                    "scanned_source_block_count",
+                    value.get("scanned_source_block_count", 0),
+                ),
+            ),
+        )
+        normalized_reference_count = output.get(
+            "normalized_reference_count",
+            metrics.get(
+                "normalized_reference_count",
+                error_details.get(
+                    "normalized_reference_count",
+                    value.get("normalized_reference_count", 0),
+                ),
+            ),
+        )
+        attempts = int(error_details.get("attempts") or 0)
+        repair_round = output.get(
+            "repair_round",
+            metrics.get(
+                "repair_round",
+                value.get("repair_round", max(0, attempts - 1)),
+            ),
+        )
+        max_repair_rounds = output.get(
+            "max_repair_rounds",
+            metrics.get(
+                "max_repair_rounds",
+                value.get("max_repair_rounds", 1 if attempts else 0),
+            ),
+        )
+        repair_history = output.get("repair_history")
+        if not isinstance(repair_history, list):
+            repair_history = output.get("validation_attempts")
+        if not isinstance(repair_history, list):
+            repair_history = []
+        # Error details are intentionally kept as structured rows.  This
+        # allows the frontend to show all controlled repair rounds instead of
+        # only the final exception string.
+        validation_errors = output.get("validation_errors")
+        if not isinstance(validation_errors, list):
+            validation_errors = output.get("errors")
+        if not isinstance(validation_errors, list):
+            validation_errors = []
+        if not validation_errors:
+            diagnostics = error_details.get("diagnostics")
+            if isinstance(diagnostics, list) and diagnostics:
+                validation_errors = [
+                    {
+                        "attempt": index,
+                        "code": "PROJECT_UNDERSTANDING_VALIDATION",
+                        "message": str(item),
+                    }
+                    for index, item in enumerate(diagnostics, start=1)
+                ]
+            elif error_value:
+                validation_errors = [error_value]
         return {
             "stage_id": stage_id,
             "label": self._PIPELINE_STAGE_LABELS[stage_id],
@@ -1824,6 +2088,17 @@ class V3WorkspaceSnapshotBuilder:
             "error": value.get("error"),
             "llm_request_count": len(requests),
             "llm_requests": requests,
+            "input_chars": int(input_chars or 0),
+            "source_block_count": int(source_block_count or 0),
+            "scanned_source_block_count": int(
+                scanned_source_block_count or 0
+            ),
+            "normalized_reference_count": int(normalized_reference_count or 0),
+            "repair_round": int(repair_round or 0),
+            "max_repair_rounds": int(max_repair_rounds or 0),
+            "repair_history": repair_history,
+            "validation_errors": validation_errors,
+            "summary": output.get("summary") if isinstance(output.get("summary"), dict) else {},
             "warnings": warnings,
             "warning_count": int(
                 output.get("warning_count") or len(warnings)
@@ -1865,7 +2140,7 @@ class V3WorkspaceSnapshotBuilder:
                 if (
                     not kind
                     or kind in seen
-                    or kind in {"ProjectModel", "ResponseTopicGraph"}
+                    or kind in {"ResponseTopicGraph"}
                 ):
                     continue
                 seen.add(kind)
@@ -1875,12 +2150,14 @@ class V3WorkspaceSnapshotBuilder:
             "SourceIndex": "来源索引",
             "RequirementLedger": "招标需求台账",
             "ScoreModel": "评分理解结果",
+            "ProjectModel": "全局项目事实",
             "ChapterBlueprint": "评分目录与覆盖结果",
         }
         stage_by_artifact = {
             "SourceIndex": "normalize_sources",
             "RequirementLedger": "build_requirement_ledger",
             "ScoreModel": "analyze_scores",
+            "ProjectModel": "plan_response",
             "ChapterBlueprint": "compile_chapter_blueprint",
         }
         latest_status_by_stage = {
@@ -1967,6 +2244,24 @@ class V3WorkspaceSnapshotBuilder:
                 ),
                 "total_points": payload.get("total_points"),
             }
+        if kind == "ProjectModel":
+            identity = (
+                payload.get("identity")
+                if isinstance(payload.get("identity"), dict)
+                else {}
+            )
+            return {
+                "project_name": str(
+                    identity.get("project_name")
+                    or identity.get("项目名称")
+                    or ""
+                ),
+                "fact_count": sum(
+                    len(payload.get(field) or [])
+                    for field in ("confirmed_facts", "inferences", "conflicts")
+                ),
+                "evidence_need_count": len(payload.get("evidence_needs") or []),
+            }
         if kind == "ChapterBlueprint":
             nodes = [
                 item
@@ -2028,7 +2323,7 @@ class V3WorkspaceSnapshotBuilder:
             or "ProjectModel" in text
             or "ResponseTopicGraph" in text
         ):
-            return ""
+            return "plan_response"
         if (
             "ChapterBlueprint" in text
             or "章节拆分" in text

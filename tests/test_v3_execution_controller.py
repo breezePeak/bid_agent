@@ -61,11 +61,16 @@ class V3ExecutionControllerTests(unittest.TestCase):
    self.assertIsNone(snapshot['document']['delivery'])
    self.assertEqual(snapshot['content_units'], [])
    stage_runs=ControlStore(context).stage_runs(str(receipt.operation_id))
+   self.assertIsNotNone(ControlStore(context).v3_active_artifact('ProjectModel'))
+   self.assertIsNone(ControlStore(context).v3_active_artifact('ResponseTopicGraph'))
+   project_run=next(item for item in stage_runs if item['stage_command']=='plan_response')
+   self.assertGreater(project_run['output']['input_chars'],0)
+   self.assertGreater(project_run['output']['source_block_count'],0)
    self.assertEqual(
        {item['stage_command'] for item in stage_runs},
        {
         'ingest_inputs','normalize_sources','compile_template_structure',
-        'build_requirement_ledger','analyze_scores','compile_chapter_blueprint',
+        'build_requirement_ledger','analyze_scores','plan_response','compile_chapter_blueprint',
         'score_structure','score_semantic','confirm_planning',
        },
    )
@@ -106,7 +111,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
    stages={item['stage_command'] for item in store.stage_runs(str(receipt.operation_id))}
    self.assertEqual(stages,{
      'ingest_inputs','normalize_sources','compile_template_structure',
-      'build_requirement_ledger','analyze_scores','score_structure','score_semantic',
+      'build_requirement_ledger','analyze_scores','score_structure','score_semantic','plan_response',
      'compile_chapter_blueprint','confirm_planning',
     })
    self.assertNotIn('execute_content_plan',stages)
@@ -126,6 +131,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
    ]
    self.assertNotIn('build_requirement_ledger',resumed_commands)
    self.assertNotIn('analyze_scores',resumed_commands)
+   self.assertNotIn('plan_response',resumed_commands)
    self.assertNotIn('compile_chapter_blueprint',resumed_commands)
    second_stages={
     item['stage_command']:item['status']
@@ -300,7 +306,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
     snapshot=v3_app.snapshot('alpha')
    payload=json.loads(snapshot.body)
    self.assertIsNone(payload['snapshot']['document']['delivery'])
-   self.assertEqual([item['artifact_kind'] for item in payload['snapshot']['promoted_artifacts']], ['ChapterBlueprint', 'InputManifest', 'RequirementLedger', 'ScoreModel', 'SourceIndex'])
+   self.assertEqual([item['artifact_kind'] for item in payload['snapshot']['promoted_artifacts']], ['ChapterBlueprint', 'InputManifest', 'ProjectModel', 'RequirementLedger', 'ScoreModel', 'SourceIndex'])
    with mock.patch.object(v3_app,'RUNS_DIR',runs):
     self.assertTrue(json.loads(v3_app.latest_gate('alpha').body)['ok'])
     self.assertTrue(json.loads(v3_app.evidence('alpha').body)['ok'])

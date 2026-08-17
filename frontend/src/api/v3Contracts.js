@@ -797,12 +797,14 @@ export function buildRunPipelineCommand(commandId, expectedRevision, chapterIds 
 export function buildPrepareOutlineCommand(commandId, expectedRevision, options = {}) {
   const reviewFeedback = String(options.reviewFeedback || '').trim()
   const baseBlueprintHash = String(options.baseBlueprintHash || '').trim()
+  const projectFeedback = String(options.projectFeedback || '').trim()
   return buildV3Command({
     commandId,
     kind: 'document.prepare_outline',
     payload: {
       ...(reviewFeedback ? { review_feedback: reviewFeedback } : {}),
       ...(baseBlueprintHash ? { base_blueprint_hash: baseBlueprintHash } : {}),
+      ...(projectFeedback ? { project_feedback: projectFeedback } : {}),
     },
     expectedRevision,
   })

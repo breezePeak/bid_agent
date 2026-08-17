@@ -18,6 +18,7 @@ V3_PIPELINE_STAGES = (
     "compile_template_structure",
     "build_requirement_ledger",
     "analyze_scores",
+    "plan_response",
     "compile_chapter_blueprint",
     "confirm_planning",
     "sync_material_requirements",
@@ -47,6 +48,7 @@ V3_OUTLINE_STAGES = (
     "compile_template_structure",
     "build_requirement_ledger",
     "analyze_scores",
+    "plan_response",
     "compile_chapter_blueprint",
 )
 
@@ -55,6 +57,7 @@ _STAGE_ARTIFACT_KIND = {
     "compile_template_structure": "TemplateStructureContract",
     "build_requirement_ledger": "RequirementLedger",
     "analyze_scores": "ScoreModel",
+    "plan_response": "ProjectModel",
     "compile_chapter_blueprint": "ChapterBlueprint",
 }
 
@@ -138,10 +141,19 @@ class V3ExecutionController:
                 if chapter.get("is_leaf") is False:
                     raise ControlPlaneError("CHAPTER_BODY_REQUIRES_LEAF", "批量编写只能选择叶子章节。", status_code=409)
                 if not chapter.get("materialized"):
-                    raise ControlPlaneError("CHAPTER_NOT_MATERIALIZED", f"章节 Workspace 尚未创建: {chapter_id}", status_code=409)
+                    # Parent-node selection is expanded to its leaf descendants
+                    # in the workbench.  Those leaves must be ready to write
+                    # without requiring the user to visit each one first.
+                    chapters.create(chapter_id=chapter_id)
+                    chapter = chapters.get_chapter(chapter_id)
                 chapter_context = chapter.get("context") if isinstance(chapter.get("context"), dict) else {}
-                if not chapter_context.get("context_hash"):
-                    raise ControlPlaneError("CHAPTER_CONTEXT_REQUIRED", f"章节上下文未就绪: {chapter_id}", status_code=409)
+                if not chapter_context.get("content_hash"):
+                    raise ControlPlaneError(
+                        "CHAPTER_CONTEXT_REQUIRED",
+                        f"章节上下文未就绪: {chapter.get('title') or chapter_id}",
+                        status_code=409,
+                        details={"chapter_id": chapter_id, "chapter_title": chapter.get("title") or chapter_id},
+                    )
         except ControlPlaneError as exc:
             job.update({"status": "blocked", "error": exc.as_dict()})
             self.store.upsert_agent_activity_state({**job, "phase": "blocked"}, source="chapter_batch")
@@ -265,12 +277,26 @@ class V3ExecutionController:
 
     def _stage_output(self, stage: str, result: Any) -> dict[str, Any]:
         warnings = self._stage_warnings(stage, result)
+        metrics: dict[str, Any] = {}
+        consume_metrics = getattr(self.runner, "consume_stage_metrics", None)
+        if callable(consume_metrics):
+            value = consume_metrics(stage)
+            if isinstance(value, dict):
+                metrics = value
         return {
             "summary": self._stage_summary(stage, result),
             "warnings": warnings,
             "warning_count": len(warnings),
             "gate_outcome": "warn" if warnings else "pass",
+            **metrics,
         }
+
+    def _stage_reuse_output(self, stage: str) -> dict[str, Any]:
+        metrics_fn = getattr(self.runner, "stage_reuse_metrics", None)
+        if not callable(metrics_fn):
+            return {}
+        value = metrics_fn(stage)
+        return value if isinstance(value, dict) else {}
 
     @staticmethod
     def _stage_error(exc: Exception) -> dict[str, Any]:
@@ -586,6 +612,15 @@ class V3ExecutionController:
         payload = envelope.payload if isinstance(envelope.payload, dict) else {}
         review_feedback = str(payload.get("review_feedback") or "").strip()
         base_blueprint_hash = str(payload.get("base_blueprint_hash") or "").strip()
+        project_feedback = str(payload.get("project_feedback") or "").strip()
+        if project_feedback:
+            request_project_revision = getattr(
+                self.runner,
+                "request_project_revision",
+                None,
+            )
+            if callable(request_project_revision):
+                request_project_revision(project_feedback)
         if review_feedback:
             active_blueprint = self.store.v3_active_artifact("ChapterBlueprint")
             active_hash = str((active_blueprint or {}).get("artifact_hash") or "")
@@ -613,6 +648,7 @@ class V3ExecutionController:
                     stage,
                     "reused",
                     disposition="v3_outline_reused",
+                    output=self._stage_reuse_output(stage),
                 )
                 completed.append(stage)
                 reused.append(stage)
@@ -634,12 +670,43 @@ class V3ExecutionController:
                         status_code=409,
                     )
             except Exception as exc:
+                error = self._stage_error(exc)
+                project_action_required = (
+                    stage == "plan_response"
+                    and (
+                        type(exc).__name__.startswith("PlanningInference")
+                        or bool(getattr(exc, "retryable", False))
+                        or "缺少可保留的项目" in str(exc)
+                    )
+                )
+                if project_action_required:
+                    self.store.record_stage_run(
+                        operation_id,
+                        stage,
+                        "paused",
+                        disposition="project_understanding_action_required",
+                        error=error,
+                    )
+                    return {
+                        "accepted": True,
+                        "operation_status": "blocked",
+                        "message": (
+                            "全局项目事实已完成自动修复尝试，但仍需要处理。"
+                            "请重试、输入修改意见，或补充提示中缺少的材料。"
+                        ),
+                        "completed_stages": completed,
+                        "error": error,
+                        "action_required": {
+                            "kind": "project_understanding",
+                            "actions": ["retry", "feedback", "later"],
+                        },
+                    }
                 self.store.record_stage_run(
                     operation_id,
                     stage,
                     "failed",
                     disposition="v3_outline_command",
-                    error=self._stage_error(exc),
+                    error=error,
                 )
                 raise
             after_identity = self._active_artifact_identity(stage)

@@ -224,6 +224,7 @@ class ControlStore:
     BLOCKED_SUPERSEDING_KINDS = {
         "document.prepare_outline",
         "document.run_pipeline",
+        "chapter.generate_draft",
     }
 
     def __init__(self, context: WorkspaceContext) -> None:

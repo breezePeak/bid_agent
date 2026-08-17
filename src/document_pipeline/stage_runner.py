@@ -217,6 +217,7 @@ class V3StageRunner:
             configured_validation_failure_blocks()
         )
         self._stage_warnings: dict[str, list[dict[str, Any]]] = {}
+        self._stage_metrics: dict[str, dict[str, Any]] = {}
         self._generation_chapter_ids: list[str] = []
 
     def set_generation_scope(self, chapter_ids: list[str] | None) -> None:
@@ -229,6 +230,10 @@ class V3StageRunner:
     def request_outline_revision(self, feedback: str) -> None:
         """Bind the next blueprint run to an explicit human review request."""
         self._outline_review_feedback = str(feedback or "").strip()
+
+    def request_project_revision(self, feedback: str) -> None:
+        """Bind the next ProjectModel run to the user's concrete correction."""
+        self._project_review_feedback = str(feedback or "").strip()
 
     def validation_policy_scope(self):
         return validation_policy_scope(
@@ -254,6 +259,25 @@ class V3StageRunner:
 
     def consume_stage_warnings(self, stage: str) -> list[dict[str, Any]]:
         return self._stage_warnings.pop(stage, [])
+
+    def consume_stage_metrics(self, stage: str) -> dict[str, Any]:
+        return self._stage_metrics.pop(stage, {})
+
+    def stage_reuse_metrics(self, stage: str) -> dict[str, Any]:
+        if stage != "plan_response":
+            return {}
+        request = build_project_understanding_input(
+            load_promoted_requirement_ledger(self.context),
+            require_promoted_source_index(self.context),
+        )
+        return {
+            "input_chars": len(canonical_json(request.model_dump(mode="json"))),
+            "source_block_count": len(request.source_context),
+            "normalized_reference_count": 0,
+            "repair_round": 0,
+            "max_repair_rounds": 2,
+            "validation_errors": [],
+        }
 
     @classmethod
     def for_deterministic_tests(
@@ -460,6 +484,40 @@ class V3StageRunner:
                 prompt_version=prompt_version,
                 prompt_hash=prompt_hash,
                 output_schema_version=schema_version,
+                provider_fingerprint=provider_fingerprint,
+                model_fingerprint=model_fingerprint,
+                temperature=temperature,
+            )
+        if stage == "plan_response":
+            if str(getattr(self, "_project_review_feedback", "") or "").strip():
+                return False
+            if self._uses_deterministic_project:
+                prompt_version = (
+                    f"{_PROJECT_CAPABILITY_ID}.deterministic_test.v1"
+                )
+                prompt_hash = canonical_hash(
+                    {"mode": "deterministic_test", "version": prompt_version}
+                )
+                provider_fingerprint = self._deterministic_provider_fingerprint(
+                    _PROJECT_CAPABILITY_ID
+                )
+                model_fingerprint = (
+                    f"deterministic_test:{_PROJECT_CAPABILITY_ID}:v1"
+                )
+                temperature = 0.0
+            else:
+                provider = self._project_provider()
+                prompt_version = provider.prompt_version
+                prompt_hash = provider.prompt_hash
+                provider_fingerprint = provider.provider_fingerprint
+                model_fingerprint = provider.model_fingerprint
+                temperature = provider.temperature
+            return self._active_inference_artifact_is_current(
+                "ProjectModel",
+                capability_version=PROJECT_CAPABILITY_VERSION,
+                prompt_version=prompt_version,
+                prompt_hash=prompt_hash,
+                output_schema_version=PROJECT_SCHEMA_VERSION,
                 provider_fingerprint=provider_fingerprint,
                 model_fingerprint=model_fingerprint,
                 temperature=temperature,
@@ -1353,15 +1411,11 @@ class V3StageRunner:
     @staticmethod
     def _deterministic_project_candidate(
         ledger: RequirementLedger,
-        scores: ScoreModel,
     ) -> ProjectUnderstandingCandidate:
         active_requirement_ids = [
             item.requirement_id
             for item in ledger.requirements
             if item.status not in {"blocked", "waived"}
-        ]
-        score_point_ids = [
-            point.score_point_id for point in scores.points
         ]
         return ProjectUnderstandingCandidate(
             facts=[
@@ -1372,26 +1426,18 @@ class V3StageRunner:
                     ),
                     classification="inference",
                     upstream_refs=[
-                        *(
-                            f"RequirementLedger:{requirement_id}"
-                            for requirement_id in active_requirement_ids
-                        ),
-                        *(
-                            f"ScoreModel:{score_point_id}"
-                            for score_point_id in score_point_ids
-                        ),
+                        f"RequirementLedger:{requirement_id}"
+                        for requirement_id in active_requirement_ids
                     ],
                     requirement_ids=active_requirement_ids,
                     confidence=1.0,
                 )
             ]
-            if active_requirement_ids or score_point_ids
+            if active_requirement_ids
             else [],
             unknowns=[
                 "deterministic_test 模式仅验证受控规划链路，不替代生产大模型项目理解"
             ],
-            covered_requirement_ids=active_requirement_ids,
-            covered_score_point_ids=score_point_ids,
             review_status="confirmed",
         )
 
@@ -2462,30 +2508,20 @@ class V3StageRunner:
             from control_plane import ControlPlaneError, ControlStore
 
             ledger = load_promoted_requirement_ledger(self.context)
-            scores = load_promoted_score_model(self.context)
-            self._require_active_inference_artifact("ScoreModel")
             source_index = require_promoted_source_index(self.context)
-            source_blocks = list(source_index.blocks)
             store = ControlStore(self.context)
             agent = PlanningAgent(self.context)
-            source_context = self._planning_source_context(
-                source_blocks,
-                requirement_chunk_ids={
-                    item.source_anchor.chunk_id for item in ledger.requirements
-                },
-                score_chunk_ids={
-                    anchor.chunk_id
-                    for point in scores.points
-                    for anchor in point.source_anchors
-                },
-            )
 
             active_project = store.v3_active_artifact("ProjectModel")
             project_base = int(active_project["revision"]) if active_project is not None else 0
+            project_feedback = str(
+                getattr(self, "_project_review_feedback", "") or ""
+            ).strip()
+            self._project_review_feedback = ""
             project_request = build_project_understanding_input(
                 ledger,
-                scores,
                 source_index,
+                review_feedback=project_feedback,
             )
             project_capability_version = PROJECT_CAPABILITY_VERSION
             if self._uses_deterministic_project:
@@ -2527,7 +2563,8 @@ class V3StageRunner:
                 )
                 project_model_fingerprint = project_provider.model_fingerprint
                 project_temperature = project_provider.temperature
-            if not self._active_inference_artifact_is_current(
+            project_result = None
+            project_is_current = self._active_inference_artifact_is_current(
                 "ProjectModel",
                 capability_version=project_capability_version,
                 prompt_version=project_prompt_version,
@@ -2536,17 +2573,27 @@ class V3StageRunner:
                 provider_fingerprint=project_provider_fingerprint,
                 model_fingerprint=project_model_fingerprint,
                 temperature=project_temperature,
-            ):
+            )
+            if project_is_current and operation_id:
+                active_project = ControlStore(self.context).v3_active_artifact(
+                    "ProjectModel"
+                )
+                active_proposal = ControlStore(self.context).v3_proposal(
+                    str((active_project or {}).get("proposal_id") or "")
+                )
+                project_is_current = (
+                    str((active_proposal or {}).get("operation_id") or "")
+                    == operation_id
+                )
+            if not project_is_current:
                 if self._uses_deterministic_project:
                     project_candidate = self._deterministic_project_candidate(
                         ledger,
-                        scores,
                     )
                     project = agent.compile_project_candidate(
                         project_candidate,
                         ledger,
-                        scores,
-                        source_blocks,
+                        source_index,
                         revision=project_base + 1,
                     )
                     project_result = self._deterministic_result(
@@ -2565,7 +2612,7 @@ class V3StageRunner:
                     with llm_stage_context(
                         self.context,
                         operation_id,
-                        "project_understanding",
+                        "plan_response",
                         capability_id=_PROJECT_CAPABILITY_ID,
                         prompt_version=project_provider.prompt_version,
                         schema_version=project_provider.schema_version,
@@ -2594,12 +2641,11 @@ class V3StageRunner:
                     project = agent.compile_project_candidate(
                         project_result.candidate,
                         ledger,
-                        scores,
-                        source_blocks,
+                        source_index,
                         revision=project_base + 1,
                     )
                 project_op_id = operation_id or (
-                    f"planning-project:{ledger.revision}:{scores.revision}"
+                    f"planning-project:{ledger.revision}:{source_index.revision}"
                 )
                 project_proposal = self._proposal_from_inference(
                     artifact_kind="ProjectModel",
@@ -2618,159 +2664,37 @@ class V3StageRunner:
                 )
             project = load_promoted_project_model(self.context)
             self._require_active_inference_artifact("ProjectModel")
-            planning_products = [self._project_product(project)]
-            self._record_stage_output(
-                operation_id,
-                "plan_response",
-                phase="topic_duty_planning",
-                products=planning_products,
+            attempt_count = int(getattr(project_result, "attempt_count", 0) or 0)
+            validation_errors = list(
+                getattr(project_result, "validation_errors", ()) or ()
             )
-
-            active_graph = store.v3_active_artifact("ResponseTopicGraph")
-            graph_base = int(active_graph["revision"]) if active_graph is not None else 0
-            topic_request = TopicDutyPlanningInput(
-                project_model=project.model_dump(mode="json"),
-                requirement_ledger=ledger.model_dump(mode="json"),
-                score_model=scores.model_dump(mode="json"),
-                source_context=source_context,
-            )
-            topic_capability_version = TOPIC_CAPABILITY_VERSION
-            if self._uses_deterministic_topic:
-                topic_prompt_version = f"{_TOPIC_CAPABILITY_ID}.deterministic_test.v1"
-                topic_prompt_hash = canonical_hash(
+            self._stage_metrics["plan_response"] = {
+                "input_chars": len(
+                    canonical_json(project_request.model_dump(mode="json"))
+                ),
+                "source_block_count": len(project_request.source_context),
+                "scanned_source_block_count": (
+                    project_request.scanned_source_block_count
+                ),
+                "normalized_reference_count": int(
+                    getattr(project_result, "normalized_reference_count", 0) or 0
+                ),
+                "repair_round": max(attempt_count - 1, 0),
+                "max_repair_rounds": 1,
+                "validation_errors": [
                     {
-                        "mode": "deterministic_test",
-                        "version": topic_prompt_version,
+                        "attempt": index,
+                        "code": "PROJECT_UNDERSTANDING_VALIDATION",
+                        "message": str(message),
                     }
-                )
-                topic_schema_version = TOPIC_SCHEMA_VERSION
-                topic_provider_fingerprint = (
-                    self._deterministic_provider_fingerprint(
-                        _TOPIC_CAPABILITY_ID
-                    )
-                )
-                topic_model_fingerprint = (
-                    f"deterministic_test:{_TOPIC_CAPABILITY_ID}:v1"
-                )
-                topic_temperature = 0.0
-            else:
-                topic_provider = self._topic_provider()
-                if topic_provider.capability_version != topic_capability_version:
-                    raise ControlPlaneError(
-                        "V3_INFERENCE_CAPABILITY_VERSION_MISMATCH",
-                        "TopicDutyPlanningProvider capability version 不受支持",
-                        status_code=409,
-                    )
-                topic_prompt_version = topic_provider.prompt_version
-                topic_prompt_hash = topic_provider.prompt_hash
-                topic_schema_version = topic_provider.schema_version
-                topic_provider_fingerprint = (
-                    topic_provider.provider_fingerprint
-                )
-                topic_model_fingerprint = topic_provider.model_fingerprint
-                topic_temperature = topic_provider.temperature
-            if not self._active_inference_artifact_is_current(
-                "ResponseTopicGraph",
-                capability_version=topic_capability_version,
-                prompt_version=topic_prompt_version,
-                prompt_hash=topic_prompt_hash,
-                output_schema_version=topic_schema_version,
-                provider_fingerprint=topic_provider_fingerprint,
-                model_fingerprint=topic_model_fingerprint,
-                temperature=topic_temperature,
-            ):
-                if self._uses_deterministic_topic:
-                    topic_candidate = self._deterministic_topic_candidate(
-                        ledger,
-                        scores,
-                        project,
-                    )
-                    graph = agent.compile_topic_candidate(
-                        topic_candidate,
-                        ledger,
-                        scores,
-                        project,
-                        source_blocks,
-                        revision=graph_base + 1,
-                    )
-                    topic_result = self._deterministic_result(
-                        capability_id=_TOPIC_CAPABILITY_ID,
-                        capability_version=topic_capability_version,
-                        schema_version=topic_schema_version,
-                        candidate=topic_candidate,
-                        input_value=topic_request,
-                        prompt_version=topic_prompt_version,
-                        model_fingerprint=topic_model_fingerprint,
-                        provider_fingerprint=topic_provider_fingerprint,
-                    )
-                else:
-                    from .llm_telemetry import llm_stage_context
-
-                    with llm_stage_context(
-                        self.context,
-                        operation_id,
-                        "topic_duty_planning",
-                        capability_id=_TOPIC_CAPABILITY_ID,
-                        prompt_version=topic_provider.prompt_version,
-                        schema_version=topic_provider.schema_version,
-                        model=topic_provider.model_fingerprint,
-                        temperature=topic_provider.temperature,
-                    ):
-                        topic_result = topic_provider.plan(topic_request)
-                    if (
-                        topic_result.capability_id != _TOPIC_CAPABILITY_ID
-                        or topic_result.prompt_version
-                        != topic_provider.prompt_version
-                        or topic_result.prompt_hash
-                        != topic_provider.prompt_hash
-                        or topic_result.schema_version
-                        != topic_provider.schema_version
-                        or topic_result.provider_fingerprint
-                        != topic_provider.provider_fingerprint
-                        or topic_result.model_fingerprint
-                        != topic_provider.model_fingerprint
-                    ):
-                        raise ControlPlaneError(
-                            "V3_INFERENCE_CAPABILITY_MISMATCH",
-                            "TopicDutyPlanningProvider 返回结果的受控元数据不一致",
-                            status_code=409,
-                        )
-                    graph = agent.compile_topic_candidate(
-                        topic_result.candidate,
-                        ledger,
-                        scores,
-                        project,
-                        source_blocks,
-                        revision=graph_base + 1,
-                    )
-                graph_op_id = operation_id or (
-                    f"planning-graph:{ledger.revision}:{scores.revision}:"
-                    f"{project.revision}"
-                )
-                graph_proposal = self._proposal_from_inference(
-                    artifact_kind="ResponseTopicGraph",
-                    producer_role="planning_agent",
-                    payload=graph,
-                    base_revision=graph_base,
-                    operation_id=graph_op_id,
-                    result=topic_result,
-                    input_snapshot=topic_request,
-                    capability_version=topic_capability_version,
-                )
-                self._validate_gate_promote(
-                    graph_proposal,
-                    producer_role="planning_agent",
-                    gate_id="G1_TOPIC_GRAPH_INTEGRITY",
-                )
-            graph = load_promoted_topic_graph(self.context)
+                    for index, message in enumerate(validation_errors, start=1)
+                ],
+            }
             self._record_stage_output(
                 operation_id,
                 "plan_response",
                 phase="completed",
-                products=[
-                    *planning_products,
-                    self._topic_graph_product(graph),
-                ],
+                products=[self._project_product(project)],
             )
             return project
 

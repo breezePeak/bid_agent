@@ -44,31 +44,17 @@ def _project_request() -> ProjectUnderstandingInput:
                 {
                     "requirement_id": "R-1",
                     "status": "active",
-                    "original_text": "完成调查监测数据核实处理",
-                    "normalized_requirement": "完成调查监测数据核实处理",
+                    "original_text": "项目范围包括完成调查监测数据核实处理",
+                    "normalized_requirement": "项目范围包括完成调查监测数据核实处理",
                 }
             ]
-        },
-        score_model={
-            "groups": [{"group_id": "SG-1"}],
-            "points": [
-                {
-                    "score_point_id": "SP-1",
-                    "title": "调查监测数据核实处理",
-                    "criterion": "完成调查监测数据核实处理",
-                    "score_conditions": [
-                        {"condition_id": "SP-1-C01"}
-                    ],
-                    "response_units": [],
-                }
-            ],
         },
         source_context=[
             {
                 "block_id": "B-1",
                 "input_id": "tender",
                 "source_anchor": {"chunk_id": "B-1"},
-                "content": "全国国土变更调查核实项目",
+                "content": "项目名称：全国国土变更调查核实项目；项目范围包括数据核实处理。",
             }
         ],
     )
@@ -86,13 +72,10 @@ def _project_candidate(*, source_ref: str = "SourceIndex:B-1") -> dict:
                 "text": "完成调查监测数据核实处理",
                 "upstream_refs": [
                     "RequirementLedger:R-1",
-                    "ScoreModel:SP-1",
                 ],
                 "confidence": 0.98,
             }
         ],
-        "covered_requirement_ids": ["R-1"],
-        "covered_score_point_ids": ["SP-1"],
         "review_status": "confirmed",
     }
 
@@ -295,8 +278,27 @@ def test_forged_project_reference_gets_one_controlled_repair() -> None:
     assert result.candidate.project_name is not None
     assert result.candidate.project_name.text == "全国国土变更调查核实项目"
     assert len(result.provider_fingerprint) == 64
-    assert "唯一一次受控修复机会" in calls[1][-1]["content"]
+    assert "当前为第 1/2 次受控修复" in calls[1][-1]["content"]
     assert "SourceIndex:invented" in calls[1][-1]["content"]
+
+
+def test_exact_bare_source_block_id_is_normalized_before_validation() -> None:
+    calls = 0
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        nonlocal calls
+        calls += 1
+        return json.dumps(_project_candidate(source_ref="B-1"), ensure_ascii=False)
+
+    result = LLMProjectUnderstandingProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).understand(_project_request())
+
+    assert calls == 1
+    assert result.normalized_reference_count == 1
+    assert result.candidate.project_name is not None
+    assert result.candidate.project_name.upstream_refs == ["SourceIndex:B-1"]
 
 
 def test_forged_project_reference_fails_closed_after_repair() -> None:
@@ -318,7 +320,7 @@ def test_forged_project_reference_fails_closed_after_repair() -> None:
     with pytest.raises(PlanningInferenceValidationError):
         provider.understand(_project_request())
 
-    assert calls == 2
+    assert calls == 3
 
 
 def test_unsupported_confirmed_project_fact_gets_one_controlled_repair() -> None:
@@ -351,7 +353,7 @@ def test_unsupported_confirmed_project_fact_gets_one_controlled_repair() -> None
     assert "全国国土变更调查核实项目" in repair_prompt
 
 
-def test_project_coverage_ids_without_semantic_refs_fail_closed() -> None:
+def test_obsolete_project_coverage_fields_fail_closed() -> None:
     empty_shell = {
         "covered_requirement_ids": ["R-1"],
         "covered_score_point_ids": ["SP-1"],
@@ -371,10 +373,10 @@ def test_project_coverage_ids_without_semantic_refs_fail_closed() -> None:
     with pytest.raises(PlanningInferenceValidationError):
         provider.understand(_project_request())
 
-    assert calls == 2
+    assert calls == 3
 
 
-def test_project_repair_feedback_contains_complete_coverage_contract() -> None:
+def test_project_repair_feedback_lists_exact_source_refs() -> None:
     request = _project_request()
     request.requirement_ledger["requirements"].append(
         {
@@ -383,8 +385,7 @@ def test_project_repair_feedback_contains_complete_coverage_contract() -> None:
             "normalized_requirement": "已阻断要求",
         }
     )
-    first = _project_candidate()
-    first["covered_requirement_ids"] = []
+    first = _project_candidate(source_ref="SourceIndex:invented")
     repaired = _project_candidate()
     calls: list[list[dict[str, str]]] = []
     outputs = iter(
@@ -405,12 +406,10 @@ def test_project_repair_feedback_contains_complete_coverage_contract() -> None:
 
     assert result.attempt_count == 2
     repair_prompt = calls[1][-1]["content"]
-    assert '"R-1"' in repair_prompt
-    assert '"SP-1"' in repair_prompt
-    assert '"RequirementLedger:R-1"' in repair_prompt
-    assert '"ScoreModel:SP-1"' in repair_prompt
+    assert '"SourceIndex:invented"' in repair_prompt
+    assert '"SourceIndex:B-1"' in repair_prompt
+    assert "ScoreModel:" not in repair_prompt
     assert "R-blocked" not in repair_prompt
-    assert "semantic-coverage" in repair_prompt
 
 
 def test_project_final_validation_error_exposes_last_failure() -> None:
@@ -433,13 +432,13 @@ def test_project_final_validation_error_exposes_last_failure() -> None:
 def _multi_source_scope_request() -> ProjectUnderstandingInput:
     return ProjectUnderstandingInput(
         requirement_ledger={"requirements": []},
-        score_model={"groups": [], "points": []},
         source_context=[
             {
                 "block_id": "B-package",
                 "input_id": "tender",
                 "source_anchor": {"chunk_id": "C-package"},
                 "content": (
+                    "项目名称：全国调查监测项目；项目范围包括所投分包全部服务。"
                     "投标人应对所投分包招标文件中所有服务进行投标，"
                     "如仅响应相应分包中的部分服务，则其投标将被拒绝。"
                 ),
@@ -472,8 +471,6 @@ def _multi_source_scope_candidate(*, fabricated_suffix: str = "") -> dict:
                 "confidence": 0.98,
             }
         ],
-        "covered_requirement_ids": [],
-        "covered_score_point_ids": [],
         "review_status": "confirmed",
     }
 
@@ -535,13 +532,15 @@ def test_short_heading_does_not_prove_a_longer_fabricated_claim() -> None:
 def test_controlled_repair_preserves_verified_items_and_drops_regressions() -> None:
     request = ProjectUnderstandingInput(
         requirement_ledger={"requirements": []},
-        score_model={"groups": [], "points": []},
         source_context=[
             {
                 "block_id": "B-goal",
                 "input_id": "tender",
                 "source_anchor": {"chunk_id": "C-goal"},
-                "content": "完成调查成果核查",
+                "content": (
+                    "项目名称：调查成果核查项目；"
+                    "项目范围包括完成调查成果核查。"
+                ),
             },
             {
                 "block_id": "B-team",
@@ -589,8 +588,6 @@ def test_controlled_repair_preserves_verified_items_and_drops_regressions() -> N
                 "confidence": 0.98,
             },
         ],
-        "covered_requirement_ids": [],
-        "covered_score_point_ids": [],
         "review_status": "confirmed",
     }
     repaired = json.loads(json.dumps(first, ensure_ascii=False))
@@ -598,6 +595,7 @@ def test_controlled_repair_preserves_verified_items_and_drops_regressions() -> N
     outputs = iter(
         [
             json.dumps(first, ensure_ascii=False),
+            json.dumps(repaired, ensure_ascii=False),
             json.dumps(repaired, ensure_ascii=False),
         ]
     )
@@ -613,8 +611,8 @@ def test_controlled_repair_preserves_verified_items_and_drops_regressions() -> N
         model_fingerprint="fake-model:v1",
     ).understand(request)
 
-    assert calls == 2
-    assert result.attempt_count == 2
+    assert calls == 3
+    assert result.attempt_count == 3
     assert result.candidate.review_status == "needs_review"
     assert [item.text for item in result.candidate.scope] == [
         (
@@ -681,11 +679,15 @@ def test_compiled_project_fact_retains_all_scope_references(
         review_status="confirmed",
     )
 
+    source_index = SourceIndex(
+        source_hashes={"tender": "hash-tender"},
+        input_manifest_revision=1,
+        blocks=blocks,
+    )
     model = PlanningAgent(context).compile_project_candidate(
         candidate,
         ledger,
-        scores,
-        blocks,
+        source_index,
         revision=1,
     )
     fact = next(
@@ -703,16 +705,11 @@ def test_compiled_project_fact_retains_all_scope_references(
         statement="legacy",
     ).model_dump(mode="json")
 
-    source_index = SourceIndex(
-        source_hashes={"tender": "hash-tender"},
-        input_manifest_revision=1,
-        blocks=blocks,
-    )
-    audit = audit_project_model(model, ledger, scores, source_index)
+    audit = audit_project_model(model, ledger, source_index)
     assert audit["passed"] is True, audit["findings"]
 
 
-def test_project_understanding_batches_on_score_point_groups() -> None:
+def test_project_understanding_uses_one_score_independent_request() -> None:
     request = ProjectUnderstandingInput(
         requirement_ledger={
             "requirements": [
@@ -733,41 +730,11 @@ def test_project_understanding_batches_on_score_point_groups() -> None:
                 },
             ]
         },
-        score_model={
-            "groups": [
-                {"group_id": "SG-1", "title": "数据核实"},
-                {"group_id": "SG-2", "title": "成果质量"},
-            ],
-            "points": [
-                {
-                    "score_point_id": "SP-1",
-                    "group_id": "SG-1",
-                    "title": "数据核实",
-                    "criterion": "完成数据核实",
-                    "response_expectation": "完整说明数据核实方法",
-                    "linked_requirement_ids": ["R-1"],
-                    "source_anchors": [
-                        {"source_input_id": "tender", "chunk_id": "C-1"}
-                    ],
-                },
-                {
-                    "score_point_id": "SP-2",
-                    "group_id": "SG-2",
-                    "title": "成果质量",
-                    "criterion": "形成质量报告",
-                    "response_expectation": "完整说明质量报告",
-                    "linked_requirement_ids": ["R-2"],
-                    "source_anchors": [
-                        {"source_input_id": "tender", "chunk_id": "C-2"}
-                    ],
-                },
-            ],
-        },
         source_context=[
             {
                 "block_id": "B-core",
                 "input_id": "tender",
-                "content": "全国调查监测项目",
+                "content": "项目名称：全国调查监测项目；项目范围包括数据核实和质量报告。",
                 "source_anchor": {"chunk_id": "C-core"},
             },
             {
@@ -784,7 +751,7 @@ def test_project_understanding_batches_on_score_point_groups() -> None:
             },
         ],
     )
-    seen_batches: list[dict] = []
+    seen_requests: list[dict] = []
 
     def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
         frozen = json.loads(
@@ -793,48 +760,25 @@ def test_project_understanding_batches_on_score_point_groups() -> None:
                 1,
             )[1]
         )
-        seen_batches.append(frozen)
-        batch_kind = frozen["requirement_ledger"]["batch_kind"]
-        if batch_kind == "project_core":
-            return json.dumps(
-                {
-                    "project_name": {
-                        "text": "全国调查监测项目",
-                        "upstream_refs": ["SourceIndex:B-core"],
-                        "confidence": 1.0,
-                    },
-                    "covered_requirement_ids": [],
-                    "covered_score_point_ids": [],
-                    "review_status": "confirmed",
-                },
-                ensure_ascii=False,
-            )
-        point = frozen["score_model"]["points"][0]
-        requirement = frozen["requirement_ledger"]["requirements"][0]
+        seen_requests.append(frozen)
         return json.dumps(
             {
-                "goals": [
-                    {
-                        "text": requirement["normalized_requirement"],
-                        "upstream_refs": [
-                            f"RequirementLedger:{requirement['requirement_id']}",
-                            f"ScoreModel:{point['score_point_id']}",
-                        ],
-                        "confidence": 1.0,
-                    }
-                ],
+                "project_name": {
+                    "text": "全国调查监测项目",
+                    "upstream_refs": ["SourceIndex:B-core"],
+                    "confidence": 1.0,
+                },
                 "scope": [
                     {
-                        "text": requirement["normalized_requirement"],
+                        "text": "项目范围包括完成数据核实并形成质量报告",
                         "upstream_refs": [
-                            f"RequirementLedger:{requirement['requirement_id']}",
-                            f"ScoreModel:{point['score_point_id']}",
+                            "RequirementLedger:R-1",
+                            "RequirementLedger:R-2",
+                            "SourceIndex:B-core",
                         ],
                         "confidence": 1.0,
                     }
                 ],
-                "covered_requirement_ids": [requirement["requirement_id"]],
-                "covered_score_point_ids": [point["score_point_id"]],
                 "review_status": "confirmed",
             },
             ensure_ascii=False,
@@ -845,25 +789,11 @@ def test_project_understanding_batches_on_score_point_groups() -> None:
         model_fingerprint="fake-model:v1",
     ).understand(request)
 
-    assert len(seen_batches) == 3
-    assert [
-        [
-            point["score_point_id"]
-            for point in batch["score_model"]["points"]
-        ]
-        for batch in seen_batches
-    ] == [[], ["SP-1"], ["SP-2"]]
-    assert result.candidate.covered_requirement_ids == [
-        "R-1",
-        "R-2",
-        "R-global",
-    ]
-    assert result.candidate.covered_score_point_ids == ["SP-1", "SP-2"]
-    assert result.candidate.facts[-1].local_id == "semantic-coverage"
-    assert result.candidate.facts[-1].upstream_refs == [
-        "RequirementLedger:R-global"
-    ]
-    assert result.candidate.scope == []
+    assert len(seen_requests) == 1
+    assert "score_model" not in seen_requests[0]
+    assert "batch_kind" not in seen_requests[0]["requirement_ledger"]
+    assert result.attempt_count == 1
+    assert result.candidate.project_name is not None
 
 
 def test_missing_score_condition_fails_after_one_repair() -> None:
@@ -1507,4 +1437,3 @@ def test_multipoint_batch_node_sharing_triggers_one_controlled_repair() -> None:
     assert cond_nodes.get("SP-01-C01") != cond_nodes.get("SP-01-C02"), (
         "C01 和 C02 仍然共用了同一节点，修复未生效"
     )
-

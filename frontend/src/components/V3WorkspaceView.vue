@@ -24,6 +24,57 @@
             <span>流程尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
             <span>模型请求 {{ selectedDrawerStage.llm_request_count || 0 }} 次</span>
           </div>
+          <section
+            v-if="selectedDrawerStage.stage_id === 'plan_response'"
+            class="project-fact-drawer-panel"
+            aria-labelledby="project-fact-drawer-heading"
+          >
+            <div class="project-fact-drawer-heading">
+              <div>
+                <p class="section-kicker">全局项目事实</p>
+                <h4 id="project-fact-drawer-heading">
+                  {{ selectedDrawerStage.status === 'reused' ? '复用已验证结果' : '本次生成明细' }}
+                </h4>
+              </div>
+              <span v-if="selectedDrawerStage.status === 'reused'" class="project-fact-reused-pill">已验证复用</span>
+            </div>
+            <dl class="project-fact-metrics">
+              <div><dt>输入字符</dt><dd>{{ selectedDrawerStageData.input_chars || 0 }}</dd></div>
+              <div><dt>扫描原文</dt><dd>{{ selectedDrawerStageData.scanned_source_block_count || 0 }}</dd></div>
+              <div><dt>送入模型</dt><dd>{{ selectedDrawerStageData.source_block_count || 0 }}</dd></div>
+              <div><dt>模型请求</dt><dd>{{ selectedDrawerStageData.llm_request_count || 0 }}</dd></div>
+              <div><dt>自动处理引用</dt><dd>{{ selectedDrawerStageData.normalized_reference_count || 0 }}</dd></div>
+            </dl>
+            <p
+              v-if="selectedDrawerStage.status === 'reused'"
+              class="project-fact-reuse-note"
+            >当前结果经过依赖、版本和哈希校验，本次没有重新调用模型。</p>
+            <div v-if="selectedDrawerStageData.summary && Object.keys(selectedDrawerStageData.summary).length" class="project-fact-summary">
+              <strong>事实摘要</strong>
+              <p v-if="selectedDrawerStageData.summary.project_name">项目：{{ selectedDrawerStageData.summary.project_name }}</p>
+              <p v-if="selectedDrawerStageData.summary.fact_count !== undefined">已确认事实 {{ selectedDrawerStageData.summary.fact_count }} 条</p>
+              <p v-if="selectedDrawerStageData.summary.evidence_need_count !== undefined">待补证据 {{ selectedDrawerStageData.summary.evidence_need_count }} 条</p>
+            </div>
+            <div v-if="['failed', 'paused', 'blocked'].includes(selectedDrawerStage.status) && selectedDrawerStageData.validation_errors?.length" class="project-fact-validation-list">
+              <strong>自动修复记录</strong>
+              <ol>
+                <li v-for="(item, index) in selectedDrawerStageData.validation_errors" :key="`${item.code || item.rule || index}-${index}`">
+                  <span>第 {{ item.attempt || index + 1 }} 次</span>
+                  <p>{{ item.message || item.error || item }}</p>
+                </li>
+              </ol>
+            </div>
+            <div v-if="['failed', 'paused', 'blocked'].includes(selectedDrawerStage.status)" class="project-fact-recovery-actions">
+              <textarea
+                v-model="projectFactFeedback"
+                rows="3"
+                placeholder="可选：告诉 Agent 哪些项目事实需要调整；不能覆盖招标文件中的正式要求"
+              />
+              <button class="btn btn-primary" type="button" :disabled="outlineActionDisabled" @click="retryProjectFacts(false)">再试一次</button>
+              <button class="btn" type="button" :disabled="outlineActionDisabled || !projectFactFeedback.trim()" @click="retryProjectFacts(true)">带意见重试</button>
+              <button class="btn" type="button" @click="closeStageDrawer">稍后处理</button>
+            </div>
+          </section>
           <dl
             v-if="selectedDrawerStage.started_at || selectedDrawerStage.completed_at"
             class="drawer-timestamps"
@@ -103,8 +154,8 @@
             </ul>
           </div>
 
-          <div v-if="selectedDrawerStage.status === 'failed' && selectedDrawerStage.error?.message" class="drawer-error-alert">
-            <strong>错误明细：</strong>
+          <div v-if="['failed', 'paused', 'blocked'].includes(selectedDrawerStage.status) && selectedDrawerStage.error?.message" class="drawer-error-alert">
+            <strong>{{ selectedDrawerStage.status === 'failed' ? '错误明细：' : '需要处理：' }}</strong>
             <p>{{ pipelineStageError(selectedDrawerStage) }}</p>
           </div>
 
@@ -1250,7 +1301,7 @@
               <small class="pipeline-llm-count">
                 大模型请求 {{ stage.llm_request_count }} 次
               </small>
-              <em v-if="stage.status === 'failed' && stage.error?.message">
+              <em v-if="['failed', 'paused', 'blocked'].includes(stage.status) && stage.error?.message">
                 {{ pipelineStageError(stage) }}
               </em>
               <details v-if="stage.llm_requests?.length" class="pipeline-llm-requests">
@@ -1462,9 +1513,9 @@
           </div>
         </div>
 
-        <div v-if="pipelineStatus === 'failed' && !hasOutline" class="planning-failed-box">
+        <div v-if="['failed', 'needs_handling'].includes(pipelineStatus) && !hasOutline" class="planning-failed-box">
           <div class="failed-icon">⚠️</div>
-          <h3>评分目录生成中断</h3>
+          <h3>{{ pipelineStatus === 'needs_handling' ? '全局项目事实需要处理' : '评分目录生成中断' }}</h3>
           <p class="failed-msg">{{ error || '后台大模型拆分响应未成功完成，已暂停生成目录。' }}</p>
           <div class="failed-actions">
             <button
@@ -1925,6 +1976,7 @@ const initialChatTurns = ref([])
 const secondStageConfirmed = ref(false)
 const dismissedPlanningReviewOperationId = ref('')
 const planningReviewFeedback = ref('')
+const projectFactFeedback = ref('')
 const initialPendingCount = ref(0)
 const initialAsking = computed(() => initialPendingCount.value > 0)
 const assistantClockNow = ref(Date.now())
@@ -2129,6 +2181,13 @@ let stageDetailRequestToken = 0
 const selectedDrawerStage = computed(() => (
   topPipelineStages.value.find(s => s.stage_id === activeStageDrawerId.value) || null
 ))
+// The list row is already a snapshot projection; the detail endpoint may add
+// the persisted artifact summary and repair history.  Merge both without
+// letting the client derive status or model-call counts.
+const selectedDrawerStageData = computed(() => ({
+  ...(selectedDrawerStage.value || {}),
+  ...(stageDetail.value || {}),
+}))
 
 async function loadStageDetail(stageId, { showLoading = false } = {}) {
   const normalized = String(stageId || '')
@@ -2437,6 +2496,7 @@ const latestOutlineOperationBusy = computed(() => (
 const pipelineStatus = computed(() => {
   const workflowStatus = String(workflow.value.status || '')
   if (workflowStatus === 'failed') return 'failed'
+  if (workflowStatus === 'needs_handling') return 'needs_handling'
   if (workflowStatus === 'blocked_human') return 'blocked_human'
   if (workflowStatus === 'running') return 'running'
   const status = String(analysisPipeline.value.status || 'not_started')
@@ -2444,6 +2504,7 @@ const pipelineStatus = computed(() => {
     return 'running'
   }
   if (pipelineStages.value.some(stage => stage.status === 'failed')) return 'failed'
+  if (pipelineStages.value.some(stage => ['paused', 'blocked'].includes(stage.status))) return 'needs_handling'
   if (pipelineStages.value.some(stage => stage.status === 'blocked_human')) return 'blocked_human'
   return status
 })
@@ -3170,6 +3231,32 @@ async function prepareOutline() {
   }
 }
 
+async function retryProjectFacts(withFeedback) {
+  if (outlineBusy.value || (running.value && runningAction.value === 'outline')) return
+  const feedback = withFeedback ? projectFactFeedback.value.trim() : ''
+  if (withFeedback && !feedback) return
+  running.value = true
+  runningAction.value = 'outline'
+  clearError()
+  try {
+    const { data } = await prepareV3Outline(
+      props.runId,
+      feedback ? { projectFeedback: feedback } : {},
+    )
+    assertCommandAccepted(data, '全局项目事实重新生成失败。')
+    projectFactFeedback.value = ''
+    await refresh()
+    closeStageDrawer()
+    message.value = data.message || data.receipt?.message || '已重新生成全局项目事实。'
+  } catch (cause) {
+    await refresh().catch(() => {})
+    reportError(cause, '全局项目事实重新生成失败。')
+  } finally {
+    running.value = false
+    runningAction.value = ''
+  }
+}
+
 async function submitPlanningFeedback() {
   const feedback = planningReviewFeedback.value.trim()
   if (!feedback) return
@@ -3550,6 +3637,14 @@ function reportOutlineOperationFailure(operation) {
 }
 
 function pipelineStageStatus(stage) {
+  if (
+    stage?.stage_id === 'plan_response'
+    && Number(stage?.repair_round || 0) > 0
+    && ['succeeded', 'reused'].includes(stage?.status)
+  ) {
+    const maxRounds = Number(stage?.max_repair_rounds || 2)
+    return `已自动修复第 ${stage.repair_round}/${maxRounds} 轮`
+  }
   const status = {
     pending: '等待上游阶段',
     queued: '已排队',
@@ -3557,6 +3652,8 @@ function pipelineStageStatus(stage) {
     succeeded: '执行完成',
     reused: '复用已验证产物',
     failed: '执行失败',
+    paused: '需要处理',
+    blocked: '需要处理',
     blocked_human: '等待人工确认',
     cancelled: '已取消',
   }[stage.status] || stage.status
@@ -3570,6 +3667,7 @@ function pipelineStageOperation(stage) {
     compile_template_structure: '操作：识别模板目录与可写位置',
     build_requirement_ledger: '操作：提取采购要求和约束',
     analyze_scores: '操作：解析评分点与满分条件',
+    plan_response: '操作：生成全局项目事实，供全部章节统一引用',
     compile_chapter_blueprint: '操作：生成评分驱动章节目录',
     confirm_planning: '用户操作：审阅并确认目录',
     sync_material_requirements: '操作：匹配公司资料并列出证据缺口',
@@ -3634,7 +3732,7 @@ function stageResultSummary(stage) {
       .join(' · ')
   }
   if (['succeeded', 'reused'].includes(stage?.status)) return '步骤已完成，产物已持久化。'
-  if (stage?.status === 'failed') return pipelineStageError(stage)
+  if (['failed', 'paused', 'blocked'].includes(stage?.status)) return pipelineStageError(stage)
   if (stage?.status === 'blocked_human') return '需要人工处理后才能继续。'
   return ''
 }
@@ -8550,6 +8648,62 @@ onUnmounted(() => {
 .planning-review-feedback { display: grid; gap: 6px; margin: 0 0 18px; color: #334155; font-size: 13px; font-weight: 700; }
 .planning-review-feedback textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #bfdbfe; border-radius: 9px; color: #172554; font: inherit; font-weight: 400; line-height: 1.5; }
 .planning-review-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+.project-fact-drawer-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+.project-fact-drawer-heading {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.project-fact-drawer-heading h4 { margin: 2px 0 0; color: #172554; }
+.project-fact-reused-pill {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #166534;
+  background: #dcfce7;
+  font-size: 11px;
+  font-weight: 750;
+}
+.project-fact-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.project-fact-metrics div { padding: 8px 10px; border: 1px solid #e0e7ff; border-radius: 9px; background: #fff; }
+.project-fact-metrics dt { color: #64748b; font-size: 11px; }
+.project-fact-metrics dd { margin: 3px 0 0; color: #1d4ed8; font-size: 17px; font-weight: 800; }
+.project-fact-reuse-note,
+.project-fact-summary p { margin: 0; color: #475569; font-size: 12px; line-height: 1.55; }
+.project-fact-summary,
+.project-fact-validation-list { display: grid; gap: 5px; color: #334155; font-size: 12px; line-height: 1.5; }
+.project-fact-summary strong,
+.project-fact-validation-list > strong { color: #172554; }
+.project-fact-validation-list ol { display: grid; gap: 7px; margin: 0; padding-left: 20px; }
+.project-fact-validation-list li span { color: #b45309; font-weight: 750; }
+.project-fact-validation-list li p { margin: 2px 0 0; overflow-wrap: anywhere; }
+.project-fact-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.project-fact-recovery-actions textarea {
+  flex: 1 0 100%;
+  width: 100%;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  background: #fff;
+  color: #172554;
+  font: inherit;
+  line-height: 1.45;
+}
 
 /* 执行计划固定在输入框上方；实时动作作为普通聊天消息进入消息流。 */
 .legacy-chat-stream .bot-msg > .msg-bubble {

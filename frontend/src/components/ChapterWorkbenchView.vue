@@ -200,6 +200,12 @@
         批量编写：{{ chapterWriteJob.status }}
         <span v-if="chapterWriteJob.current_chapter_id">，正在编写 {{ chapterWriteJob.current_chapter_id }}</span>
         <span>；已完成 {{ chapterWriteJob.completed_count || 0 }} 章</span>
+        <span v-if="chapterWriteJobError">；{{ chapterWriteJobError }}</span>
+      </div>
+      <div v-if="batchWritingProgress" class="banner ok">
+        批量编写：正在处理《{{ batchWritingProgress.current_title || '准备选中章节' }}》
+        <span>；第 {{ batchWritingProgress.current_index || 1 }}/{{ batchWritingProgress.total }} 章</span>
+        <span>；已完成 {{ batchWritingProgress.completed_count }} 章</span>
       </div>
 
       <div ref="docBodyEl" class="chapter-doc-body">
@@ -692,6 +698,19 @@ const composeResult = ref(null)
 const workspaceRevision = ref(0)
 const globalProjectContext = ref({})
 const chapterWriteJob = ref(null)
+const batchWritingProgress = ref(null)
+
+const chapterWriteJobError = computed(() => {
+  const error = chapterWriteJob.value?.error
+  const message = String(error?.message || '').trim()
+  if (!message) return ''
+  const chapterId = String(error?.details?.chapter_id || '')
+    || message.match(/chapter-[a-z0-9]+/i)?.[0]
+  if (!chapterId) return message
+  const chapter = items.value.find(item => item.chapter_id === chapterId)
+  if (!chapter?.title) return message
+  return message.replace(chapterId, `《${chapter.title}》（${chapterId}）`)
+})
 
 const busy = ref(false)
 const busyAction = ref('')
@@ -1114,12 +1133,24 @@ async function startWritingChapters(chapterIds, { autoReview = false } = {}) {
   busyAction.value = 'batch-draft'
   actionError.value = ''
   actionMessage.value = ''
+  batchWritingProgress.value = {
+    total: ids.length,
+    current_index: 0,
+    current_title: '',
+    completed_count: 0,
+  }
   try {
     // 章节工作台已有独立的正文落盘流。批量编写沿用该流，避免重新触发
     // 全局 ScoreModel/Blueprint 推理；后者在模型配置更新后会要求重新规划。
     let completed = 0
     const failed = []
-    for (const chapterId of ids) {
+    for (const [index, chapterId] of ids.entries()) {
+      const chapter = writableLeafChapters.value.find(item => item.chapter_id === chapterId)
+      batchWritingProgress.value = {
+        ...batchWritingProgress.value,
+        current_index: index + 1,
+        current_title: chapter?.title || chapterId,
+      }
       selectChapter(chapterId)
       await loadChapterDetail({ force: true })
       // 批量编写由章节 Agent 自主完成提纲审核与正文生成，不能因为
@@ -1151,6 +1182,10 @@ async function startWritingChapters(chapterIds, { autoReview = false } = {}) {
         break
       }
       completed += 1
+      batchWritingProgress.value = {
+        ...batchWritingProgress.value,
+        completed_count: completed,
+      }
     }
     actionMessage.value = failed.length
       ? `已完成 ${completed} 章；${failed.length} 章未完成，请在目录中查看错误提示。`
@@ -1159,6 +1194,7 @@ async function startWritingChapters(chapterIds, { autoReview = false } = {}) {
   } catch (e) {
     actionError.value = e?.response?.data?.message || e?.response?.data?.error?.message || e.message || String(e)
   } finally {
+    batchWritingProgress.value = null
     busy.value = false
     busyAction.value = ''
   }
@@ -1168,29 +1204,9 @@ async function writeSelectedChapters() {
   const ids = [...selectedWritingChapterIds.value]
   isSelectingChapters.value = false
   if (!ids.length) return
-  busy.value = true
-  busyAction.value = 'batch-draft'
-  actionError.value = ''
-  actionMessage.value = ''
-  try {
-    await refreshSnapshotRevision()
-    const { data } = await submitV3Command(props.workspaceId, {
-      kind: 'chapter.batch.generate',
-      payload: { chapter_ids: ids },
-      expected_revision: workspaceRevision.value,
-      idempotency_key: `chapter.batch.generate-${Date.now()}`,
-    })
-    if (!data?.ok) {
-      throw new Error(data?.receipt?.error?.message || data?.message || '批量章节编写失败')
-    }
-    await reloadAll()
-    actionMessage.value = data.message || data.receipt?.message || '批量章节编写已完成。'
-  } catch (e) {
-    actionError.value = e?.response?.data?.message || e?.response?.data?.error?.message || e.message || String(e)
-  } finally {
-    busy.value = false
-    busyAction.value = ''
-  }
+  // Use the same streaming path as single-chapter drafting so every selected
+  // leaf becomes active in turn and exposes its Agent analysis in the chat.
+  await startWritingChapters(ids, { autoReview: true })
 }
 
 async function writeCurrentChapter() {
@@ -1241,7 +1257,11 @@ async function refreshSnapshotRevision() {
   if (snap.data?.ok) {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
     globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
-    chapterWriteJob.value = snap.data.snapshot?.chapter_write_job || null
+    const job = snap.data.snapshot?.chapter_write_job || null
+    // Blocked and failed jobs are historical results.  Keeping them in this
+    // banner makes a later one-click draft look like it was rejected by that
+    // old batch operation.
+    chapterWriteJob.value = ['queued', 'running'].includes(job?.status) ? job : null
   }
 }
 
@@ -1579,10 +1599,11 @@ async function generateDraft() {
           completedContent = payload?.content && typeof payload.content === 'object'
             ? payload.content
             : null
-        } else if (type === 'error') {
-          const payload = event?.data && typeof event.data === 'object' ? event.data : event
-          const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
-          const message = String(payload?.message || '流式生成失败')
+          } else if (type === 'error') {
+            const payload = event?.data && typeof event.data === 'object' ? event.data : event
+            const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
+            const message = String(payload?.message || '流式生成失败')
+            const code = String(payload?.code || '').trim()
           if (String(payload?.code || '') === 'CHAPTER_RESEARCH_UNAVAILABLE') {
             researchStatus.value = reason ? `公开资料检索失败：${reason}` : message
           }
@@ -1591,8 +1612,9 @@ async function generateDraft() {
             applyChatAuthority(payload.authority || { mode: 'human_review', review_status: 'pending' })
             chatInput.value = chatInput.value || '先列出本章要写的内容'
           }
-          throw new Error(reason ? `${message}（${reason}）` : message)
-        }
+            const detail = reason ? `${message}（${reason}）` : message
+            throw new Error(code ? `${detail} [${code}]` : detail)
+          }
       },
     })
     if (controller.signal.aborted || chapterId !== selectedId.value) return

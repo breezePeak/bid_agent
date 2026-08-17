@@ -22,7 +22,7 @@ from .contracts import (
     TemplateStructureContract,
 )
 
-ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-8"
+ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-9"
 
 
 @dataclass(frozen=True)
@@ -96,10 +96,13 @@ class ArtifactKindRegistry:
                 kind="ProjectModel",
                 payload_model=ProjectModel,
                 legal_producers=frozenset({"planning_agent"}),
-                dependency_kinds=("RequirementLedger", "ScoreModel", "SourceIndex"),
+                # Project understanding is a project/source projection.  It
+                # deliberately does not depend on ScoreModel: score changes
+                # must be able to reuse the already verified project facts.
+                dependency_kinds=("RequirementLedger", "SourceIndex"),
                 enabled=True,
                 promotable=True,
-                notes="Legacy manual compatibility; excluded from automatic V3 stage lists.",
+                notes="Current score-independent global project facts used by the V3 flow.",
             ),
             "ResponseTopicGraph": ArtifactKindRegistration(
                 kind="ResponseTopicGraph",
@@ -113,7 +116,7 @@ class ArtifactKindRegistry:
                 ),
                 enabled=True,
                 promotable=True,
-                notes="Legacy manual compatibility; excluded from automatic V3 stage lists.",
+                notes="Historical/manual compatibility only; excluded from the current V3 flow.",
             ),
             "ChapterBlueprint": ArtifactKindRegistration(
                 kind="ChapterBlueprint",
