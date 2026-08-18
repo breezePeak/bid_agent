@@ -93,7 +93,7 @@ test('only long-running workflow phases show expandable processing details', () 
   assert.match(aiProcessDisclosure, /processing: `正在处理 .*durationLabel/)
   assert.match(aiProcessDisclosure, /completed: `已处理 .*durationLabel/)
   assert.match(aiProcessDisclosure, /failed: `处理失败 .*durationLabel/)
-  assert.match(aiProcessDisclosure, /width: 100%[\s\S]*?background: #f7faff;/)
+  assert.match(aiProcessDisclosure, /width: 100%[\s\S]*?background: #f8fafc;/)
   assert.doesNotMatch(aiProcessDisclosure, /background:\s*#(?:000|0f172a|111827)/i)
 })
 
@@ -258,8 +258,8 @@ test('one compact workflow disclosure is rendered before the composer', () => {
   assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)
   assert.doesNotMatch(workspaceView, /class="pipeline-activity-group/)
   assert.ok(
-    workspaceView.indexOf('v-if="showOutlineProcessMessage"') > conversationTurns,
-    'expected the phase-2 disclosure after conversation',
+    workspaceView.indexOf('v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"') > conversationTurns,
+    'expected the phase-2 card after conversation once materials are ready',
   )
   return
 
@@ -273,8 +273,8 @@ test('one compact workflow disclosure is rendered before the composer', () => {
   assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)
   assert.doesNotMatch(workspaceView, /class="pipeline-activity-group/)
   assert.ok(
-    workspaceView.indexOf('v-if="showOutlineProcessMessage"') > conversationTurns,
-    'expected the phase-2 disclosure after conversation',
+    workspaceView.indexOf('v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"') > conversationTurns,
+    'expected the phase-2 card after conversation once materials are ready',
   )
   return
   assert.match(workspaceView, /pipeline-turn-\$\{pipelineActivityVersion\}/)
@@ -304,11 +304,12 @@ test('workflow disclosure is light and keeps processing details progressively di
 })
 
 test('outline planning and full-document generation render as separate chat phases', () => {
-  assert.match(workspaceView, /v-if="showOutlineProcessMessage"/)
-  assert.match(
-    workspaceView,
-    /const showOutlineProcessMessage = computed\(\(\) => \(\s*hasOutline\.value\s*\|\| planningReadyForReview\.value/,
-  )
+  assert.match(workspaceView, /v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"/)
+  assert.match(workspaceView, /v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg generation-stage-msg"/)
+  assert.match(workspaceView, /const phaseStates = computed\(\(\) => workflow\.value\.phase_states \|\| \{\}\)/)
+  assert.match(workspaceView, /planningPhaseState\.value\.phase_status/)
+  assert.match(workspaceView, /writingPhaseState\.value\.phase_status/)
+  assert.doesNotMatch(workspaceView, /if \(planningStatus\.value === 'confirmed' && hasOutline\.value\) return 'completed'/)
   assert.match(workspaceView, /:status="outlineProcessStatus"[\s\S]*?:seconds="outlineElapsedSeconds"/)
   assert.match(workspaceView, /:status="generationProcessStatus"[\s\S]*?:seconds="generationElapsedSeconds"/)
   assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)

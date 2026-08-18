@@ -660,9 +660,7 @@
 
           <!-- 阶段 2 从开始、失败到完成始终只占一条 AI 消息。 -->
           <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
-            <div class="msg-avatar outline-avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v16H7.5A2.5 2.5 0 0 0 5 20.5zm2.5 0H20M9 7h7M9 11h7M9 15h4" /></svg>
-            </div>
+            <div class="msg-avatar outline-avatar" aria-hidden="true">2</div>
             <div class="msg-bubble outline-card-bubble">
               <header class="card-title-row">
                 <div>
@@ -2418,17 +2416,21 @@ const generationErrorMessage = computed(() => (
   || '完整标书生成失败。'
 ))
 const generationHeadline = computed(() => {
-  if (generationBusy.value) {
+  const status = String(writingPhaseState.value.phase_status || 'not_started')
+  if (status === 'in_progress') {
+    return currentGenerationStage.value?.label
+      ? `正在执行“${currentGenerationStage.value.label}”。`
+      : '正在编写章节正文。'
+  }
+  if (status === 'running') {
     return currentGenerationStage.value?.label
       ? `正在执行“${currentGenerationStage.value.label}”，页面每 2 秒自动更新。`
       : '任务已启动，正在等待后端阶段状态。'
   }
-  if (generationContent.value.stale_units) {
-    return '旧正文与当前写作器、模型或研究策略不一致，必须重新生成。'
-  }
-  if (generation.value.status === 'succeeded') return '全部阶段已完成，可查看章节正文并下载 Word。'
-  if (generation.value.status === 'blocked') return `已暂停，等待处理：${generationErrorMessage.value}`
-  if (generation.value.status === 'failed') return `生成已停止：${generationErrorMessage.value}`
+  if (status === 'outdated') return '写作结果已过期，需要根据新的业务输入重新生成。'
+  if (status === 'completed') return '全部阶段已完成，可查看章节正文并下载 Word。'
+  if (status === 'blocked') return `已暂停，等待处理：${writingPhaseState.value.message || generationErrorMessage.value}`
+  if (status === 'failed') return `生成已停止：${writingPhaseState.value.error?.message || writingPhaseState.value.message || generationErrorMessage.value}`
   return '确认目录后可生成整本标书，也可在左侧选择目录后只生成该章。'
 })
 const generationTabLabel = computed(() => {
@@ -2442,6 +2444,12 @@ const generationTabLabel = computed(() => {
 const evidenceNeeds = computed(() => snapshot.value.evidence_needs || [])
 const planning = computed(() => snapshot.value.planning || {})
 const workflow = computed(() => snapshot.value.workflow || {})
+const phaseStates = computed(() => workflow.value.phase_states || {})
+const planningPhaseState = computed(() => phaseStates.value.planning || { phase_status: 'not_started' })
+const writingPhaseState = computed(() => phaseStates.value.writing || { phase_status: 'not_started' })
+const workflowIsWriting = computed(() => !['not_started', 'ready', 'blocked'].includes(
+  String(writingPhaseState.value.phase_status || 'not_started'),
+))
 const pendingReviews = computed(() => workflow.value.pending_reviews || [])
 const planningStatus = computed(() => planning.value.status || 'not_ready')
 const deliveryStatus = computed(() => document.value.delivery?.status || 'new')
@@ -2455,7 +2463,10 @@ const hasOutline = computed(() => (
   // outline disappear.  `workflow.status` represents the latest workflow
   // operation and may therefore be `failed` while the confirmed blueprint and
   // its chapter workspaces are still valid.
-  ['needs_human', 'confirmed'].includes(planningStatus.value)
+  (
+    ['needs_human', 'confirmed'].includes(planningStatus.value)
+    || workflowIsWriting.value
+  )
   && planningView.value.summary.chapter_count > 0
 ))
 watch(
@@ -2704,30 +2715,19 @@ function assistantTurnElapsedSeconds(turn) {
   return Math.max(0, Math.floor((finishedAt - startedAt) / 1000))
 }
 
-const outlineElapsedSeconds = computed(() => workflowElapsedSeconds(
-  pipelineStages.value,
-  outlineBusy.value,
-  runningDurationSeconds.value,
-  latestWorkspaceOperation.value,
-))
-const generationElapsedSeconds = computed(() => workflowElapsedSeconds(
-  generationExecutionStages.value,
-  generationBusy.value,
-  runningDurationSeconds.value,
-  generation.value,
-))
-const outlineProcessStatus = computed(() => {
-  if (planningStatus.value === 'confirmed' && hasOutline.value) return 'completed'
-  if (outlineBusy.value) return 'processing'
-  if (pipelineStatus.value === 'failed') return 'failed'
-  if (planningStatus.value === 'needs_human') return 'waiting'
+const outlineElapsedSeconds = computed(() => planningPhaseState.value.elapsed_seconds ?? null)
+const generationElapsedSeconds = computed(() => writingPhaseState.value.elapsed_seconds ?? null)
+function phaseProcessStatus(status) {
+  if (['running', 'in_progress'].includes(status)) return 'processing'
+  if (status === 'completed') return 'completed'
+  if (['failed', 'blocked', 'outdated'].includes(status)) return 'failed'
   return 'waiting'
+}
+const outlineProcessStatus = computed(() => {
+  return phaseProcessStatus(String(planningPhaseState.value.phase_status || 'not_started'))
 })
 const generationProcessStatus = computed(() => {
-  if (generationBusy.value) return 'processing'
-  if (['failed', 'blocked'].includes(String(generation.value.status || ''))) return 'failed'
-  if (!hasOutline.value || planningStatus.value !== 'confirmed') return 'waiting'
-  return 'completed'
+  return phaseProcessStatus(String(writingPhaseState.value.phase_status || 'not_started'))
 })
 const showOutlineProcessMessage = computed(() => (
   hasOutline.value
@@ -2736,14 +2736,16 @@ const showOutlineProcessMessage = computed(() => (
   || pipelineStages.value.some(stage => stage.status !== 'pending')
 ))
 const outlineWorkflowTitle = computed(() => {
-  if (!secondStageConfirmed.value) return '等待您确认进入第二阶段'
+  const status = String(planningPhaseState.value.phase_status || 'not_started')
+  if (['not_started', 'ready'].includes(status)) return '等待进入第二阶段'
   if (outlineProcessStatus.value === 'processing') return '正在解析评分点并生成目录'
   if (outlineProcessStatus.value === 'failed') return '评分点解析与目录生成失败'
-  if (outlineProcessStatus.value === 'waiting') return '编写计划已生成，等待您审核'
+  if (status === 'waiting_confirmation') return '编写计划已生成，等待您审核'
   return `编写计划已生成（${planningView.value.summary.chapter_count} 个章节节点）`
 })
 const outlineWorkflowDescription = computed(() => {
-  if (!secondStageConfirmed.value) return '请回复“继续第二阶段”后开始解析评分点并生成目录。'
+  const status = String(planningPhaseState.value.phase_status || 'not_started')
+  if (['not_started', 'ready'].includes(status)) return '材料准备完成后即可开始解析评分点并生成目录。'
   if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
   if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
   return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
@@ -2952,11 +2954,14 @@ const generationWorkflowStatusLabel = computed(() => {
   return '已启动'
 })
 const generationWorkflowTitle = computed(() => {
-  if (generationBusy.value) return '完整标书正在生成'
-  if (generation.value.status === 'succeeded') return '完整标书生成完成'
-  if (generation.value.status === 'failed') return '完整标书生成失败'
-  if (generation.value.status === 'blocked') return '完整标书生成已暂停'
-  return '完整标书生成已启动'
+  const status = String(writingPhaseState.value.phase_status || 'not_started')
+  if (status === 'in_progress') return '正在编写章节正文'
+  if (status === 'running') return '完整标书正在生成'
+  if (status === 'completed') return '完整标书生成完成'
+  if (status === 'failed') return '完整标书生成失败'
+  if (status === 'blocked') return '完整标书生成已暂停'
+  if (status === 'outdated') return '写作结果已过期'
+  return '等待第二阶段完成并确认目录'
 })
 watch(
   () => [

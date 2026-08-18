@@ -180,7 +180,12 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 28
+    SCHEMA_VERSION = 29
+    WORKFLOW_PHASES = ("materials", "planning", "writing")
+    PHASE_STATUSES = {
+        "not_started", "ready", "running", "waiting_confirmation",
+        "in_progress", "completed", "failed", "outdated", "blocked",
+    }
     # Includes resumable blocked/paused records for command routing. They do
     # not own the workspace lease; see LOCK_OPERATION_STATES.
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
@@ -229,6 +234,151 @@ class ControlStore:
         "document.run_pipeline",
         "chapter.generate_draft",
     }
+
+    @staticmethod
+    def _workflow_phase_for_kind(kind: str) -> str:
+        value = str(kind or "")
+        if value == "document.prepare_outline" or value == "document.confirm_planning":
+            return "planning"
+        if value == "document.run_pipeline" or value.startswith("chapter."):
+            return "writing"
+        if value.startswith("materials.") or value.startswith("material."):
+            return "materials"
+        return ""
+
+    @staticmethod
+    def _phase_status_for_operation(kind: str, operation_status: str) -> str:
+        phase = ControlStore._workflow_phase_for_kind(kind)
+        status = str(operation_status or "")
+        if not phase:
+            return ""
+        if status in {"queued", "running", "processing", "background"}:
+            return "in_progress" if phase == "writing" else "running"
+        if status == "blocked_human" and phase == "planning":
+            return "waiting_confirmation"
+        if status in {"blocked", "paused"}:
+            return "blocked"
+        if status == "failed":
+            return "failed"
+        if status == "succeeded":
+            if phase == "writing" and str(kind) != "document.run_pipeline":
+                return "in_progress"
+            return "completed"
+        if status == "cancelled":
+            return "outdated"
+        return "ready"
+
+    def _backfill_operation_phase_fields(self, connection: sqlite3.Connection) -> None:
+        """One-time migration from operation identity; runtime reads never infer phases."""
+        rows = connection.execute(
+            "SELECT operation_id, kind, status FROM operations WHERE workflow_phase = '' ORDER BY created_at"
+        ).fetchall()
+        revisions = {
+            phase: int(connection.execute(
+                "SELECT COALESCE(MAX(phase_revision), 0) FROM operations WHERE workflow_phase = ?",
+                (phase,),
+            ).fetchone()[0])
+            for phase in self.WORKFLOW_PHASES
+        }
+        migrated_phases: set[str] = set()
+        for row in rows:
+            phase = self._workflow_phase_for_kind(str(row["kind"] or ""))
+            if not phase:
+                continue
+            migrated_phases.add(phase)
+            revisions[phase] += 1
+            connection.execute(
+                "UPDATE operations SET workflow_phase = ?, phase_status = ?, phase_revision = ? "
+                "WHERE operation_id = ?",
+                (
+                    phase,
+                    self._phase_status_for_operation(str(row["kind"]), str(row["status"])),
+                    revisions[phase],
+                    str(row["operation_id"]),
+                ),
+            )
+        for phase in migrated_phases:
+            current = connection.execute(
+                "SELECT operation_id FROM operations WHERE workflow_phase = ? "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (phase,),
+            ).fetchone()
+            if current:
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = NULL WHERE operation_id = ?",
+                    (str(current["operation_id"]),),
+                )
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = ? "
+                    "WHERE workflow_phase = ? AND operation_id <> ? AND superseded_by_operation_id IS NULL",
+                    (str(current["operation_id"]), phase, str(current["operation_id"])),
+                )
+        confirmed = connection.execute(
+            "SELECT operation_id, updated_at FROM operations "
+            "WHERE kind = 'document.confirm_planning' AND status = 'succeeded' "
+            "ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        if confirmed:
+            outline = connection.execute(
+                "SELECT operation_id FROM operations WHERE kind = 'document.prepare_outline' "
+                "AND created_at <= ? ORDER BY created_at DESC LIMIT 1",
+                (str(confirmed["updated_at"]),),
+            ).fetchone()
+            if outline:
+                outline_id = str(outline["operation_id"])
+                connection.execute(
+                    "UPDATE operations SET status = 'succeeded', phase_status = 'completed', "
+                    "completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE operation_id = ?",
+                    (str(confirmed["updated_at"]), str(confirmed["updated_at"]), outline_id),
+                )
+                if not connection.execute(
+                    "SELECT 1 FROM stage_runs WHERE operation_id = ? AND stage_command = 'confirm_planning' "
+                    "AND status = 'succeeded' LIMIT 1",
+                    (outline_id,),
+                ).fetchone():
+                    attempt = int(connection.execute(
+                        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM stage_runs "
+                        "WHERE operation_id = ? AND stage_command = 'confirm_planning'",
+                        (outline_id,),
+                    ).fetchone()[0])
+                    connection.execute(
+                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, "
+                        "disposition, started_at, completed_at) VALUES (?, ?, 'confirm_planning', ?, "
+                        "'succeeded', 'migrated_h1_confirmation', ?, ?)",
+                        (str(uuid.uuid4()), outline_id, attempt, str(confirmed["updated_at"]), str(confirmed["updated_at"])),
+                    )
+
+    def _record_phase_marker_tx(
+        self,
+        connection: sqlite3.Connection,
+        workflow_phase: str,
+        phase_status: str,
+        *,
+        kind: str,
+        message: str,
+        now: str,
+    ) -> str:
+        operation_id = str(uuid.uuid4())
+        phase_revision = int(connection.execute(
+            "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = ?",
+            (workflow_phase,),
+        ).fetchone()[0])
+        connection.execute(
+            "UPDATE operations SET superseded_by_operation_id = ? WHERE workflow_phase = ? "
+            "AND superseded_by_operation_id IS NULL",
+            (operation_id, workflow_phase),
+        )
+        operation_status = "failed" if phase_status == "failed" else "succeeded"
+        connection.execute(
+            "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at, "
+            "completed_at, message, workflow_phase, phase_status, phase_revision) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                operation_id, kind, operation_status, now, now, now, message,
+                workflow_phase, phase_status, phase_revision,
+            ),
+        )
+        return operation_id
 
     def __init__(self, context: WorkspaceContext) -> None:
         self.context = context
@@ -289,7 +439,11 @@ class ControlStore:
                         updated_at TEXT NOT NULL,
                         completed_at TEXT,
                         message TEXT NOT NULL DEFAULT '',
-                        error_json TEXT
+                        error_json TEXT,
+                        workflow_phase TEXT NOT NULL DEFAULT '',
+                        phase_status TEXT NOT NULL DEFAULT '',
+                        phase_revision INTEGER NOT NULL DEFAULT 0,
+                        superseded_by_operation_id TEXT
                     );
                     CREATE TABLE IF NOT EXISTS stage_runs (
                         stage_run_id TEXT PRIMARY KEY,
@@ -792,6 +946,19 @@ class ControlStore:
                 }
                 if "parent_operation_id" not in operation_columns:
                     connection.execute("ALTER TABLE operations ADD COLUMN parent_operation_id TEXT")
+                for column, definition in (
+                    ("workflow_phase", "TEXT NOT NULL DEFAULT ''"),
+                    ("phase_status", "TEXT NOT NULL DEFAULT ''"),
+                    ("phase_revision", "INTEGER NOT NULL DEFAULT 0"),
+                    ("superseded_by_operation_id", "TEXT"),
+                ):
+                    if column not in operation_columns:
+                        connection.execute(f"ALTER TABLE operations ADD COLUMN {column} {definition}")
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_operations_workflow_phase "
+                    "ON operations(workflow_phase, superseded_by_operation_id, phase_revision DESC)"
+                )
+                self._backfill_operation_phase_fields(connection)
                 self._migrate_v3_kernel_columns(connection)
                 self._migrate_chapter_workspace_tables(connection)
                 connection.execute("DROP TABLE IF EXISTS migration_conflicts")
@@ -5430,6 +5597,178 @@ class ControlStore:
             self.ACTIVE_OPERATION_STATES,
         ).fetchone()
 
+    def latest_command_by_kind(self, kind: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM commands WHERE kind = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (str(kind),),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["payload"] = _decode(item.pop("payload_json", None), {})
+        item["actor"] = _decode(item.pop("actor_json", None), {})
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def latest_operation_by_kind(self, kind: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE kind = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (str(kind),),
+            ).fetchone()
+        return self._operation_row(row)
+
+    @staticmethod
+    def _operation_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def current_phase_operation(self, workflow_phase: str) -> dict[str, Any] | None:
+        phase = str(workflow_phase or "")
+        if phase not in self.WORKFLOW_PHASES:
+            raise ValueError(f"invalid workflow phase: {phase}")
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE workflow_phase = ? "
+                "AND superseded_by_operation_id IS NULL "
+                "ORDER BY phase_revision DESC, updated_at DESC LIMIT 1",
+                (phase,),
+            ).fetchone()
+        return self._operation_row(row)
+
+    def workflow_phase_states(self) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for phase in self.WORKFLOW_PHASES:
+            operation = self.current_phase_operation(phase)
+            if not operation:
+                result[phase] = {
+                    "workflow_phase": phase,
+                    "phase_status": "not_started",
+                    "phase_revision": 0,
+                    "operation_id": "",
+                    "started_at": None,
+                    "updated_at": None,
+                    "completed_at": None,
+                    "elapsed_seconds": None,
+                    "error": None,
+                }
+                continue
+            started_at = str(operation.get("created_at") or "") or None
+            completed_at = str(operation.get("completed_at") or "") or None
+            end_at = completed_at or (str(operation.get("updated_at") or "") or None)
+            elapsed: int | None = None
+            if started_at and end_at:
+                try:
+                    elapsed = max(0, int((datetime.fromisoformat(end_at) - datetime.fromisoformat(started_at)).total_seconds()))
+                except ValueError:
+                    elapsed = None
+            result[phase] = {
+                "workflow_phase": phase,
+                "phase_status": str(operation.get("phase_status") or "not_started"),
+                "phase_revision": int(operation.get("phase_revision") or 0),
+                "operation_id": str(operation.get("operation_id") or ""),
+                "operation_kind": str(operation.get("kind") or ""),
+                "operation_status": str(operation.get("status") or ""),
+                "started_at": started_at,
+                "updated_at": str(operation.get("updated_at") or "") or None,
+                "completed_at": completed_at,
+                "elapsed_seconds": elapsed,
+                "message": str(operation.get("message") or ""),
+                "error": operation.get("error"),
+            }
+        return result
+
+    def record_migrated_phase_state(
+        self,
+        workflow_phase: str,
+        phase_status: str,
+        *,
+        message: str,
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a one-time explicit phase state derived from legacy authority."""
+        phase = str(workflow_phase or "")
+        status = str(phase_status or "")
+        if phase not in self.WORKFLOW_PHASES or status not in self.PHASE_STATUSES:
+            raise ValueError("invalid migrated workflow phase state")
+        now = str(occurred_at or _now())
+        operation_id = str(uuid.uuid4())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                phase_revision = int(connection.execute(
+                    "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = ?",
+                    (phase,),
+                ).fetchone()[0])
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = ? WHERE workflow_phase = ? "
+                    "AND superseded_by_operation_id IS NULL",
+                    (operation_id, phase),
+                )
+                operation_status = "failed" if status == "failed" else "succeeded"
+                connection.execute(
+                    "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at, "
+                    "completed_at, message, workflow_phase, phase_status, phase_revision) "
+                    "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        operation_id, f"workflow.migrate.{phase}", operation_status, now, now, now,
+                        message, phase, status, phase_revision,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(connection, revision, "WorkflowPhaseMigrated", "Operation", operation_id, {
+                    "workflow_phase": phase, "phase_status": status, "phase_revision": phase_revision,
+                })
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.operation(operation_id) or {}
+
+    def finalize_planning_confirmation(self, confirmation_operation_id: str) -> None:
+        """Finish the original outline operation and its human-confirmation stage."""
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                outline = connection.execute(
+                    "SELECT operation_id FROM operations WHERE kind = 'document.prepare_outline' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+                if not outline:
+                    connection.commit()
+                    return
+                outline_id = str(outline["operation_id"])
+                connection.execute(
+                    "UPDATE operations SET status = 'succeeded', phase_status = 'completed', "
+                    "message = ?, error_json = NULL, updated_at = ?, completed_at = COALESCE(completed_at, ?) "
+                    "WHERE operation_id = ?",
+                    ("Planning confirmed by H1 receipt.", now, now, outline_id),
+                )
+                previous = connection.execute(
+                    "SELECT COALESCE(MAX(attempt), 0) FROM stage_runs "
+                    "WHERE operation_id = ? AND stage_command = 'confirm_planning'",
+                    (outline_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT OR REPLACE INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, started_at, completed_at) "
+                    "VALUES (?, ?, 'confirm_planning', ?, 'succeeded', 'explicit_human_confirmation', ?, ?)",
+                    (str(uuid.uuid4()), outline_id, max(1, int(previous or 0)), now, now),
+                )
+                revision = self._bump_revision(connection)
+                self._event(connection, revision, "WorkflowPhaseChanged", "Operation", outline_id, {
+                    "workflow_phase": "planning", "phase_status": "completed",
+                    "confirmation_operation_id": str(confirmation_operation_id),
+                })
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     def prepare(self, envelope: CommandEnvelope) -> tuple[CommandReceipt, bool]:
         now = _now()
         with self._connection() as connection:
@@ -5618,12 +5957,25 @@ class ControlStore:
                     previous_status = str(active["status"]) if blocked_pipeline_parent and active else ""
                     parent_operation_id = str(active["operation_id"]) if blocked_pipeline_parent and active else ""
                     fencing_token = 1
+                    workflow_phase = self._workflow_phase_for_kind(envelope.kind)
+                    phase_revision = 0
+                    if workflow_phase:
+                        phase_revision = int(connection.execute(
+                            "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = ?",
+                            (workflow_phase,),
+                        ).fetchone()[0])
+                        connection.execute(
+                            "UPDATE operations SET superseded_by_operation_id = ? "
+                            "WHERE workflow_phase = ? AND superseded_by_operation_id IS NULL",
+                            (operation_id, workflow_phase),
+                        )
                     connection.execute(
                         """
                         INSERT INTO operations(
                             operation_id, parent_operation_id, kind, status, start_command,
-                            fencing_token, created_at, updated_at, message
-                        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, '')
+                            fencing_token, created_at, updated_at, message, workflow_phase,
+                            phase_status, phase_revision
+                        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, '', ?, ?, ?)
                         """,
                         (
                             operation_id,
@@ -5633,6 +5985,9 @@ class ControlStore:
                             fencing_token,
                             now,
                             now,
+                            workflow_phase,
+                            self._phase_status_for_operation(envelope.kind, "queued"),
+                            phase_revision,
                         ),
                     )
 
@@ -5717,7 +6072,8 @@ class ControlStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 operation = connection.execute(
-                    "SELECT status FROM operations WHERE operation_id = ?",
+                    "SELECT status, kind, workflow_phase, phase_revision, superseded_by_operation_id "
+                    "FROM operations WHERE operation_id = ?",
                     (operation_id,),
                 ).fetchone()
                 if not operation:
@@ -5739,14 +6095,73 @@ class ControlStore:
                     (command_status, message, _json(error) if error else None, now, envelope.command_id),
                 )
                 terminal_at = now if operation_status in {"succeeded", "failed", "cancelled", "blocked_human"} else None
+                phase_status = self._phase_status_for_operation(str(operation["kind"]), operation_status)
                 connection.execute(
                     """
                     UPDATE operations SET status = ?, message = ?, error_json = ?, updated_at = ?,
-                        completed_at = COALESCE(?, completed_at)
+                        completed_at = COALESCE(?, completed_at),
+                        phase_status = CASE WHEN superseded_by_operation_id IS NULL THEN ? ELSE phase_status END
                     WHERE operation_id = ?
                     """,
-                    (operation_status, message, _json(error) if error else None, now, terminal_at, operation_id),
+                    (operation_status, message, _json(error) if error else None, now, terminal_at, phase_status, operation_id),
                 )
+                dependent_phase_operations: list[str] = []
+                if str(operation["workflow_phase"] or "") == "materials" and operation_status == "succeeded":
+                    planning_current = connection.execute(
+                        "SELECT phase_status FROM operations WHERE workflow_phase = 'planning' "
+                        "AND superseded_by_operation_id IS NULL ORDER BY phase_revision DESC LIMIT 1"
+                    ).fetchone()
+                    planning_status = "outdated" if planning_current else "ready"
+                    dependent_phase_operations.append(self._record_phase_marker_tx(
+                        connection,
+                        "planning",
+                        planning_status,
+                        kind="workflow.business_input_changed",
+                        message=(
+                            "Business inputs changed; planning must be regenerated."
+                            if planning_current else "Materials completed; planning is ready."
+                        ),
+                        now=now,
+                    ))
+                    writing_current = connection.execute(
+                        "SELECT 1 FROM operations WHERE workflow_phase = 'writing' "
+                        "AND superseded_by_operation_id IS NULL LIMIT 1"
+                    ).fetchone()
+                    if writing_current:
+                        dependent_phase_operations.append(self._record_phase_marker_tx(
+                            connection,
+                            "writing",
+                            "blocked",
+                            kind="workflow.business_input_changed",
+                            message="Business inputs changed; writing is blocked until planning is confirmed again.",
+                            now=now,
+                        ))
+                if (
+                    str(operation["kind"] or "") == "document.prepare_outline"
+                    and operation_status in {"blocked_human", "succeeded"}
+                ):
+                    writing_current = connection.execute(
+                        "SELECT 1 FROM operations WHERE workflow_phase = 'writing' "
+                        "AND superseded_by_operation_id IS NULL LIMIT 1"
+                    ).fetchone()
+                    if writing_current:
+                        dependent_phase_operations.append(self._record_phase_marker_tx(
+                            connection,
+                            "writing",
+                            "blocked",
+                            kind="workflow.outline_changed",
+                            message="Outline changed; writing is blocked until the new outline is confirmed.",
+                            now=now,
+                        ))
+                if str(operation["kind"] or "") == "document.confirm_planning" and operation_status == "succeeded":
+                    dependent_phase_operations.append(self._record_phase_marker_tx(
+                        connection,
+                        "writing",
+                        "ready",
+                        kind="workflow.planning_confirmed",
+                        message="Planning confirmed; writing is ready.",
+                        now=now,
+                    ))
                 if operation_status not in {"queued", "running", "pausing", "cancelling"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 self._event(
@@ -5761,6 +6176,10 @@ class ControlStore:
                         "operation_status": operation_status,
                         "message": message,
                         "error": error,
+                        "workflow_phase": str(operation["workflow_phase"] or ""),
+                        "phase_status": phase_status if operation["superseded_by_operation_id"] is None else None,
+                        "phase_revision": int(operation["phase_revision"] or 0),
+                        "dependent_phase_operations": dependent_phase_operations,
                     },
                 )
                 connection.commit()
@@ -5792,7 +6211,8 @@ class ControlStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "SELECT status, message, error_json, fencing_token FROM operations WHERE operation_id = ?",
+                    "SELECT status, message, error_json, fencing_token, kind, workflow_phase, "
+                    "phase_revision, superseded_by_operation_id FROM operations WHERE operation_id = ?",
                     (operation_id,),
                 ).fetchone()
                 if not row:
@@ -5838,13 +6258,15 @@ class ControlStore:
                     return self._revision(connection)
                 revision = self._bump_revision(connection)
                 terminal_at = now if status in {"succeeded", "failed", "cancelled"} else None
+                phase_status = self._phase_status_for_operation(str(row["kind"]), status)
                 connection.execute(
                     """
                     UPDATE operations SET status = ?, message = ?, error_json = ?, updated_at = ?,
-                        completed_at = COALESCE(?, completed_at)
+                        completed_at = COALESCE(?, completed_at),
+                        phase_status = CASE WHEN superseded_by_operation_id IS NULL THEN ? ELSE phase_status END
                     WHERE operation_id = ?
                     """,
-                    (status, message, error_json, now, terminal_at, operation_id),
+                    (status, message, error_json, now, terminal_at, phase_status, operation_id),
                 )
                 if status not in {"queued", "running", "pausing", "cancelling"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
@@ -5860,7 +6282,12 @@ class ControlStore:
                     "OperationStatusChanged",
                     "Operation",
                     operation_id,
-                    {"status": status, "message": message, "error": error},
+                    {
+                        "status": status, "message": message, "error": error,
+                        "workflow_phase": str(row["workflow_phase"] or ""),
+                        "phase_status": phase_status if row["superseded_by_operation_id"] is None else None,
+                        "phase_revision": int(row["phase_revision"] or 0),
+                    },
                 )
                 connection.commit()
                 return revision
@@ -6038,10 +6465,19 @@ class ControlStore:
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
+                phase_revision = int(connection.execute(
+                    "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = 'writing'"
+                ).fetchone()[0])
                 connection.execute(
-                    "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at) "
-                    "VALUES (?, 'chapter.generate_batch', 'background', 1, ?, ?)",
-                    (operation_id, now, now),
+                    "UPDATE operations SET superseded_by_operation_id = ? "
+                    "WHERE workflow_phase = 'writing' AND superseded_by_operation_id IS NULL",
+                    (operation_id,),
+                )
+                connection.execute(
+                    "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at, "
+                    "workflow_phase, phase_status, phase_revision) "
+                    "VALUES (?, 'chapter.generate_batch', 'background', 1, ?, ?, 'writing', 'in_progress', ?)",
+                    (operation_id, now, now, phase_revision),
                 )
                 connection.execute(
                     "INSERT INTO chapter_batch_jobs(job_id, operation_id, status, chapter_ids_json, retry_policy_json, fencing_token, created_at, updated_at) "
@@ -6105,12 +6541,14 @@ class ControlStore:
                     status if status in {"succeeded", "failed", "cancelled"} else "background"
                 )
                 if status is not None:
+                    phase_status = self._phase_status_for_operation("chapter.generate_batch", operation_status)
                     connection.execute(
-                        "UPDATE operations SET status = ?, updated_at = ?, "
+                        "UPDATE operations SET status = ?, updated_at = ?, phase_status = CASE "
+                        "WHEN superseded_by_operation_id IS NULL THEN ? ELSE phase_status END, "
                         "completed_at = CASE WHEN ? IN ('succeeded', 'failed', 'cancelled') "
                         "THEN COALESCE(completed_at, ?) ELSE completed_at END "
                         "WHERE operation_id = (SELECT operation_id FROM chapter_batch_jobs WHERE job_id = ?)",
-                        (operation_status, now, operation_status, now, str(job_id)),
+                        (operation_status, now, phase_status, operation_status, now, str(job_id)),
                     )
                 if status in {"succeeded", "failed", "cancelled"}:
                     connection.execute("UPDATE chapter_batch_jobs SET completed_at = COALESCE(completed_at, ?) WHERE job_id = ?", (now, str(job_id)))

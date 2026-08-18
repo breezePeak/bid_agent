@@ -1022,6 +1022,69 @@ class ControlPlaneTests(unittest.TestCase):
                 )
             self.assertEqual(fenced.exception.code, "LEASE_FENCED")
 
+    def test_phase_state_is_not_lost_after_more_than_500_commands(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = self._workspace(Path(tmp), "phase-history")
+
+            def handler(ctx, envelope, operation_id):
+                if envelope.kind == "document.prepare_outline":
+                    return {"operation_status": "blocked_human", "message": "review"}
+                return {"operation_status": "succeeded", "message": "written"}
+
+            gateway = CommandGateway(
+                context,
+                {
+                    "document.prepare_outline": handler,
+                    "chapter.workspace.ensure_all": handler,
+                },
+            )
+            outline = gateway.submit(
+                _envelope(context, gateway.store, "document.prepare_outline")
+            )
+            gateway.store.finalize_planning_confirmation("confirmation-op")
+            for _ in range(505):
+                gateway.submit(
+                    _envelope(context, gateway.store, "chapter.workspace.ensure_all")
+                )
+
+            self.assertEqual(
+                gateway.store.latest_command_by_kind("document.prepare_outline")["operation_id"],
+                outline.operation_id,
+            )
+            states = gateway.store.workflow_phase_states()
+            self.assertEqual(states["planning"]["phase_status"], "completed")
+            self.assertEqual(states["writing"]["phase_status"], "in_progress")
+            self.assertIsNone(states["materials"]["elapsed_seconds"])
+
+    def test_business_input_change_persists_outdated_and_blocked_phases(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = self._workspace(Path(tmp), "phase-invalidation")
+
+            def handler(ctx, envelope, operation_id):
+                if envelope.kind == "document.prepare_outline":
+                    return {"operation_status": "blocked_human", "message": "review"}
+                if envelope.kind == "document.confirm_planning":
+                    gateway.store.finalize_planning_confirmation(operation_id)
+                return {"operation_status": "succeeded", "message": "done"}
+
+            gateway = CommandGateway(context, {
+                "materials.verify": handler,
+                "document.prepare_outline": handler,
+                "document.confirm_planning": handler,
+                "chapter.generate_draft": handler,
+            })
+            gateway.submit(_envelope(context, gateway.store, "materials.verify"))
+            self.assertEqual(gateway.store.workflow_phase_states()["planning"]["phase_status"], "ready")
+            gateway.submit(_envelope(context, gateway.store, "document.prepare_outline"))
+            gateway.submit(_envelope(context, gateway.store, "document.confirm_planning"))
+            gateway.submit(_envelope(context, gateway.store, "chapter.generate_draft"))
+            gateway.submit(_envelope(context, gateway.store, "materials.verify"))
+
+            states = gateway.store.workflow_phase_states()
+            self.assertEqual(states["materials"]["phase_status"], "completed")
+            self.assertEqual(states["planning"]["phase_status"], "outdated")
+            self.assertEqual(states["writing"]["phase_status"], "blocked")
+
 
 if __name__ == "__main__":
     unittest.main()

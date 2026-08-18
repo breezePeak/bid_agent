@@ -36,7 +36,7 @@ import { computed } from 'vue'
 
 const props = defineProps({
   status: { type: String, default: 'completed' },
-  seconds: { type: Number, default: 0 },
+  seconds: { type: Number, default: null },
   detailText: { type: String, default: '' },
 })
 
@@ -47,6 +47,7 @@ const normalizedStatus = computed(() => (
 ))
 
 const durationLabel = computed(() => {
+  if (props.seconds == null) return null
   const total = Math.max(0, Math.floor(Number(props.seconds) || 0))
   const minutes = Math.floor(total / 60)
   const seconds = total % 60
@@ -54,12 +55,17 @@ const durationLabel = computed(() => {
   return `${seconds} 秒`
 })
 
-const summaryLabel = computed(() => ({
-  processing: `正在处理 · 已用 ${durationLabel.value}`,
-  completed: `已处理 · 耗时 ${durationLabel.value}`,
-  failed: `处理失败 · 耗时 ${durationLabel.value}`,
-  waiting: `等待确认 · 已处理 ${durationLabel.value}`,
-}[normalizedStatus.value]))
+const summaryLabel = computed(() => {
+  if (durationLabel.value == null) {
+    return normalizedStatus.value === 'waiting' ? '等待确认' : '尚未开始'
+  }
+  return {
+    processing: `正在处理 · 已用 ${durationLabel.value}`,
+    completed: `已处理 · 耗时 ${durationLabel.value}`,
+    failed: `处理失败 · 耗时 ${durationLabel.value}`,
+    waiting: `等待确认 · 已处理 ${durationLabel.value}`,
+  }[normalizedStatus.value]
+})
 
 const defaultDetailText = computed(() => ({
   processing: '请求已提交，正在等待当前处理步骤返回。',

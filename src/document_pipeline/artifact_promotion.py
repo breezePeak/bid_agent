@@ -1172,28 +1172,14 @@ class HumanGateService:
                     status_code=409,
                 )
             expected = expected_runtime.get(artifact_kind)
-            if expected is not None and any(
-                str(
-                    receipt.get(field)
-                    if receipt.get(field) is not None
-                    else ""
-                )
-                != str(expected[field])
-                for field in (
-                    "capability_id",
-                    "capability_version",
-                    "prompt_version",
-                    "prompt_hash",
-                    "provider_fingerprint",
-                    "model_fingerprint",
-                    "output_schema_version",
-                    "temperature",
-                )
+            if (
+                expected is not None
+                and str(receipt.get("output_schema_version") or "")
+                != str(expected.get("output_schema_version") or "")
             ):
                 raise ControlPlaneError(
-                    "PLANNING_CONFIRM_STALE",
-                    f"{artifact_kind} 的推理凭证不再匹配当前 "
-                    "Capability/Prompt/模型/Schema，请重新规划。",
+                    "migration_required",
+                    f"{artifact_kind} 的输出 Schema 与当前运行时不兼容，需要先执行迁移。",
                     status_code=409,
                 )
             trace.append(
@@ -1220,6 +1206,32 @@ class HumanGateService:
                 }
             )
         return trace
+
+    def runtime_change_warnings(self, planning_model: str = "score_direct") -> list[dict[str, Any]]:
+        """Report deployment drift without invalidating an already confirmed H1."""
+        expected_runtime = self._current_inference_metadata(planning_model)
+        warnings: list[dict[str, Any]] = []
+        for item in self._generation_trace(planning_model):
+            expected = expected_runtime.get(str(item.get("artifact_kind") or ""))
+            if expected is None:
+                continue
+            changed_fields = [
+                field
+                for field in (
+                    "capability_id", "capability_version", "prompt_version", "prompt_hash",
+                    "provider_fingerprint", "model_fingerprint", "temperature",
+                )
+                if str(item.get(field, "")) != str(expected.get(field, ""))
+            ]
+            if changed_fields:
+                warnings.append({
+                    "code": "runtime_changed",
+                    "artifact_kind": str(item.get("artifact_kind") or ""),
+                    "changed_fields": changed_fields,
+                    "blocking": False,
+                    "message": "运行时版本已变化；原人工确认仍然有效。",
+                })
+        return warnings
 
     def _current_inference_metadata(
         self,

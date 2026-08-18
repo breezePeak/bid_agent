@@ -93,20 +93,17 @@ class V3GenerationProgressTests(TestCase):
 
             class _Control:
                 @staticmethod
-                def snapshot():
+                def latest_command_by_kind(kind: str):
+                    if kind == "document.prepare_outline":
+                        return {
+                            "kind": kind,
+                            "operation_id": "outline-operation",
+                            "status": "succeeded",
+                        }
                     return {
-                        "commands": [
-                            {
-                                "kind": "document.run_pipeline",
-                                "operation_id": "generation-operation",
-                                "status": "running",
-                            },
-                            {
-                                "kind": "document.prepare_outline",
-                                "operation_id": "outline-operation",
-                                "status": "succeeded",
-                            },
-                        ]
+                        "kind": kind,
+                        "operation_id": "generation-operation",
+                        "status": "running",
                     }
 
                 @staticmethod
@@ -152,15 +149,11 @@ class V3GenerationProgressTests(TestCase):
 
             class _Control:
                 @staticmethod
-                def snapshot():
+                def latest_command_by_kind(kind: str):
                     return {
-                        "commands": [
-                            {
-                                "kind": "document.run_pipeline",
-                                "operation_id": "generation-operation",
-                                "status": "running",
-                            }
-                        ]
+                        "kind": kind,
+                        "operation_id": "generation-operation",
+                        "status": "running",
                     }
 
                 @staticmethod

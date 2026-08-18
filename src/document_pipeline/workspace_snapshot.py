@@ -140,7 +140,11 @@ class V3WorkspaceSnapshotBuilder:
                 service = HumanGateService(self.context)
                 try:
                     receipt = service.require_current_confirmation()
-                    planning = {"status": "confirmed", "receipt_id": receipt.receipt_id}
+                    planning = {
+                        "status": "confirmed",
+                        "receipt_id": receipt.receipt_id,
+                        "warnings": service.runtime_change_warnings(),
+                    }
                 except Exception:
                     try:
                         planning = {"status": "needs_human", "snapshot": service.planning_snapshot()}
@@ -233,6 +237,7 @@ class V3WorkspaceSnapshotBuilder:
             planning_status=str(planning.get("status") or "not_ready"),
         )
         chapters = self._chapters_snapshot(control, plan or {})
+        phase_states = control.workflow_phase_states()
         workflow = self._workflow_projection(
             planning=planning,
             analysis_pipeline=analysis_pipeline,
@@ -240,6 +245,7 @@ class V3WorkspaceSnapshotBuilder:
             chapters=chapters,
             blueprint_artifact=artifacts.get("ChapterBlueprint") or {},
             project_model_current=artifact_states.get("ProjectModel") is True,
+            phase_states=phase_states,
         )
         return {
             "schema_version": "v3",
@@ -303,6 +309,7 @@ class V3WorkspaceSnapshotBuilder:
         chapters: dict[str, Any],
         blueprint_artifact: dict[str, Any],
         project_model_current: bool,
+        phase_states: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
         """The single UI-facing workflow truth.
 
@@ -418,10 +425,31 @@ class V3WorkspaceSnapshotBuilder:
                 }
             )
 
+        # Phase identity and status are persisted operation fields.  Artifact
+        # and chapter projections above only enrich review/detail sections.
+        explicit_phase = "materials"
+        explicit_state = phase_states.get("materials") or {}
+        planning_state = phase_states.get("planning") or {}
+        writing_state = phase_states.get("writing") or {}
+        planning_phase_status = str(planning_state.get("phase_status") or "not_started")
+        writing_phase_status = str(writing_state.get("phase_status") or "not_started")
+        if planning_phase_status in {
+            "running", "waiting_confirmation", "failed", "outdated", "blocked",
+        }:
+            explicit_phase, explicit_state = "planning", planning_state
+        elif writing_phase_status != "not_started":
+            explicit_phase, explicit_state = "writing", writing_state
+        elif planning_phase_status != "not_started":
+            explicit_phase, explicit_state = "planning", planning_state
+        phase = explicit_phase
+        status = str(explicit_state.get("phase_status") or "not_started")
+        operation_id = str(explicit_state.get("operation_id") or "")
+
         return {
             "phase": phase,
             "status": status,
             "operation_id": operation_id,
+            "phase_states": phase_states,
             "attempt": max(
                 (int(item.get("attempt") or 0) for item in stages if isinstance(item, dict)),
                 default=0,
@@ -486,19 +514,7 @@ class V3WorkspaceSnapshotBuilder:
         writer_research: dict[str, Any],
         delivery: dict[str, Any],
     ) -> dict[str, Any]:
-        commands = [
-            item
-            for item in (control.snapshot().get("commands") or [])
-            if isinstance(item, dict)
-            and str(item.get("kind") or "") == "document.run_pipeline"
-        ]
-        latest = max(
-            commands,
-            key=lambda item: self._timestamp_key(
-                str(item.get("updated_at") or item.get("created_at") or "")
-            ),
-            default={},
-        )
+        latest = control.latest_command_by_kind("document.run_pipeline") or {}
         operation_id = str(latest.get("operation_id") or "")
         operation = control.operation(operation_id) if operation_id else None
         operation = operation if isinstance(operation, dict) else {}
@@ -1696,18 +1712,7 @@ class V3WorkspaceSnapshotBuilder:
         control: ControlStore,
         artifacts: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        snapshot = control.snapshot()
-        commands = snapshot.get("commands")
-        command_items = commands if isinstance(commands, list) else []
-        latest_command = next(
-            (
-                command
-                for command in command_items
-                if isinstance(command, dict)
-                and str(command.get("kind") or "") in self._ANALYSIS_COMMAND_KINDS
-            ),
-            None,
-        )
+        latest_command = control.latest_command_by_kind("document.prepare_outline")
         if latest_command is None:
             return {}
         operation_id = str(latest_command.get("operation_id") or "")

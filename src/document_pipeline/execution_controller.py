@@ -677,6 +677,7 @@ class V3ExecutionController:
             submitted_snapshot=snapshot,
             nonce=envelope.command_id,
         )
+        self.store.finalize_planning_confirmation(operation_id)
         self.store.record_stage_run(operation_id, "confirm_planning", "succeeded", disposition="explicit_human_confirmation")
         workspaces = ChapterWorkspaceService(self.context).ensure_all(actor=actor)
         return {

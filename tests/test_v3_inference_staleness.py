@@ -207,7 +207,7 @@ class V3InferenceStalenessTests(unittest.TestCase):
                 )
             )
 
-    def test_deployment_inference_policy_change_stales_h1_without_rerun(
+    def test_deployment_inference_policy_change_keeps_h1_and_warns(
         self,
     ) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -236,12 +236,23 @@ class V3InferenceStalenessTests(unittest.TestCase):
                 "ChapterBlueprint",
                 InferenceRuntimeMetadata(**changed),
             )
-            with self.assertRaises(ControlPlaneError) as stale:
-                human_gate.require_current_confirmation()
-            self.assertEqual(
-                stale.exception.code,
-                "PLANNING_CONFIRM_STALE",
+            receipt = human_gate.require_current_confirmation()
+            self.assertTrue(receipt.receipt_id)
+            warnings = human_gate.runtime_change_warnings()
+            self.assertEqual(warnings[0]["code"], "runtime_changed")
+            self.assertFalse(warnings[0]["blocking"])
+            self.assertIn("provider_fingerprint", warnings[0]["changed_fields"])
+
+            incompatible = dict(changed)
+            incompatible["output_schema_version"] = "schema.next"
+            INFERENCE_RUNTIME_REGISTRY.publish(
+                context,
+                "ChapterBlueprint",
+                InferenceRuntimeMetadata(**incompatible),
             )
+            with self.assertRaises(ControlPlaneError) as migration:
+                human_gate.require_current_confirmation()
+            self.assertEqual(migration.exception.code, "migration_required")
 
 
 if __name__ == "__main__":
