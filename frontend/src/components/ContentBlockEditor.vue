@@ -1,48 +1,136 @@
 <template>
-  <div class="block-editor">
-    <div class="toolbar">
-      <button type="button" class="btn" :disabled="readonly || busy" @click="addParagraph">插入段落</button>
-      <button type="button" class="btn" :disabled="readonly || busy || !dirty" @click="save">保存正文</button>
-      <span v-if="dirty" class="dirty">未保存</span>
-      <span v-if="remoteHint" class="remote">{{ remoteHint }}</span>
-    </div>
-    <div v-if="!localBlocks.length" class="empty">暂无正文块。可生成草稿或手动插入段落。</div>
-    <div
-      v-for="(block, index) in localBlocks"
-      :key="block.block_id"
-      class="block"
-      :class="{ locked: block.lock_state === 'USER_LOCKED' || block.human_locked }"
-    >
-      <div class="block-meta">
-        <span>#{{ index + 1 }} {{ block.type }}</span>
-        <span>{{ block.source || 'AI_GENERATED' }}</span>
-        <span v-if="block.lock_state === 'USER_LOCKED' || block.human_locked">已锁定</span>
+  <div class="block-editor word-style-editor">
+    <!-- 顶部 Word 风格工具栏 -->
+    <div class="word-toolbar">
+      <div class="toolbar-left">
         <button
           type="button"
-          class="link"
-          :disabled="readonly || busy || index === 0"
-          @click="move(block.block_id, index - 1)"
-        >上移</button>
+          class="word-btn word-btn-primary"
+          :disabled="readonly || busy || !dirty"
+          @click="save"
+        >
+          <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
+            <path d="M17 3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2V7l-4-4zm-5 16c-1.66 0-3-1.34-3-3s1.34-3 3-3 3 1.34 3 3-1.34 3-3 3zm3-10H5V5h10v4z"/>
+          </svg>
+          保存正文
+        </button>
         <button
           type="button"
-          class="link"
-          :disabled="readonly || busy || index >= localBlocks.length - 1"
-          @click="move(block.block_id, index + 1)"
-        >下移</button>
-        <button type="button" class="link danger" :disabled="readonly || busy" @click="remove(block.block_id)">删除</button>
+          class="word-btn word-btn-secondary"
+          :disabled="readonly || busy"
+          @click="addParagraph"
+        >
+          <svg class="icon-svg" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M10 3a1 1 0 011 1v5h5a1 1 0 110 2h-5v5a1 1 0 11-2 0v-5H4a1 1 0 110-2h5V4a1 1 0 011-1z" clip-rule="evenodd" />
+          </svg>
+          插入段落
+        </button>
       </div>
-      <textarea
-        :value="block.content"
-        :disabled="readonly || busy"
-        rows="4"
-        @input="onEdit(block.block_id, $event.target.value)"
-      />
+
+      <div class="toolbar-right">
+        <span v-if="dirty" class="status-tag dirty-tag">● 未保存修改</span>
+        <span v-else class="status-tag saved-tag">✓ 已同步</span>
+        <span v-if="remoteHint" class="status-tag remote-tag">{{ remoteHint }}</span>
+        <span class="word-count-badge">共 {{ totalChars }} 字</span>
+      </div>
+    </div>
+
+    <!-- 正文空状态 -->
+    <div v-if="!localBlocks.length" class="word-empty-state">
+      <p>当前章节暂无正文内容</p>
+      <button type="button" class="word-btn word-btn-secondary" :disabled="readonly || busy" @click="addParagraph">
+        + 手动新增第一段
+      </button>
+    </div>
+
+    <!-- Word 规范排版正文流 -->
+    <div v-else class="word-document-flow">
+      <div
+        v-for="(block, index) in localBlocks"
+        :key="block.block_id"
+        class="word-paragraph-item"
+        :class="[
+          `block-type-${block.type || 'paragraph'}`,
+          {
+            'is-locked': block.lock_state === 'USER_LOCKED' || block.human_locked,
+            'is-editing': activeBlockId === block.block_id,
+          }
+        ]"
+        @mouseenter="hoveredBlockId = block.block_id"
+        @mouseleave="hoveredBlockId = null"
+      >
+        <!-- 悬浮轻量操作胶囊（平时不打扰排版） -->
+        <div
+          v-if="!readonly"
+          class="floating-actions"
+          :class="{ 'is-visible': hoveredBlockId === block.block_id || activeBlockId === block.block_id }"
+        >
+          <span class="para-idx">P{{ index + 1 }}</span>
+          <span v-if="block.lock_state === 'USER_LOCKED' || block.human_locked" class="para-badge lock">已锁定</span>
+          <button
+            type="button"
+            class="action-btn"
+            title="上移段落"
+            :disabled="busy || index === 0"
+            @click.stop="move(block.block_id, index - 1)"
+          >↑</button>
+          <button
+            type="button"
+            class="action-btn"
+            title="下移段落"
+            :disabled="busy || index >= localBlocks.length - 1"
+            @click.stop="move(block.block_id, index + 1)"
+          >↓</button>
+          <button
+            type="button"
+            class="action-btn danger"
+            title="删除段落"
+            :disabled="busy"
+            @click.stop="remove(block.block_id)"
+          >×</button>
+        </div>
+
+        <!-- 针对标题类型 -->
+        <div v-if="block.type === 'heading' || block.type === 'h2' || block.type === 'h3'" class="para-wrapper heading-wrapper">
+          <textarea
+            :ref="el => setBlockRef(block.block_id, el)"
+            :value="block.content"
+            :disabled="readonly || busy"
+            class="word-textarea heading-textarea"
+            rows="1"
+            placeholder="输入小节标题…"
+            @focus="activeBlockId = block.block_id"
+            @blur="activeBlockId = null"
+            @input="onTextareaInput(block.block_id, $event)"
+          />
+        </div>
+
+        <!-- 标准正文段落（中文排版：首行缩进2字符，自然行距） -->
+        <div v-else class="para-wrapper paragraph-wrapper">
+          <textarea
+            :ref="el => setBlockRef(block.block_id, el)"
+            :value="block.content"
+            :disabled="readonly || busy"
+            class="word-textarea paragraph-textarea"
+            rows="1"
+            placeholder="输入段落正文…"
+            @focus="activeBlockId = block.block_id"
+            @blur="activeBlockId = null"
+            @input="onTextareaInput(block.block_id, $event)"
+          />
+        </div>
+      </div>
+
+      <!-- 底部追加段落提示区 -->
+      <div v-if="!readonly && !busy" class="add-para-footer" @click="addParagraph">
+        <span>+ 点击在此处添加新段落</span>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
+import { ref, computed, watch, nextTick, onMounted } from 'vue'
 
 const props = defineProps({
   blocks: { type: Array, default: () => [] },
@@ -55,6 +143,34 @@ const emit = defineEmits(['save'])
 const localBlocks = ref([])
 const dirty = ref(false)
 const baselineJson = ref('[]')
+const hoveredBlockId = ref(null)
+const activeBlockId = ref(null)
+const textareaRefs = new Map()
+
+const totalChars = computed(() => {
+  return localBlocks.value.reduce((acc, block) => acc + (block.content ? block.content.length : 0), 0)
+})
+
+function setBlockRef(id, el) {
+  if (el) {
+    textareaRefs.set(id, el)
+    resizeTextarea(el)
+  } else {
+    textareaRefs.delete(id)
+  }
+}
+
+function resizeTextarea(el) {
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = `${Math.max(el.scrollHeight, 32)}px`
+}
+
+function resizeAll() {
+  nextTick(() => {
+    textareaRefs.forEach((el) => resizeTextarea(el))
+  })
+}
 
 watch(
   () => props.blocks,
@@ -63,6 +179,7 @@ watch(
     const next = Array.isArray(value) ? value.map(item => ({ ...item })) : []
     localBlocks.value = next
     baselineJson.value = JSON.stringify(next)
+    resizeAll()
   },
   { immediate: true, deep: true },
 )
@@ -71,7 +188,9 @@ function markDirty() {
   dirty.value = JSON.stringify(localBlocks.value) !== baselineJson.value
 }
 
-function onEdit(blockId, content) {
+function onTextareaInput(blockId, event) {
+  const content = event.target.value
+  resizeTextarea(event.target)
   localBlocks.value = localBlocks.value.map(item => (
     item.block_id === blockId ? { ...item, content } : item
   ))
@@ -85,7 +204,7 @@ function addParagraph() {
     {
       block_id: blockId,
       type: 'paragraph',
-      content: '新段落',
+      content: '',
       source: 'USER_CREATED',
       lock_state: 'USER_LOCKED',
       human_locked: true,
@@ -93,11 +212,19 @@ function addParagraph() {
     },
   ]
   markDirty()
+  nextTick(() => {
+    const el = textareaRefs.get(blockId)
+    if (el) {
+      resizeTextarea(el)
+      el.focus()
+    }
+  })
 }
 
 function remove(blockId) {
   localBlocks.value = localBlocks.value.filter(item => item.block_id !== blockId)
   markDirty()
+  resizeAll()
 }
 
 function move(blockId, toIndex) {
@@ -108,6 +235,7 @@ function move(blockId, toIndex) {
   list.splice(toIndex, 0, item)
   localBlocks.value = list.map((block, order) => ({ ...block, order }))
   markDirty()
+  resizeAll()
 }
 
 function save() {
@@ -145,7 +273,6 @@ function save() {
       })
     }
   })
-  // Final order via moves from remaining baseline order is approximate; replace_all safer for reorder+edit.
   operations.push({
     op: 'replace_all',
     blocks: localBlocks.value.map((block, order) => ({
@@ -161,29 +288,280 @@ function save() {
   baselineJson.value = JSON.stringify(localBlocks.value)
 }
 
-defineExpose({ dirty, markClean() {
-  dirty.value = false
-  baselineJson.value = JSON.stringify(localBlocks.value)
-} })
+onMounted(() => {
+  resizeAll()
+})
+
+defineExpose({
+  dirty,
+  markClean() {
+    dirty.value = false
+    baselineJson.value = JSON.stringify(localBlocks.value)
+  },
+})
 </script>
 
 <style scoped>
-.block-editor {
+.word-style-editor {
   display: flex;
   flex-direction: column;
-  gap: 12px;
   min-height: 100%;
+  position: relative;
 }
-.toolbar { display: flex; gap: 8px; align-items: center; }
-.btn, .link { cursor: pointer; }
-.btn { border: 1px solid #cbd5e1; background: #fff; border-radius: 6px; padding: 6px 10px; }
-.link { border: none; background: none; color: #2563eb; }
-.link.danger { color: #dc2626; }
-.dirty { color: #d97706; font-size: 12px; }
-.remote { color: #7c3aed; font-size: 12px; }
-.block { border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; background: #fff; }
-.block.locked { border-color: #f59e0b; }
-.block-meta { display: flex; gap: 10px; font-size: 12px; color: #64748b; margin-bottom: 6px; flex-wrap: wrap; }
-textarea { width: 100%; border: 1px solid #cbd5e1; border-radius: 6px; padding: 8px; font: inherit; resize: vertical; }
-.empty { color: #94a3b8; padding: 24px; text-align: center; }
+
+/* 顶部 Word 风格工具栏 */
+.word-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  margin-bottom: 24px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.toolbar-left, .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.word-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 14px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+}
+.word-btn .icon-svg {
+  width: 14px;
+  height: 14px;
+}
+.word-btn-primary {
+  background: #2563eb;
+  color: #fff;
+}
+.word-btn-primary:hover:not(:disabled) {
+  background: #1d4ed8;
+}
+.word-btn-secondary {
+  background: #ffffff;
+  color: #334155;
+  border-color: #cbd5e1;
+}
+.word-btn-secondary:hover:not(:disabled) {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+}
+.word-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.status-tag {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.dirty-tag {
+  color: #d97706;
+  background: #fef3c7;
+}
+.saved-tag {
+  color: #059669;
+  background: #ecfdf5;
+}
+.remote-tag {
+  color: #7c3aed;
+  background: #f3e8ff;
+}
+.word-count-badge {
+  font-size: 12px;
+  color: #64748b;
+  margin-left: 4px;
+}
+
+/* 正文空状态 */
+.word-empty-state {
+  text-align: center;
+  padding: 48px 16px;
+  color: #94a3b8;
+  font-size: 14px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Word 文档正文排版流 */
+.word-document-flow {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  width: 100%;
+}
+
+.word-paragraph-item {
+  position: relative;
+  margin-bottom: 12px;
+  border-radius: 4px;
+  transition: background-color 0.15s ease;
+}
+
+.word-paragraph-item:hover,
+.word-paragraph-item.is-editing {
+  background-color: rgba(241, 245, 249, 0.45);
+}
+
+.word-paragraph-item.is-locked {
+  border-left: 2px solid #f59e0b;
+  padding-left: 6px;
+}
+
+/* 悬浮微操作胶囊 */
+.floating-actions {
+  position: absolute;
+  top: -14px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+  border-radius: 999px;
+  padding: 2px 8px;
+  z-index: 10;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  transform: translateY(2px);
+}
+
+.floating-actions.is-visible {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
+}
+
+.para-idx {
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  margin-right: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.para-badge.lock {
+  font-size: 10px;
+  background: #fef3c7;
+  color: #d97706;
+  padding: 0 4px;
+  border-radius: 3px;
+  margin-right: 2px;
+}
+
+.action-btn {
+  background: transparent;
+  border: none;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1;
+  width: 20px;
+  height: 20px;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.1s ease;
+}
+
+.action-btn:hover:not(:disabled) {
+  background: #f1f5f9;
+  color: #1e293b;
+}
+
+.action-btn.danger:hover:not(:disabled) {
+  background: #fee2e2;
+  color: #dc2626;
+}
+
+.action-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* 无边框自适应排版输入框（仿 Word 所见即所得） */
+.para-wrapper {
+  position: relative;
+  width: 100%;
+}
+
+.word-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1px solid transparent;
+  outline: none;
+  resize: none;
+  overflow: hidden;
+  padding: 4px 6px;
+  border-radius: 4px;
+  color: #111827;
+  font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", "STSong", serif;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.word-textarea:focus {
+  border-color: #cbd5e1;
+  background: #ffffff;
+}
+
+/* 正文段落排版：首行缩进 2em，两端对齐，标准行高 1.85，字号 16px */
+.paragraph-textarea {
+  font-size: 16px;
+  line-height: 1.85;
+  text-indent: 2em;
+  text-align: justify;
+  letter-spacing: 0.02em;
+}
+
+/* 标题排版：字号加大加粗，无缩进 */
+.heading-textarea {
+  font-family: "SimHei", "Microsoft YaHei", sans-serif;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-indent: 0;
+  color: #0f172a;
+}
+
+/* 底部追加段落提示区 */
+.add-para-footer {
+  margin-top: 14px;
+  padding: 10px;
+  border: 1px dashed #e2e8f0;
+  border-radius: 6px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.add-para-footer:hover {
+  border-color: #3b82f6;
+  color: #2563eb;
+  background: #eff6ff;
+}
 </style>
+

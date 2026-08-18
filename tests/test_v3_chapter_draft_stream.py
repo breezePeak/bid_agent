@@ -133,8 +133,17 @@ class V3ChapterDraftStreamTests(TestCase):
         }
 
     def test_draft_prompt_assigns_chapter_specific_opening_policy(self):
+        background_goal = "交代项目任务所处背景、现实情境及任务由来，帮助评审理解项目实施基础。"
+        background_objective = "清楚说明项目任务背景及任务由来。"
         background_messages = v3_app._chapter_draft_messages(
-            {**self._chapter(), "title": "项目任务背景"},
+            {
+                **self._chapter(),
+                "title": "项目任务背景",
+                "blueprint_node": {
+                    "purpose": background_goal,
+                    "writing_objectives": [background_objective],
+                },
+            },
             project_context=self._project_context(),
         )
         goal_messages = v3_app._chapter_draft_messages(
@@ -164,7 +173,37 @@ class V3ChapterDraftStreamTests(TestCase):
         self.assertIn("技术路线图/流程图", diagram_messages[0]["content"])
         self.assertIn("Mermaid", diagram_messages[0]["content"])
         self.assertIn("writing_outline.blocks", background_messages[0]["content"])
+        self.assertIn("唯一章节目标", background_messages[0]["content"])
+        self.assertNotIn("chapter_intent", background_messages[0]["content"])
+        self.assertNotIn("chapter_intent", background_payload)
+        self.assertNotIn("chapter_intent", goal_payload)
+        self.assertEqual(background_payload["purpose"], background_goal)
+        self.assertEqual(background_payload["writing_objectives"], [background_objective])
         self.assertGreaterEqual(len(background_payload["writing_outline"]["blocks"]), 1)
+
+    def test_draft_prompt_keeps_recent_chapter_dialogue(self):
+        messages = v3_app._chapter_draft_messages(
+            self._chapter(),
+            instruction="重新理解本章需求后重写。",
+            chat_history=[
+                {"role": "user", "content": "当前草稿完全错了。"},
+                {"role": "assistant", "content": "旧回复不作为事实依据。"},
+                {"role": "user", "content": "重新理解本章需求后重写。"},
+            ],
+        )
+        payload = json.loads(messages[1]["content"])
+        self.assertEqual(payload["user_instruction"], "重新理解本章需求后重写。")
+        self.assertEqual(len(payload["recent_chapter_dialogue"]), 3)
+        self.assertIn("assistant 的旧回复不是事实依据", messages[0]["content"])
+
+    def test_research_gap_keeps_rejected_candidate_links_for_user_review(self):
+        rows = v3_app._research_candidate_rows([
+            {"status": "inspecting", "index": 1, "title": "候选一", "source_url": "https://a.example"},
+            {"status": "rejected", "index": 1, "title": "候选一", "source_url": "https://a.example"},
+            {"status": "rejected", "index": 2, "title": "候选二", "source_url": "https://b.example"},
+        ])
+        self.assertEqual([item["title"] for item in rows], ["候选一", "候选二"])
+        self.assertEqual(rows[0]["source_url"], "https://a.example")
 
     def test_think_tags_go_to_thinking_channel_not_saved_body(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
@@ -544,7 +583,7 @@ class V3ChapterDraftStreamTests(TestCase):
             stream.assert_not_called()
             gateway.submit.assert_not_called()
 
-    def test_research_gap_continues_with_tender_project_facts(self):
+    def test_research_gap_requires_confirmation_before_continuing_with_project_facts(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context = self._context(Path(temporary))
             chapter = {**self._chapter(), "title": "项目任务背景"}
@@ -573,14 +612,30 @@ class V3ChapterDraftStreamTests(TestCase):
                 ))
                 events = asyncio.run(_events(response))
 
+                confirmed_response = asyncio.run(v3_app.stream_chapter_draft(
+                    "alpha", "chapter-1", _request({
+                        "expected_revision": 3,
+                        "expected_chapter_revision": 7,
+                        "allow_research_gap": True,
+                    })
+                ))
+                confirmed_events = asyncio.run(_events(confirmed_response))
+
             types = [item["type"] for item in events]
             self.assertEqual(types[0], "meta")
-            self.assertIn("delta", types)
-            self.assertEqual(types[-1], "done")
+            self.assertEqual(types[-1], "error")
+            self.assertEqual(events[-1]["code"], "CHAPTER_RESEARCH_CONFIRMATION_REQUIRED")
             research_events = [item for item in events if item["type"] == "research"]
             statuses = [item.get("status") for item in research_events]
             self.assertIn("planning", statuses)
             self.assertIn("gap", statuses)
+            self.assertNotIn("delta", types)
+
+            confirmed_types = [item["type"] for item in confirmed_events]
+            self.assertIn("delta", confirmed_types)
+            self.assertEqual(confirmed_types[-1], "done")
+            confirmed_research_events = [item for item in confirmed_events if item["type"] == "research"]
+            self.assertIn("gap_confirmed", [item.get("status") for item in confirmed_research_events])
             stream.assert_called_once()
             gateway.submit.assert_called_once()
 

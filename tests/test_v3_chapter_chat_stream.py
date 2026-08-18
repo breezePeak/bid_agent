@@ -171,8 +171,8 @@ class ChapterChatStreamTests(unittest.TestCase):
 
             types = [item["type"] for item in events]
             self.assertEqual(types[0], "meta")
-            self.assertIn("inspect_planning", types)
-            self.assertIn("inspect_skipped", types)
+            self.assertNotIn("inspect_planning", types)
+            self.assertNotIn("inspect_skipped", types)
             self.assertIn("thinking_delta", types)
             self.assertIn("content_delta", types)
             self.assertEqual(types[-1], "done")
@@ -185,11 +185,10 @@ class ChapterChatStreamTests(unittest.TestCase):
             self.assertIn("目录位置", thinking)
             self.assertIn("阶段划分", content)
             done = events[-1]
-            # `thinking` must retain the progress notes rendered before the
-            # model deltas; otherwise the client loses them when it swaps its
-            # live turn for the final history returned by `done`.
-            self.assertIn("先看目录标题", done["thinking"])
-            self.assertIn("标题树足够", done["thinking"])
+            # Do not render a generic directory-inspection preamble on every
+            # turn; only actual cross-chapter reads are surfaced to the user.
+            self.assertNotIn("先看目录标题", done["thinking"])
+            self.assertNotIn("标题树足够", done["thinking"])
             self.assertIn(thinking, done["thinking"])
             self.assertEqual(done["reply"], content)
 
@@ -237,12 +236,57 @@ class ChapterChatStreamTests(unittest.TestCase):
             self.assertIn("中间文档", content)
             self.assertNotIn("总体技术路线分四步", content)
             self.assertTrue(events[-1]["document_write_requested"])
-            self.assertIn("先看目录标题", events[-1]["thinking"])
-            self.assertIn("目录", events[-1]["thinking"])
+            self.assertNotIn("先看目录标题", events[-1]["thinking"])
             self.assertEqual(
                 service.load_history("ch-a")[-1]["thinking"],
                 events[-1]["thinking"],
             )
+
+    def test_explicit_research_request_invokes_research_before_answering(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context)
+            chapter = {
+                "chapter_id": "ch-a",
+                "title": "技术方案",
+                "blueprint_node": {"chapter_id": "ch-a", "title": "技术方案"},
+                "context": {"items": []},
+                "is_leaf": True,
+            }
+            service = ChapterChatService(context)
+            service.set_authority(mode="full_authority", chapter_id="ch-a")
+
+            class FakeBatch:
+                status = "published"
+                error = None
+                items = []
+
+            with (
+                mock.patch(
+                    "document_pipeline.document_outline_context.DocumentOutlineContextService.plan_and_load_inspections",
+                    return_value={"inspect_ids": [], "reason": "标题树足够", "views": []},
+                ),
+                mock.patch(
+                    "document_pipeline.chapter_research_planner.plan_chapter_research",
+                    return_value={"need_research": True, "search_query": "技术方案 公开规范"},
+                ),
+                mock.patch("document_pipeline.research_adapters.create_research_adapter"),
+                mock.patch(
+                    "document_pipeline.research_service.ResearchService.resolve",
+                    return_value=FakeBatch(),
+                ) as research,
+                mock.patch(
+                    "llm_client.chat_stream_chunks",
+                    return_value=iter([("content", "已按检索结果整理。")]),
+                ),
+            ):
+                events = list(service.iter_answer_events("ch-a", "你去查资料啊", chapter=chapter))
+
+            research.assert_called_once()
+            self.assertTrue(research.call_args.kwargs["force_refresh"])
+            research_event = next(item for item in events if item["type"] == "research")
+            self.assertEqual(research_event["status"], "published")
+            self.assertIn("公开资料检索", research_event["message"])
 
     def test_request_to_write_to_middle_document_routes_body_out_of_chat(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

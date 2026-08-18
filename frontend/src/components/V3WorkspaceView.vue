@@ -605,32 +605,20 @@
             </div>
           </div>
 
-          <!-- 步骤 1.1：已登记材料卡片消息 -->
-          <div v-if="activeInputs.length" class="chat-msg bot-msg timeline-step-msg">
-            <div class="msg-avatar material-avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6" /></svg>
-            </div>
-            <div class="msg-bubble materials-card-bubble">
-              <header class="card-title-row">
-                <div>
-                  <span class="workflow-result-kicker">步骤结果</span>
-                  <h4>已接收材料（{{ activeInputs.length }} 份）</h4>
-                </div>
-                <span class="material-status-tag ok">✓ 已就绪</span>
-              </header>
-              <ul class="chat-materials-grid">
-                <li v-for="item in activeInputs" :key="item.input_id" class="chat-material-card">
-                  <span class="file-icon" aria-hidden="true">
-                    <svg v-if="item.role === 'tender'" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5" /></svg>
-                    <svg v-else viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
+          <!-- 步骤 1.1：已登记材料卡片消息（Cursor 风格文件变动卡片） -->
+          <div v-if="activeInputs.length" class="chat-msg bot-msg">
+            <div class="file-changes-card" style="width: 100%; max-width: 640px;">
+              <div class="file-changes-list">
+                <div v-for="item in activeInputs" :key="item.input_id" class="file-change-item">
+                  <span class="file-path">
+                    <span class="dir">{{ roleLabel(item.role) }} / </span>
+                    <span class="name">{{ item.filename }}</span>
                   </span>
-                  <div class="file-info">
-                    <strong>{{ item.filename }}</strong>
-                    <small>{{ roleLabel(item.role) }} · {{ sourceStatusLabel(item) }}</small>
+                  <div class="file-diff-stats">
+                    <span class="diff-tag add">✓ {{ sourceStatusLabel(item) }}</span>
                   </div>
-                  <span class="file-badge">✓ 已就绪</span>
-                </li>
-              </ul>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -657,14 +645,21 @@
             class="chat-msg"
             :class="turn.role === 'user' ? 'user-msg' : 'bot-msg'"
           >
-            <div class="msg-avatar conversation-avatar" aria-hidden="true">{{ turn.role === 'user' ? '你' : 'AI' }}</div>
             <div class="msg-bubble conversation-bubble">
+              <button
+                v-if="turn.role === 'user'"
+                type="button"
+                class="chat-delete-btn"
+                title="删除此条对话"
+                aria-label="删除此条对话"
+                @click="deleteInitialChatTurn(turn)"
+              >×</button>
               <p>{{ turn.content }}</p>
             </div>
           </div>
 
           <!-- 阶段 2 从开始、失败到完成始终只占一条 AI 消息。 -->
-          <div v-if="showOutlineProcessMessage" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
+          <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
             <div class="msg-avatar outline-avatar" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v16H7.5A2.5 2.5 0 0 0 5 20.5zm2.5 0H20M9 7h7M9 11h7M9 15h4" /></svg>
             </div>
@@ -733,7 +728,7 @@
           </div>
 
           <!-- 阶段 3 也只保留一条消息，详情按需展开。 -->
-          <div v-if="showGenerationPipeline" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
+          <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
             <div class="msg-avatar generation-avatar" aria-hidden="true">3</div>
             <div class="msg-bubble generation-stage-bubble">
               <header class="workflow-step-header">
@@ -2142,6 +2137,12 @@ async function sendInitialChat() {
     startedAt,
     finishedAt: 0,
   })
+function deleteInitialChatTurn(turn) {
+  if (!turn) return
+  if (!window.confirm('确定删除此条对话吗？')) return
+  initialChatTurns.value = initialChatTurns.value.filter(t => t.id !== turn.id)
+}
+
   initialChatTurns.value.push(userTurn)
   initialChatTurns.value.push(assistantTurn)
   initialPendingCount.value += 1
@@ -2450,8 +2451,11 @@ const deliveryReady = computed(() => (
 ))
 const hasScorePoints = computed(() => planningView.value.summary.score_point_count > 0)
 const hasOutline = computed(() => (
-  ['planning_review', 'writing'].includes(String(workflow.value.phase || ''))
-  && String(workflow.value.status || '') !== 'failed'
+  // A later document-generation failure must not make an already confirmed
+  // outline disappear.  `workflow.status` represents the latest workflow
+  // operation and may therefore be `failed` while the confirmed blueprint and
+  // its chapter workspaces are still valid.
+  ['needs_human', 'confirmed'].includes(planningStatus.value)
   && planningView.value.summary.chapter_count > 0
 ))
 watch(
@@ -2495,7 +2499,10 @@ const latestOutlineOperationBusy = computed(() => (
 ))
 const pipelineStatus = computed(() => {
   const workflowStatus = String(workflow.value.status || '')
-  if (workflowStatus === 'failed') return 'failed'
+  // Once the directory is confirmed, a failure belongs to the generation
+  // workflow (stage 3), not to score analysis / directory generation (stage
+  // 2).  Do not overwrite the stage-2 timeline with that later failure.
+  if (workflowStatus === 'failed' && planningStatus.value !== 'confirmed') return 'failed'
   if (workflowStatus === 'needs_handling') return 'needs_handling'
   if (workflowStatus === 'blocked_human') return 'blocked_human'
   if (workflowStatus === 'running') return 'running'
@@ -2622,7 +2629,10 @@ function formatLlmParameters(req) {
 const showGenerationPipeline = computed(() => (
   hasOutline.value
   && planningStatus.value === 'confirmed'
-  && generationBusy.value
+  && (
+    generationBusy.value
+    || ['failed', 'blocked', 'succeeded'].includes(String(generation.value.status || ''))
+  )
 ))
 // Once Step 3 is visible, Step 2 is necessarily complete and its launch CTA
 // must never be rendered again. Planning status and chapter data cover both
@@ -2667,11 +2677,20 @@ function timestampMilliseconds(value) {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0) {
+function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0, operation = null) {
   const startedAt = stages
     .map(stage => timestampMilliseconds(stage.started_at))
     .filter(Boolean)
-  if (!startedAt.length) return fallbackSeconds
+  if (!startedAt.length) {
+    if (operation && (operation.started_at || operation.created_at)) {
+      const opStart = timestampMilliseconds(operation.started_at || operation.created_at)
+      const opEnd = isRunning ? assistantClockNow.value : timestampMilliseconds(operation.updated_at || operation.completed_at || operation.created_at)
+      if (opStart && opEnd) {
+        return Math.max(0, Math.floor((opEnd - opStart) / 1000))
+      }
+    }
+    return fallbackSeconds
+  }
   const completedAt = stages
     .map(stage => timestampMilliseconds(stage.completed_at))
     .filter(Boolean)
@@ -2689,21 +2708,25 @@ const outlineElapsedSeconds = computed(() => workflowElapsedSeconds(
   pipelineStages.value,
   outlineBusy.value,
   runningDurationSeconds.value,
+  latestWorkspaceOperation.value,
 ))
 const generationElapsedSeconds = computed(() => workflowElapsedSeconds(
   generationExecutionStages.value,
   generationBusy.value,
   runningDurationSeconds.value,
+  generation.value,
 ))
 const outlineProcessStatus = computed(() => {
+  if (planningStatus.value === 'confirmed' && hasOutline.value) return 'completed'
   if (outlineBusy.value) return 'processing'
   if (pipelineStatus.value === 'failed') return 'failed'
   if (planningStatus.value === 'needs_human') return 'waiting'
-  return 'completed'
+  return 'waiting'
 })
 const generationProcessStatus = computed(() => {
   if (generationBusy.value) return 'processing'
   if (['failed', 'blocked'].includes(String(generation.value.status || ''))) return 'failed'
+  if (!hasOutline.value || planningStatus.value !== 'confirmed') return 'waiting'
   return 'completed'
 })
 const showOutlineProcessMessage = computed(() => (
@@ -2713,12 +2736,14 @@ const showOutlineProcessMessage = computed(() => (
   || pipelineStages.value.some(stage => stage.status !== 'pending')
 ))
 const outlineWorkflowTitle = computed(() => {
+  if (!secondStageConfirmed.value) return '等待您确认进入第二阶段'
   if (outlineProcessStatus.value === 'processing') return '正在解析评分点并生成目录'
   if (outlineProcessStatus.value === 'failed') return '评分点解析与目录生成失败'
   if (outlineProcessStatus.value === 'waiting') return '编写计划已生成，等待您审核'
   return `编写计划已生成（${planningView.value.summary.chapter_count} 个章节节点）`
 })
 const outlineWorkflowDescription = computed(() => {
+  if (!secondStageConfirmed.value) return '请回复“继续第二阶段”后开始解析评分点并生成目录。'
   if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
   if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
   return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
@@ -3303,7 +3328,12 @@ async function confirmPlanning() {
 }
 
 function openWritingWorkbench() {
-  router.push({ name: 'ProjectHome', params: { workspaceId: props.runId } })
+  const firstChapterId = flatOutline.value[0]?.chapter_id || ''
+  if (firstChapterId) {
+    router.push({ name: 'ChapterWorkspace', params: { workspaceId: props.runId, chapterId: firstChapterId } })
+  } else {
+    router.push({ name: 'ProjectHome', params: { workspaceId: props.runId } })
+  }
 }
 
 async function runDocument(chapterIds = []) {
@@ -6925,14 +6955,37 @@ onUnmounted(() => {
   box-shadow: 0 1px 3px rgba(0,0,0,0.02);
 }
 .user-msg .msg-bubble {
-  background: #2563eb;
+  position: relative;
+  background: #27272a;
   color: #ffffff;
-  border-color: #2563eb;
+  border: none;
+  border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  padding: 12px 18px;
 }
-.materials-card-bubble {
-  width: 100%;
-  max-width: 520px;
-  background: #f8fafc;
+.user-msg .msg-bubble p {
+  color: #ffffff;
+}
+.user-msg .msg-bubble .chat-delete-btn {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  display: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 16px;
+  line-height: 18px;
+  cursor: pointer;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+  align-items: center;
+  justify-content: center;
+}
+.user-msg .msg-bubble:hover .chat-delete-btn {
+  display: flex;
 }
 .upload-start-bubble {
   width: 100%;
@@ -7609,7 +7662,10 @@ onUnmounted(() => {
 }
 
 .user-msg .msg-bubble {
-  border-radius: 16px 4px 16px 16px;
+  border-radius: 16px;
+  background: #27272a;
+  color: #ffffff;
+  border: none;
 }
 
 .materials-card-bubble,

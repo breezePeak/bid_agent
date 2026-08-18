@@ -108,123 +108,33 @@ class V3ExecutionController:
         }
 
     def generate_chapter_batch(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
-        """Run selected leaf chapters server-side and persist queue progress."""
-        from .artifact_promotion import HumanGateService
-        from .chapter_chat import ChapterChatService
-        from .chapter_workspace import ChapterWorkspaceService
-        from .global_project_context import GlobalProjectContextService
+        """Persist a batch job and start it only after this command releases its lease."""
+        from .chapter_batch import ChapterBatchService
 
-        chapter_ids = list(dict.fromkeys(
-            str(item).strip() for item in (envelope.payload.get("chapter_ids") or []) if str(item).strip()
-        ))
+        chapter_ids = list(
+            dict.fromkeys(
+                str(item).strip()
+                for item in (envelope.payload.get("chapter_ids") or [])
+                if str(item).strip()
+            )
+        )
         if not chapter_ids:
             raise ControlPlaneError("CHAPTER_BATCH_EMPTY", "请选择至少一个可编写章节。", status_code=400)
-        job = {
-            "job_id": operation_id,
-            "operation_id": operation_id,
-            "status": "queued",
-            "chapter_ids": chapter_ids,
-            "current_chapter_id": "",
-            "completed_count": 0,
-            "failed_count": 0,
-            "error": None,
-            "items": [{"chapter_id": item, "status": "queued", "content_revision": 0} for item in chapter_ids],
+        service = ChapterBatchService(context)
+        job = service.create(
+            chapter_ids,
+            actor=envelope.actor,
+            idempotency_key=envelope.idempotency_key,
+            schedule=False,
+        )
+        job_id = str(job.get("job_id") or "")
+        return {
+            "accepted": True,
+            "operation_status": "succeeded",
+            "message": f"批量编写任务已创建，共 {len(job.get('items') or [])} 个叶子章节。",
+            "batch_job": job,
+            "_after_commit": lambda: service.schedule(job_id),
         }
-        self.store.upsert_agent_activity_state({**job, "phase": "chapter_batch"}, source="chapter_batch")
-        try:
-            # Validate every prerequisite before the first chapter is started.
-            GlobalProjectContextService(context).load_model()
-            HumanGateService(context).require_current_confirmation()
-            chapters = ChapterWorkspaceService(context)
-            for chapter_id in chapter_ids:
-                chapter = chapters.get_chapter(chapter_id)
-                if chapter.get("is_leaf") is False:
-                    raise ControlPlaneError("CHAPTER_BODY_REQUIRES_LEAF", "批量编写只能选择叶子章节。", status_code=409)
-                if not chapter.get("materialized"):
-                    # Parent-node selection is expanded to its leaf descendants
-                    # in the workbench.  Those leaves must be ready to write
-                    # without requiring the user to visit each one first.
-                    chapters.create(chapter_id=chapter_id)
-                    chapter = chapters.get_chapter(chapter_id)
-                chapter_context = chapter.get("context") if isinstance(chapter.get("context"), dict) else {}
-                if not chapter_context.get("content_hash"):
-                    raise ControlPlaneError(
-                        "CHAPTER_CONTEXT_REQUIRED",
-                        f"章节上下文未就绪: {chapter.get('title') or chapter_id}",
-                        status_code=409,
-                        details={"chapter_id": chapter_id, "chapter_title": chapter.get("title") or chapter_id},
-                    )
-        except ControlPlaneError as exc:
-            job.update({"status": "blocked", "error": exc.as_dict()})
-            self.store.upsert_agent_activity_state({**job, "phase": "blocked"}, source="chapter_batch")
-            return {"accepted": False, "operation_status": "blocked", "message": exc.message, "error": exc.as_dict()}
-
-        chat = ChapterChatService(context)
-        for index, chapter_id in enumerate(chapter_ids):
-            authority = chat.load_authority(chapter_id)
-            if str(authority.get("mode") or "") == "human_review":
-                error = {
-                    "code": "CHAPTER_OUTLINE_REVIEW_REQUIRED",
-                    "message": "该章节配置为人工审核，请先确认本章提纲后再继续批量编写。",
-                    "retryable": True,
-                    "details": {"chapter_id": chapter_id},
-                }
-                job["items"][index].update({"status": "blocked_human", "error": error})
-                job.update({"status": "blocked_human", "error": error})
-                self.store.record_stage_run(
-                    operation_id,
-                    f"chapter.batch:{chapter_id}",
-                    "blocked_human",
-                    disposition="chapter_outline_review_required",
-                    error=error,
-                )
-                self.store.cancel_active_stage_runs(
-                    operation_id,
-                    disposition="chapter_outline_review_required",
-                    error=error,
-                )
-                self.store.upsert_agent_activity_state(
-                    {**job, "phase": "blocked_human"}, source="chapter_batch"
-                )
-                return {
-                    "accepted": True,
-                    "operation_status": "blocked_human",
-                    "message": error["message"],
-                    "error": error,
-                }
-            job["status"] = "running"
-            job["current_chapter_id"] = chapter_id
-            job["items"][index]["status"] = "running"
-            self.store.upsert_agent_activity_state({**job, "phase": "writing"}, source="chapter_batch")
-            self.store.record_stage_run(operation_id, f"chapter.batch:{chapter_id}", "running", disposition="chapter_batch")
-            try:
-                # Respect the chapter's persisted review authority.  A batch
-                # command must never silently turn a human-review chapter into
-                # an autonomous one.
-                scoped = CommandEnvelope.from_mapping(
-                    {**envelope.as_dict(), "kind": "document.run_pipeline", "payload": {"chapter_ids": [chapter_id]}},
-                    workspace_id=context.workspace_id,
-                )
-                self.run_pipeline(context, scoped, operation_id)
-                updated = chapters.get_chapter(chapter_id)
-                revision = int(updated.get("head_content_revision") or 0)
-                if revision <= 0:
-                    raise ControlPlaneError("CHAPTER_DRAFT_COMMIT_REJECTED", "章节正文未写入中间文档。", status_code=409)
-                job["items"][index].update({"status": "succeeded", "content_revision": revision})
-                job["completed_count"] += 1
-                self.store.record_stage_run(operation_id, f"chapter.batch:{chapter_id}", "succeeded", disposition="chapter_batch")
-            except Exception as exc:
-                error = self._stage_error(exc if isinstance(exc, Exception) else Exception(str(exc)))
-                job["items"][index].update({"status": "failed", "error": error})
-                job.update({"status": "failed", "failed_count": 1, "error": error})
-                self.store.record_stage_run(operation_id, f"chapter.batch:{chapter_id}", "failed", disposition="chapter_batch", error=error)
-                self.store.upsert_agent_activity_state({**job, "phase": "failed"}, source="chapter_batch")
-                return {"accepted": False, "operation_status": "failed", "message": error["message"], "error": error}
-            finally:
-                self.store.upsert_agent_activity_state({**job, "phase": "writing"}, source="chapter_batch")
-        job.update({"status": "succeeded", "current_chapter_id": ""})
-        self.store.upsert_agent_activity_state({**job, "phase": "completed"}, source="chapter_batch")
-        return {"accepted": True, "operation_status": "succeeded", "message": f"已完成 {job['completed_count']} 个章节的编写。"}
 
     def _active_artifact_identity(self, stage: str) -> tuple[str, int, str] | None:
         kind = _STAGE_ARTIFACT_KIND.get(stage)

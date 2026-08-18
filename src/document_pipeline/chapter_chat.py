@@ -11,6 +11,7 @@ write ContentBlock, Blueprint, or other promoted Artifacts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -31,15 +32,24 @@ MAX_TURN_CHARS = 20_000
 AUTHORITY_MODES = ("human_review", "delegate_review", "full_authority")
 DEFAULT_AUTHORITY_MODE = "human_review"
 MAX_DELEGATE_ROUNDS = 2
+_RESEARCH_REQUEST_RE = re.compile(
+    r"(?:查(?:资料|一下|一查)?|检索|搜索|联网|网上查|帮我找|查找|再搜|重搜|重新搜).{0,24}"
+    r"|(?:资料|政策|规范|标准|文件).{0,12}(?:查|检索|搜索|找)",
+    re.I,
+)
 _CONFIRM_RE = re.compile(
     r"^(确认|通过|同意|可以写|按这个写|按此提纲|开始写|审核通过|写吧)([，,。.\s].*)?$"
 )
 _REJECT_RE = re.compile(r"(不通过|重列|改提纲|提纲不对|重新列)")
 _DOCUMENT_WRITE_RE = re.compile(
-    r"(写|撰写|生成|开始|填入|写入|放到).{0,16}"
+    r"(写|撰写|生成|开始|填入|写入|放到|改写|重写|重新写|重做|修订).{0,16}"
     r"(正文|本章|章节内容|中间文档|屏幕中间文档|文档中|文档里)"
     r"|(中间文档|屏幕中间文档).{0,8}(写|撰写|生成|填入|写入|放到)"
-    r"|^(写正文|生成正文)$"
+    r"|(?:草稿|内容).{0,16}(?:改写|重写|重新写|重做|修订)"
+    r"|(?:改写|重写|重新写|重做|修订).{0,16}(?:草稿|内容|需求)"
+    r"|^(写正文|生成正文|改写|重写|重新写)$"
+    r"|(?:改|修改|调整|优化|删掉|删除|替换|补充).{0,12}(?:正文|本章|章节|第\s*[#\d一二三四五六七八九十]+\s*段)"
+    r"|(?:正文|本章|章节|第\s*[#\d一二三四五六七八九十]+\s*段).{0,12}(?:改|修改|调整|优化|删掉|删除|替换|补充)"
 )
 _DOCUMENT_WRITE_NOTICE = "提纲已确认，正文将写入中间文档；对话区只保留进度与结果。"
 
@@ -529,6 +539,54 @@ class ChapterChatService:
         self._write_history(chapter_id, turns)
         return updated
 
+    def delete_turn(
+        self,
+        chapter_id: str,
+        *,
+        turn_id: str = "",
+        created_at: str = "",
+        role: str = "",
+    ) -> None:
+        """Permanently remove one chapter-local collaboration turn."""
+        wanted_id = str(turn_id or "").strip()
+        wanted_created = str(created_at or "").strip()
+        wanted_role = str(role or "").strip()
+        if not wanted_id and not (wanted_created and wanted_role):
+            raise ControlPlaneError(
+                "CHAT_TURN_INVALID",
+                "删除消息需要 turn_id 或创建时间和角色。",
+                status_code=400,
+            )
+        turns = self.load_history(chapter_id, limit=0)
+        match_index = next(
+            (
+                index
+                for index, item in enumerate(turns)
+                if (wanted_id and str(item.get("turn_id") or "") == wanted_id)
+                or (
+                    not wanted_id
+                    and str(item.get("created_at") or "") == wanted_created
+                    and str(item.get("role") or "") == wanted_role
+                )
+            ),
+            -1,
+        )
+        if match_index < 0:
+            raise ControlPlaneError(
+                "CHAT_TURN_NOT_FOUND",
+                "未找到要删除的历史消息。",
+                status_code=404,
+            )
+        del turns[match_index]
+        self._write_history(chapter_id, turns)
+
+    def clear_history(self, chapter_id: str) -> int:
+        """Permanently remove all chapter-local collaboration turns."""
+        turns = self.load_history(chapter_id, limit=0)
+        deleted_count = len(turns)
+        self._write_history(chapter_id, [])
+        return deleted_count
+
     def _write_history(self, chapter_id: str, turns: list[dict[str, Any]]) -> None:
         path = self.history_path(chapter_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -595,12 +653,44 @@ class ChapterChatService:
         ]
 
         gpc = global_project_context if isinstance(global_project_context, dict) else {}
-        identity = gpc.get("project_identity") if isinstance(gpc.get("project_identity"), dict) else {}
+        # GlobalProjectContextService exposes the canonical key as ``identity``.
+        # Looking only for ``project_identity`` left the chapter agent without
+        # the project name or any substantive project facts.
+        identity = gpc.get("identity") if isinstance(gpc.get("identity"), dict) else {}
+        if not identity and isinstance(gpc.get("project_identity"), dict):
+            identity = dict(gpc["project_identity"])
+
+        def _context_list(key: str, limit: int = 40) -> list[Any]:
+            values = gpc.get(key)
+            return list(values[:limit]) if isinstance(values, list) else []
+
+        confirmed_facts = []
+        for item in _context_list("confirmed_facts", 40):
+            if isinstance(item, dict):
+                statement = str(item.get("statement") or item.get("value") or "").strip()
+                if statement:
+                    confirmed_facts.append(
+                        {
+                            "fact_id": str(item.get("fact_id") or ""),
+                            "statement": statement,
+                            "source_ids": list(item.get("source_ids") or [])[:8],
+                        }
+                    )
         shared_facts = {
             "global_context_revision": gpc.get("global_context_revision"),
             "project_name": identity.get("project_name") or gpc.get("project_name"),
             "buyer": identity.get("buyer") or gpc.get("buyer"),
-            "scope_summary": gpc.get("scope_summary") or identity.get("scope_summary"),
+            "identity": identity,
+            "background": _context_list("background"),
+            "goals": _context_list("goals"),
+            "scope": _context_list("scope"),
+            "boundaries": _context_list("boundaries"),
+            "work_packages": _context_list("work_packages"),
+            "inputs": _context_list("inputs"),
+            "outputs": _context_list("outputs"),
+            "deliverables": _context_list("deliverables"),
+            "constraints": _context_list("constraints"),
+            "confirmed_facts": confirmed_facts,
             "confirmed_fact_count": len(gpc.get("confirmed_facts") or [])
             if isinstance(gpc.get("confirmed_facts"), list)
             else 0,
@@ -743,6 +833,9 @@ class ChapterChatService:
             task=text,
         )
         chat_context["inspected_chapters"] = list(inspection.get("views") or [])
+        research = self._research_for_message(chapter_id, text, chat_context)
+        if research:
+            chat_context["research"] = research
         phase = self.resolve_write_phase(
             chapter_id,
             outline=chat_context.get("writing_outline"),
@@ -873,13 +966,6 @@ class ChapterChatService:
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
 
-        inspection_planning_note = "先看目录标题，判断是否需要打开他章详情…"
-        reasoning_parts.append(f"{inspection_planning_note}\n")
-        yield {
-            "type": "inspect_planning",
-            "chapter_id": safe_id,
-            "message": inspection_planning_note,
-        }
         inspection = self._resolve_inspections(
             chapter_id=chapter_id,
             outline_context=outline_context or chat_context.get("document_outline_context"),
@@ -906,14 +992,18 @@ class ChapterChatService:
                 "reason": str(inspection.get("reason") or ""),
                 "message": inspection_note,
             }
-        else:
-            inspection_note = str(inspection.get("reason") or "仅依据目录标题继续回答。")
-            reasoning_parts.append(f"{inspection_note}\n")
+
+        research = self._research_for_message(chapter_id, text, chat_context)
+        if research:
+            chat_context["research"] = research
+            research_note = str(research["message"])
+            reasoning_parts.append(f"{research_note}\n")
             yield {
-                "type": "inspect_skipped",
+                "type": "research",
                 "chapter_id": safe_id,
-                "reason": str(inspection.get("reason") or "标题树已足够"),
-                "message": inspection_note,
+                "status": research["status"],
+                "message": research_note,
+                "sources": research["sources"],
             }
 
         phase = self.resolve_write_phase(
@@ -1270,6 +1360,127 @@ class ChapterChatService:
                 "decision_source": "error",
             }
 
+    def _research_for_message(
+        self,
+        chapter_id: str,
+        message: str,
+        chat_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Run the bounded research tool when the user explicitly asks for it."""
+        if not _RESEARCH_REQUEST_RE.search(message):
+            return None
+        from .chapter_research_planner import plan_chapter_research
+        from .contracts import EvidenceNeed
+        from .research_adapters import create_research_adapter
+        from .research_service import ResearchService
+
+        title = str(chat_context.get("title") or chapter_id).strip()
+        purpose = str(chat_context.get("purpose") or "").strip()
+        requirements = [
+            str(item.get("normalized_requirement") or item.get("requirement") or "").strip()
+            for item in list(chat_context.get("tender_requirements") or [])[:3]
+            if isinstance(item, dict)
+        ]
+        research_chapter = {
+            "chapter_id": _safe_chapter_id(chapter_id),
+            "title": title,
+            "blueprint_node": {"title": title, "purpose": purpose},
+            "context": {"items": list(chat_context.get("chapter_context_items") or [])},
+        }
+        shared = chat_context.get("shared_project_facts")
+        shared = shared if isinstance(shared, dict) else {}
+        research_plan = plan_chapter_research(
+            research_chapter,
+            project_context={
+                "identity": {
+                    key: value
+                    for key, value in {
+                        "project_name": shared.get("project_name"),
+                        "buyer": shared.get("buyer"),
+                    }.items()
+                    if str(value or "").strip()
+                },
+                "scope": list(shared.get("scope") or []),
+            },
+            sibling_context=chat_context.get("sibling_chapter_context"),
+            writing_orientation=chat_context.get("writing_orientation"),
+            inspected_chapters=chat_context.get("inspected_chapters"),
+            tender_requirements=chat_context.get("tender_requirements"),
+            scoring_requirements=chat_context.get("scoring_requirements"),
+            instruction=message,
+            force_research=True,
+        )
+        if not research_plan.get("need_research"):
+            return {
+                "status": "skipped",
+                "message": str(research_plan.get("reason") or "章节 Agent 判断现有资料足够，无需公开检索。"),
+                "sources": [],
+            }
+        question_parts = [
+            f"请检索与投标章节“{title}”直接相关、可核验的公开资料。",
+            "优先采用政府部门、标准发布机构和采购人官网来源；逐项给出标题、发布机构、摘要和 URL。",
+            "仅补充项目背景、政策标准、技术方法或实施依据；不得推断投标企业资质、业绩、人员、报价或承诺。",
+        ]
+        if purpose:
+            question_parts.append(f"章节目的：{purpose}")
+        if requirements:
+            question_parts.append("关联要求：" + "；".join(requirements))
+        # A terse command such as “你去查资料啊” must become a usable,
+        # chapter-scoped query instead of being sent verbatim to the provider.
+        if len(message) > 12:
+            question_parts.append(f"用户关注点：{message}")
+        question = str(research_plan.get("search_query") or "").strip() or "\n".join(question_parts)
+        digest = hashlib.sha256(f"{chapter_id}:{question}".encode("utf-8")).hexdigest()[:16]
+        need = EvidenceNeed(
+            need_id=f"EN-CHAT-{digest}",
+            question=question,
+            topic_id=f"chapter-chat:{_safe_chapter_id(chapter_id)}",
+            priority="high",
+            blocking_scope="none",
+            deadline_stage="chapter_chat",
+            query_budget=3,
+            task_anchors=[title] if title else [],
+            relevance_context={
+                "chapter_title": title,
+                "chapter_purpose": purpose,
+                "tender_requirements": requirements,
+                "project_scope": list(shared.get("scope") or []),
+            },
+            max_adopted_items=3,
+        )
+        try:
+            batch = ResearchService(self.context, create_research_adapter()).resolve(
+                need,
+                force_refresh=True,
+            )
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "message": f"已发起本章公开资料检索，但检索工具未完成：{str(exc)[:240]}",
+                "sources": [],
+            }
+        sources = [
+            {
+                "evidence_id": item.evidence_id,
+                "title": item.title,
+                "publisher": item.publisher,
+                "source_url": item.source_url,
+                "excerpt": item.supporting_excerpt or item.content[:500],
+                "extracted_points": list(item.extracted_points or []),
+                "relevance_reason": item.relevance_reason,
+                "relevance_confidence": item.relevance_confidence,
+                "usage_category": item.usage_category,
+            }
+            for item in batch.items
+        ]
+        if batch.status == "published" and sources:
+            message_text = f"已完成本章公开资料检索，找到 {len(sources)} 条可采用来源。"
+        elif batch.status == "gap":
+            message_text = "已完成本章公开资料检索，但没有通过关联性和可核验筛选的来源。"
+        else:
+            message_text = f"本章公开资料检索未完成：{str(batch.error or '检索服务不可用')[:240]}"
+        return {"status": batch.status, "message": message_text, "sources": sources}
+
     @staticmethod
     def _build_messages(
         chat_context: dict[str, Any],
@@ -1284,7 +1495,8 @@ class ChapterChatService:
         system_prompt = (
             f"你就是这份投标文件里「{title}」这一章的写作 Agent，不是顾问、不是检查员、不是产品经理。"
             f"当前权限：{mode_label}。"
-            "用户在和你讨论本章，你的默认动作是写标书正文，或改本章正文。"
+            "用户在和你讨论本章：提问就直接回答，要求评判就对照 draft_preview 指出具体问题；"
+            "只有明确索要可粘贴文本时才在对话中给文本。"
             + (f"本章目的：{purpose}。" if purpose else "")
             + "先按 writing_orientation 确认本章职责和目录位置，再按 writing_outline.blocks 逐块写。"
             "每块写清做法或检查口径、交付物或记录方式；用标书口吻，直接给可粘贴的正文。"
@@ -1293,14 +1505,28 @@ class ChapterChatService:
                 if phase == "list_for_review"
                 else "当前阶段是写正文：按已确认或已代审的提纲直接写。"
             )
-            + "draft_preview 为空时，不要说“建议重新撰写”。"
+            + "draft_preview 为空时要明确说明当前没有可供检查的正文，不得假装看过正文。"
             "禁止反问“需要我给出框架吗”“要不要我展开”；有材料就写，缺企业证据就用待补表述继续写完。"
             "不要输出满分条件、得分点、评分要求等内部术语。"
             "document_outline_context 只有目录标题；只有 inspected_chapters 才是他章只读详情。"
             "不得改写其他章节，不得把外部网页写成企业资质、业绩或人员。"
             "提纲确认或用户明确要求写正文时，正文必须交给中间文档写作流落盘；对话区只回复进度和结果，不粘贴完整正文。"
-            "思考通道里分析本章提纲和材料缺口，面向用户只出标书正文或针对性改稿。"
+            "本对话模型本身不能修改中间文档；只有上游标记 document_write_requested 后才会触发写作流。"
+            "当前能收到本提示就表示本轮没有触发写作流，因此绝对禁止声称‘已修改’、‘已覆盖’、‘已写入’、‘已提交’或‘已完成正文’。"
+            "思考通道里分析本章提纲和材料缺口；面向用户按其实际问题给出具体、可核对的回答。"
         )
+        research = chat_context.get("research") if isinstance(chat_context.get("research"), dict) else {}
+        if research and research.get("status") != "skipped":
+            system_prompt += (
+                "用户已明确要求查资料，系统已实际调用公开资料检索工具。"
+                "只能基于 research.sources 中返回的来源描述检索结果，不得声称自己没有检索工具，"
+                "也不得编造未返回的政策名称、文号、年份或链接。"
+            )
+        elif research:
+            system_prompt += (
+                "检索规划器已判断现有资料足以回答本章；如解释该决定，只能依据 research.message，"
+                "不得捏造未检索的外部来源。"
+            )
         recent = [
             {
                 "role": item.get("role"),
@@ -1320,10 +1546,11 @@ class ChapterChatService:
             "recent_chapter_dialogue": recent,
             "chapter_context": chat_context,
             "inspected_chapters": list(chat_context.get("inspected_chapters") or []),
+            "research": research,
             "user_message": user_message,
             "instruction": (
-                "若用户在要正文、改写、展开或本章尚无草稿，直接输出本章标书正文；"
-                "不要给检查清单，不要征求是否继续写。"
+                "忠实回答 user_message。若用户是在追问、质疑或检查现有内容，必须引用 draft_preview 的具体内容回答；"
+                "若 draft_preview 为空则如实说明。不得声称已经修改或写入文档。"
             ),
         }
         return [

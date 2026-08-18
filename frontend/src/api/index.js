@@ -251,6 +251,24 @@ export function saveChapterChatTurn(runId, chapterId, payload) {
   return api.put(v3WorkspacePath(runId, `chapters/${id}/chat/history`), payload || {})
 }
 
+/** Permanently delete one persisted chapter-chat turn. */
+export function deleteChapterChatTurn(runId, chapterId, payload) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.delete(v3WorkspacePath(runId, `chapters/${id}/chat/history`), {
+    data: payload || {},
+  })
+}
+
+/** Permanently delete all persisted chapter-chat turns. */
+export function clearChapterChatHistory(runId, chapterId) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.delete(v3WorkspacePath(runId, `chapters/${id}/chat/history`), {
+    data: { clear_all: true },
+  })
+}
+
 /** Isolated per-chapter dialogue; history never mixes across chapters. */
 export function chatChapterV3(runId, chapterId, message) {
   const id = encodeURIComponent(String(chapterId || '').trim())
@@ -306,6 +324,10 @@ export function fetchChapterReadonlyView(runId, viewerChapterId, targetChapterId
 
 export function downloadV3Final(runId) {
   window.open(`/api${v3WorkspacePath(runId, 'exports/final')}`, '_blank')
+}
+
+export function downloadV3CurrentWord(runId) {
+  window.open(`/api${v3WorkspacePath(runId, 'exports/word')}`, '_blank')
 }
 
 export function fetchChapters(runId, includeArchived = true) {
@@ -387,6 +409,43 @@ export function submitV3Command(runId, command) {
     idempotency_key: command.idempotency_key || newCommandId(),
   }
   return api.post(v3WorkspacePath(runId, 'commands'), body, { timeout: 300000 })
+}
+
+export function createChapterBatchJob(runId, chapterIds, idempotencyKey = '') {
+  return api.post(v3WorkspacePath(runId, 'chapter-batch-jobs'), {
+    chapter_ids: Array.isArray(chapterIds) ? chapterIds : [],
+    idempotency_key: idempotencyKey || newCommandId(),
+  })
+}
+
+export function fetchChapterBatchJob(runId, jobId) {
+  const id = encodeURIComponent(String(jobId || '').trim())
+  if (!id) throw new TypeError('jobId is required')
+  return api.get(v3WorkspacePath(runId, `chapter-batch-jobs/${id}`), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchCurrentChapterBatchJob(runId) {
+  return api.get(v3WorkspacePath(runId, 'chapter-batch-jobs/current'), {
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function fetchChapterBatchEvents(runId, jobId, afterSequence = 0) {
+  const id = encodeURIComponent(String(jobId || '').trim())
+  if (!id) throw new TypeError('jobId is required')
+  return api.get(v3WorkspacePath(runId, `chapter-batch-jobs/${id}/events`), {
+    params: { after_sequence: Number(afterSequence || 0) },
+    headers: { 'Cache-Control': 'no-cache' },
+  })
+}
+
+export function actOnChapterBatchJob(runId, jobId, action) {
+  const id = encodeURIComponent(String(jobId || '').trim())
+  const command = encodeURIComponent(String(action || '').trim())
+  if (!id || !command) throw new TypeError('jobId and action are required')
+  return api.post(v3WorkspacePath(runId, `chapter-batch-jobs/${id}/${command}`))
 }
 
 export async function createChapter(runId, chapterId, title = '') {

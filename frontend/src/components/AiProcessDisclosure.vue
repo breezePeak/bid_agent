@@ -72,40 +72,40 @@ const defaultDetailText = computed(() => ({
 <style scoped>
 .ai-process-disclosure {
   width: 100%;
-  margin-top: 10px;
-  color: #52627a;
+  margin-top: 8px;
+  color: #64748b;
 }
 
 .ai-process-disclosure > summary {
-  min-height: 44px;
+  min-height: 36px;
   display: grid;
-  grid-template-columns: 20px minmax(0, 1fr) 18px;
+  grid-template-columns: 18px minmax(0, 1fr) 16px;
   gap: 8px;
   align-items: center;
-  padding: 7px 10px;
-  border: 1px solid #dbe5f2;
-  border-radius: 10px;
-  background: #f7faff;
-  color: #40516a;
+  padding: 4px 8px;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #64748b;
   cursor: pointer;
   list-style: none;
-  font-size: 12px;
-  font-weight: 700;
-  transition: border-color .2s ease, background-color .2s ease, color .2s ease;
+  font-size: 13px;
+  font-weight: 500;
+  transition: border-color .15s ease, background-color .15s ease, color .15s ease;
 }
 
 .ai-process-disclosure > summary::-webkit-details-marker { display: none; }
-.ai-process-disclosure > summary:hover { border-color: #b8c9df; background: #f1f6fc; color: #263a56; }
-.ai-process-disclosure > summary:focus-visible { outline: 3px solid rgba(59, 130, 246, .22); outline-offset: 2px; }
+.ai-process-disclosure > summary:hover { border-color: #e2e8f0; background: #f1f5f9; color: #334155; }
+.ai-process-disclosure > summary:focus-visible { outline: 2px solid #cbd5e1; outline-offset: 1px; }
 
 .ai-process-indicator,
 .ai-process-indicator svg,
 .ai-process-chevron {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
-.ai-process-indicator { display: inline-grid; place-items: center; color: #2f6fed; }
+.ai-process-indicator { display: inline-grid; place-items: center; color: #64748b; }
 .ai-process-indicator svg,
 .ai-process-chevron {
   fill: none;
@@ -115,10 +115,10 @@ const defaultDetailText = computed(() => ({
   stroke-linejoin: round;
 }
 
-.is-completed .ai-process-indicator { color: #16834b; }
-.is-failed .ai-process-indicator { color: #c43d3d; }
-.is-waiting .ai-process-indicator { color: #9a6700; }
-.ai-process-chevron { color: #8291a7; transition: transform .2s ease; }
+.is-completed .ai-process-indicator { color: #16a34a; }
+.is-failed .ai-process-indicator { color: #dc2626; }
+.is-waiting .ai-process-indicator { color: #d97706; }
+.ai-process-chevron { color: #94a3b8; transition: transform .2s ease; }
 .ai-process-disclosure[open] .ai-process-chevron { transform: rotate(90deg); }
 
 .ai-process-spinner circle {
@@ -128,11 +128,12 @@ const defaultDetailText = computed(() => ({
 }
 
 .ai-process-detail {
-  margin: 7px 4px 0;
+  margin: 6px 0 0;
   padding: 10px 12px;
-  border-left: 2px solid #dbe5f2;
-  color: #5f6f86;
-  background: #fbfdff;
+  border-radius: 8px;
+  color: #475569;
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
   font-size: 12px;
   line-height: 1.6;
 }

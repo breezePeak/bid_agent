@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import inspect
 import json
+import os
 import random
 import ssl
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import certifi
@@ -15,6 +21,99 @@ from concurrency import llm_slot, note_rate_limit_429
 from config import Settings, get_settings
 from runtime_context import record_llm_call
 from utils import project_root, strip_code_fences
+
+
+_REQUEST_LOG_LOCK = threading.Lock()
+_CHAPTER_AGENT_MODULES = {
+    "chapter_chat",
+    "chapter_research_planner",
+    "chapter_reviewer",
+    "chapter_summarizer",
+    "chapter_writer",
+    "content_grounding",
+    "content_writer",
+    "document_outline_context",
+    "research_service",
+    "writer_research",
+}
+
+
+def _llm_request_log_path() -> Path:
+    configured = os.environ.get("BID_AGENT_LLM_REQUEST_LOG", "").strip()
+    if configured:
+        path = Path(configured).expanduser()
+        return path if path.is_absolute() else project_root() / path
+    return project_root() / "runs" / "logs" / "chapter_agent_llm_requests.jsonl"
+
+
+def _request_callsite() -> tuple[dict[str, Any], bool]:
+    """Locate the logical caller and determine whether this is a chapter-agent call."""
+
+    first_external: dict[str, Any] = {}
+    is_chapter_agent = False
+    root = project_root()
+    for frame_info in inspect.stack(context=0)[2:]:
+        module_name = str(frame_info.frame.f_globals.get("__name__") or "")
+        if module_name == __name__:
+            continue
+        module_leaf = module_name.rsplit(".", 1)[-1]
+        if module_leaf in _CHAPTER_AGENT_MODULES or module_leaf.startswith("chapter_"):
+            is_chapter_agent = True
+        if not first_external:
+            filename = Path(frame_info.filename).resolve()
+            try:
+                display_path = str(filename.relative_to(root))
+            except ValueError:
+                display_path = str(filename)
+            first_external = {
+                "module": module_name,
+                "function": frame_info.function,
+                "file": display_path,
+                "line": frame_info.lineno,
+            }
+    return first_external, is_chapter_agent
+
+
+def _log_llm_request(
+    *,
+    provider: str,
+    endpoint: str,
+    payload: dict[str, Any],
+    timeout: float,
+    verify_ssl: bool,
+    transport_attempt: int,
+    transport_max_retries: int,
+) -> None:
+    """Append the complete request (excluding credentials) as one JSONL record."""
+
+    callsite, is_chapter_agent = _request_callsite()
+    if not is_chapter_agent:
+        return
+    record = {
+        "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
+        "request_id": uuid.uuid4().hex,
+        "agent": "chapter_agent",
+        "is_chapter_agent": True,
+        "callsite": callsite,
+        "parameters": {
+            "provider": provider,
+            "endpoint": endpoint,
+            "timeout": timeout,
+            "verify_ssl": verify_ssl,
+            "transport_attempt": transport_attempt,
+            "transport_max_retries": transport_max_retries,
+            **payload,
+        },
+    }
+    try:
+        path = _llm_request_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(record, ensure_ascii=False, default=str) + "\n"
+        with _REQUEST_LOG_LOCK:
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+    except Exception as exc:
+        print(f"[LLM] 请求日志写入失败: {exc}", file=sys.stderr)
 
 
 def _create_ssl_context(verify_ssl: bool = True) -> ssl.SSLContext:
@@ -235,7 +334,14 @@ def _retry_delay(attempt: int, initial_delay: float, max_delay: float) -> float:
     return base_delay + jitter
 
 
-def _openai_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str, str]:
+def _openai_request(
+    settings: Settings,
+    messages: list[dict],
+    temperature: float,
+    *,
+    transport_attempt: int = 1,
+    transport_max_retries: int = 1,
+) -> tuple[str, str, str]:
     endpoint = _openai_chat_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     payload: dict[str, Any] = {
@@ -243,8 +349,19 @@ def _openai_request(settings: Settings, messages: list[dict], temperature: float
         "messages": messages,
         "temperature": temperature,
     }
+    if settings.reasoning_effort:
+        payload["reasoning_effort"] = settings.reasoning_effort
     if settings.stream:
         payload["stream"] = True
+    _log_llm_request(
+        provider="openai",
+        endpoint=endpoint,
+        payload=payload,
+        timeout=settings.timeout,
+        verify_ssl=settings.verify_ssl,
+        transport_attempt=transport_attempt,
+        transport_max_retries=transport_max_retries,
+    )
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {settings.api_key}",
@@ -282,7 +399,14 @@ def _openai_request(settings: Settings, messages: list[dict], temperature: float
         )
 
 
-def _anthropic_request(settings: Settings, messages: list[dict], temperature: float) -> tuple[str, str, str]:
+def _anthropic_request(
+    settings: Settings,
+    messages: list[dict],
+    temperature: float,
+    *,
+    transport_attempt: int = 1,
+    transport_max_retries: int = 1,
+) -> tuple[str, str, str]:
     endpoint = _anthropic_messages_endpoint(settings.base_url)
     ssl_context = _create_ssl_context(settings.verify_ssl)
     system_text, converted = _split_system_messages(messages)
@@ -296,6 +420,15 @@ def _anthropic_request(settings: Settings, messages: list[dict], temperature: fl
     }
     if system_text:
         payload["system"] = system_text
+    _log_llm_request(
+        provider="anthropic",
+        endpoint=endpoint,
+        payload=payload,
+        timeout=settings.timeout,
+        verify_ssl=settings.verify_ssl,
+        transport_attempt=transport_attempt,
+        transport_max_retries=transport_max_retries,
+    )
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
         "x-api-key": settings.api_key,
@@ -344,6 +477,7 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
                     "provider": provider,
                     "endpoint": endpoint,
                     "model": settings.model,
+                    "reasoning_effort": settings.reasoning_effort,
                     "temperature": temperature,
                     "timeout": settings.timeout,
                     "stream": settings.stream if provider == "openai" else False,
@@ -368,12 +502,16 @@ def chat_with_meta(messages: list[dict], temperature: float = 0.2) -> dict[str, 
                                 settings,
                                 messages,
                                 temperature,
+                                transport_attempt=attempt,
+                                transport_max_retries=initial_settings.max_retries,
                             )
                         else:
                             transport_result = _openai_request(
                                 settings,
                                 messages,
                                 temperature,
+                                transport_attempt=attempt,
+                                transport_max_retries=initial_settings.max_retries,
                             )
                         if len(transport_result) == 2:
                             cleaned, reasoning = transport_result
@@ -454,6 +592,17 @@ def chat_stream_chunks(messages: list[dict], temperature: float = 0.2):
         "temperature": temperature,
         "stream": True,
     }
+    if settings.reasoning_effort:
+        payload["reasoning_effort"] = settings.reasoning_effort
+    _log_llm_request(
+        provider="openai",
+        endpoint=endpoint,
+        payload=payload,
+        timeout=settings.timeout,
+        verify_ssl=settings.verify_ssl,
+        transport_attempt=1,
+        transport_max_retries=1,
+    )
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
         "Authorization": f"Bearer {settings.api_key}",

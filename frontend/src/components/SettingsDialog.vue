@@ -109,6 +109,19 @@
                 required
               />
             </div>
+            <div v-if="form.provider === 'openai'" class="form-group">
+              <label for="llm-reasoning-effort">思考等级（reasoning_effort）</label>
+              <select id="llm-reasoning-effort" v-model="form.reasoning_effort">
+                <option value="">跟随模型默认（不传）</option>
+                <option value="none">无（none）</option>
+                <option value="low">低（low）</option>
+                <option value="medium">中（medium）</option>
+                <option value="high">高（high）</option>
+                <option value="xhigh">超高（xhigh）</option>
+                <option value="max">最高（max）</option>
+              </select>
+              <p class="field-hint">仅用于支持该参数的 OpenAI 兼容模型；CPA 的 Luna 可在此选择思考等级。</p>
+            </div>
             <div class="form-row">
               <div class="form-group">
                 <label for="llm-timeout">超时（秒）</label>
@@ -188,9 +201,10 @@
             <select id="flow-research-provider" v-model="flowForm.research_provider">
               <option value="doubao_web">豆包网页</option>
               <option value="deepseek_web">DeepSeek 网页</option>
+              <option value="tavily">Tavily API</option>
               <option value="disabled">不联网搜索</option>
             </select>
-            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时会自动调用该 Provider；选「不联网搜索」则只写招标已有材料。右侧 Agent 轨迹会显示是否联网及来源。</p>
+            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时会自动调用该 Provider；Tavily 需在 .env 设置 BID_AGENT_TAVILY_API_KEY。选「不联网搜索」则只写招标已有材料。右侧 Agent 轨迹会显示是否联网及来源。</p>
           </div>
           <div class="form-row">
             <div class="form-group"><label for="flow-workers">章节并发数</label><input id="flow-workers" v-model.number="flowForm.workers" type="number" min="1" max="10" /></div>

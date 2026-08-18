@@ -14,6 +14,7 @@ from typing import Any
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
 from .contracts import ContentBlock
+from .canonicalization import chapter_context_hash
 
 
 def _now_iso() -> str:
@@ -435,8 +436,10 @@ class ChapterEditingService:
             chapter_context_revision=int(
                 context_record.get("context_revision") or 0
             ),
-            chapter_context_hash=str(
-                context_record.get("context_hash") or ""
+            chapter_context_hash=chapter_context_hash(
+                chapter_id,
+                int(context_record.get("context_revision") or 0),
+                context_record.get("items") or [],
             ),
         )
         current_chapter_ref = (
@@ -843,6 +846,63 @@ class ChapterEditingService:
             "document_hash": document_hash,
             "mode": "formal" if export_allowed else "draft_preview",
         }
+
+    def compose_current_document(self) -> dict[str, Any]:
+        """Assemble the current editable document without requiring approval."""
+        from .chapter_workspace import ChapterWorkspaceService
+
+        listing = ChapterWorkspaceService(self.context).list_chapters(include_archived=False)
+        items = [
+            dict(item) for item in listing.get("items") or []
+            if isinstance(item, dict) and str(item.get("status") or "") != "archived"
+        ]
+        by_id = {str(item.get("chapter_id") or ""): item for item in items}
+
+        def sort_key(item: dict[str, Any]) -> tuple[int, str]:
+            try:
+                order = int(item.get("order") or 0)
+            except (TypeError, ValueError):
+                order = 0
+            return order if order else 999999, str(item.get("title") or item.get("chapter_id") or "")
+
+        children: dict[str, list[dict[str, Any]]] = {}
+        roots: list[dict[str, Any]] = []
+        for item in items:
+            chapter_id = str(item.get("chapter_id") or "")
+            parent_id = str(item.get("parent_chapter_id") or "")
+            if parent_id and parent_id in by_id and parent_id != chapter_id:
+                children.setdefault(parent_id, []).append(item)
+            else:
+                roots.append(item)
+
+        chapters: list[dict[str, Any]] = []
+
+        def append_branch(item: dict[str, Any], depth: int) -> None:
+            chapter_id = str(item.get("chapter_id") or "")
+            try:
+                head_revision = int(item.get("head_content_revision") or 0)
+                formal_revision = int(item.get("formal_content_revision") or 0)
+            except (TypeError, ValueError):
+                head_revision = formal_revision = 0
+            revision = head_revision or formal_revision
+            content = self.store.chapter_content_revision(chapter_id, revision) if revision else None
+            blocks = [
+                dict(block) for block in (content or {}).get("blocks") or []
+                if isinstance(block, dict) and str(block.get("content") or "").strip()
+            ]
+            chapters.append({
+                "chapter_id": chapter_id,
+                "title": str(item.get("title") or chapter_id),
+                "depth": depth,
+                "blocks": blocks,
+                "content_revision": revision,
+            })
+            for child in sorted(children.get(chapter_id, []), key=sort_key):
+                append_branch(child, depth + 1)
+
+        for root in sorted(roots, key=sort_key):
+            append_branch(root, 0)
+        return {"chapters": chapters, "mode": "current_draft"}
 
     # --- Command handlers ---
 

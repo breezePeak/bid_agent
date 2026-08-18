@@ -155,6 +155,51 @@ class ChapterResearchPlannerTests(unittest.TestCase):
         self.assertEqual(plan["decision_source"], "chapter_agent")
         self.assertIn("成图", plan["reason"])
 
+    def test_explicit_force_research_overrides_model_skip(self) -> None:
+        chapter = {
+            "chapter_id": "ch-bg",
+            "title": "项目背景",
+            "blueprint_node": {"purpose": "说明行业现状"},
+        }
+        with mock.patch(
+            "llm_client.chat",
+            return_value=json.dumps(
+                {
+                    "orientation_confirmed": False,
+                    "existing_materials_sufficient": True,
+                    "need_research": False,
+                    "reason": "已有资料足够",
+                    "search_query": "",
+                },
+                ensure_ascii=False,
+            ),
+        ):
+            plan = plan_chapter_research(
+                chapter,
+                project_context={"scope": ["行业现状调研"]},
+                instruction="去联网搜索啊",
+                force_research=True,
+            )
+        self.assertTrue(plan["need_research"])
+        self.assertTrue(plan["search_query"])
+
+    def test_explicit_force_research_has_fallback_when_agent_unavailable(self) -> None:
+        chapter = {
+            "chapter_id": "ch-bg",
+            "title": "项目背景",
+            "blueprint_node": {"purpose": "说明行业现状"},
+        }
+        with mock.patch("llm_client.chat", side_effect=RuntimeError("offline")):
+            plan = plan_chapter_research(
+                chapter,
+                project_context={"scope": ["行业现状调研"]},
+                instruction="重新搜索啊",
+                force_research=True,
+            )
+        self.assertTrue(plan["need_research"])
+        self.assertEqual(plan["decision_source"], "explicit_request_fallback")
+        self.assertIn("项目背景", plan["search_query"])
+
     def test_model_research_query_is_distilled_not_full_tender(self) -> None:
         chapter = {
             "chapter_id": "ch-bg",

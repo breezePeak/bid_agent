@@ -51,6 +51,7 @@ test('model payload sends only a newly entered key and omits credential metadata
     base_url: ' https://example.com/v1 ',
     has_api_key: true,
     model: ' model-a ',
+    reasoning_effort: 'high',
   })
   const payload = llmModelPayload(form, { isNew: false })
 
@@ -58,6 +59,7 @@ test('model payload sends only a newly entered key and omits credential metadata
   assert.equal(payload.name, '主模型')
   assert.equal(payload.base_url, 'https://example.com/v1')
   assert.equal(payload.model, 'model-a')
+  assert.equal(payload.reasoning_effort, 'high')
   assert.equal(payload.api_key, '')
   assert.equal(Object.hasOwn(payload, 'has_stored_api_key'), false)
   assert.equal(Object.hasOwn(payload, 'api_key_masked'), false)

@@ -69,6 +69,54 @@ def _chapter_context() -> dict:
 
 
 class ContentGroundingGateTests(unittest.TestCase):
+    def test_goal_gate_rejects_real_but_off_goal_procurement_process(self) -> None:
+        chapter = {
+            "chapter_id": "background",
+            "title": "项目任务背景",
+            "blueprint_node": {
+                "purpose": "交代项目任务所处背景、现实情境及任务由来，帮助评审理解项目实施基础。",
+                "writing_objectives": ["清楚说明项目任务背景及任务由来。"],
+            },
+        }
+        with (
+            mock.patch(
+                "document_pipeline.content_grounding._goal_alignment_review",
+                return_value={
+                    "verdict": "drifted",
+                    "confidence": 0.96,
+                    "off_goal_paragraphs": [0, 1],
+                    "reason": "正文主要写采购人安排、资料接收和任务分发。",
+                },
+            ),
+            self.assertRaises(ControlPlaneError) as caught,
+        ):
+            ContentGroundingGate.evaluate(
+                global_context=_global_context(),
+                chapter=chapter,
+                chapter_grounding_context=_chapter_context(),
+                content=(
+                    f"{PROJECT_NAME}面向年度全国国土变更调查监测数据开展国家级核实处理，"
+                    "并由采购人形成本次任务。\n\n"
+                    "项目组依据采购人安排接收资料并完成任务分发。"
+                ),
+            )
+        self.assertEqual(caught.exception.code, "CHAPTER_GOAL_MISALIGNED")
+
+    def test_fact_binding_does_not_bind_many_facts_on_weak_bigram_overlap(self) -> None:
+        context = _global_context()
+        context["confirmed_facts"] = [
+            {"fact_id": f"PF-{index}", "statement": f"采购人安排第{index}批项目任务并组织人员流程。"}
+            for index in range(35)
+        ]
+        report = ContentGroundingGate.evaluate(
+            global_context=context,
+            chapter={"chapter_id": "quality", "title": "质量控制"},
+            chapter_grounding_context=_chapter_context(),
+            content="完成数据接收、任务分发、国家级内外业核查、质量控制及成果复核。",
+        )
+        self.assertLessEqual(len(report["paragraph_fact_bindings"]["0"]), 6)
+        self.assertLessEqual(len(report["used_fact_ids"]), 6)
+
     def test_only_project_overview_chapter_uses_project_summary_opening(self) -> None:
         background = chapter_opening_policy({"title": "项目任务背景"})
         necessity = chapter_opening_policy({"title": "工作必要性和可行性理由"})

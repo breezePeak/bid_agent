@@ -7,8 +7,8 @@ Flow:
    existing materials are enough, and only then whether to web_search.
 3. Never paste the full tender or a raw project_context JSON dump into search.
 
-Search need is model-owned after orientation is confirmed.  There is no
-keyword heuristic that auto-triggers or auto-skips research.
+Search need is model-owned after orientation is confirmed unless the caller
+explicitly marks a user search request with ``force_research=True``.
 """
 
 from __future__ import annotations
@@ -321,6 +321,7 @@ def plan_chapter_research(
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
     instruction: str = "",
+    force_research: bool = False,
 ) -> dict[str, Any]:
     """Confirm orientation, then decide search from existing materials.
 
@@ -340,6 +341,18 @@ def plan_chapter_research(
     )
     decision = _model_decide(brief)
     if decision is None:
+        if force_research:
+            query = _fallback_search_query(brief)
+            return {
+                "need_research": bool(query),
+                "reason": "用户明确要求联网搜索，已按章节上下文执行。",
+                "search_query": query,
+                "brief": brief,
+                "decision_source": "explicit_request_fallback",
+                "orientation_confirmed": True,
+                "orientation_summary": str(brief.get("orientation_summary") or ""),
+                "existing_materials_sufficient": False,
+            }
         return {
             "need_research": False,
             "reason": "章节 Agent 未能完成检索决策，已跳过公开检索，直接基于已有要点写作。",
@@ -354,13 +367,12 @@ def plan_chapter_research(
     confirmed = bool(decision.get("orientation_confirmed", True))
     materials_enough = bool(decision.get("existing_materials_sufficient"))
     need = bool(decision.get("need_research"))
-    # Confirm orientation first. If materials already cover the chapter purpose,
-    # do not search even if the model also asked for a query.
-    if not confirmed or materials_enough:
+    # An explicit user request has priority over the model's sufficiency judgment.
+    if not force_research and (not confirmed or materials_enough):
         need = False
     reason = str(decision.get("reason") or "").strip()
     query = _sanitize_search_query(str(decision.get("search_query") or ""), brief)
-    if need and not query:
+    if (need or force_research) and not query:
         # Model asked for research but forgot query — ask not invented need.
         query = _sanitize_search_query(
             " ".join(
@@ -374,8 +386,10 @@ def plan_chapter_research(
             ),
             brief,
         )
-    if not need:
+    if not need and not force_research:
         query = ""
+
+    need = bool(need or force_research)
 
     return {
         "need_research": bool(need and query),
@@ -394,6 +408,22 @@ def plan_chapter_research(
         ).strip(),
         "existing_materials_sufficient": materials_enough,
     }
+
+
+def _fallback_search_query(brief: dict[str, Any]) -> str:
+    """Build a conservative chapter-scoped query without inventing project facts."""
+    return _sanitize_search_query(
+        " ".join(
+            [
+                str(brief.get("project_name") or ""),
+                str(brief.get("chapter_title") or ""),
+                " ".join(brief.get("related_tasks") or []),
+                " ".join(brief.get("focus_keywords") or []),
+                "政策 标准 同类方法",
+            ]
+        ),
+        brief,
+    )
 
 
 def _model_decide(brief: dict[str, Any]) -> dict[str, Any] | None:

@@ -924,6 +924,11 @@ class ContentWriter:
             project = GlobalProjectContextService.prompt_projection(
                 dict(project),
                 chapter_grounding_context,
+                purpose=str(blueprint_node.get("purpose") or ""),
+                writing_objectives=list(blueprint_node.get("writing_objectives") or []),
+                scoring_requirements=[
+                    item for item in bundle.score_obligations if isinstance(item, dict)
+                ],
             )
         project_name = str(
             (project.get("identity") or {}).get("project_name")
@@ -978,7 +983,10 @@ class ContentWriter:
                 "chapter_grounding_context": chapter_grounding_context,
                 "opening_policy": opening_policy,
                 "writing_outline": writing_outline,
-                "chapter_objectives": objectives,
+                "blueprint_goal": {
+                    "purpose": str(blueprint_node.get("purpose") or ""),
+                    "writing_objectives": list(blueprint_node.get("writing_objectives") or []),
+                },
                 "tender_requirement_excerpts": requirement_points,
                 "internal_coverage_intents": intents,
                 "scoring_obligations": scoring_obligations,
@@ -987,7 +995,7 @@ class ContentWriter:
                 "allowed_research_evidence": research_evidence or [],
                 "writing_rule": (
                     "按 writing_outline.blocks 顺序写正文，一块至少一段；"
-                    "每段按对应 block 的 write_as 写清做法或检查口径；"
+                    "Blueprint GOAL 是唯一章节目标；每段按对应 block 的 write_as 直接回答 must_answer；"
                     "只有 outcome_kind=deliverable/acceptance 的 block，才能写招标文件明确要求的"
                     "交付成果或验收内容，其他 block 不得机械添加“本章交付物”。"
                     "不要输出提纲标题，不要出现评分术语。"
@@ -1014,8 +1022,9 @@ class ContentWriter:
                     {
                         "role": "system",
                         "content": (
-                            "你是技术标书正文写作器。按 writing_outline.blocks 顺序输出项目化正文，"
-                            "一块至少一段，并按各 block 的 write_as 写清做法或检查口径。"
+                            "你是技术标书正文写作器。blueprint_goal 的 purpose 与 writing_objectives"
+                            "原文是唯一章节目标，不得分类、改写、扩展或派生。按 writing_outline.blocks"
+                            "顺序输出正文，一块至少一段，并直接回答各 block 的 must_answer。"
                             "只有 outcome_kind=deliverable/acceptance 的 block，才能写招标文件明确要求的"
                             "交付成果或验收内容；其他 block 不得机械添加“本章交付物”。"
                             "不得复述评分条件、招标写作指令或生成占位话术。"

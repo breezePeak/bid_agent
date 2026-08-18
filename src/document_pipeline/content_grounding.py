@@ -66,6 +66,19 @@ def _supported(source: str, content: str) -> bool:
     return overlap >= 6 and overlap / len(grams) >= 0.16
 
 
+def _binding_supported(source: str, content: str) -> bool:
+    """Require strong textual evidence before binding one fact to a paragraph."""
+    source_text = _compact(source)
+    content_text = _compact(content)
+    if not source_text or not content_text:
+        return False
+    if source_text in content_text:
+        return True
+    grams = _bigrams(source_text)
+    overlap = len(grams & _bigrams(content_text))
+    return overlap >= 8 and overlap / max(1, len(grams)) >= 0.45
+
+
 def _as_texts(values: Any) -> list[str]:
     if isinstance(values, str):
         return [values] if values.strip() else []
@@ -194,16 +207,17 @@ def _semantic_relevance_review(
     valid_requirement_ids = {str(item.get("id")) for item in requirements}
     valid_evidence_ids = {str(item.get("evidence_id")) for item in evidence_candidates}
 
-    def _valid_ids(value: Any, allowed: set[str]) -> list[str]:
+    def _valid_ids(value: Any, allowed: set[str], *, limit: int | None = None) -> list[str]:
         values = value if isinstance(value, list) else []
-        return sorted({str(item) for item in values if str(item) in allowed})
+        clean = sorted({str(item) for item in values if str(item) in allowed})
+        return clean[:limit] if limit is not None else clean
 
     def _valid_bindings(value: Any, allowed: set[str]) -> dict[str, list[str]]:
         if not isinstance(value, dict):
             return {}
         result: dict[str, list[str]] = {}
         for key, ids in value.items():
-            clean = _valid_ids(ids, allowed)
+            clean = _valid_ids(ids, allowed, limit=6)
             if clean:
                 result[str(key)] = clean
         return result
@@ -211,7 +225,9 @@ def _semantic_relevance_review(
     return {
         "verdict": verdict,
         "confidence": confidence,
-        "matched_fact_ids": _valid_ids(parsed.get("matched_fact_ids"), valid_fact_ids),
+        "matched_fact_ids": _valid_ids(
+            parsed.get("matched_fact_ids"), valid_fact_ids, limit=12
+        ),
         "matched_requirement_ids": _valid_ids(
             parsed.get("matched_requirement_ids"), valid_requirement_ids
         ),
@@ -231,6 +247,89 @@ def _semantic_relevance_review(
     }
 
 
+def _goal_alignment_review(
+    *, chapter: dict[str, Any], content: str, bound_requirements: list[str]
+) -> dict[str, Any]:
+    """Judge the finished body against the exact Blueprint GOAL before save."""
+    from llm_client import chat
+
+    node = chapter.get("blueprint_node")
+    node = node if isinstance(node, dict) else {}
+    purpose = str(node.get("purpose") or "").strip()
+    objectives = [
+        str(item).strip()
+        for item in node.get("writing_objectives") or []
+        if str(item).strip()
+    ]
+    if not purpose and not objectives:
+        return {}
+    payload = {
+        "chapter_title": str(chapter.get("title") or node.get("title") or ""),
+        "blueprint_goal": {
+            "purpose": purpose,
+            "writing_objectives": objectives,
+        },
+        "bound_requirements": list(bound_requirements),
+        "content": str(content),
+        "output_schema": {
+            "verdict": "aligned|drifted",
+            "confidence": "number between 0 and 1",
+            "off_goal_paragraphs": "array of zero-based paragraph indexes",
+            "reason": "short Chinese explanation",
+        },
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "你是章节 GOAL 一致性保存门禁。Blueprint 中 purpose 与 writing_objectives 的原文"
+                "是唯一判断标准，不得对其分类、改写、扩展或推导新的章节目的。判断正文是否直接"
+                "完成该目标，以及是否用较大篇幅写了目标没有要求的内容。事实真实不等于切题；"
+                "bound_requirements 只能补充必须回答内容，不能改变章节目的。采购人安排、人员、"
+                "流程、任务分发、输入输出、交付或验收等内容，只有原始 GOAL 或明确评分条件要求时"
+                "才可展开。必须只返回 JSON，不得输出 Markdown。"
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    try:
+        parsed = _parse_json_object(chat(messages, temperature=0.0))
+    except Exception as exc:
+        raise ControlPlaneError(
+            "CHAPTER_GOAL_REVIEW_UNAVAILABLE",
+            "章节 GOAL 一致性审核暂不可用，已阻止保存。",
+            status_code=503,
+            details={"error": f"{type(exc).__name__}: {exc}"[:500]},
+        ) from exc
+    if not parsed or str(parsed.get("verdict") or "").lower() not in {"aligned", "drifted"}:
+        raise ControlPlaneError(
+            "CHAPTER_GOAL_REVIEW_UNAVAILABLE",
+            "章节 GOAL 一致性审核返回格式无效，已阻止保存。",
+            status_code=503,
+        )
+    try:
+        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0))))
+    except (TypeError, ValueError):
+        confidence = 0.0
+    paragraph_count = len([p for p in re.split(r"\n\s*\n", content) if p.strip()])
+    raw_indexes = parsed.get("off_goal_paragraphs")
+    raw_indexes = raw_indexes if isinstance(raw_indexes, list) else []
+    indexes = sorted(
+        {
+            int(item)
+            for item in raw_indexes
+            if isinstance(item, int) and 0 <= item < paragraph_count
+        }
+    )
+    return {
+        "verdict": str(parsed.get("verdict")).lower(),
+        "confidence": confidence,
+        "off_goal_paragraphs": indexes,
+        "reason": str(parsed.get("reason") or "").strip()[:500],
+        "blueprint_goal": {"purpose": purpose, "writing_objectives": objectives},
+    }
+
+
 def _chapter_profile(chapter: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     node = chapter.get("blueprint_node")
     node = node if isinstance(node, dict) else {}
@@ -245,7 +344,7 @@ def _chapter_profile(chapter: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     if _ENTERPRISE_CUES.search(raw):
         return "enterprise_response", ("constraints", "work_packages")
     if _BACKGROUND_CUES.search(raw):
-        return "project_background", ("background", "scope", "work_packages")
+        return "project_background", ("background",)
     if _QUALITY_CUES.search(raw):
         return "quality_acceptance", (
             "scope", "work_packages", "processing", "outputs",
@@ -278,7 +377,8 @@ def chapter_opening_policy(chapter: dict[str, Any]) -> dict[str, str]:
         return {
             "mode": "project_overview",
             "instruction": (
-                "首段先交代本招标项目的具体对象、任务范围和现实背景，随后围绕本章展开。"
+                "首段直接响应 Blueprint 原始章节目的；不得因本章属于背景类章节就自动补写"
+                "采购人安排、任务范围、实施流程、人员或成果清单。"
             ),
         }
     return {
@@ -593,12 +693,26 @@ class ContentGroundingGate:
                 )
             )
         if profile == "project_background" and not any(
-            key in matched_fields for key in ("background", "scope", "work_packages")
+            key in matched_fields for key in ("background",)
         ):
             findings.append(
                 GroundingFinding(
                     "PROJECT_BACKGROUND_MISSING",
-                    "项目背景章节没有使用全局项目背景、采购范围或具体任务事实。",
+                    "项目背景章节没有使用与原始 GOAL 直接相关的项目背景事实。",
+                )
+            )
+
+        goal_alignment = _goal_alignment_review(
+            chapter=chapter,
+            content=body,
+            bound_requirements=requirements,
+        )
+        if goal_alignment.get("verdict") == "drifted":
+            findings.append(
+                GroundingFinding(
+                    "CHAPTER_GOAL_MISALIGNED",
+                    "正文未直接完成 Blueprint 原始章节目的，或大篇幅写入了目标未要求内容，已拒绝保存。",
+                    {"goal_alignment": goal_alignment},
                 )
             )
 
@@ -639,7 +753,7 @@ class ContentGroundingGate:
                 for item in confirmed
                 if isinstance(item, dict)
                 and item.get("fact_id")
-                and _supported(
+                and _binding_supported(
                     str(item.get("statement") or ""), substantive_body
                 )
             }
@@ -651,7 +765,7 @@ class ContentGroundingGate:
                     for item in confirmed
                     if isinstance(item, dict)
                     and item.get("fact_id")
-                    and _supported(
+                    and _binding_supported(
                         str(item.get("statement") or ""),
                         paragraph.replace(project_name, " "),
                     )
@@ -678,7 +792,7 @@ class ContentGroundingGate:
             paragraph_fact_bindings[str(index)] = sorted(
                 set(paragraph_fact_bindings[str(index)])
                 | {str(item) for item in fact_ids if str(item) in confirmed_ids}
-            )
+            )[:6]
         requirement_text_by_id = {row["id"]: row["text"] for row in requirement_rows}
         for index, requirement_ids in (
             semantic_review.get("paragraph_requirement_bindings") or {}
@@ -724,6 +838,7 @@ class ContentGroundingGate:
             "project_identity_gate_enabled": _project_identity_gate_enabled(),
             "relevance_method": "semantic" if semantic_review else "lexical",
             "semantic_review": semantic_review,
+            "goal_alignment": goal_alignment,
             "repair_attempted": False,
             "repair_succeeded": False,
             "matched_fact_groups": sorted(matched_fields),
