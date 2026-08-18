@@ -1401,6 +1401,12 @@ class WriterInputBundle(ContractModel):
     head_content_revision: int = Field(default=0, ge=0)
     locked_blocks: list[dict[str, Any]] = Field(default_factory=list)
     content_history_summary: list[dict[str, Any]] = Field(default_factory=list)
+    # Frozen request intent.  These values are supplied by the writing
+    # service; the model kernel must not recover them from transport/chat.
+    operation: Literal["create", "rewrite", "repair"] = "create"
+    user_instruction: str = ""
+    existing_content: str = ""
+    overwrite_locked: bool = False
 
 
 class ContentBlock(BaseModel):

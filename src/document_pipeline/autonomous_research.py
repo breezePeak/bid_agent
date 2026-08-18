@@ -228,7 +228,7 @@ class AutonomousResearchCoordinator:
                             topic_id=f"chapter:{node.chapter_id}",
                             priority="normal",
                             blocking_scope="none",
-                            deadline_stage="execute_content_plan",
+                            deadline_stage="chapter_writing",
                             query_budget=_env_int(
                                 "BID_AGENT_AUTO_RESEARCH_SOURCES_PER_QUERY",
                                 5,

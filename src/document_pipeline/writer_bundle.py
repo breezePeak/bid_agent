@@ -13,12 +13,10 @@ from .chapter_blueprint import load_promoted_chapter_blueprint
 from .contracts import (
     DOCUMENT_CONTRACT_ADAPTER,
     ContractNode,
-    DocumentPlan,
     TemplateContract,
     WriterInputBundle,
 )
 from .document_contract import DOCUMENT_CONTRACT_PATH
-from .document_planner import DOCUMENT_PLAN_PATH
 from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
@@ -132,9 +130,12 @@ class WriterInputBundleAssembler:
         blueprint_artifact = self.store.v3_active_artifact("ChapterBlueprint")
         assert blueprint_artifact is not None
         contract = DOCUMENT_CONTRACT_ADAPTER.validate_python(read_json(self.root / DOCUMENT_CONTRACT_PATH))
-        plan = DocumentPlan.model_validate(read_json(self.root / DOCUMENT_PLAN_PATH))
-        if contract.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]) or plan.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]):
-            raise ControlPlaneError("WRITER_BUNDLE_BLOCKED", "DocumentContract/DocumentPlan 未绑定当前 H1 Blueprint。", status_code=409)
+        if contract.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]):
+            raise ControlPlaneError(
+                "WRITER_BUNDLE_BLOCKED",
+                "DocumentContract 未绑定当前 H1 Blueprint。",
+                status_code=409,
+            )
         blueprint = load_promoted_chapter_blueprint(self.context)
         if blueprint.planning_model != "score_direct":
             raise ControlPlaneError(
@@ -461,6 +462,12 @@ class WriterInputBundleAssembler:
                         "head_content_revision": int(
                             workspace.get("head_content_revision") or 0
                         ),
+                        "existing_content": "\n\n".join(
+                            str(block.get("content") or "")
+                            for block in ((content_head or {}).get("blocks") or [])
+                            if isinstance(block, dict)
+                            and str(block.get("content") or "").strip()
+                        ),
                         "locked_blocks": locked,
                         "content_history_summary": history,
                     }
@@ -553,6 +560,10 @@ def load_writer_bundle(root: Path, bundle_id: str) -> WriterInputBundle:
             "locked_blocks",
             "content_history_summary",
             "research_decisions",
+            "operation",
+            "user_instruction",
+            "existing_content",
+            "overwrite_locked",
         ):
             legacy_body.pop(key, None)
         body_hash = canonical_hash(legacy_body)

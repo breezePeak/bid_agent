@@ -276,55 +276,6 @@ class ChapterEditingService:
                 status_code=400,
             ) from exc
 
-    def _confirmation_required(self) -> bool:
-        try:
-            from api.settings_service import SettingsService
-            from pathlib import Path
-
-            root = Path(__file__).resolve().parents[2]
-            settings = SettingsService(root).flow_settings()
-            return bool(settings.get("confirmation_required", False))
-        except Exception as exc:
-            raise ControlPlaneError(
-                "CHAPTER_POLICY_READ_FAILED",
-                f"无法读取章节确认策略，已停止提交：{exc}",
-                status_code=500,
-            ) from exc
-
-    def _make_current_effective(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Promote a newly written revision without requiring a second user action."""
-        if result.get("unchanged"):
-            return result
-        content = result.get("content") or {}
-        chapter_data = result.get("chapter") or {}
-        chapter_id = str(chapter_data.get("chapter_id") or "").strip()
-        content_revision = int(content.get("content_revision") or 0)
-        content_hash = str(content.get("content_hash") or "")
-        if not chapter_id or not content_revision or not content_hash:
-            raise ControlPlaneError(
-                "CHAPTER_EFFECTIVE_REVISION_INVALID",
-                "生成结果缺少 chapter_id、content_revision 或 content_hash，已停止提交。",
-                status_code=500,
-            )
-        receipt = self.store.record_chapter_approval_receipt(
-            chapter_id=chapter_id,
-            content_revision=content_revision,
-            content_hash=content_hash,
-            decision="auto_approved",
-            principal_id="system",
-            confirmation_required=False,
-            actor={"type": "system", "id": "system", "role": "auto"},
-        )
-        chapter = self.store.set_chapter_formal_pointer(
-            chapter_id=chapter_id,
-            expected_chapter_revision=int(chapter_data.get("chapter_revision") or 0),
-            content_revision=content_revision,
-            content_hash=content_hash,
-            approval_status="approved",
-            actor={"type": "system", "id": "system", "role": "auto"},
-        )
-        return {"chapter": chapter, "content": content, "approval": receipt, "unchanged": False}
-
     def _require_leaf_chapter(self, chapter_id: str) -> None:
         from .chapter_workspace import ChapterWorkspaceService
 
@@ -496,7 +447,7 @@ class ChapterEditingService:
         )
         previous_policy = dict((head or {}).get("approval_policy") or {})
         policy = {
-            "confirmation_required": self._confirmation_required(),
+            "confirmation_required": True,
             "frozen_at": _now_iso(),
             "grounding_required": bool(
                 previous_policy.get("grounding")
@@ -515,8 +466,6 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        if not self._confirmation_required():
-            return self._make_current_effective(result)
         return result
 
     def restore_revision(
@@ -536,7 +485,7 @@ class ChapterEditingService:
                 status_code=404,
             )
         policy = {
-            "confirmation_required": self._confirmation_required(),
+            "confirmation_required": True,
             "frozen_at": _now_iso(),
             "restored_from": int(from_content_revision),
         }
@@ -554,8 +503,6 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        if not self._confirmation_required():
-            return self._make_current_effective(result)
         return result
 
     def generate_draft(
@@ -571,7 +518,7 @@ class ChapterEditingService:
         expected_chapter_ref: tuple[str, int, str] | None = None,
         evidence_batch_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Create an AI revision and make it current when H2 is disabled."""
+        """Create an AI Draft Revision; never advance the formal pointer."""
         self._require_leaf_chapter(chapter_id)
         workspace = self.store.chapter_workspace(chapter_id)
         if workspace is None:
@@ -642,9 +589,8 @@ class ChapterEditingService:
                 block["fact_ids"] = list(
                     fact_bindings.get(str(index)) or []
                 )
-        confirmation_required = self._confirmation_required()
         policy = {
-            "confirmation_required": confirmation_required,
+            "confirmation_required": True,
             "frozen_at": _now_iso(),
             "overwrite_locked": bool(overwrite_locked),
             "grounding": report,
@@ -658,8 +604,6 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        if not confirmation_required:
-            return self._make_current_effective(result)
         return result
 
     def confirm_approval(

@@ -93,6 +93,23 @@ class ChapterWritingOutlineTests(unittest.TestCase):
         self.assertNotIn("可执行做法", outline["blocks"][0]["write_as"])
         self.assertIn("材料只是证据池", outline["writing_rule"])
 
+    def test_splits_explicit_parallel_purpose_into_readable_outline_blocks(self) -> None:
+        outline = compile_chapter_writing_outline(
+            {
+                "chapter_id": "ch-necessity-feasibility",
+                "title": "工作必要性与可行性依据",
+                "blueprint_node": {
+                    "purpose": "分别论证开展相关工作的必要性和实施可行性"
+                },
+            }
+        )
+
+        self.assertEqual(outline["block_count"], 2)
+        self.assertEqual(
+            [item["must_answer"] for item in outline["blocks"]],
+            ["论证开展相关工作的必要性", "论证实施可行性"],
+        )
+
     def test_background_score_condition_keeps_background_chapter_boundary(self) -> None:
         outline = compile_chapter_writing_outline(
             {

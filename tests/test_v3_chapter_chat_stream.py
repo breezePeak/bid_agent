@@ -237,6 +237,7 @@ class ChapterChatStreamTests(unittest.TestCase):
             self.assertNotIn("总体技术路线分四步", content)
             self.assertTrue(events[-1]["document_write_requested"])
             self.assertNotIn("先看目录标题", events[-1]["thinking"])
+            self.assertNotIn("1/4 章节名称", events[-1]["thinking"])
             self.assertEqual(
                 service.load_history("ch-a")[-1]["thinking"],
                 events[-1]["thinking"],

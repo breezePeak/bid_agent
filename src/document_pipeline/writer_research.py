@@ -30,7 +30,7 @@ _PROHIBITED_SCOPES = [
 
 
 def writer_research_enabled() -> bool:
-    """Whether execute_content_plan may auto-search public sources."""
+    """Whether ChapterWritingService may auto-search public sources."""
 
     flag = str(os.environ.get("BID_AGENT_WRITER_RESEARCH_ENABLED", "1")).strip().lower()
     if flag in {"0", "false", "no", "off"}:
@@ -60,9 +60,23 @@ class WriterResearchCoordinator:
         self.decision_provider = decision_provider
 
     def resolve_for_bundle(self, bundle: WriterInputBundle) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        decision = self.plan_for_bundle(bundle)
+        return self.execute_plan(bundle, decision)
+
+    def plan_for_bundle(self, bundle: WriterInputBundle) -> ResearchDecision:
+        """Decide first so streaming callers can disclose yes/no before searching."""
         decision = self._decision(bundle)
         payload = decision.model_dump(mode="json")
         self._upsert(payload)
+        return decision
+
+    def execute_plan(
+        self,
+        bundle: WriterInputBundle,
+        decision: ResearchDecision,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Execute one already-disclosed research decision."""
+        payload = decision.model_dump(mode="json")
         if not decision.needs_research:
             return payload, []
 
@@ -109,7 +123,7 @@ class WriterResearchCoordinator:
                 topic_id=f"writer-unit:{bundle.unit_id}:{query.query_id}",
                 priority="high",
                 blocking_scope="content_unit",
-                deadline_stage="execute_content_plan",
+                deadline_stage="chapter_writing",
                 query_budget=3,
                 project_anchors=project_anchors,
                 task_anchors=task_anchors,

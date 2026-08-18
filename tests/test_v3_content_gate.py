@@ -510,7 +510,7 @@ class WriterBundleContentGateTests(unittest.TestCase):
             runs = Path(tmp) / "runs"
             (runs / "writer").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "writer")
-            blocks = ContentWriter.for_deterministic_tests(context).write_bundle(
+        blocks = ContentWriter.for_deterministic_tests(context).stream_bundle(
                 _condition_bundle()
             )
         self.assertEqual(

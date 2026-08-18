@@ -24,18 +24,6 @@ V3_PIPELINE_STAGES = (
     "sync_material_requirements",
     "compile_document_contract",
     "plan_document",
-    "execute_content_plan",
-    "integrate_document",
-    "verify_document",
-    "render_document",
-    "verify_delivery",
-)
-
-V3_GENERATION_STAGES = (
-    "sync_material_requirements",
-    "compile_document_contract",
-    "plan_document",
-    "execute_content_plan",
     "integrate_document",
     "verify_document",
     "render_document",
@@ -240,21 +228,6 @@ class V3ExecutionController:
         if stage == "plan_document" and isinstance(result, tuple):
             units = result[1] if len(result) > 1 and isinstance(result[1], list) else []
             return {"content_unit_count": len(units)}
-        if stage == "execute_content_plan" and isinstance(result, list):
-            blocks = [
-                block
-                for unit_blocks in result
-                if isinstance(unit_blocks, list)
-                for block in unit_blocks
-            ]
-            return {
-                "content_unit_count": len(result),
-                "block_count": len(blocks),
-                "character_count": sum(
-                    len(str(getattr(block, "content", "") or ""))
-                    for block in blocks
-                ),
-            }
         if stage == "integrate_document":
             blocks = getattr(result, "blocks", [])
             return {"block_count": len(blocks) if isinstance(blocks, list) else 0}
@@ -389,129 +362,44 @@ class V3ExecutionController:
         return {"accepted": True, "operation_status": "succeeded", "message": f"V3 阶段完成: {stage}"}
 
     def run_pipeline(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
-        # document.run_pipeline starts after the separately confirmed outline.
-        # Re-running ingestion/score analysis/outline compilation here both wastes
-        # time and can invalidate the exact chapter IDs the user just confirmed.
-        stages = V3_GENERATION_STAGES
+        """Compatibility command: enqueue chapter drafts through the one service path.
+
+        The former implementation owned a second writer orchestration inside
+        StageRunner.  Generation commands now create only a durable batch; each
+        batch item delegates the actual writing to ChapterWritingService.
+        """
+        del operation_id
+        from .chapter_batch import ChapterBatchService
+
         requested_chapter_ids = [
             str(item).strip()
             for item in (envelope.payload.get("chapter_ids") or [])
             if str(item).strip()
         ]
-        set_scope = getattr(self.runner, "set_generation_scope", None)
-        if callable(set_scope):
-            set_scope(requested_chapter_ids)
-        if requested_chapter_ids:
-            stages = V3_GENERATION_STAGES[:4]
-        completed: list[str] = []
-        for stage in stages:
-            self.store.record_stage_run(
-                operation_id,
-                stage,
-                "queued",
-                disposition="v3_pipeline",
+        if not requested_chapter_ids:
+            listing = ChapterWorkspaceService(context).list_chapters(
+                include_archived=False
             )
-        for stage in stages:
-            self.store.record_stage_run(
-                operation_id,
-                stage,
-                "running",
-                disposition="v3_pipeline",
-            )
-            try:
-                with self._runner_policy_scope():
-                    result = self.runner.run(stage, operation_id=operation_id)
-            except Exception as exc:
-                error = self._stage_error(exc)
-                blocked_code = getattr(exc, "code", "")
-                if blocked_code in {
-                    "WRITER_RESEARCH_ACTION_REQUIRED",
-                    "WRITER_MODEL_ACTION_REQUIRED",
-                    "TECHNICAL_DRAFT_READY",
-                }:
-                    disposition = (
-                        "writer_model_action_required"
-                        if blocked_code == "WRITER_MODEL_ACTION_REQUIRED"
-                        else (
-                            "technical_draft_ready"
-                            if blocked_code == "TECHNICAL_DRAFT_READY"
-                            else "writer_research_action_required"
-                        )
-                    )
-                    self.store.record_stage_run(
-                        operation_id,
-                        stage,
-                        "paused",
-                        disposition=disposition,
-                        error=error,
-                    )
-                    self.store.cancel_active_stage_runs(
-                        operation_id,
-                        disposition=disposition,
-                        error=error,
-                    )
-                    return {
-                        "accepted": True,
-                        "operation_status": "blocked",
-                        "message": (
-                            str(getattr(exc, "message", "") or "")
-                            or (
-                                "写作模型输出无法解析；任务已在当前章节暂停，可直接重试该章节。"
-                                if blocked_code == "WRITER_MODEL_ACTION_REQUIRED"
-                                else (
-                                    "技术章节已写完；商务部分和价格部分按当前要求暂不写入。"
-                                    if blocked_code == "TECHNICAL_DRAFT_READY"
-                                    else "写作 Agent 需要公开资料检索；请完成当前 Provider 的检索后重新生成以继续当前章节。"
-                                )
-                            )
-                        ),
-                        "completed_stages": completed,
-                        "error": error,
-                    }
-                self.store.record_stage_run(
-                    operation_id,
-                    stage,
-                    "failed",
-                    disposition="v3_pipeline",
-                    error=error,
-                )
-                self.store.cancel_active_stage_runs(
-                    operation_id,
-                    disposition="upstream_stage_failed",
-                    error=error,
-                )
-                raise
-            if stage == "confirm_planning" and isinstance(result, dict) and result.get("verdict") == "needs_human":
-                self.store.record_stage_run(operation_id, stage, "blocked_human", disposition="planning_confirmation_required")
-                self.store.cancel_active_stage_runs(
-                    operation_id,
-                    disposition="planning_confirmation_required",
-                )
-                return {
-                    "accepted": True,
-                    "operation_status": "blocked_human",
-                    "message": "规划已生成，等待已认证用户在统一规划页确认。",
-                    "completed_stages": completed,
-                    "planning_snapshot": result.get("planning_snapshot") if isinstance(result, dict) else None,
-                }
-            self.store.record_stage_run(
-                operation_id,
-                stage,
-                "succeeded",
-                disposition="v3_pipeline",
-                output=self._stage_output(stage, result),
-            )
-            completed.append(stage)
+            requested_chapter_ids = [
+                str(item.get("chapter_id") or "")
+                for item in listing.get("items") or []
+                if isinstance(item, dict) and str(item.get("chapter_id") or "")
+            ]
+        service = ChapterBatchService(context)
+        job = service.create(
+            requested_chapter_ids,
+            actor=envelope.actor,
+            idempotency_key=envelope.idempotency_key,
+            schedule=False,
+        )
+        job_id = str(job.get("job_id") or "")
         return {
             "accepted": True,
             "operation_status": "succeeded",
-            "message": (
-                f"指定章节写作完成: {len(requested_chapter_ids)} 个章节范围"
-                if requested_chapter_ids
-                else f"V3 Pipeline 完成: {len(completed)} 个阶段"
-            ),
-            "completed_stages": completed,
+            "message": f"章节写作任务已创建，共 {len(job.get('items') or [])} 个叶子章节。",
             "chapter_ids": requested_chapter_ids,
+            "batch_job": job,
+            "_after_commit": lambda: service.schedule(job_id),
         }
 
     def prepare_outline(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:

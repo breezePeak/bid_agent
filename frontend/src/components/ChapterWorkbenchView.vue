@@ -592,7 +592,7 @@
                       class="thinking-summary-label"
                       :class="{ 'thinking-shimmer': turn.streaming && !turn.content }"
                     >
-                      {{ turn.streaming && !turn.content ? '正在思考…' : '正在思考' }}
+                      {{ turn.streaming ? '正在分析…' : '分析过程' }}
                     </span>
                     <svg v-if="turn.thinking" class="thinking-chevron" viewBox="0 0 20 20" aria-hidden="true">
                       <path d="m7.5 5 5 5-5 5" />
@@ -1737,6 +1737,7 @@ async function generateDraft(options = {}) {
   actionMessage.value = ''
   researchGapConfirmation.value = null
   rightTab.value = 'chat'
+  const draftStartedAt = Date.now()
   const draftTurnId = `draft-${operationId}`
   const draftTurn = {
     id: draftTurnId,
@@ -1747,7 +1748,9 @@ async function generateDraft(options = {}) {
     thinkingOpen: true,
     streaming: true,
     editing: false,
+    started_at: draftStartedAt,
   }
+  startStreamingTimer()
   chatTurns.value = [...chatTurns.value, draftTurn]
   rememberChapterChat(chapterId, chatTurns.value)
   await scrollChatToBottom()
@@ -1794,6 +1797,15 @@ async function generateDraft(options = {}) {
         const type = String(event?.type || event?.event || '').toLowerCase()
         if (type === 'meta') {
           streamOperationId.value = String(event.operation_id || event?.data?.operation_id || operationId)
+        } else if (type === 'thinking_step') {
+          const note = String(event.message || event?.data?.message || '').trim()
+          if (!note) return
+          patchDraftTurn((turn) => {
+            turn.thinking = turn.thinking ? `${turn.thinking}\n${note}` : note
+            turn.thinkingOpen = true
+            turn.streaming = true
+          })
+          scrollChatToBottom()
         } else if (type === 'research') {
           const payload = event?.data && typeof event.data === 'object' ? event.data : event
           const note = String(payload.message || '正在检索公开资料…').trim()
@@ -1867,6 +1879,7 @@ async function generateDraft(options = {}) {
     patchDraftTurn((turn) => {
       turn.streaming = false
       turn.thinkingOpen = true
+      turn.elapsed_seconds = Math.max(1, Math.round((Date.now() - draftStartedAt) / 1000))
       if (!turn.content) turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
     })
     await loadChapterList()
@@ -1893,6 +1906,7 @@ async function generateDraft(options = {}) {
       busyAction.value = ''
       patchDraftTurn((turn) => {
         turn.streaming = false
+        turn.elapsed_seconds = Math.max(1, Math.round((Date.now() - draftStartedAt) / 1000))
         if (turn.content) return
         if (controller.signal.aborted) {
           turn.content = '草稿生成已中断。思考过程保留在本条对话中。'
@@ -1902,6 +1916,7 @@ async function generateDraft(options = {}) {
           turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
         }
       })
+      stopStreamingTimer()
     }
   }
 }
@@ -2193,7 +2208,7 @@ async function setChatAuthority(mode) {
 }
 
 async function confirmChapterOutline() {
-  chatInput.value = '确认'
+  chatInput.value = '确认以上提纲，立即开始写正文'
   await sendChat()
 }
 
@@ -2260,7 +2275,15 @@ async function sendChat() {
     await streamChapterChat(props.workspaceId, chapterId, text, {
       onEvent: async (event) => {
         const type = String(event?.type || '').toLowerCase()
-        if (type === 'inspect_planning' || type === 'inspecting' || type === 'inspect_skipped') {
+        if ([
+          'thinking_step',
+          'inspect_planning',
+          'inspecting',
+          'inspect_skipped',
+          'research',
+          'delegate_reviewing',
+          'delegate_fixing',
+        ].includes(type)) {
           const note = String(event.message || event.reason || '').trim()
           if (!note) return
           patchAssistant((turn) => {
@@ -3150,7 +3173,7 @@ onUnmounted(() => {
   line-height: 1.6;
   max-height: 280px;
   overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: inherit;
   outline: none;
   background: #f8fafc;
   border: 1px solid #f1f5f9;
@@ -3166,6 +3189,8 @@ onUnmounted(() => {
   border-radius: 14px;
   padding: 14px 18px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .chat-streaming-hint {
   color: #64748b !important;

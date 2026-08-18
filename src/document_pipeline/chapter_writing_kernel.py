@@ -235,6 +235,45 @@ def _project_facts(project_context: Any, target: str) -> dict[str, Any]:
     return projected
 
 
+def project_chapter_facts(
+    project_context: Any,
+    *,
+    purpose: str = "",
+    writing_objectives: Any = (),
+    writing_outline: Any = None,
+    bound_requirements: Any = (),
+) -> dict[str, Any]:
+    """Return the project-fact projection shared by writing and chapter chat.
+
+    The declared chapter goal is the only content-selection signal.  A fact
+    that does not match that goal is omitted; an empty match never falls back
+    to the full project context.
+    """
+    outline = _dump(writing_outline) or {}
+    if not isinstance(outline, dict):
+        outline = {}
+    objectives = [_text(item) for item in (_dump(writing_objectives) or []) if _text(item)]
+    requirements = [
+        item
+        for item in (_dump(bound_requirements) or [])
+        if isinstance(item, dict)
+    ]
+    target_parts = [_text(purpose), *objectives]
+    target_parts.extend(
+        _text(block.get("must_answer"))
+        for block in outline.get("blocks") or []
+        if isinstance(block, dict)
+    )
+    target_parts.extend(
+        _text(item.get("text") or item.get("normalized_requirement") or item.get("requirement"))
+        for item in requirements
+    )
+    return _project_facts(
+        project_context,
+        " ".join(item for item in target_parts if item),
+    )
+
+
 def _normalize_history(history: Any) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for raw in history or []:
@@ -326,6 +365,67 @@ class ChapterWritingSpec:
     def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
         return self.payload(include_hash=True)
 
+    def scope_contract(self) -> "ChapterScopeContract":
+        """Expose the same immutable boundary to non-writing chapter turns."""
+        return compile_chapter_scope_contract(self)
+
+
+@dataclass(frozen=True)
+class ChapterScopeContract:
+    """The chapter boundary shared by document writing and conversational turns.
+
+    Runtime state such as the current user message, draft and chat history is
+    intentionally absent.  Those inputs may shape the response, but may not
+    expand what the chapter is about.
+    """
+
+    chapter_id: str
+    chapter_title: str
+    purpose: str
+    writing_objectives: tuple[str, ...]
+    writing_outline: dict[str, Any]
+    bound_requirements: tuple[dict[str, Any], ...]
+    project_context: dict[str, Any]
+    scope_hash: str = field(default="")
+
+    def payload(self, *, include_hash: bool = True) -> dict[str, Any]:
+        value = {
+            "schema_version": "v3.chapter-scope-contract.v1",
+            "chapter_id": self.chapter_id,
+            # Display metadata is never a scope-selection input.
+            "display": {"chapter_title": self.chapter_title},
+            "purpose": self.purpose,
+            "writing_objectives": list(self.writing_objectives),
+            "writing_outline": deepcopy(self.writing_outline),
+            "bound_requirements": deepcopy(list(self.bound_requirements)),
+            "project_context": deepcopy(self.project_context),
+        }
+        if include_hash:
+            value["scope_hash"] = self.scope_hash
+        return value
+
+    def model_dump(self, *, mode: str = "json") -> dict[str, Any]:
+        return self.payload(include_hash=True)
+
+
+def compile_chapter_scope_contract(spec: ChapterWritingSpec) -> ChapterScopeContract:
+    """Derive the transport-neutral chapter boundary from the canonical spec."""
+    if not isinstance(spec, ChapterWritingSpec):
+        raise TypeError("spec must be ChapterWritingSpec")
+    contract = ChapterScopeContract(
+        chapter_id=spec.chapter_id,
+        chapter_title=spec.chapter_title,
+        purpose=spec.purpose,
+        writing_objectives=tuple(spec.writing_objectives),
+        writing_outline=deepcopy(spec.writing_outline),
+        bound_requirements=tuple(deepcopy(list(spec.bound_requirements))),
+        project_context=deepcopy(spec.project_context),
+    )
+    hash_payload = contract.payload(include_hash=False)
+    hash_payload.pop("display", None)
+    object.__setattr__(contract, "scope_hash", canonical_hash(hash_payload))
+    return contract
+
 
 def _request_from_values(request: Any, values: dict[str, Any]) -> ChapterWritingRequest:
     if request is None:
@@ -372,15 +472,13 @@ def compile_chapter_writing_spec(
     bound = _bound_requirements(
         node, tender, scoring, _dump(req.binding_requirements), outline
     )
-    target_parts = [purpose, *objectives]
-    target_parts.extend(
-        _text(block.get("must_answer"))
-        for block in outline.get("blocks") or []
-        if isinstance(block, dict)
+    projected_context = project_chapter_facts(
+        req.project_context,
+        purpose=purpose,
+        writing_objectives=objectives,
+        writing_outline=outline,
+        bound_requirements=bound,
     )
-    target_parts.extend(_text(item.get("text")) for item in bound if item.get("text"))
-    target = " ".join(item for item in target_parts if item)
-    projected_context = _project_facts(req.project_context, target)
     normalized_history = tuple(_normalize_history(req.history))
     errors = tuple(_text(item) for item in req.validation_errors if _text(item))
     spec = ChapterWritingSpec(
@@ -455,8 +553,11 @@ __all__ = [
     "ChapterWritingKernel",
     "ChapterWritingRequest",
     "ChapterWritingSpec",
+    "ChapterScopeContract",
+    "compile_chapter_scope_contract",
     "compile_chapter_writing_messages",
     "compile_chapter_writing_spec",
     "compile_messages",
     "compile_spec",
+    "project_chapter_facts",
 ]

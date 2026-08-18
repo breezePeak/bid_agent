@@ -70,6 +70,23 @@ def _write_as(kind: str, outcome_kind: str) -> str:
     return _WRITE_AS.get(kind, _WRITE_AS["response"])
 
 
+def _explicit_purpose_objectives(purpose: str) -> list[str]:
+    """Split only an explicit “分别 A 和 B” purpose into its stated objectives."""
+    text = _clean(purpose)
+    match = re.fullmatch(r"分别(.+?)(?:和|与|及)(.+)", text)
+    if not match:
+        return []
+    left = match.group(1).strip(" ，、；")
+    right = match.group(2).strip(" ，、；")
+    if not left or not right:
+        return []
+    for verb in ("论证", "说明", "分析", "阐明", "明确"):
+        if left.startswith(verb) and not right.startswith(verb):
+            right = f"{verb}{right}"
+            break
+    return [left, right]
+
+
 def compile_chapter_writing_outline(
     chapter: dict[str, Any],
     *,
@@ -87,6 +104,8 @@ def compile_chapter_writing_outline(
         for item in node.get("writing_objectives") or []
         if str(item or "").strip()
     ][:6]
+    if not objectives:
+        objectives = _explicit_purpose_objectives(purpose)
     primary_unit_ids = {
         str(item) for item in (node.get("primary_response_unit_ids") or []) if item
     }

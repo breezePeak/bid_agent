@@ -6,17 +6,10 @@ import threading
 import uuid
 from typing import Any
 
-from control_plane import (
-    CommandEnvelope,
-    CommandGateway,
-    ControlPlaneError,
-    ControlStore,
-    WorkspaceContext,
-)
+from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 
 from .canonicalization import chapter_context_hash
 from .chapter_workspace import ChapterWorkspaceService
-from .execution_controller import V3ExecutionController
 
 
 _RUNNING: set[tuple[str, str]] = set()
@@ -302,61 +295,55 @@ class ChapterBatchService:
                 self.store.update_batch_item(str(item["item_id"]), stage="drafting")
                 self._event(job_id, item, "draft_started", stage="drafting", status="running", message="章节 Agent 正在生成正文。")
 
-                snapshot = self.store.snapshot()
-                envelope = CommandEnvelope.from_mapping(
-                    {
-                        "kind": "document.run_pipeline",
-                        "payload": {"chapter_ids": [chapter_id]},
-                        "actor": {"type": "system", "id": "chapter-batch-worker"},
-                        "expected_revision": int(snapshot.get("revision") or 0),
-                        "idempotency_key": f"chapter-batch:{job_id}:{item['item_id']}:{attempt}",
-                    },
-                    workspace_id=self.context.workspace_id,
+                from .chapter_writing_service import (
+                    ChapterWritingRequest,
+                    ChapterWritingService,
                 )
-                controller = V3ExecutionController(self.context)
-                receipt = CommandGateway(self.context, controller.handlers()).submit(envelope)
-                self.store.assert_batch_fence(job_id, fencing_token)
-                receipt_data = receipt.as_dict()
-                result = receipt_data.get("result") if isinstance(receipt_data.get("result"), dict) else {}
-                operation_status = str(result.get("operation_status") or receipt_data.get("status") or "")
-                if operation_status not in {"succeeded", "completed"}:
-                    raw_error = receipt_data.get("error") if isinstance(receipt_data.get("error"), dict) else {}
-                    raise ControlPlaneError(
-                        str(raw_error.get("code") or "CHAPTER_GENERATION_NOT_COMMITTED"),
-                        str(raw_error.get("message") or receipt_data.get("message") or "章节生成未完成。"),
-                        status_code=409,
-                        retryable=bool(raw_error.get("retryable")),
-                        details={"chapter_id": chapter_id, "receipt": receipt_data},
-                    )
+
+                request = ChapterWritingRequest(
+                    unit_id=f"chapter-{chapter_id}",
+                    node_ids=(chapter_id,),
+                    operation_id=f"chapter-batch:{job_id}:{item['item_id']}:{attempt}",
+                    operation=(
+                        "rewrite"
+                        if int(chapter.get("head_content_revision") or 0) > 0
+                        else "create"
+                    ),
+                    chapter_id=chapter_id,
+                    expected_chapter_revision=int(chapter.get("chapter_revision") or 0),
+                    actor={
+                        "type": "user",
+                        "id": str(job.get("actor") or "chapter-batch-worker"),
+                        "role": "chapter-batch-worker",
+                    },
+                    run_research=True,
+                    commit_drafts=True,
+                )
+                for service_event in ChapterWritingService(self.context).iter_events(request):
+                    self.store.assert_batch_fence(job_id, fencing_token)
+                    event_type = str(service_event.get("type") or "")
+                    if event_type == "research":
+                        self._event(
+                            job_id,
+                            item,
+                            "research_result",
+                            stage="researching",
+                            status="running",
+                            message=str(service_event.get("message") or "资料检查已完成。"),
+                            data={"sources": service_event.get("sources") or []},
+                        )
+                    elif event_type == "content_delta":
+                        self._event(
+                            job_id,
+                            item,
+                            "draft_delta",
+                            stage="drafting",
+                            status="running",
+                            message="",
+                            data={"text": str(service_event.get("delta") or "")[:12000]},
+                        )
 
                 updated = self.chapters.get_chapter(chapter_id)
-                generated_text = "\n\n".join(
-                    str(block.get("content") or "")
-                    for block in ((updated.get("content") or {}).get("blocks") or [])
-                    if isinstance(block, dict) and str(block.get("content") or "").strip()
-                )
-                self._event(
-                    job_id,
-                    item,
-                    "research_result",
-                    stage="researching",
-                    status="running",
-                    message="资料检查与必要检索已完成。",
-                )
-                if generated_text:
-                    self._event(
-                        job_id,
-                        item,
-                        "draft_delta",
-                        stage="drafting",
-                        status="running",
-                        message="",
-                        data={"text": generated_text[:12000]},
-                    )
-                self.store.update_batch_item(str(item["item_id"]), stage="validating")
-                self._event(job_id, item, "validation_started", stage="validating", status="running", message="正在校验章节正文与事实约束。")
-                self.store.update_batch_item(str(item["item_id"]), stage="committing")
-                self._event(job_id, item, "commit_started", stage="committing", status="running", message="正在确认正文写入中间文档。")
                 revision = int(updated.get("head_content_revision") or 0)
                 if revision <= before_revision:
                     raise ControlPlaneError(

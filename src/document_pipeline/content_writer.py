@@ -1,25 +1,14 @@
 from __future__ import annotations
 
-from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
-from utils import write_json
+from control_plane import ControlPlaneError, WorkspaceContext
 
 from .contracts import ContentBlock, WriterInputBundle
-from .content_gate import WriterBundleContentGate
-from .canonicalization import canonical_hash
-from .input_manifest import V3_ROOT
 from .writer_policy import (
-    WRITER_IMPLEMENTATION_VERSION,
-    WRITER_PROMPT_VERSION,
-    evidence_bindings,
     require_content_quality,
     require_writer_model,
-    writer_base_fingerprint,
-    writer_fingerprint,
 )
-from .writer_research import WriterResearchCoordinator
 
 
-CONTENT_OUTPUT_DIR = V3_ROOT / "content_units"
 _DETERMINISTIC_TEST_AUTHORITY = object()
 
 
@@ -34,7 +23,6 @@ class ContentWriter:
     ) -> None:
         self.context = context
         self.root = context.root
-        self.store = ControlStore(context)
         self.deterministic_test = (
             _deterministic_test_authority is _DETERMINISTIC_TEST_AUTHORITY
         )
@@ -49,17 +37,14 @@ class ContentWriter:
             _deterministic_test_authority=_DETERMINISTIC_TEST_AUTHORITY,
         )
 
-    def write(self, unit_id: str, node_ids: list[str]) -> list[ContentBlock]:
-        raise ValueError("WRITER_BUNDLE_REQUIRED: Writer 只能接收由确认 Blueprint 编译的 WriterInputBundle")
-
-    def write_bundle(
+    def _execute_bundle(
         self,
         bundle: WriterInputBundle,
         *,
         operation_id: str = "",
-        enable_writer_research: bool = False,
     ) -> list[ContentBlock]:
         """Generate only from a frozen Bundle; this method never reads workspace facts."""
+        del operation_id
         if not self.deterministic_test:
             require_writer_model(self.root)
             from .global_project_context import GlobalProjectContextService
@@ -135,33 +120,6 @@ class ContentWriter:
             if str(target.get("content_policy") or "full") == "full"
             and _is_leaf_target(target)
         ]
-        if writable_targets:
-            first_target = writable_targets[0]
-            self.store.update_content_unit_progress(
-                bundle.unit_id,
-                chapter_id=str(first_target.get("output_target") or ""),
-                chapter_title=str(first_target.get("title") or ""),
-                phase="preparing_research",
-            )
-        researcher = WriterResearchCoordinator(
-            self.context,
-            operation_id=operation_id,
-            deterministic_test=self.deterministic_test,
-        )
-        research_decision: dict[str, object] = {}
-        if enable_writer_research:
-            research_decision, dynamic_evidence = researcher.resolve_for_bundle(
-                bundle
-            )
-            if dynamic_evidence:
-                bundle = self._bundle_with_research(
-                    bundle,
-                    evidence=[*bundle.evidence_snapshot, *dynamic_evidence],
-                    decisions=[
-                        *bundle.research_decisions,
-                        research_decision,
-                    ],
-                )
         for target in bundle.document_target_constraints:
             if str(target.get("content_policy") or "full") != "full":
                 continue
@@ -169,12 +127,6 @@ class ContentWriter:
                 continue
             target_id = str(target["output_target"])
             title = str(target["title"])
-            self.store.update_content_unit_progress(
-                bundle.unit_id,
-                chapter_id=target_id,
-                chapter_title=title,
-                phase="drafting",
-            )
             research_evidence = self._research_evidence_for_target(
                 bundle,
                 target,
@@ -420,136 +372,25 @@ class ContentWriter:
                         human_locked=False,
                     )
                 )
-            # Phase 7: if chapter workspace exists, also append a draft content revision
-            # (never formal). Locked blocks are preserved by the merge service.
-            if self.store.chapter_workspace(target_id) is not None:
-                from .chapter_editing import ChapterEditingService
-
-                workspace = self.store.chapter_workspace(target_id) or {}
-                ChapterEditingService(self.context).generate_draft(
-                    chapter_id=target_id,
-                    expected_chapter_revision=int(
-                        workspace.get("chapter_revision") or 0
-                    ),
-                    text=content,
-                    overwrite_locked=False,
-                    grounding_report=grounding_report,
-                    actor={"type": "system", "id": "writer", "role": "writer"},
-                )
-            # This is an execution checkpoint only.  It lets the workspace show
-            # the durable part of a running draft without promoting it to the
-            # final Word artifact before the unit-level quality gate passes.
-            self.store.update_content_unit_progress(
-                bundle.unit_id,
-                chapter_id=target_id,
-                chapter_title=title,
-                phase="drafted_checkpoint",
-                draft_preview="\n\n".join(block.content for block in blocks),
-            )
-            researcher.mark_used(
-                research_decision,
-                str(target.get("node_id") or ""),
-                used_evidence_ids,
-            )
         if not blocks:
             raise ValueError("CONTENT_BLOCKED: WriterBundle 不包含可生成的章节目标")
-        proposal = WriterBundleContentGate().validate(bundle, blocks)
-        base_fingerprint = writer_base_fingerprint(
-            self.context,
-            unit_id=bundle.unit_id,
-            contract_revision=bundle.revision,
-            node_ids=[
-                str(item.get("chapter_id") or item.get("node_id") or "")
-                for item in bundle.blueprint_slice
-                if str(item.get("chapter_id") or item.get("node_id") or "")
-            ],
-            deterministic_test=self.deterministic_test,
-        )
-        bindings = evidence_bindings(bundle.evidence_snapshot)
-        final_fingerprint = writer_fingerprint(base_fingerprint, bindings)
-        content_hash = canonical_hash(
-            [block.model_dump(mode="json") for block in blocks]
-        )
-        output = (
-            self.root
-            / CONTENT_OUTPUT_DIR
-            / (
-                f"{bundle.unit_id}--{final_fingerprint[:12]}"
-                f"--{content_hash[:12]}.json"
-            )
-        )
-        write_json(
-            output,
-            {
-                "schema_version": "v3",
-                "writer_version": WRITER_IMPLEMENTATION_VERSION,
-                "writer_prompt_version": WRITER_PROMPT_VERSION,
-                "writer_mode": (
-                    "deterministic_test"
-                    if self.deterministic_test
-                    else "production"
-                ),
-                "writer_base_fingerprint": base_fingerprint,
-                "writer_fingerprint": final_fingerprint,
-                "evidence_batches": bindings,
-                "research_decision_id": str(
-                    research_decision.get("decision_id") or ""
-                ),
-                "research_operation_id": operation_id,
-                "unit_id": bundle.unit_id,
-                "bundle_id": bundle.bundle_id,
-                "content_proposal": proposal.model_dump(mode="json"),
-                "blocks": [
-                    block.model_dump(mode="json")
-                    for block in blocks
-                ],
-            },
-        )
-        self.store.upsert_content_unit_state(
-            {
-                "unit_id": bundle.unit_id,
-                "contract_revision": bundle.revision,
-                "state": "completed",
-                "evidence_snapshot_hash": bundle.bundle_hash,
-                "writer_fingerprint": final_fingerprint,
-                "stale_reason": "",
-                "output_artifact_id": output.relative_to(self.root).as_posix(),
-                "current_chapter_id": "",
-                "current_chapter_title": "",
-                "progress_phase": "",
-            }
-        )
         return blocks
 
-    def _bundle_with_research(
+    def stream_bundle(
         self,
         bundle: WriterInputBundle,
         *,
-        evidence: list[dict],
-        decisions: list[dict],
-    ) -> WriterInputBundle:
-        """Freeze writer-time evidence into a new immutable Bundle revision."""
-        body = bundle.model_dump(
-            mode="json",
-            exclude={"revision", "source_hashes", "bundle_id", "bundle_hash"},
+        operation_id: str = "",
+    ) -> list[ContentBlock]:
+        """Run the sole content-model kernel on an already frozen Bundle.
+
+        Research planning and chapter revision persistence belong to
+        ``ChapterWritingService``.  This is the only public model boundary.
+        """
+        return self._execute_bundle(
+            bundle,
+            operation_id=operation_id,
         )
-        body["evidence_snapshot"] = evidence
-        body["research_decisions"] = decisions
-        source_hashes = dict(bundle.source_hashes)
-        for item in evidence:
-            if isinstance(item, dict) and item.get("batch_id"):
-                source_hashes[f"evidence:{item['batch_id']}"] = canonical_hash(item)
-        bundle_hash = canonical_hash(body)
-        frozen = WriterInputBundle(
-            revision=bundle.revision,
-            source_hashes=source_hashes,
-            bundle_id=f"{bundle.bundle_id}-r{bundle_hash[:8]}",
-            bundle_hash=bundle_hash,
-            **body,
-        )
-        path = self.root / V3_ROOT / "writer_bundles" / f"{frozen.bundle_id}.json"
-        write_json(path, frozen.model_dump(mode="json"))
-        return frozen
 
     @staticmethod
     def _research_evidence_for_target(
@@ -657,7 +498,9 @@ class ContentWriter:
         spec = compile_chapter_writing_spec(
             ChapterWritingRequest(
                 chapter_id=str(target.get("node_id") or ""),
-                operation="create",
+                operation=bundle.operation,
+                user_instruction=bundle.user_instruction,
+                existing_content=bundle.existing_content,
                 chapter={
                     "chapter_id": str(target.get("node_id") or ""),
                     "title": title,

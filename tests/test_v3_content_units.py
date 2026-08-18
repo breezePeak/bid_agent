@@ -43,8 +43,7 @@ class V3ContentUnitTests(unittest.TestCase):
             _, units = DocumentPlanner(context).build()
             scheduler = ContentUnitScheduler(context)
             self.assertEqual(scheduler.initialize(), units)
-            with self.assertRaisesRegex(ValueError, "WRITER_BUNDLE_REQUIRED"):
-                ContentWriter(context).write(units[0].unit_id, units[0].node_ids)
+            self.assertFalse(hasattr(ContentWriter(context), "write"))
             self.assertEqual(scheduler.store.upsert_content_unit_state({"unit_id": units[0].unit_id, "contract_revision": 1, "state": "completed"})["state"], "completed")
 
 

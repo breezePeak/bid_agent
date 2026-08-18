@@ -238,7 +238,7 @@ class PlanningAgent:
             unknowns.append("尚未提供可核验的企业资质、人员或业绩材料")
             evidence_needs.append(EvidenceNeed(need_id="EN-company-qualification", question="请补充与资格要求对应的企业资质、人员和业绩材料。", topic_id="company_qualification", priority="blocking", blocking_scope="content_unit", deadline_stage="write_content", query_budget=0))
         for candidate in scores.evidence_need_candidates:
-            evidence_needs.append(EvidenceNeed(need_id=candidate.need_id, question=candidate.question, topic_id=f"score:{candidate.score_point_id}", priority=candidate.priority, blocking_scope="content_unit" if candidate.priority == "blocking" else "none", deadline_stage="execute_content_plan", query_budget=0))
+            evidence_needs.append(EvidenceNeed(need_id=candidate.need_id, question=candidate.question, topic_id=f"score:{candidate.score_point_id}", priority=candidate.priority, blocking_scope="content_unit" if candidate.priority == "blocking" else "none", deadline_stage="chapter_writing", query_budget=0))
         deliverables = [item.normalized_requirement for item in ledger.requirements if item.kind is RequirementKind.DELIVERABLE]
         acceptance = [item.normalized_requirement for item in ledger.requirements if item.kind is RequirementKind.ACCEPTANCE]
         if not deliverables:

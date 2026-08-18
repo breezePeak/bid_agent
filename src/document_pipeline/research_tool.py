@@ -63,7 +63,7 @@ class V3ResearchTool:
                             if candidate.priority in {"blocking", "high"}
                             else "none"
                         ),
-                        deadline_stage="execute_content_plan",
+                        deadline_stage="chapter_writing",
                         query_budget=5,
                     )
         # Explicit legacy planning calls may still have promoted ProjectModel

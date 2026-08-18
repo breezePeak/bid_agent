@@ -58,7 +58,7 @@ class V3WorkspaceSnapshotBuilder:
         "sync_material_requirements": "检查材料与证据缺口",
         "compile_document_contract": "锁定确认后的文档结构",
         "plan_document": "生成逐章写作任务",
-        "execute_content_plan": "章节写作",
+    "chapter_writing": "章节写作",
         "integrate_document": "全文整合",
         "verify_document": "质量审核",
         "render_document": "Word 渲染",
@@ -208,7 +208,7 @@ class V3WorkspaceSnapshotBuilder:
                     ),
                     "deadline_stage": str(
                         candidate.get("deadline_stage")
-                        or "execute_content_plan"
+                        or "chapter_writing"
                     ),
                     "query_budget": int(candidate.get("query_budget") or 5),
                 }
@@ -1378,7 +1378,7 @@ class V3WorkspaceSnapshotBuilder:
                     )
                     if isinstance(item, dict)
                 ]
-        elif normalized == "execute_content_plan":
+        elif normalized == "chapter_writing":
             content = generation.get("content") or {}
             research = generation.get("research") or {}
             details = {
