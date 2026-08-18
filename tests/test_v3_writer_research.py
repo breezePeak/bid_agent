@@ -32,7 +32,7 @@ class _Provider:
             ResearchCandidate(
                 title="实施指南",
                 publisher="example.gov.cn",
-                content="公开实施方法",
+                content="公开实施方法应建立全过程记录并形成可核验结果",
                 source_url="https://example.gov.cn/guide",
             )
         ]

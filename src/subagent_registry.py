@@ -49,41 +49,6 @@ CHAPTER_CONTEXT_SELECTOR = SubagentSpec(
 )
 
 
-CHAPTER_WRITER = SubagentSpec(
-    name="chapter_writer",
-    label="章节写作子 Agent",
-    description=(
-        "章节写作子 agent 蓝图（注册表只存 1 种类型）。运行时由 subagent_runner.run_write_all / "
-        "run_rewrite_all 将章节任务投入 worker 池，经 ThreadPoolExecutor 并发执行"
-        "（上限 BID_AGENT_WORKERS_MAX，默认 BID_AGENT_WORKERS_DEFAULT），"
-        "每个 worker 依次领取章节并 invoke chapter_subgraph（加载已选上下文→写作→自检）。"
-        "write 模式对应初写（write-all），rewrite 模式带审核反馈改稿（复用同一蓝图的文件上下文，"
-        "即 continue 模式）。"
-    ),
-    command="write-all",
-    instantiation="per-chapter",
-    concurrency=_chapter_concurrency(),
-    modes=("write", "rewrite"),
-    worker_module="agents.chapter_writer_agent",
-)
-
-CHAPTER_REVIEWER = SubagentSpec(
-    name="chapter_reviewer",
-    label="章节审核子 Agent",
-    description=(
-        "章节审核子 agent 蓝图。固定 worker 池并发审核"
-        "（上限 BID_AGENT_WORKERS_MAX，默认 BID_AGENT_WORKERS_DEFAULT），"
-        "fresh——与写作子 agent 不同实例，避免写作偏见。"
-        "worker 为 review_chapter，只读，产出 workspace/reviews/*_review.json。"
-        "对应并发调度 subagent_runner.run_review_all。"
-    ),
-    command="review-fix-all",
-    instantiation="per-chapter",
-    concurrency=_chapter_concurrency(),
-    modes=("review",),
-    worker_module="agents.chapter_review_agent",
-)
-
 GLOBAL_REVIEWER = SubagentSpec(
     name="global_reviewer",
     label="全文审核子 Agent",
@@ -101,8 +66,6 @@ GLOBAL_REVIEWER = SubagentSpec(
 
 _SUBAGENTS: tuple[SubagentSpec, ...] = (
     CHAPTER_CONTEXT_SELECTOR,
-    CHAPTER_WRITER,
-    CHAPTER_REVIEWER,
     GLOBAL_REVIEWER,
 )
 _SUBAGENT_BY_NAME: dict[str, SubagentSpec] = {s.name: s for s in _SUBAGENTS}
@@ -149,8 +112,6 @@ _STAGE_DESCRIPTIONS: dict[str, str] = {
     "generate_outline": "基于评分点和事实生成标书大纲。",
     "plan_chapter_jobs": "将大纲拆解为章节任务包。",
     "select_contexts": "主 Agent 派发章节上下文选择子 agent，并发生成上下文且支持断点续跑。",
-    "write_chapters": "派发给多个章节写作子 agent 并发生成章节。",
-    "review_fix_chapters": "派发给多个章节审核子 agent 并发审核，需要时由写作子 agent 改稿。",
     "build_source_trace_index": "生成来源追溯索引。",
     "build_score_coverage_matrix": "生成评分覆盖矩阵。",
     "estimate_final_score": "按覆盖档位估算终稿得分与失分项。",

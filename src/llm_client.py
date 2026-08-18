@@ -29,7 +29,6 @@ _CHAPTER_AGENT_MODULES = {
     "chapter_research_planner",
     "chapter_reviewer",
     "chapter_summarizer",
-    "chapter_writer",
     "content_grounding",
     "content_writer",
     "document_outline_context",

@@ -230,13 +230,6 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
     else:
         add(_check("workspace/contexts ranked", "warn", "workspace/contexts 下无 *_ranked_chunks.json 文件", "请执行 select-context-all 以生成 chunk-ranker 结果"))
 
-    # 25. workspace/chapters 下 md 文件
-    chapters_dir = root / "workspace" / "chapters"
-    if chapters_dir.exists() and list(chapters_dir.glob("*.md")):
-        add(_check("workspace/chapters", "ok", "chapters 目录下存在章节文件"))
-    else:
-        add(_check("workspace/chapters", "warn", "workspace/chapters 下无 md 文件", "请执行 write-all"))
-
     # 25b. workspace/summaries 目录
     summaries_dir = root / "workspace" / "summaries"
     if summaries_dir.exists() and list(summaries_dir.glob("*_summary.json")):
@@ -297,13 +290,6 @@ def validate_project(root: Path | None = None) -> dict[str, Any]:
             add(_check("compliance review", "warn", f"compliance_report.json 读取失败: {exc}", "请重新执行 compliance-check"))
     else:
         add(_check("workspace/compliance_report.json", "warn", "compliance_report.json 不存在", "请执行 compliance-check"))
-
-    # 25f. workspace/rewrites 目录
-    rewrites_dir = root / "workspace" / "rewrites"
-    if rewrites_dir.exists() and list(rewrites_dir.glob("*_rewrite_log.json")):
-        add(_check("workspace/rewrites", "ok", "rewrites 目录下存在重写日志"))
-    else:
-        add(_check("workspace/rewrites", "warn", "workspace/rewrites 下无 *_rewrite_log.json 文件", "请执行 review-fix-all 以生成改稿日志"))
 
     # 25g. workspace/template_schema.json
     template_schema_path = root / "workspace" / "template_schema.json"

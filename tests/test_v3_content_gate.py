@@ -103,43 +103,6 @@ def _condition_bundle() -> WriterInputBundle:
     )
 
 
-class ContentWriterJsonParseTests(unittest.TestCase):
-    def test_accepts_raw_newlines_inside_content_string(self) -> None:
-        raw = (
-            '前言\n'
-            '{\n'
-            '  "content": "第一段\n第二段",\n'
-            '  "used_evidence_ids": ["ev-1"]\n'
-            '}\n'
-        )
-        decoded = ContentWriter._parse_writer_json(raw)
-        self.assertEqual(decoded["content"], "第一段\n第二段")
-        self.assertEqual(decoded["used_evidence_ids"], ["ev-1"])
-
-    def test_repairs_trailing_commas_and_smart_quotes(self) -> None:
-        raw = (
-            "{\n"
-            '  “content”: “意见建议正文”,\n'
-            '  “used_evidence_ids”: [],\n'
-            "}\n"
-        )
-        decoded = ContentWriter._parse_writer_json(raw)
-        self.assertEqual(decoded["content"], "意见建议正文")
-
-    def test_salvages_content_when_json_is_severely_broken(self) -> None:
-        raw = (
-            '说明文字\n'
-            '{\n'
-            '  "content": "第一段\n第二段仍应保留",\n'
-            '  "used_evidence_ids": ["ev-9",]\n'
-            # Missing closing brace on purpose.
-        )
-        decoded = ContentWriter._parse_writer_json(raw)
-        self.assertIn("第一段", decoded["content"])
-        self.assertIn("第二段仍应保留", decoded["content"])
-        self.assertEqual(decoded["used_evidence_ids"], ["ev-9"])
-
-
 class WriterBundleContentGateTests(unittest.TestCase):
     def test_quality_gate_does_not_require_every_generic_writing_dimension(self) -> None:
         content = (
@@ -554,8 +517,8 @@ class WriterBundleContentGateTests(unittest.TestCase):
             [block.claim_ids for block in blocks],
             [["SP-1-C-content", "SP-1-C-evidence"]],
         )
-        self.assertIn("实施方法", blocks[0].content)
-        self.assertIn("案例合同", blocks[0].content)
+        self.assertIn("实施步骤", blocks[0].content)
+        self.assertIn("提供项目案例证明", blocks[0].content)
         self.assertNotIn("满分条件", blocks[0].content)
         self.assertEqual(
             [block.requirement_ids for block in blocks],

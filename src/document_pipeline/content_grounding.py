@@ -7,7 +7,6 @@ draft may be persisted.
 
 from __future__ import annotations
 
-import os
 import json
 import re
 from dataclasses import dataclass, field
@@ -17,26 +16,11 @@ from control_plane import ControlPlaneError
 
 
 GROUNDING_POLICY_VERSION = "v3.global-project-context.v2"
-PROJECT_IDENTITY_GATE_ENV = "BID_AGENT_PROJECT_IDENTITY_GATE"
-
-_BACKGROUND_CUES = re.compile(r"项目.*背景|任务.*背景|项目概况|现状|必要性")
-_PROJECT_OVERVIEW_CUES = re.compile(
-    r"项目.*背景|任务.*背景|项目概况|任务概况|项目简介"
+_GROUNDING_FACT_FIELDS = (
+    "background", "goals", "scope", "work_packages", "inputs",
+    "processing", "outputs", "deliverables", "acceptance_conditions",
+    "constraints", "risks", "roles",
 )
-_GOAL_SCOPE_CUES = re.compile(r"目标|范围|工作内容|任务内容|成果|交付|验收")
-_QUALITY_CUES = re.compile(r"质量|检查|核查|复核|验收|测试")
-_ENTERPRISE_CUES = re.compile(r"资质|资格|人员|团队|业绩|案例|证书|社保|报价")
-_PROJECT_SUFFIX = re.compile(r"(?:采购|招标)?项目$")
-
-
-def _project_identity_gate_enabled() -> bool:
-    """Emergency switch for the project-overview identity requirement."""
-    return str(os.environ.get(PROJECT_IDENTITY_GATE_ENV, "1")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 def _compact(value: Any) -> str:
@@ -331,64 +315,8 @@ def _goal_alignment_review(
 
 
 def _chapter_profile(chapter: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    raw = " ".join(
-        str(value or "")
-        for value in (
-            chapter.get("title"),
-            node.get("purpose"),
-            " ".join(str(item) for item in node.get("writing_objectives") or []),
-        )
-    )
-    if _ENTERPRISE_CUES.search(raw):
-        return "enterprise_response", ("constraints", "work_packages")
-    if _BACKGROUND_CUES.search(raw):
-        return "project_background", ("background",)
-    if _QUALITY_CUES.search(raw):
-        return "quality_acceptance", (
-            "scope", "work_packages", "processing", "outputs",
-            "acceptance_conditions", "constraints",
-        )
-    if _GOAL_SCOPE_CUES.search(raw):
-        return "goal_scope_delivery", (
-            "goals", "scope", "work_packages", "deliverables",
-            "acceptance_conditions",
-        )
-    return "technical_solution", (
-        "scope", "work_packages", "inputs", "processing", "outputs",
-        "deliverables", "constraints", "risks",
-    )
-
-
-def chapter_opening_policy(chapter: dict[str, Any]) -> dict[str, str]:
-    """Return the opening rule for one chapter without forcing a shared preamble."""
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    title = str(chapter.get("title") or node.get("title") or "当前章节").strip()
-    raw = " ".join(
-        str(value or "")
-        for value in (
-            title,
-            node.get("purpose"),
-        )
-    )
-    if _PROJECT_OVERVIEW_CUES.search(raw):
-        return {
-            "mode": "project_overview",
-            "instruction": (
-                "首段直接响应 Blueprint 原始章节目的；不得因本章属于背景类章节就自动补写"
-                "采购人安排、任务范围、实施流程、人员或成果清单。"
-            ),
-        }
-    return {
-        "mode": "chapter_focus",
-        "instruction": (
-            f"首段直接切入“{title}”的核心内容；不要复述项目概况、覆盖区域、"
-            "总体任务清单等其他子章节已经承担的公共背景。项目事实只在支撑本章论述时"
-            "就地引用，避免使用可复制到任意章节的统一前言。"
-        ),
-    }
+    """Return one title-independent profile for every chapter."""
+    return "goal_driven", _GROUNDING_FACT_FIELDS
 
 
 @dataclass
@@ -489,30 +417,6 @@ class ContentGroundingGate:
             for item in re.split(r"\n\s*\n", body)
             if item.strip()
         ]
-        opening = "\n".join(paragraphs[:2]) if paragraphs else body
-        compact_name = _compact(project_name)
-        short_name = _PROJECT_SUFFIX.sub("", compact_name)
-        opening_policy = chapter_opening_policy(chapter)
-        identity_scope = (
-            opening
-            if opening_policy["mode"] == "project_overview"
-            else body
-        )
-        identity_used = bool(
-            compact_name in _compact(identity_scope)
-            or (len(short_name) >= 8 and short_name in _compact(identity_scope))
-            or (
-                "本项目" in identity_scope
-                and any(
-                    _supported(item, identity_scope)
-                    for item in (
-                        _as_texts(global_context.get("scope"))
-                        + _as_texts(global_context.get("work_packages"))
-                    )
-                )
-            )
-        )
-
         matched_fields: dict[str, list[str]] = {}
         for field_name in relevant_fields:
             matches = [
@@ -580,18 +484,8 @@ class ContentGroundingGate:
         semantic_review: dict[str, Any] = {}
         specificity_missing_before_semantic = not matched_fields and not matched_requirements
         semantic_needed = bool(
-            (
-                (not matched_fields and not matched_requirements)
-                and not (
-                    opening_policy["mode"] == "project_overview"
-                    and not identity_used
-                )
-            )
+            (not matched_fields and not matched_requirements)
             or (requirements and not matched_requirements)
-            or (
-                opening_policy["mode"] == "project_overview"
-                and not any(key in matched_fields for key in ("background", "scope", "work_packages"))
-            )
             or (require_evidence_use and evidence_rows and not used_evidence_ids)
         )
         if semantic_needed:
@@ -622,21 +516,6 @@ class ContentGroundingGate:
             )
 
         findings: list[GroundingFinding] = []
-        identity_required = (
-            opening_policy["mode"] == "project_overview"
-            and _project_identity_gate_enabled()
-        )
-        if identity_required and not identity_used:
-            findings.append(
-                GroundingFinding(
-                    "PROJECT_IDENTITY_MISSING",
-                    (
-                        "项目背景章节开篇没有说明当前招标项目及其具体任务。"
-                        if opening_policy["mode"] == "project_overview"
-                        else "正文没有结合当前招标项目及其具体任务。"
-                    ),
-                )
-            )
         semantic_conflict = semantic_review.get("verdict") == "conflict"
         semantic_relevance_failed = bool(
             semantic_review
@@ -692,16 +571,6 @@ class ContentGroundingGate:
                     {"evidence_count": len(evidence_rows)},
                 )
             )
-        if profile == "project_background" and not any(
-            key in matched_fields for key in ("background",)
-        ):
-            findings.append(
-                GroundingFinding(
-                    "PROJECT_BACKGROUND_MISSING",
-                    "项目背景章节没有使用与原始 GOAL 直接相关的项目背景事实。",
-                )
-            )
-
         goal_alignment = _goal_alignment_review(
             chapter=chapter,
             content=body,
@@ -833,9 +702,6 @@ class ContentGroundingGate:
             "chapter_context_hash": chapter_context_hash,
             "chapter_id": str(chapter.get("chapter_id") or ""),
             "chapter_profile": profile,
-            "identity_required": identity_required,
-            "identity_used": identity_used,
-            "project_identity_gate_enabled": _project_identity_gate_enabled(),
             "relevance_method": "semantic" if semantic_review else "lexical",
             "semantic_review": semantic_review,
             "goal_alignment": goal_alignment,

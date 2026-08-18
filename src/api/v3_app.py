@@ -1514,11 +1514,9 @@ def _ndjson_event(event_type: str, **payload: Any) -> bytes:
 
 _GROUNDING_REPAIRABLE_CODES = frozenset(
     {
-        "PROJECT_IDENTITY_MISSING",
         "PROJECT_SPECIFICITY_MISSING",
         "CHAPTER_REQUIREMENT_MISSING",
         "PUBLIC_EVIDENCE_NOT_USED",
-        "PROJECT_BACKGROUND_MISSING",
     }
 )
 
@@ -1532,51 +1530,30 @@ def _chapter_repair_messages(
     tender_requirements: list[dict[str, Any]],
     scoring_requirements: list[dict[str, Any]],
 ) -> list[dict[str, str]]:
-    """Build one bounded repair request without turning the chapter into a preamble."""
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    title = str(chapter.get("title") or node.get("title") or "当前章节")
-    from document_pipeline.content_grounding import chapter_opening_policy
+    """Compile repair through the same chapter-writing kernel as first drafts."""
+    from document_pipeline.chapter_writing_kernel import (
+        ChapterWritingRequest,
+        compile_chapter_writing_messages,
+        compile_chapter_writing_spec,
+    )
 
-    opening_policy = chapter_opening_policy(chapter)
-    project_facts = [
-        {
-            "fact_id": str(item.get("fact_id") or ""),
-            "statement": str(item.get("statement") or ""),
-        }
-        for item in project_context.get("confirmed_facts") or []
-        if isinstance(item, dict) and str(item.get("statement") or "").strip()
-    ][:12]
-    requirements = [
-        str(item.get("text") or item.get("normalized_requirement") or item.get("statement") or "")
-        for item in [*(tender_requirements or []), *(scoring_requirements or [])]
-        if isinstance(item, dict)
-    ]
-    payload = {
-        "chapter_title": title,
-        "chapter_purpose": str(node.get("purpose") or ""),
-        "writing_objectives": list(node.get("writing_objectives") or []),
-        "opening_policy": opening_policy,
-        "current_draft": content,
-        "grounding_findings": grounding_details,
-        "project_facts": project_facts,
-        "requirements": [item for item in requirements if item][:16],
-    }
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你是技术标书正文修复器。Blueprint 原始 purpose 与 writing_objectives 是唯一"
-                "章节目标，不得改写或扩展。只修复当前章节项目关联不足的问题，保留原文中"
-                "已经正确的结构、步骤和技术内容。只能使用输入提供的项目事实。"
-                "普通技术章节不得机械添加项目全称、统一项目总述或‘本项目’套话；"
-                "只可使用与原始目标直接相关的候选事实；未提供相关事实时宁可少写，不得自动补齐"
-                "范围、输入、处理、输出、人员、交付物或验收口径。"
-                "只输出修复后的完整正文，不要解释修改过程，不要输出 JSON 或 Markdown 代码围栏。"
-            ),
-        },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
+    errors = [
+        json.dumps(grounding_details, ensure_ascii=False, sort_keys=True)
+    ] if grounding_details else []
+    spec = compile_chapter_writing_spec(
+        ChapterWritingRequest(
+            chapter_id=str(chapter.get("chapter_id") or ""),
+            operation="repair",
+            existing_content=str(content or ""),
+            validation_errors=tuple(errors),
+            chapter=chapter,
+            tender_requirements=tuple(tender_requirements or []),
+            scoring_requirements=tuple(scoring_requirements or []),
+            project_context=project_context,
+            chapter_context={"grounding_findings": dict(grounding_details or {})},
+        )
+    )
+    return compile_chapter_writing_messages(spec)
 
 
 def _chapter_draft_messages(
@@ -1595,164 +1572,46 @@ def _chapter_draft_messages(
     research_trace: list[dict[str, Any]] | None = None,
     chat_history: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, str]]:
-    from document_pipeline.content_grounding import chapter_opening_policy
-    from document_pipeline.document_outline_context import (
-        compact_outline_for_prompt,
-        compact_sibling_for_prompt,
+    from document_pipeline.chapter_writing_kernel import (
+        ChapterWritingRequest,
+        compile_chapter_writing_messages,
+        compile_chapter_writing_spec,
     )
-    from document_pipeline.sibling_chapter_context import _chapter_role
-    from document_pipeline.writing_orientation import compact_orientation_for_prompt
-    from document_pipeline.chapter_writing_outline import compile_chapter_writing_outline
 
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    chapter_context = chapter.get("context")
-    chapter_context = chapter_context if isinstance(chapter_context, dict) else {}
-    context_items = [
-        {
-            "kind": str(item.get("kind") or ""),
-            "title": str(item.get("title") or ""),
-            "body": str(item.get("body") or ""),
-            "source": str(item.get("source") or ""),
-        }
-        for item in (chapter_context.get("items") or [])
+    chapter_record = chapter.get("context")
+    chapter_record = chapter_record if isinstance(chapter_record, dict) else {}
+    existing_content = "\n\n".join(
+        str(item.get("content") or item.get("text") or item.get("body") or "").strip()
+        for item in ((chapter.get("content") or {}).get("blocks") or [])
         if isinstance(item, dict)
-    ]
-    sibling_payload = compact_sibling_for_prompt(dict(sibling_context or {}))
-    outline_payload = compact_outline_for_prompt(dict(outline_context or {}))
-    orientation_payload = compact_orientation_for_prompt(writing_orientation)
-    orientation_purpose = orientation_payload.get("writing_purpose")
-    orientation_purpose = orientation_purpose if isinstance(orientation_purpose, dict) else {}
-    orientation_payload["writing_purpose"] = {
-        **orientation_purpose,
-        "purpose": str(node.get("purpose") or ""),
-        "writing_objectives": list(node.get("writing_objectives") or []),
-    }
-    writing_outline = compile_chapter_writing_outline(
-        chapter,
-        tender_requirements=tender_requirements,
-        scoring_requirements=scoring_requirements,
-        writing_orientation=orientation_payload,
-        chapter_context_items=context_items,
+        and str(item.get("content") or item.get("text") or item.get("body") or "").strip()
     )
-    inspected = list(inspected_chapters or [])
-    title = str(chapter.get("title") or node.get("title") or "")
-    purpose = str(node.get("purpose") or "")
-    chapter_role = str(
-        (orientation_payload.get("writing_purpose") or {}).get("role")
-        or outline_payload.get("current_role")
-        or sibling_payload.get("chapter_role")
-        or _chapter_role(title, purpose)
-    )
-    is_visual = chapter_role == "visual"
-    writing_input = {
-        "chapter_id": str(chapter.get("chapter_id") or ""),
-        "chapter_title": title,
-        "purpose": purpose,
-        "writing_objectives": list(node.get("writing_objectives") or []),
-        "content_format": "technical_roadmap_diagram" if is_visual else "prose",
-        "tender_requirements": list(tender_requirements or []),
-        "scoring_requirements": list(scoring_requirements or []),
-        "chapter_context": context_items,
-        "global_project_context": dict(project_context or {}),
-        "chapter_grounding_context": dict(chapter_grounding_context or {}),
-        "writing_orientation": orientation_payload,
-        "writing_outline": writing_outline,
-        # Titles-first outline; peer bodies only appear in inspected_chapters.
-        "document_outline_context": outline_payload,
-        "sibling_chapter_context": sibling_payload,
-        "inspected_chapters": inspected,
-        "user_instruction": instruction,
-        "recent_chapter_dialogue": [
-            {
-                "role": str(item.get("role") or ""),
-                "content": str(item.get("content") or ""),
-            }
-            for item in list(chat_history or [])[-12:]
-            if isinstance(item, dict) and str(item.get("content") or "").strip()
-        ],
-        "verified_public_sources": list(research_sources or []),
-        "public_research_trace": list(research_trace or []),
-        "opening_policy": chapter_opening_policy(chapter),
-    }
-    structure_rules = ""
-    policy = (
-        (outline_payload.get("writing_policy") if isinstance(outline_payload, dict) else None)
-        or (sibling_payload.get("writing_policy") if isinstance(sibling_payload, dict) else None)
-    )
-    if isinstance(policy, dict):
-        rules = [str(item).strip() for item in (policy.get("rules") or []) if str(item).strip()]
-        guidance = str(policy.get("guidance") or "").strip()
-        if rules or guidance:
-            structure_rules = (
-                "目录处境约束："
-                + "；".join(rules)
-                + (f"。补充说明：{guidance}" if guidance else "")
-                + "。"
-            )
-    orientation_rules = (
-        "必须先按 writing_orientation 确认：本章写作目的、在整份标书中的目录位置、"
-        "以及与其他章节的关系；只完成本章职责，不要越权写他章主责。"
-        "必须按 writing_outline.blocks 的顺序写正文，一块至少一段；"
-        "每段按对应 block 的 write_as 直接回答 must_answer；"
-        "只有 outcome_kind=deliverable 或 acceptance 的 block，才能写招标文件明确要求的"
-        "交付成果或验收内容，其他 block 不得机械添加“本章交付物”。"
-        "不要输出提纲小标题本身，不要出现“满分条件、得分点、评分要求、本节用于”等词。"
-        "supporting 块只点到为止，不要写成他章主责的完整方案。"
-    )
-    if is_visual:
-        system = (
-            "你是技术标书中的「技术路线图/流程图」撰写器，不是普通论述写作器。"
-            "本章 content_format=technical_roadmap_diagram：输出必须以图示结构为主，"
-            "禁止写成总体技术路线或关键技术方法的长文复述。"
-            + orientation_rules
-            + "固定输出顺序（不要输出章节标题本身）："
-            "1) 一句话图题（说明本图展示什么阶段/节点关系）；"
-            "2) 用 Mermaid flowchart 或清晰 ASCII/文本流程图画出阶段、先后/并行、"
-            "关键质控节点与主要输入输出（节点命名对齐已 inspect 的上游总体技术路线骨架）；"
-            "3) 图注不超过 5 条短要点（每条一行，只解释读图，不展开方法细则）。"
-            "不得虚构企业资质、业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，"
-            "不要使用 Markdown 代码围栏包裹全文（Mermaid 代码块本身除外）。"
-            "若提供已核验公开资料，仅可补充通用阶段命名或质控节点习惯，不得改写项目事实。"
-            "document_outline_context 默认只有目录标题树；只有 inspected_chapters 才有他章只读详情。"
-            "不得修改或搬空其他章节主责内容。"
-            + structure_rules
+    operation = "rewrite" if existing_content else "create"
+    spec = compile_chapter_writing_spec(
+        ChapterWritingRequest(
+            chapter_id=str(chapter.get("chapter_id") or ""),
+            operation=operation,
+            user_instruction=str(instruction or ""),
+            existing_content=existing_content,
+            chapter=chapter,
+            tender_requirements=tuple(tender_requirements or []),
+            scoring_requirements=tuple(scoring_requirements or []),
+            project_context=dict(project_context or {}),
+            chapter_context={
+                **dict(chapter_grounding_context or {}),
+                "items": list(chapter_record.get("items") or []),
+                "writing_orientation": dict(writing_orientation or {}),
+                "document_outline_context": dict(outline_context or {}),
+                "sibling_chapter_context": dict(sibling_context or {}),
+                "inspected_chapters": list(inspected_chapters or []),
+                "verified_public_sources": list(research_sources or []),
+                "public_research_trace": list(research_trace or []),
+            },
+            history=tuple(chat_history or []),
+            writing_orientation=dict(writing_orientation or {}),
         )
-    else:
-        system = (
-            "你是技术标书正文写作器。请直接撰写当前章节的完整中文正文。"
-            + orientation_rules
-            + "Blueprint 原始 purpose 与 writing_objectives 是唯一章节目标，必须按输入原文执行，"
-            "不得分类、改写、扩展或生成派生目标；评分条件只能补充 must_answer，不能改变章节目的。"
-            "输入中的项目事实、招标要求、"
-            "公开资料和他章摘要只是证据池，不是必须逐项写入的内容清单；与本章目标无直接关系"
-            "的材料必须忽略。"
-            + "内容必须具体、专业，并符合当前章节体裁；只使用输入中提供的事实，不得虚构企业资质、"
-            "业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，不要使用 Markdown"
-            "代码围栏，也不要输出章节标题；只输出可直接保存的正文。若提供了“已核验公开资料”，"
-            "只能依据其中的原文摘要归纳政策、标准或通用方法；资料不足时使用条件化表述，"
-            "不得把公开资料推断成项目或投标人的既有事实。项目背景、任务范围、建设目标、"
-            "标记为同类项目资料或行业标准的来源只能支持方法、质量、风险和验收思路，"
-            "不得改写当前项目的采购人、范围、任务或成果。"
-            "项目事实只是候选证据，不是正文清单；筛选结果为空时不得自行补齐 scope、"
-            "work_packages、constraints、采购人安排、人员或流程。"
-            "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
-            "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
-            "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
-            "document_outline_context 默认只有目录标题与状态；"
-            "只有 inspected_chapters 中的章节才提供只读详情。"
-            "可据此判断处境与交叉引用，但不得改写或整段复制其他章节主责正文。"
-            "recent_chapter_dialogue 是本章最近对话：用户最新的明确要求优先；其中 assistant 的旧回复"
-            "不是事实依据，也不能据此声称正文已完成。"
-            + structure_rules
-        )
-    return [
-        {"role": "system", "content": system},
-        {
-            "role": "user",
-            "content": json.dumps(writing_input, ensure_ascii=False),
-        },
-    ]
+    )
+    return compile_chapter_writing_messages(spec)
 
 
 def _chapter_research_question(

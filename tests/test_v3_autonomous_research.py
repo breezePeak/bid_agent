@@ -18,7 +18,6 @@ from document_pipeline.autonomous_research import (  # noqa: E402
     PlannedResearchNeed,
 )
 from document_pipeline.contracts import EvidenceNeed, EvidenceSourceType  # noqa: E402
-from document_pipeline.content_writer import ContentWriter  # noqa: E402
 from document_pipeline.pipeline_policy import validation_policy_scope  # noqa: E402
 from document_pipeline.research_service import ResearchCandidate  # noqa: E402
 from document_pipeline.writer_bundle import WriterInputBundleAssembler  # noqa: E402
@@ -262,9 +261,6 @@ class AutonomousResearchTests(unittest.TestCase):
                 "https://example.gov.cn/guide",
             )
             self.assertTrue(snapshot[0]["evidence_ids"])
-            clause = ContentWriter._research_clause(snapshot)
-            self.assertIn("公开实施指南", clause)
-            self.assertNotIn("https://example.gov.cn/guide", clause)
 
     def test_retries_failed_and_gap_three_times_then_continues_with_warning(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

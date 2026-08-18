@@ -29,7 +29,6 @@ CLOSED_OVERRIDE_STATUSES = {"accepted", "resolved", "dismissed", "confirmed"}
 REPLAY_STAGE_BY_CATEGORY = {
     "template_evidence": "select_contexts",
     "score_coverage": "plan_chapter_jobs",
-    "chapter_review": "write_chapters",
     "global_review": "global_review",
 }
 

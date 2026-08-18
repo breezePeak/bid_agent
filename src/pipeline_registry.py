@@ -232,36 +232,6 @@ STAGE_SPECS: tuple[StageSpec, ...] = (
         validator="collection",
     ),
     StageSpec(
-        id="write_chapters",
-        label="生成章节",
-        command="write-all",
-        kind="core",
-        requires=(
-            _artifact("workspace/contexts/*_context.json", kind="glob"),
-            _artifact("inputs/writing_brief.md", required_nonempty=False),
-        ),
-        produces=(_artifact("workspace/chapters/*.md", kind="glob"),),
-        runner="chapter_writer.write_all",
-        max_context_chars=16000,
-        max_chunks=16,
-        prompt_agents=("chapter_writer",),
-        validator="collection",
-    ),
-    StageSpec(
-        id="review_fix_chapters",
-        label="审核改稿",
-        command="review-fix-all",
-        kind="core",
-        requires=(_artifact("workspace/chapters/*.md", kind="glob"),),
-        produces=(
-            _artifact("workspace/reviews/*_review.json", kind="glob"),
-            _artifact("workspace/rewrites/*_rewrite_log.json", kind="glob", required_nonempty=False),
-        ),
-        runner="chapter_rewriter.review_fix_all",
-        prompt_agents=("chapter_reviewer", "chapter_rewriter"),
-        validator="collection",
-    ),
-    StageSpec(
         id="build_source_trace_index",
         label="生成来源追溯",
         command="build-source-trace",
@@ -402,9 +372,8 @@ def chapter_review_enabled() -> bool:
 
 
 def workflow_stage_specs(include_utility: bool = True) -> list[StageSpec]:
-    # Chapter generation owns its self-check/rewrite loop.  Keep the standalone
-    # review stage available for explicit manual re-review, but never schedule
-    # it again in the normal pipeline.
+    # Chapter generation is owned by the V3 writing kernel.  The legacy
+    # write/rewrite stages are intentionally absent from this registry.
     review_enabled = chapter_review_enabled()
     # 摘要仅供审核链压缩上下文；关闭审核后不再调用模型生成摘要，
     # 避免一个已关闭的审核辅助阶段反过来中断正常出稿。
@@ -417,7 +386,6 @@ def workflow_stage_specs(include_utility: bool = True) -> list[StageSpec]:
         _stage_for_current_review_policy(stage)
         for stage in STAGE_SPECS
         if stage.auto_run
-        and stage.id != "review_fix_chapters"
         and (review_enabled or stage.id not in draft_optional_stages)
     ]
     if include_utility:

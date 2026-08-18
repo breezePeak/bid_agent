@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Callable
 
 from .sibling_chapter_context import _chapter_role
 from .writing_orientation import compact_orientation_for_prompt
@@ -322,6 +322,7 @@ def plan_chapter_research(
     scoring_requirements: list[dict[str, Any]] | None = None,
     instruction: str = "",
     force_research: bool = False,
+    decision_provider: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
     """Confirm orientation, then decide search from existing materials.
 
@@ -339,7 +340,11 @@ def plan_chapter_research(
         scoring_requirements=scoring_requirements,
         instruction=instruction,
     )
-    decision = _model_decide(brief)
+    decision = (
+        decision_provider(brief)
+        if decision_provider is not None
+        else _model_decide(brief)
+    )
     if decision is None:
         if force_research:
             query = _fallback_search_query(brief)

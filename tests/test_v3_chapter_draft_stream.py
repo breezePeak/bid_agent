@@ -132,7 +132,7 @@ class V3ChapterDraftStreamTests(TestCase):
             "paragraph_fact_bindings": {},
         }
 
-    def test_draft_prompt_assigns_chapter_specific_opening_policy(self):
+    def test_draft_prompt_uses_same_kernel_for_different_titles(self):
         background_goal = "交代项目任务所处背景、现实情境及任务由来，帮助评审理解项目实施基础。"
         background_objective = "清楚说明项目任务背景及任务由来。"
         background_messages = v3_app._chapter_draft_messages(
@@ -163,17 +163,11 @@ class V3ChapterDraftStreamTests(TestCase):
         background_payload = json.loads(background_messages[1]["content"])
         goal_payload = json.loads(goal_messages[1]["content"])
         diagram_payload = json.loads(diagram_messages[1]["content"])
-        self.assertEqual(
-            background_payload["opening_policy"]["mode"],
-            "project_overview",
-        )
-        self.assertEqual(goal_payload["opening_policy"]["mode"], "chapter_focus")
-        self.assertIn("禁止在多个子章节套用同一段", goal_messages[0]["content"])
-        self.assertEqual(diagram_payload["content_format"], "technical_roadmap_diagram")
-        self.assertIn("技术路线图/流程图", diagram_messages[0]["content"])
-        self.assertIn("Mermaid", diagram_messages[0]["content"])
-        self.assertIn("writing_outline.blocks", background_messages[0]["content"])
-        self.assertIn("唯一章节目标", background_messages[0]["content"])
+        self.assertEqual(background_messages[0], goal_messages[0])
+        self.assertEqual(background_messages[0], diagram_messages[0])
+        self.assertNotIn("opening_policy", background_payload)
+        self.assertNotIn("content_format", diagram_payload)
+        self.assertIn("writing blocks", background_messages[0]["content"])
         self.assertNotIn("chapter_intent", background_messages[0]["content"])
         self.assertNotIn("chapter_intent", background_payload)
         self.assertNotIn("chapter_intent", goal_payload)
@@ -193,8 +187,10 @@ class V3ChapterDraftStreamTests(TestCase):
         )
         payload = json.loads(messages[1]["content"])
         self.assertEqual(payload["user_instruction"], "重新理解本章需求后重写。")
-        self.assertEqual(len(payload["recent_chapter_dialogue"]), 3)
-        self.assertIn("assistant 的旧回复不是事实依据", messages[0]["content"])
+        self.assertEqual(len(payload["history"]), 3)
+        assistant = next(item for item in payload["history"] if item["role"] == "assistant")
+        self.assertEqual(assistant["authority"], "non_authoritative")
+        self.assertFalse(assistant["is_fact_source"])
 
     def test_research_gap_keeps_rejected_candidate_links_for_user_review(self):
         rows = v3_app._research_candidate_rows([
@@ -503,9 +499,10 @@ class V3ChapterDraftStreamTests(TestCase):
 
             def chunks(messages, **_kwargs):
                 payload = json.loads(messages[1]["content"])
-                self.assertEqual(payload["verified_public_sources"][0]["source_url"], "https://std.samr.gov.cn/example")
-                self.assertEqual(payload["global_project_context"]["identity"]["project_name"], "城市地下管网普查项目")
-                self.assertIn("项目背景、任务范围", messages[0]["content"])
+                sources = payload["chapter_context"]["verified_public_sources"]
+                self.assertEqual(sources[0]["source_url"], "https://std.samr.gov.cn/example")
+                self.assertEqual(payload["project_context"]["identity"]["project_name"], "城市地下管网普查项目")
+                self.assertIn("single chapter-writing engine", messages[0]["content"])
                 yield "content", "依据现行标准建立全过程质量控制机制。"
 
             with (

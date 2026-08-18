@@ -765,6 +765,22 @@ class ChapterChatService:
         except Exception:
             writing_outline = {}
 
+        # Project global context through the chapter's compiled purpose and
+        # blocks before exposing it to the model.  This is deliberately
+        # content-driven: chapter titles never choose a fact set.
+        shared_facts = _project_shared_facts(
+            shared_facts,
+            purpose=str(
+                (orientation_for_agent.get("writing_purpose") or {}).get("purpose")
+                or node.get("purpose")
+                or node.get("response_purpose")
+                or ""
+            ),
+            outline=writing_outline,
+            tender_requirements=tender_requirements,
+            scoring_requirements=scoring_requirements,
+        )
+
         return {
             "chapter_id": str(chapter.get("chapter_id") or ""),
             "title": str(chapter.get("title") or node.get("title") or ""),
@@ -796,6 +812,9 @@ class ChapterChatService:
             "formal_content_revision": int(chapter.get("formal_content_revision") or 0),
         }
 
+    # Non-streaming callers consume the exact same event producer as the
+    # streaming endpoint.  Keep this adapter next to the producer so phase,
+    # research, delegation and fallback behavior cannot drift.
     def answer(
         self,
         chapter_id: str,
@@ -809,112 +828,40 @@ class ChapterChatService:
         outline_context: dict[str, Any] | None = None,
         writing_orientation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        text = str(message or "").strip()
-        if not text:
-            raise ControlPlaneError(
-                "CHAT_MESSAGE_REQUIRED",
-                "请输入要处理的问题。",
-                status_code=400,
+        events = list(
+            self.iter_answer_events(
+                chapter_id,
+                message,
+                chapter=chapter,
+                global_project_context=global_project_context,
+                tender_requirements=tender_requirements,
+                scoring_requirements=scoring_requirements,
+                sibling_context=sibling_context,
+                outline_context=outline_context,
+                writing_orientation=writing_orientation,
             )
-
-        history = self.load_history(chapter_id, limit=PROMPT_HISTORY_TAIL)
-        chat_context = self.build_chapter_chat_context(
-            chapter,
-            global_project_context=global_project_context,
-            tender_requirements=tender_requirements,
-            scoring_requirements=scoring_requirements,
-            sibling_context=sibling_context,
-            outline_context=outline_context,
-            writing_orientation=writing_orientation,
         )
-        inspection = self._resolve_inspections(
-            chapter_id=chapter_id,
-            outline_context=outline_context or chat_context.get("document_outline_context"),
-            task=text,
+        done = next(
+            (item for item in reversed(events) if item.get("type") == "done"),
+            None,
         )
-        chat_context["inspected_chapters"] = list(inspection.get("views") or [])
-        research = self._research_for_message(chapter_id, text, chat_context)
-        if research:
-            chat_context["research"] = research
-        phase = self.resolve_write_phase(
-            chapter_id,
-            outline=chat_context.get("writing_outline"),
-            user_message=text,
-        )
-        chat_context["authority"] = phase
-        thinking = ""
-        # delegate_review: 同步 LLM 审核 + 定向修改
-        if phase.get("review_status") == "pending_delegate":
-            current_outline = chat_context.get("writing_outline") or {}
-            for delegate_round in range(1, MAX_DELEGATE_ROUNDS + 1):
-                review_result = _llm_delegate_review_outline(current_outline, chat_context)
-                if review_result.get("passed"):
-                    self._update_chapter_review(
-                        chapter_id,
-                        review_status="delegated",
-                        outline_hash=_outline_hash(current_outline),
-                        mode="delegate_review",
-                    )
-                    phase["review_status"] = "delegated"
-                    phase["write_phase"] = "write_body"
-                    phase["delegate_review"] = review_result
-                    chat_context["authority"] = phase
-                    break
-                issues = review_result.get("issues") or []
-                if not issues or delegate_round >= MAX_DELEGATE_ROUNDS:
-                    self._update_chapter_review(
-                        chapter_id,
-                        review_status="rejected",
-                        outline_hash=_outline_hash(current_outline),
-                        mode="delegate_review",
-                    )
-                    phase["review_status"] = "rejected"
-                    phase["delegate_review"] = review_result
-                    chat_context["authority"] = phase
-                    break
-                fixed = self._apply_delegate_fixes(
-                    chapter_id, current_outline, issues, chat_context
-                )
-                current_outline = fixed
-                chat_context["writing_outline"] = current_outline
-
-        document_write_requested = _requests_document_write(text, phase)
-        if document_write_requested:
-            answer = _DOCUMENT_WRITE_NOTICE
-        elif phase.get("write_phase") == "list_for_review":
-            answer = self.render_outline_review(chat_context)
-        else:
-            messages = self._build_messages(chat_context, history, text)
-            try:
-                from llm_client import chat_with_meta
-
-                meta = chat_with_meta(messages, temperature=0.2)
-                answer = str(meta.get("content") or "").strip()
-                thinking = str(meta.get("reasoning") or "").strip()
-            except Exception:
-                answer = self._fallback_answer(chat_context, text)
-            if phase.get("mode") == "delegate_review" and phase.get("delegate_review"):
-                answer = self.render_outline_review(chat_context) + "\n\n" + answer
-
-        if not answer:
-            answer = "（无回复）"
-
-        user_record = self.append_turn(chapter_id, role="user", content=text)
-        assistant_record = self.append_turn(
-            chapter_id,
-            role="assistant",
-            content=answer,
-            thinking=thinking,
-        )
+        if done is None:
+            raise ControlPlaneError(
+                "CHAT_TURN_FAILED",
+                "Chapter chat did not return a done event.",
+                status_code=500,
+            )
         return {
-            "reply": answer,
-            "thinking": thinking,
-            "chapter_id": _safe_chapter_id(chapter_id),
-            "inspected_chapter_ids": list(inspection.get("inspect_ids") or []),
-            "user_turn": user_record,
-            "assistant_turn": assistant_record,
-            "history_tail": self.load_history(chapter_id, limit=HISTORY_TAIL),
-            "document_write_requested": document_write_requested,
+            "reply": done.get("reply") or "",
+            "thinking": done.get("thinking") or "",
+            "chapter_id": done.get("chapter_id") or _safe_chapter_id(chapter_id),
+            "inspected_chapter_ids": list(done.get("inspected_chapter_ids") or []),
+            "user_turn": done.get("user_turn"),
+            "assistant_turn": done.get("assistant_turn"),
+            "history_tail": done.get("turns") or self.load_history(
+                chapter_id, limit=HISTORY_TAIL
+            ),
+            "document_write_requested": bool(done.get("document_write_requested")),
         }
 
     def iter_answer_events(
@@ -1527,14 +1474,34 @@ class ChapterChatService:
                 "检索规划器已判断现有资料足以回答本章；如解释该决定，只能依据 research.message，"
                 "不得捏造未检索的外部来源。"
             )
+        # Keep the generic outline guidance narrow.  Block-level details such
+        # as procedures, deliverables, acceptance or ownership are included
+        # only when the compiled outline explicitly asks for them.
+        system_prompt += (
+            "Answer each block's must_answer in order and follow its write_as. "
+            "Do not add procedures, deliverables, records, acceptance criteria, "
+            "inputs/outputs or role assignments unless the outline asks for them. "
+            "A prior assistant reply is non-authoritative and may be wrong. "
+            "When the user criticizes prior dialogue, address that dialogue directly. "
+            "Only inspect draft_preview when the user explicitly asks about the current draft."
+        )
+
+        # Assistant history is a conversation record only.  It is never a
+        # project fact or an instruction: an earlier answer may be wrong and
+        # must not reinforce itself on the next turn.
         recent = [
             {
                 "role": item.get("role"),
                 "content": item.get("content"),
+                "authority": "non_authoritative"
+                if item.get("role") == "assistant"
+                else "user_instruction",
             }
             for item in history
             if isinstance(item, dict) and item.get("content")
         ]
+        draft_requested = _is_draft_inspection_request(user_message)
+        history_critique = _is_history_critique_request(user_message)
         user_payload = {
             "role": "bid_chapter_writer",
             "chapter_id": chat_context.get("chapter_id"),
@@ -1547,12 +1514,24 @@ class ChapterChatService:
             "chapter_context": chat_context,
             "inspected_chapters": list(chat_context.get("inspected_chapters") or []),
             "research": research,
+            "draft_inspection_requested": draft_requested,
+            "history_critique_requested": history_critique,
+            "history_is_non_authoritative": True,
             "user_message": user_message,
             "instruction": (
                 "忠实回答 user_message。若用户是在追问、质疑或检查现有内容，必须引用 draft_preview 的具体内容回答；"
                 "若 draft_preview 为空则如实说明。不得声称已经修改或写入文档。"
             ),
         }
+        # Replace the legacy broad instruction above with the explicit
+        # distinction used by the current routing contract.
+        user_payload["instruction"] += (
+            "Answer user_message faithfully. Inspect draft_preview only when "
+            "draft_inspection_requested is true; if it is empty, say no current "
+            "draft is available. If history_critique_requested is true, address "
+            "the prior dialogue directly and treat assistant history as non-authoritative. "
+            "Never claim that a document was changed unless document_write_requested is true."
+        )
         return [
             {"role": "system", "content": system_prompt},
             {
@@ -1631,6 +1610,132 @@ class ChapterChatService:
         if "材料" in message or "证据" in message:
             parts.append("缺企业资质/案例/产品实绩时，请走 Evidence 补证，不要用外部网页顶替。")
         return " ".join(parts)
+
+
+def _text_terms(value: Any) -> set[str]:
+    """Return language-neutral search terms for generic fact projection."""
+    text = str(value or "").lower()
+    terms = set(re.findall(r"[a-z0-9_]{2,}", text))
+    cjk = re.findall(r"[\u3400-\u9fff]", text)
+    terms.update("".join(cjk[index : index + 2]) for index in range(len(cjk) - 1))
+    return {term for term in terms if term.strip()}
+
+
+def _project_shared_facts(
+    shared: dict[str, Any],
+    *,
+    purpose: str,
+    outline: dict[str, Any],
+    tender_requirements: list[dict[str, Any]] | None,
+    scoring_requirements: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Keep only global facts that can support this chapter's declared goal.
+
+    Identity metadata is retained for display.  Content lists are projected
+    by lexical relevance to purpose/objectives/blocks, with no chapter-title
+    or topic-specific branches.  If no target terms are available, preserve
+    the source projection rather than silently dropping all evidence.
+    """
+    target_parts: list[str] = [purpose]
+    if isinstance(outline, dict):
+        for block in outline.get("blocks") or []:
+            if isinstance(block, dict):
+                target_parts.extend(
+                    str(block.get(key) or "")
+                    for key in ("heading", "must_answer", "write_as", "outcome_kind")
+                )
+    for requirement in list(tender_requirements or [])[:20] + list(scoring_requirements or [])[:20]:
+        if isinstance(requirement, dict):
+            target_parts.append(
+                str(
+                    requirement.get("normalized_requirement")
+                    or requirement.get("requirement")
+                    or requirement.get("text")
+                    or ""
+                )
+            )
+    target_terms = _text_terms(" ".join(target_parts))
+
+    def relevant(value: Any) -> bool:
+        if isinstance(value, dict):
+            value_text = " ".join(str(item or "") for item in value.values())
+        else:
+            value_text = str(value or "")
+        if not value_text.strip() or not target_terms:
+            return True
+        candidate_terms = _text_terms(value_text)
+        # Untagged primitive context values are already the canonical compact
+        # projection supplied by the context service.  Keep them for
+        # backwards compatibility; apply lexical filtering to structured
+        # facts where scope/role metadata is available.
+        if not isinstance(value, dict):
+            return True
+        return bool(candidate_terms & target_terms)
+
+    projected = dict(shared)
+    for key in (
+        "background",
+        "goals",
+        "scope",
+        "boundaries",
+        "work_packages",
+        "inputs",
+        "outputs",
+        "deliverables",
+        "constraints",
+    ):
+        values = shared.get(key)
+        if isinstance(values, list):
+            selected = [item for item in values if relevant(item)]
+            projected[key] = selected if selected or not values else values
+    facts = shared.get("confirmed_facts")
+    if isinstance(facts, list):
+        selected_facts = [item for item in facts if relevant(item)]
+        projected["confirmed_facts"] = (
+            selected_facts if selected_facts or not facts else facts
+        )
+        projected["confirmed_fact_count"] = len(projected["confirmed_facts"])
+    projected["projection"] = {
+        "basis": "purpose_objectives_outline_requirements",
+        "target_term_count": len(target_terms),
+    }
+    return projected
+
+
+def _is_draft_inspection_request(message: str) -> bool:
+    text = str(message or "").lower()
+    markers = (
+        "draft",
+        "preview",
+        "正文",
+        "草稿",
+        "段落",
+        "第1段",
+        "第2段",
+        "第3段",
+        "paragraph",
+        "current copy",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_history_critique_request(message: str) -> bool:
+    text = str(message or "").lower()
+    markers = (
+        "history",
+        "previous",
+        "prior",
+        "assistant",
+        "dialogue",
+        "对话",
+        "回复",
+        "刚才",
+        "之前",
+        "为什么又",
+        "怎么又",
+        "仍然",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _normalize_mode(value: Any) -> str:
