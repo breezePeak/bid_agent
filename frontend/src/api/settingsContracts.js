@@ -48,3 +48,20 @@ export function llmModelPayload(form, { isNew = false } = {}) {
     verify_ssl: Boolean(form?.verify_ssl),
   }
 }
+
+export function researchSettingsFormFromApi(settings = {}) {
+  return {
+    ...settings,
+    // Persisted Tavily credentials are represented only by readiness metadata.
+    tavily_api_key: '',
+    has_tavily_api_key: Boolean(settings.has_tavily_api_key),
+  }
+}
+
+export function researchSettingsPayload(form) {
+  const payload = { ...form }
+  delete payload.has_tavily_api_key
+  delete payload.tavily_runtime_status
+  payload.tavily_api_key = String(form?.tavily_api_key || '').trim()
+  return payload
+}

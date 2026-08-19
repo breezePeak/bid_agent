@@ -710,10 +710,18 @@ class TavilyResearchAdapterTests(unittest.TestCase):
             adapter = TavilySearchAdapter()
             candidates = adapter.search("适用政策", limit=1)
 
-        request = urlopen.call_args.args[0]
-        self.assertEqual(request.full_url, "https://api.tavily.com/search")
-        self.assertEqual(request.get_header("Authorization"), "Bearer tvly-test")
-        self.assertEqual(json.loads(request.data.decode("utf-8"))["include_raw_content"], "markdown")
+        self.assertEqual(urlopen.call_count, 2)
+        search_request = urlopen.call_args_list[0].args[0]
+        extract_request = urlopen.call_args_list[1].args[0]
+        self.assertEqual(search_request.full_url, "https://api.tavily.com/search")
+        self.assertEqual(extract_request.full_url, "https://api.tavily.com/extract")
+        self.assertEqual(search_request.get_header("Authorization"), "Bearer tvly-test")
+        search_payload = json.loads(search_request.data.decode("utf-8"))
+        self.assertFalse(search_payload["include_answer"])
+        self.assertFalse(search_payload["include_raw_content"])
+        extract_payload = json.loads(extract_request.data.decode("utf-8"))
+        self.assertNotIn("query", extract_payload)
+        self.assertNotIn("chunks_per_source", extract_payload)
         self.assertEqual(candidates[0].source_url, "https://www.gov.cn/zhengce/example")
         self.assertEqual(candidates[0].source_type, EvidenceSourceType.OFFICIAL)
 
@@ -728,7 +736,7 @@ class TavilyResearchAdapterTests(unittest.TestCase):
             adapter = create_research_adapter("tavily")
             self.assertIsInstance(adapter, TavilySearchAdapter)
             self.assertEqual(adapter.runtime_status()["reason"], "TAVILY_API_KEY_MISSING")
-            with self.assertRaisesRegex(RuntimeError, "API Key 未配置"):
+            with self.assertRaisesRegex(RuntimeError, "TAVILY_API_KEY_MISSING"):
                 adapter.search("适用政策", limit=1)
 
     def test_reads_tavily_key_from_authoritative_dotenv(self) -> None:

@@ -148,6 +148,7 @@ class WriterResearchCoordinator:
                     "error": batch.error or ("" if success else "回答未形成可核验公开来源"),
                     "duration_ms": int((time.perf_counter() - started) * 1000),
                     "at": datetime.now(UTC).isoformat(),
+                    "research_run": dict(batch.research_run),
                 }
             )
             query.batch_id = batch.batch_id
@@ -349,6 +350,7 @@ class WriterResearchCoordinator:
             "evidence_ids": [item.evidence_id for item in batch.items],
             "content": "\n\n".join(contents)[:8000],
             "sources": list(query.sources),
+            "research_run": dict(batch.research_run),
         }
 
     def _report(self) -> dict[str, Any]:

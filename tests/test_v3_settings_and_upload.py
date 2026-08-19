@@ -817,5 +817,28 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                 self.assertEqual(_payload(accepted)["input"]["role"], "tender")
 
 
+    def test_tavily_key_is_persisted_but_never_returned(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary, mock.patch.dict(
+            os.environ,
+            {"BID_AGENT_TAVILY_API_KEY": ""},
+            clear=False,
+        ):
+            settings = SettingsService(Path(temporary))
+            result = settings.write_flow_settings(
+                {
+                    "research_provider": "tavily",
+                    "tavily_api_key": "tvly-private-test",
+                    "deep_research_enabled": True,
+                    "deep_research_max_search_calls": 4,
+                }
+            )
+            self.assertTrue(result["has_tavily_api_key"])
+            self.assertTrue(result["tavily_runtime_status"]["ready"])
+            self.assertNotIn("tvly-private-test", json.dumps(result))
+            preserved = settings.write_flow_settings({"tavily_api_key": ""})
+            self.assertTrue(preserved["has_tavily_api_key"])
+            self.assertIn("BID_AGENT_TAVILY_API_KEY=tvly-private-test", settings.env_path.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -204,7 +204,26 @@
               <option value="tavily">Tavily API</option>
               <option value="disabled">不联网搜索</option>
             </select>
-            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时会自动调用该 Provider；Tavily 需在 .env 设置 BID_AGENT_TAVILY_API_KEY。选「不联网搜索」则只写招标已有材料。右侧 Agent 轨迹会显示是否联网及来源。</p>
+            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时会自动调用该 Provider；不会静默切换到其他 Provider。</p>
+          </div>
+          <div v-if="flowForm.research_provider === 'tavily'" class="form-group">
+            <label for="flow-tavily-key">Tavily API Key</label>
+            <input id="flow-tavily-key" v-model="flowForm.tavily_api_key" type="password" autocomplete="new-password" :placeholder="flowForm.has_tavily_api_key ? '已保存；留空保持不变' : 'tvly-…'" />
+            <p class="field-hint" :class="{ 'form-error': !flowForm.tavily_runtime_status?.ready }">
+              {{ flowForm.tavily_runtime_status?.ready ? 'Tavily 运行时已就绪' : 'Tavily 未就绪：缺少 API Key' }}
+            </p>
+          </div>
+          <div class="settings-form-title">Deep Research</div>
+          <div class="form-check-group">
+            <label class="form-check"><input v-model="flowForm.deep_research_enabled" type="checkbox" /><span>启用多轮深度研究</span></label>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label for="flow-dr-search">最大搜索次数</label><input id="flow-dr-search" v-model.number="flowForm.deep_research_max_search_calls" type="number" min="1" max="20" /></div>
+            <div class="form-group"><label for="flow-dr-iterations">最大研究轮次</label><input id="flow-dr-iterations" v-model.number="flowForm.deep_research_max_supervisor_iterations" type="number" min="1" max="10" /></div>
+          </div>
+          <div class="form-row">
+            <div class="form-group"><label for="flow-dr-extract-round">每轮提取 URL</label><input id="flow-dr-extract-round" v-model.number="flowForm.deep_research_max_extract_urls_per_round" type="number" min="1" max="10" /></div>
+            <div class="form-group"><label for="flow-dr-extract-total">总提取 URL</label><input id="flow-dr-extract-total" v-model.number="flowForm.deep_research_max_total_extract_urls" type="number" min="1" max="30" /></div>
           </div>
           <div class="form-row">
             <div class="form-group"><label for="flow-workers">章节并发数</label><input id="flow-workers" v-model.number="flowForm.workers" type="number" min="1" max="10" /></div>
@@ -243,6 +262,8 @@ import {
   llmModelFormFromApi,
   llmModelKeyIsReady,
   llmModelPayload,
+  researchSettingsFormFromApi,
+  researchSettingsPayload,
 } from '../api/settingsContracts.js'
 
 const props = defineProps({
@@ -292,6 +313,14 @@ const flowForm = reactive({
   write_batch_retries: 5,
   max_repair_rounds: 2,
   research_provider: 'doubao_web',
+  tavily_api_key: '',
+  has_tavily_api_key: false,
+  tavily_runtime_status: { ready: false, reason: 'TAVILY_API_KEY_MISSING' },
+  deep_research_enabled: true,
+  deep_research_max_search_calls: 4,
+  deep_research_max_supervisor_iterations: 4,
+  deep_research_max_extract_urls_per_round: 4,
+  deep_research_max_total_extract_urls: 12,
   chapter_review_enabled: true,
   chapter_review_gate: true,
   global_review_gate: true,
@@ -303,16 +332,16 @@ const flowForm = reactive({
 async function loadFlow() {
   try {
     const { data } = await fetchFlowSettings()
-    if (data?.ok && data.settings) Object.assign(flowForm, data.settings)
+    if (data?.ok && data.settings) Object.assign(flowForm, researchSettingsFormFromApi(data.settings))
   } catch (e) { flowError.value = '加载流程设置失败，请检查后端服务' }
 }
 
 async function saveFlow() {
   flowSaving.value = true; flowError.value = ''; flowSuccess.value = ''
   try {
-    const { data } = await saveFlowSettings({ ...flowForm })
+    const { data } = await saveFlowSettings(researchSettingsPayload(flowForm))
     if (!data?.ok) throw new Error(data?.message || '保存失败')
-    Object.assign(flowForm, data.settings || {})
+    Object.assign(flowForm, researchSettingsFormFromApi(data.settings || {}))
     flowSuccess.value = '流程设置已保存，后续启动的阶段会使用新参数。'
   } catch (e) { flowError.value = e.response?.data?.message || e.message || '保存失败' } finally { flowSaving.value = false }
 }

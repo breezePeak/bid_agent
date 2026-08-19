@@ -235,6 +235,20 @@ class ChapterChatService:
                     "outline_hash": outline_hash,
                     "reason": "本章提纲已生成，等待用户确认后再写正文。",
                 }
+            if action == "write_document":
+                self._update_chapter_review(
+                    chapter_id,
+                    review_status="approved",
+                    outline_hash=outline_hash,
+                    mode=mode,
+                )
+                return {
+                    **authority,
+                    "write_phase": "write_body",
+                    "review_status": "approved",
+                    "outline_hash": outline_hash,
+                    "reason": "你已明确要求开始写正文，按当前章节提纲直接编写。",
+                }
             if review_status == "approved":
                 return {
                     **authority,
@@ -326,10 +340,22 @@ class ChapterChatService:
         authority = chat_context.get("authority") if isinstance(chat_context.get("authority"), dict) else {}
         outline = chat_context.get("writing_outline") if isinstance(chat_context.get("writing_outline"), dict) else {}
         blocks = [item for item in (outline.get("blocks") or []) if isinstance(item, dict)]
+        objectives = [
+            str(item).strip()
+            for item in (outline.get("writing_objectives") or [])
+            if str(item or "").strip()
+        ]
         lines = ["本章写作提纲", "", f"章节名称：{title}"]
         if purpose:
             lines.append(f"写作目的：{purpose}")
-        lines.extend(("", f"共 {len(blocks)} 个写作要点："))
+        if objectives:
+            lines.extend(("", "写作目标："))
+            lines.extend(
+                f"{index}. {objective}"
+                for index, objective in enumerate(objectives, start=1)
+            )
+        block_section = "评分与内容覆盖要点" if objectives else "写作要点"
+        lines.extend(("", f"共 {len(blocks)} 个{block_section}："))
         for index, item in enumerate(blocks, start=1):
             kind = _kind_label(str(item.get("kind") or ""))
             heading = str(item.get("heading") or f"要点{index}")
@@ -339,7 +365,8 @@ class ChapterChatService:
             lines.append(f"{index}. {heading}")
             lines.append(f"   内容类型：{kind}")
             if must:
-                lines.append(f"   核心问题：{must}")
+                label = "覆盖要求" if objectives else "核心问题"
+                lines.append(f"   {label}：{must}")
             if write_as:
                 lines.append(f"   表达要求：{write_as}")
         mode = str(authority.get("mode") or DEFAULT_AUTHORITY_MODE)
@@ -1823,11 +1850,12 @@ def _decide_chapter_action(
                 "The Agent's default duty is to create or improve the current chapter. "
                 "Choose write_document when the user asks, implies, approves, continues, "
                 "corrects, critiques with an expected fix, or otherwise wants chapter content changed. "
+                "An explicit request to start or continue body writing is write_document and is itself "
+                "authorization to write; it does not require a separate outline-confirmation phrase. "
                 "Choose prepare_outline when the user asks to generate, show, list, regenerate, or review "
                 "the chapter outline before body writing. This remains true even if an older outline was approved. "
                 "Choose confirm_outline only when the user is explicitly approving the outline that was "
-                "shown in the immediately preceding dialogue; a request to start writing is not itself "
-                "outline approval when no outline has been shown. "
+                "shown in the immediately preceding dialogue without asking to write the body in the same turn. "
                 "Choose approve_document only when the user explicitly approves, confirms, finalizes, "
                 "or accepts the current body draft as the formal chapter. Distinguish this from outline approval. "
                 "Choose respond_only only for an explicit question, explanation, status check, "

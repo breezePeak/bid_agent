@@ -21,6 +21,7 @@ from .input_manifest import V3_ROOT
 
 
 EVIDENCE_BATCH_DIR = V3_ROOT / "evidence" / "batches"
+RESEARCH_RUN_DIR = V3_ROOT / "evidence" / "research_runs"
 RESEARCH_RELEVANCE_POLICY_VERSION = "v3.semantic-relevance.v2"
 _USAGE_CATEGORIES = {
     "project_background",
@@ -30,6 +31,11 @@ _USAGE_CATEGORIES = {
     "implementation_reference",
     "acceptance_reference",
 }
+_PROHIBITED_PUBLIC_RESEARCH = re.compile(
+    r"(?:本企业|我公司|投标人|供应商|承建方).{0,12}(?:资质|业绩|案例|人员|履历|证书|社保|财务|报价|承诺|法定代表人|授权|软件|设备|服务能力)"
+    r"|(?:企业资质|企业业绩|企业案例|人员身份|人员履历|人员证书|企业财务|投标报价|投标承诺|法定代表人|授权信息)",
+    re.IGNORECASE,
+)
 
 
 def load_published_batch(context: WorkspaceContext, batch_id: str) -> EvidenceBatch | None:
@@ -121,15 +127,48 @@ class ResearchService:
                 return latest
             report("skipped", "本章未配置公开检索额度。")
             return self._publish(need, [], query_count=0, status="gap")
+        if _PROHIBITED_PUBLIC_RESEARCH.search(
+            f"{need.question}\n{json.dumps(need.relevance_context, ensure_ascii=False)}"
+        ):
+            report("prohibited", "该资料范围禁止通过公开网络补充。")
+            return self._publish(
+                need,
+                [],
+                query_count=0,
+                status="gap",
+                error="PROHIBITED_SCOPE",
+                research_run={
+                    "status": "prohibited",
+                    "sufficient": False,
+                    "completion_reason": "prohibited_scope",
+                    "search_call_count": 0,
+                    "extract_call_count": 0,
+                },
+            )
         self.store.upsert_evidence_need({**need.model_dump(mode="json"), "status": "researching"})
         report("waiting", "已提交公开资料检索，正在等待搜索结果。", query=need.question)
+        run_result = None
         try:
             # Retrieve a broader candidate set, then adopt only the best three
             # relevant sources.  A real URL is not evidence of relevance.
-            candidates = self.provider.search(
-                need.question,
-                limit=max(12, need.query_budget),
-            )
+            research_need = getattr(self.provider, "research_need", None)
+            if callable(research_need):
+                run_result = research_need(need, limit=max(12, need.query_budget))
+                candidates = list(run_result.candidates)
+                self._persist_research_run(run_result)
+                report(
+                    "research_completed",
+                    "深度研究循环已完成，正在执行 Evidence Gate。",
+                    run_id=run_result.run_id,
+                    search_call_count=run_result.search_call_count,
+                    extract_call_count=run_result.extract_call_count,
+                    completion_reason=run_result.sufficiency.completion_reason,
+                )
+            else:
+                candidates = self.provider.search(
+                    need.question,
+                    limit=max(12, need.query_budget),
+                )
         except Exception as exc:
             report("failed", "公开检索失败。", error=f"{type(exc).__name__}: {exc}"[:500])
             return self._publish(
@@ -138,6 +177,17 @@ class ResearchService:
                 query_count=1,
                 status="failed",
                 error=f"{type(exc).__name__}: {exc}"[:2000],
+            )
+        run_summary = self._run_summary(run_result)
+        if run_result is not None and run_result.status in {"failed", "prohibited"} and not candidates:
+            status = "gap" if run_result.status == "prohibited" else "failed"
+            return self._publish(
+                need,
+                [],
+                query_count=run_result.search_call_count,
+                status=status,
+                error=run_result.sufficiency.completion_reason,
+                research_run=run_summary,
             )
         report("candidates_found", f"搜索返回 {len(candidates)} 个候选链接，正在逐个查看和核验。", candidate_count=len(candidates))
         items: list[EvidenceItem] = []
@@ -237,8 +287,18 @@ class ResearchService:
         return self._publish(
             need,
             items,
-            query_count=1,
-            status="published" if items else "gap",
+            query_count=(run_result.search_call_count if run_result is not None else 1),
+            status=(
+                "published"
+                if items and (run_result is None or run_result.sufficiency.sufficient)
+                else "gap"
+            ),
+            error=(
+                None
+                if run_result is None or run_result.sufficiency.sufficient
+                else run_result.sufficiency.completion_reason
+            ),
+            research_run=run_summary,
         )
 
     @staticmethod
@@ -540,6 +600,7 @@ class ResearchService:
         query_count: int,
         status: str,
         error: str | None = None,
+        research_run: dict[str, Any] | None = None,
     ) -> EvidenceBatch:
         previous = self._batches(need)
         revision = max((batch.revision for batch in previous), default=0) + 1
@@ -579,6 +640,7 @@ class ResearchService:
             items=normalized,
             status=status,
             error=error,
+            research_run=research_run or {},
         )
         path = self.root / EVIDENCE_BATCH_DIR / f"{batch_id}.json"
         if path.exists():
@@ -594,6 +656,47 @@ class ResearchService:
         }[status]
         self.store.upsert_evidence_need({**need.model_dump(mode="json"), "status": next_status, "active_batch_id": batch_id})
         return batch
+
+    def _persist_research_run(self, run_result: Any) -> None:
+        run_id = str(getattr(run_result, "run_id", "") or "")
+        if not re.fullmatch(r"DR-[0-9a-f]{32}", run_id):
+            raise ValueError("DEEP_RESEARCH_RUN_ID_INVALID")
+        path = self.root / RESEARCH_RUN_DIR / f"{run_id}.json"
+        payload = run_result.model_dump(mode="json")
+        # Candidates duplicate extracted page bodies and are governed by the
+        # immutable EvidenceBatch. The audit record keeps hashes/URLs, not a
+        # second mutable evidence repository.
+        payload["candidates"] = [
+            {
+                "title": candidate.title,
+                "publisher": candidate.publisher,
+                "source_url": candidate.source_url,
+                "content_hash": hashlib.sha256(candidate.content.encode("utf-8")).hexdigest(),
+            }
+            for candidate in run_result.candidates
+        ]
+        if path.exists():
+            if read_json(path) != payload:
+                raise ValueError("Deep Research 运行记录不可变")
+            return
+        write_json(path, payload)
+
+    @staticmethod
+    def _run_summary(run_result: Any) -> dict[str, Any]:
+        if run_result is None:
+            return {}
+        return {
+            "run_id": run_result.run_id,
+            "status": run_result.status,
+            "sufficient": run_result.sufficiency.sufficient,
+            "completion_reason": run_result.sufficiency.completion_reason,
+            "search_call_count": run_result.search_call_count,
+            "extract_call_count": run_result.extract_call_count,
+            "iterations": run_result.iterations,
+            "missing_claim_ids": list(run_result.sufficiency.missing_claim_ids),
+            "weak_claim_ids": list(run_result.sufficiency.weak_claim_ids),
+            "conflict_claim_ids": list(run_result.sufficiency.conflict_claim_ids),
+        }
 
     def _base_batch_id(self, need: EvidenceNeed) -> str:
         seed = (
