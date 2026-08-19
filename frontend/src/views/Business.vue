@@ -75,6 +75,7 @@ let closeWorkspaceStream = null
 const chapterId = computed(() => String(route.params.chapterId || ''))
 const shellMode = computed(() => {
   if (route.name === 'WorkspacePipeline') return 'pipeline'
+  if (route.name === 'ChapterWorkspace') return 'workbench'
   // A historical ChapterBlueprint is not a routing signal.  The workbench is
   // reachable only after the current H1 receipt has confirmed that exact
   // directory version.

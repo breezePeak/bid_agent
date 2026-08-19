@@ -5,6 +5,8 @@ import tempfile
 import threading
 import types
 import unittest
+import json
+import os
 from pathlib import Path
 from unittest import mock
 
@@ -16,6 +18,7 @@ from document_pipeline.contracts import EvidenceSourceType  # noqa: E402
 from document_pipeline.research_adapters import (  # noqa: E402
     DeepSeekWebAdapter,
     DoubaoWebAdapter,
+    TavilySearchAdapter,
     _WEB_RUNTIME_STATUS,
     _click_send_button,
     _extract_sources,
@@ -676,6 +679,69 @@ class DeepSeekResearchAdapterTests(unittest.TestCase):
             self.assertEqual(adapter.chat_url, "https://www.doubao.com/chat")
             self.assertEqual(adapter.profile_dir, profile)
             self.assertIsInstance(create_research_adapter("doubao_web"), DoubaoWebAdapter)
+
+
+class TavilyResearchAdapterTests(unittest.TestCase):
+    def test_search_uses_documented_api_and_returns_source_content(self) -> None:
+        response_body = json.dumps({
+            "results": [{
+                "title": "政策文件",
+                "url": "https://www.gov.cn/zhengce/example#section",
+                "raw_content": "公开政策正文。" * 30,
+            }],
+        }).encode("utf-8")
+
+        class _Response:
+            status = 200
+
+            def read(self, _size: int) -> bytes:
+                return response_body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args) -> None:
+                return None
+
+        with mock.patch.dict(os.environ, {"BID_AGENT_TAVILY_API_KEY": "tvly-test"}, clear=False), mock.patch(
+            "document_pipeline.research_adapters.urllib.request.urlopen",
+            return_value=_Response(),
+        ) as urlopen:
+            adapter = TavilySearchAdapter()
+            candidates = adapter.search("适用政策", limit=1)
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://api.tavily.com/search")
+        self.assertEqual(request.get_header("Authorization"), "Bearer tvly-test")
+        self.assertEqual(json.loads(request.data.decode("utf-8"))["include_raw_content"], "markdown")
+        self.assertEqual(candidates[0].source_url, "https://www.gov.cn/zhengce/example")
+        self.assertEqual(candidates[0].source_type, EvidenceSourceType.OFFICIAL)
+
+    def test_factory_creates_tavily_and_requires_key_at_search_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(
+            os.environ,
+            {"BID_AGENT_CONFIG_ROOT": tmp},
+            clear=False,
+        ):
+            os.environ.pop("BID_AGENT_TAVILY_API_KEY", None)
+            os.environ.pop("TAVILY_API_KEY", None)
+            adapter = create_research_adapter("tavily")
+            self.assertIsInstance(adapter, TavilySearchAdapter)
+            self.assertEqual(adapter.runtime_status()["reason"], "TAVILY_API_KEY_MISSING")
+            with self.assertRaisesRegex(RuntimeError, "API Key 未配置"):
+                adapter.search("适用政策", limit=1)
+
+    def test_reads_tavily_key_from_authoritative_dotenv(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, ".env").write_text("BID_AGENT_TAVILY_API_KEY=tvly-from-dotenv\n", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"BID_AGENT_CONFIG_ROOT": tmp},
+                clear=False,
+            ):
+                os.environ.pop("BID_AGENT_TAVILY_API_KEY", None)
+                os.environ.pop("TAVILY_API_KEY", None)
+                self.assertEqual(TavilySearchAdapter().api_key, "tvly-from-dotenv")
 
 
 if __name__ == "__main__":

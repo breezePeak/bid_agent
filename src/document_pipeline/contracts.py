@@ -579,6 +579,9 @@ class EvidenceNeed(BaseModel):
     status: Literal["open", "researching", "satisfied", "gap", "cancelled"] = "open"
     project_anchors: list[str] = Field(default_factory=list)
     task_anchors: list[str] = Field(default_factory=list)
+    # Immutable chapter-scoped context for semantic review of public sources.
+    # Kept optional so evidence batches created before this policy remain readable.
+    relevance_context: dict[str, Any] = Field(default_factory=dict)
     allowed_relevance_tiers: list[EvidenceRelevanceTier] = Field(
         default_factory=lambda: [
             EvidenceRelevanceTier.PROJECT_DIRECT,
@@ -693,6 +696,12 @@ class EvidenceItem(BaseModel):
     matched_task_anchors: list[str] = Field(default_factory=list)
     supporting_excerpt: str = ""
     usage_constraints: list[str] = Field(default_factory=list)
+    # Semantic-review output. `content` remains the source record; the writer
+    # consumes the following focused fields instead of the complete web page.
+    extracted_points: list[str] = Field(default_factory=list)
+    relevance_reason: str = ""
+    relevance_confidence: float = Field(default=0.0, ge=0, le=1)
+    usage_category: str = ""
 
     @model_validator(mode="after")
     def enterprise_claims_require_company_evidence(self) -> "EvidenceItem":
@@ -1392,6 +1401,12 @@ class WriterInputBundle(ContractModel):
     head_content_revision: int = Field(default=0, ge=0)
     locked_blocks: list[dict[str, Any]] = Field(default_factory=list)
     content_history_summary: list[dict[str, Any]] = Field(default_factory=list)
+    # Frozen request intent.  These values are supplied by the writing
+    # service; the model kernel must not recover them from transport/chat.
+    operation: Literal["create", "rewrite", "repair"] = "create"
+    user_instruction: str = ""
+    existing_content: str = ""
+    overwrite_locked: bool = False
 
 
 class ContentBlock(BaseModel):

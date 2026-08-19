@@ -139,6 +139,35 @@ def _seed_project(
 
 
 class GlobalProjectContextTests(unittest.TestCase):
+    def test_prompt_projection_uses_exact_goal_and_excludes_zero_relevance_facts(self) -> None:
+        goal = "交代项目任务所处背景、现实情境及任务由来，帮助评审理解项目实施基础。"
+        projected = GlobalProjectContextService.prompt_projection(
+            {
+                "global_context_id": "PM-1",
+                "global_context_revision": 1,
+                "global_context_hash": "a" * 64,
+                "project_id": "P-1",
+                "identity": {"project_name": "测试项目", "purchaser": "某采购人"},
+                "scope": ["依据采购人安排接收资料"],
+                "work_packages": ["完成任务分发和人员考试"],
+                "constraints": ["项目组人员必须驻场"],
+                "confirmed_facts": [
+                    {"fact_id": "PF-PURCHASER", "statement": "依据采购人安排接收资料并完成任务分发。"},
+                    {"fact_id": "PF-STAFF", "statement": "项目组人员通过考试后驻场。"},
+                ],
+            },
+            {"highlighted_fact_ids": ["PF-PURCHASER", "PF-STAFF"]},
+            purpose=goal,
+            writing_objectives=["清楚说明项目任务背景及任务由来。"],
+            scoring_requirements=[],
+        )
+        self.assertEqual(projected["confirmed_facts"], [])
+        self.assertEqual(projected["selected_fact_ids"], [])
+        self.assertNotIn("scope", projected)
+        self.assertNotIn("work_packages", projected)
+        self.assertNotIn("constraints", projected)
+        self.assertNotIn("purchaser", projected["identity"])
+
     def test_all_chapters_share_one_global_version_without_fact_copies(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))

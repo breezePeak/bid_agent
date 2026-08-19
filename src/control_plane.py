@@ -180,8 +180,16 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 27
+    SCHEMA_VERSION = 29
+    WORKFLOW_PHASES = ("materials", "planning", "writing")
+    PHASE_STATUSES = {
+        "not_started", "ready", "running", "waiting_confirmation",
+        "in_progress", "completed", "failed", "outdated", "blocked",
+    }
+    # Includes resumable blocked/paused records for command routing. They do
+    # not own the workspace lease; see LOCK_OPERATION_STATES.
     ACTIVE_OPERATION_STATES = ("queued", "running", "pausing", "paused", "cancelling", "blocked")
+    LOCK_OPERATION_STATES = ("queued", "running", "pausing", "cancelling")
     CONFIRMATION_REQUIRED_KINDS = {
         "pipeline.cancel",
         "pipeline.skip_stage",
@@ -224,7 +232,153 @@ class ControlStore:
     BLOCKED_SUPERSEDING_KINDS = {
         "document.prepare_outline",
         "document.run_pipeline",
+        "chapter.generate_draft",
     }
+
+    @staticmethod
+    def _workflow_phase_for_kind(kind: str) -> str:
+        value = str(kind or "")
+        if value == "document.prepare_outline" or value == "document.confirm_planning":
+            return "planning"
+        if value == "document.run_pipeline" or value.startswith("chapter."):
+            return "writing"
+        if value.startswith("materials.") or value.startswith("material."):
+            return "materials"
+        return ""
+
+    @staticmethod
+    def _phase_status_for_operation(kind: str, operation_status: str) -> str:
+        phase = ControlStore._workflow_phase_for_kind(kind)
+        status = str(operation_status or "")
+        if not phase:
+            return ""
+        if status in {"queued", "running", "processing", "background"}:
+            return "in_progress" if phase == "writing" else "running"
+        if status == "blocked_human" and phase == "planning":
+            return "waiting_confirmation"
+        if status in {"blocked", "paused"}:
+            return "blocked"
+        if status == "failed":
+            return "failed"
+        if status == "succeeded":
+            if phase == "writing" and str(kind) != "document.run_pipeline":
+                return "in_progress"
+            return "completed"
+        if status == "cancelled":
+            return "outdated"
+        return "ready"
+
+    def _backfill_operation_phase_fields(self, connection: sqlite3.Connection) -> None:
+        """One-time migration from operation identity; runtime reads never infer phases."""
+        rows = connection.execute(
+            "SELECT operation_id, kind, status FROM operations WHERE workflow_phase = '' ORDER BY created_at"
+        ).fetchall()
+        revisions = {
+            phase: int(connection.execute(
+                "SELECT COALESCE(MAX(phase_revision), 0) FROM operations WHERE workflow_phase = ?",
+                (phase,),
+            ).fetchone()[0])
+            for phase in self.WORKFLOW_PHASES
+        }
+        migrated_phases: set[str] = set()
+        for row in rows:
+            phase = self._workflow_phase_for_kind(str(row["kind"] or ""))
+            if not phase:
+                continue
+            migrated_phases.add(phase)
+            revisions[phase] += 1
+            connection.execute(
+                "UPDATE operations SET workflow_phase = ?, phase_status = ?, phase_revision = ? "
+                "WHERE operation_id = ?",
+                (
+                    phase,
+                    self._phase_status_for_operation(str(row["kind"]), str(row["status"])),
+                    revisions[phase],
+                    str(row["operation_id"]),
+                ),
+            )
+        for phase in migrated_phases:
+            current = connection.execute(
+                "SELECT operation_id FROM operations WHERE workflow_phase = ? "
+                "ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (phase,),
+            ).fetchone()
+            if current:
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = NULL WHERE operation_id = ?",
+                    (str(current["operation_id"]),),
+                )
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = ? "
+                    "WHERE workflow_phase = ? AND operation_id <> ? AND superseded_by_operation_id IS NULL",
+                    (str(current["operation_id"]), phase, str(current["operation_id"])),
+                )
+        confirmed = connection.execute(
+            "SELECT operation_id, updated_at FROM operations "
+            "WHERE kind = 'document.confirm_planning' AND status = 'succeeded' "
+            "ORDER BY updated_at DESC LIMIT 1"
+        ).fetchone()
+        if confirmed:
+            outline = connection.execute(
+                "SELECT operation_id FROM operations WHERE kind = 'document.prepare_outline' "
+                "AND created_at <= ? ORDER BY created_at DESC LIMIT 1",
+                (str(confirmed["updated_at"]),),
+            ).fetchone()
+            if outline:
+                outline_id = str(outline["operation_id"])
+                connection.execute(
+                    "UPDATE operations SET status = 'succeeded', phase_status = 'completed', "
+                    "completed_at = COALESCE(completed_at, ?), updated_at = ? WHERE operation_id = ?",
+                    (str(confirmed["updated_at"]), str(confirmed["updated_at"]), outline_id),
+                )
+                if not connection.execute(
+                    "SELECT 1 FROM stage_runs WHERE operation_id = ? AND stage_command = 'confirm_planning' "
+                    "AND status = 'succeeded' LIMIT 1",
+                    (outline_id,),
+                ).fetchone():
+                    attempt = int(connection.execute(
+                        "SELECT COALESCE(MAX(attempt), 0) + 1 FROM stage_runs "
+                        "WHERE operation_id = ? AND stage_command = 'confirm_planning'",
+                        (outline_id,),
+                    ).fetchone()[0])
+                    connection.execute(
+                        "INSERT INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, "
+                        "disposition, started_at, completed_at) VALUES (?, ?, 'confirm_planning', ?, "
+                        "'succeeded', 'migrated_h1_confirmation', ?, ?)",
+                        (str(uuid.uuid4()), outline_id, attempt, str(confirmed["updated_at"]), str(confirmed["updated_at"])),
+                    )
+
+    def _record_phase_marker_tx(
+        self,
+        connection: sqlite3.Connection,
+        workflow_phase: str,
+        phase_status: str,
+        *,
+        kind: str,
+        message: str,
+        now: str,
+    ) -> str:
+        operation_id = str(uuid.uuid4())
+        phase_revision = int(connection.execute(
+            "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = ?",
+            (workflow_phase,),
+        ).fetchone()[0])
+        connection.execute(
+            "UPDATE operations SET superseded_by_operation_id = ? WHERE workflow_phase = ? "
+            "AND superseded_by_operation_id IS NULL",
+            (operation_id, workflow_phase),
+        )
+        operation_status = "failed" if phase_status == "failed" else "succeeded"
+        connection.execute(
+            "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at, "
+            "completed_at, message, workflow_phase, phase_status, phase_revision) "
+            "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                operation_id, kind, operation_status, now, now, now, message,
+                workflow_phase, phase_status, phase_revision,
+            ),
+        )
+        return operation_id
 
     def __init__(self, context: WorkspaceContext) -> None:
         self.context = context
@@ -285,7 +439,11 @@ class ControlStore:
                         updated_at TEXT NOT NULL,
                         completed_at TEXT,
                         message TEXT NOT NULL DEFAULT '',
-                        error_json TEXT
+                        error_json TEXT,
+                        workflow_phase TEXT NOT NULL DEFAULT '',
+                        phase_status TEXT NOT NULL DEFAULT '',
+                        phase_revision INTEGER NOT NULL DEFAULT 0,
+                        superseded_by_operation_id TEXT
                     );
                     CREATE TABLE IF NOT EXISTS stage_runs (
                         stage_run_id TEXT PRIMARY KEY,
@@ -479,6 +637,67 @@ class ControlStore:
                         payload_json TEXT NOT NULL,
                         occurred_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS chapter_batch_jobs (
+                        job_id TEXT PRIMARY KEY,
+                        operation_id TEXT NOT NULL UNIQUE REFERENCES operations(operation_id),
+                        status TEXT NOT NULL,
+                        chapter_ids_json TEXT NOT NULL,
+                        current_chapter_id TEXT NOT NULL DEFAULT '',
+                        completed_count INTEGER NOT NULL DEFAULT 0,
+                        failed_count INTEGER NOT NULL DEFAULT 0,
+                        error_json TEXT,
+                        retry_policy_json TEXT NOT NULL DEFAULT '{}',
+                        fencing_token INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        completed_at TEXT
+                    );
+                    CREATE TABLE IF NOT EXISTS chapter_batch_items (
+                        item_id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES chapter_batch_jobs(job_id) ON DELETE CASCADE,
+                        chapter_id TEXT NOT NULL,
+                        chapter_title TEXT NOT NULL DEFAULT '',
+                        position INTEGER NOT NULL,
+                        status TEXT NOT NULL,
+                        stage TEXT NOT NULL DEFAULT 'queued',
+                        attempt INTEGER NOT NULL DEFAULT 0,
+                        context_ref_json TEXT NOT NULL DEFAULT '{}',
+                        content_revision INTEGER NOT NULL DEFAULT 0,
+                        error_json TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        UNIQUE(job_id, chapter_id), UNIQUE(job_id, position)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_batch_items_job
+                        ON chapter_batch_items(job_id, position);
+                    CREATE TABLE IF NOT EXISTS chapter_batch_checkpoints (
+                        checkpoint_id TEXT PRIMARY KEY,
+                        job_id TEXT NOT NULL REFERENCES chapter_batch_jobs(job_id) ON DELETE CASCADE,
+                        item_id TEXT NOT NULL REFERENCES chapter_batch_items(item_id) ON DELETE CASCADE,
+                        stage TEXT NOT NULL,
+                        input_hash TEXT NOT NULL DEFAULT '',
+                        artifact_refs_json TEXT NOT NULL DEFAULT '{}',
+                        event_sequence INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(item_id, stage, input_hash)
+                    );
+                    CREATE TABLE IF NOT EXISTS chapter_batch_events (
+                        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                        event_id TEXT NOT NULL UNIQUE,
+                        job_id TEXT NOT NULL REFERENCES chapter_batch_jobs(job_id) ON DELETE CASCADE,
+                        item_id TEXT,
+                        chapter_id TEXT,
+                        chapter_title TEXT NOT NULL DEFAULT '',
+                        stage TEXT NOT NULL DEFAULT '',
+                        type TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT '',
+                        message TEXT NOT NULL DEFAULT '',
+                        data_json TEXT NOT NULL DEFAULT '{}',
+                        error_json TEXT,
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_batch_events_job
+                        ON chapter_batch_events(job_id, sequence);
                     CREATE TABLE IF NOT EXISTS document_state (
                         workspace_id TEXT PRIMARY KEY,
                         document_mode TEXT NOT NULL DEFAULT '',
@@ -727,6 +946,19 @@ class ControlStore:
                 }
                 if "parent_operation_id" not in operation_columns:
                     connection.execute("ALTER TABLE operations ADD COLUMN parent_operation_id TEXT")
+                for column, definition in (
+                    ("workflow_phase", "TEXT NOT NULL DEFAULT ''"),
+                    ("phase_status", "TEXT NOT NULL DEFAULT ''"),
+                    ("phase_revision", "INTEGER NOT NULL DEFAULT 0"),
+                    ("superseded_by_operation_id", "TEXT"),
+                ):
+                    if column not in operation_columns:
+                        connection.execute(f"ALTER TABLE operations ADD COLUMN {column} {definition}")
+                connection.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_operations_workflow_phase "
+                    "ON operations(workflow_phase, superseded_by_operation_id, phase_revision DESC)"
+                )
+                self._backfill_operation_phase_fields(connection)
                 self._migrate_v3_kernel_columns(connection)
                 self._migrate_chapter_workspace_tables(connection)
                 connection.execute("DROP TABLE IF EXISTS migration_conflicts")
@@ -748,6 +980,12 @@ class ControlStore:
                     (str(self.SCHEMA_VERSION),),
                 )
                 connection.execute("INSERT OR IGNORE INTO control_meta(key, value) VALUES ('revision', '0')")
+                # Blocked/paused operations are resumable records, never active
+                # workspace writers. Remove stale leases left by older builds.
+                connection.execute(
+                    "DELETE FROM workspace_lease WHERE operation_id IN "
+                    "(SELECT operation_id FROM operations WHERE status IN ('blocked', 'paused'))"
+                )
 
     def upsert_evidence_need(self, item: dict[str, Any]) -> dict[str, Any]:
         """Persist V3 research scheduling state; evidence itself is immutable."""
@@ -5359,6 +5597,178 @@ class ControlStore:
             self.ACTIVE_OPERATION_STATES,
         ).fetchone()
 
+    def latest_command_by_kind(self, kind: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM commands WHERE kind = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (str(kind),),
+            ).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["payload"] = _decode(item.pop("payload_json", None), {})
+        item["actor"] = _decode(item.pop("actor_json", None), {})
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def latest_operation_by_kind(self, kind: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE kind = ? ORDER BY updated_at DESC, created_at DESC LIMIT 1",
+                (str(kind),),
+            ).fetchone()
+        return self._operation_row(row)
+
+    @staticmethod
+    def _operation_row(row: sqlite3.Row | None) -> dict[str, Any] | None:
+        if not row:
+            return None
+        item = dict(row)
+        item["error"] = _decode(item.pop("error_json", None), None)
+        return item
+
+    def current_phase_operation(self, workflow_phase: str) -> dict[str, Any] | None:
+        phase = str(workflow_phase or "")
+        if phase not in self.WORKFLOW_PHASES:
+            raise ValueError(f"invalid workflow phase: {phase}")
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM operations WHERE workflow_phase = ? "
+                "AND superseded_by_operation_id IS NULL "
+                "ORDER BY phase_revision DESC, updated_at DESC LIMIT 1",
+                (phase,),
+            ).fetchone()
+        return self._operation_row(row)
+
+    def workflow_phase_states(self) -> dict[str, dict[str, Any]]:
+        result: dict[str, dict[str, Any]] = {}
+        for phase in self.WORKFLOW_PHASES:
+            operation = self.current_phase_operation(phase)
+            if not operation:
+                result[phase] = {
+                    "workflow_phase": phase,
+                    "phase_status": "not_started",
+                    "phase_revision": 0,
+                    "operation_id": "",
+                    "started_at": None,
+                    "updated_at": None,
+                    "completed_at": None,
+                    "elapsed_seconds": None,
+                    "error": None,
+                }
+                continue
+            started_at = str(operation.get("created_at") or "") or None
+            completed_at = str(operation.get("completed_at") or "") or None
+            end_at = completed_at or (str(operation.get("updated_at") or "") or None)
+            elapsed: int | None = None
+            if started_at and end_at:
+                try:
+                    elapsed = max(0, int((datetime.fromisoformat(end_at) - datetime.fromisoformat(started_at)).total_seconds()))
+                except ValueError:
+                    elapsed = None
+            result[phase] = {
+                "workflow_phase": phase,
+                "phase_status": str(operation.get("phase_status") or "not_started"),
+                "phase_revision": int(operation.get("phase_revision") or 0),
+                "operation_id": str(operation.get("operation_id") or ""),
+                "operation_kind": str(operation.get("kind") or ""),
+                "operation_status": str(operation.get("status") or ""),
+                "started_at": started_at,
+                "updated_at": str(operation.get("updated_at") or "") or None,
+                "completed_at": completed_at,
+                "elapsed_seconds": elapsed,
+                "message": str(operation.get("message") or ""),
+                "error": operation.get("error"),
+            }
+        return result
+
+    def record_migrated_phase_state(
+        self,
+        workflow_phase: str,
+        phase_status: str,
+        *,
+        message: str,
+        occurred_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist a one-time explicit phase state derived from legacy authority."""
+        phase = str(workflow_phase or "")
+        status = str(phase_status or "")
+        if phase not in self.WORKFLOW_PHASES or status not in self.PHASE_STATUSES:
+            raise ValueError("invalid migrated workflow phase state")
+        now = str(occurred_at or _now())
+        operation_id = str(uuid.uuid4())
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                phase_revision = int(connection.execute(
+                    "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = ?",
+                    (phase,),
+                ).fetchone()[0])
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = ? WHERE workflow_phase = ? "
+                    "AND superseded_by_operation_id IS NULL",
+                    (operation_id, phase),
+                )
+                operation_status = "failed" if status == "failed" else "succeeded"
+                connection.execute(
+                    "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at, "
+                    "completed_at, message, workflow_phase, phase_status, phase_revision) "
+                    "VALUES (?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        operation_id, f"workflow.migrate.{phase}", operation_status, now, now, now,
+                        message, phase, status, phase_revision,
+                    ),
+                )
+                revision = self._bump_revision(connection)
+                self._event(connection, revision, "WorkflowPhaseMigrated", "Operation", operation_id, {
+                    "workflow_phase": phase, "phase_status": status, "phase_revision": phase_revision,
+                })
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.operation(operation_id) or {}
+
+    def finalize_planning_confirmation(self, confirmation_operation_id: str) -> None:
+        """Finish the original outline operation and its human-confirmation stage."""
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                outline = connection.execute(
+                    "SELECT operation_id FROM operations WHERE kind = 'document.prepare_outline' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ).fetchone()
+                if not outline:
+                    connection.commit()
+                    return
+                outline_id = str(outline["operation_id"])
+                connection.execute(
+                    "UPDATE operations SET status = 'succeeded', phase_status = 'completed', "
+                    "message = ?, error_json = NULL, updated_at = ?, completed_at = COALESCE(completed_at, ?) "
+                    "WHERE operation_id = ?",
+                    ("Planning confirmed by H1 receipt.", now, now, outline_id),
+                )
+                previous = connection.execute(
+                    "SELECT COALESCE(MAX(attempt), 0) FROM stage_runs "
+                    "WHERE operation_id = ? AND stage_command = 'confirm_planning'",
+                    (outline_id,),
+                ).fetchone()[0]
+                connection.execute(
+                    "INSERT OR REPLACE INTO stage_runs(stage_run_id, operation_id, stage_command, attempt, status, disposition, started_at, completed_at) "
+                    "VALUES (?, ?, 'confirm_planning', ?, 'succeeded', 'explicit_human_confirmation', ?, ?)",
+                    (str(uuid.uuid4()), outline_id, max(1, int(previous or 0)), now, now),
+                )
+                revision = self._bump_revision(connection)
+                self._event(connection, revision, "WorkflowPhaseChanged", "Operation", outline_id, {
+                    "workflow_phase": "planning", "phase_status": "completed",
+                    "confirmation_operation_id": str(confirmation_operation_id),
+                })
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+
     def prepare(self, envelope: CommandEnvelope) -> tuple[CommandReceipt, bool]:
         now = _now()
         with self._connection() as connection:
@@ -5537,7 +5947,7 @@ class ControlStore:
                         (prepared_status, fencing_token, now, operation_id),
                     )
                 else:
-                    if active and not blocked_pipeline_parent:
+                    if active and str(active["status"] or "") in self.LOCK_OPERATION_STATES and not blocked_pipeline_parent:
                         raise ControlPlaneError(
                             "LEASE_CONFLICT",
                             "当前工作区已有变更 Operation。",
@@ -5547,12 +5957,25 @@ class ControlStore:
                     previous_status = str(active["status"]) if blocked_pipeline_parent and active else ""
                     parent_operation_id = str(active["operation_id"]) if blocked_pipeline_parent and active else ""
                     fencing_token = 1
+                    workflow_phase = self._workflow_phase_for_kind(envelope.kind)
+                    phase_revision = 0
+                    if workflow_phase:
+                        phase_revision = int(connection.execute(
+                            "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = ?",
+                            (workflow_phase,),
+                        ).fetchone()[0])
+                        connection.execute(
+                            "UPDATE operations SET superseded_by_operation_id = ? "
+                            "WHERE workflow_phase = ? AND superseded_by_operation_id IS NULL",
+                            (operation_id, workflow_phase),
+                        )
                     connection.execute(
                         """
                         INSERT INTO operations(
                             operation_id, parent_operation_id, kind, status, start_command,
-                            fencing_token, created_at, updated_at, message
-                        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, '')
+                            fencing_token, created_at, updated_at, message, workflow_phase,
+                            phase_status, phase_revision
+                        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, '', ?, ?, ?)
                         """,
                         (
                             operation_id,
@@ -5562,6 +5985,9 @@ class ControlStore:
                             fencing_token,
                             now,
                             now,
+                            workflow_phase,
+                            self._phase_status_for_operation(envelope.kind, "queued"),
+                            phase_revision,
                         ),
                     )
 
@@ -5646,7 +6072,8 @@ class ControlStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 operation = connection.execute(
-                    "SELECT status FROM operations WHERE operation_id = ?",
+                    "SELECT status, kind, workflow_phase, phase_revision, superseded_by_operation_id "
+                    "FROM operations WHERE operation_id = ?",
                     (operation_id,),
                 ).fetchone()
                 if not operation:
@@ -5668,15 +6095,74 @@ class ControlStore:
                     (command_status, message, _json(error) if error else None, now, envelope.command_id),
                 )
                 terminal_at = now if operation_status in {"succeeded", "failed", "cancelled", "blocked_human"} else None
+                phase_status = self._phase_status_for_operation(str(operation["kind"]), operation_status)
                 connection.execute(
                     """
                     UPDATE operations SET status = ?, message = ?, error_json = ?, updated_at = ?,
-                        completed_at = COALESCE(?, completed_at)
+                        completed_at = COALESCE(?, completed_at),
+                        phase_status = CASE WHEN superseded_by_operation_id IS NULL THEN ? ELSE phase_status END
                     WHERE operation_id = ?
                     """,
-                    (operation_status, message, _json(error) if error else None, now, terminal_at, operation_id),
+                    (operation_status, message, _json(error) if error else None, now, terminal_at, phase_status, operation_id),
                 )
-                if operation_status in {"succeeded", "failed", "cancelled", "blocked", "blocked_human"}:
+                dependent_phase_operations: list[str] = []
+                if str(operation["workflow_phase"] or "") == "materials" and operation_status == "succeeded":
+                    planning_current = connection.execute(
+                        "SELECT phase_status FROM operations WHERE workflow_phase = 'planning' "
+                        "AND superseded_by_operation_id IS NULL ORDER BY phase_revision DESC LIMIT 1"
+                    ).fetchone()
+                    planning_status = "outdated" if planning_current else "ready"
+                    dependent_phase_operations.append(self._record_phase_marker_tx(
+                        connection,
+                        "planning",
+                        planning_status,
+                        kind="workflow.business_input_changed",
+                        message=(
+                            "Business inputs changed; planning must be regenerated."
+                            if planning_current else "Materials completed; planning is ready."
+                        ),
+                        now=now,
+                    ))
+                    writing_current = connection.execute(
+                        "SELECT 1 FROM operations WHERE workflow_phase = 'writing' "
+                        "AND superseded_by_operation_id IS NULL LIMIT 1"
+                    ).fetchone()
+                    if writing_current:
+                        dependent_phase_operations.append(self._record_phase_marker_tx(
+                            connection,
+                            "writing",
+                            "blocked",
+                            kind="workflow.business_input_changed",
+                            message="Business inputs changed; writing is blocked until planning is confirmed again.",
+                            now=now,
+                        ))
+                if (
+                    str(operation["kind"] or "") == "document.prepare_outline"
+                    and operation_status in {"blocked_human", "succeeded"}
+                ):
+                    writing_current = connection.execute(
+                        "SELECT 1 FROM operations WHERE workflow_phase = 'writing' "
+                        "AND superseded_by_operation_id IS NULL LIMIT 1"
+                    ).fetchone()
+                    if writing_current:
+                        dependent_phase_operations.append(self._record_phase_marker_tx(
+                            connection,
+                            "writing",
+                            "blocked",
+                            kind="workflow.outline_changed",
+                            message="Outline changed; writing is blocked until the new outline is confirmed.",
+                            now=now,
+                        ))
+                if str(operation["kind"] or "") == "document.confirm_planning" and operation_status == "succeeded":
+                    dependent_phase_operations.append(self._record_phase_marker_tx(
+                        connection,
+                        "writing",
+                        "ready",
+                        kind="workflow.planning_confirmed",
+                        message="Planning confirmed; writing is ready.",
+                        now=now,
+                    ))
+                if operation_status not in {"queued", "running", "pausing", "cancelling"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 self._event(
                     connection,
@@ -5690,6 +6176,10 @@ class ControlStore:
                         "operation_status": operation_status,
                         "message": message,
                         "error": error,
+                        "workflow_phase": str(operation["workflow_phase"] or ""),
+                        "phase_status": phase_status if operation["superseded_by_operation_id"] is None else None,
+                        "phase_revision": int(operation["phase_revision"] or 0),
+                        "dependent_phase_operations": dependent_phase_operations,
                     },
                 )
                 connection.commit()
@@ -5721,7 +6211,8 @@ class ControlStore:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 row = connection.execute(
-                    "SELECT status, message, error_json, fencing_token FROM operations WHERE operation_id = ?",
+                    "SELECT status, message, error_json, fencing_token, kind, workflow_phase, "
+                    "phase_revision, superseded_by_operation_id FROM operations WHERE operation_id = ?",
                     (operation_id,),
                 ).fetchone()
                 if not row:
@@ -5755,27 +6246,29 @@ class ControlStore:
                     return self._revision(connection)
                 error_json = _json(error) if error else None
                 if str(row["status"]) == status and str(row["message"] or "") == message and row["error_json"] == error_json:
-                    if status not in {"succeeded", "failed", "cancelled", "blocked"}:
+                    if status in {"queued", "running", "pausing", "cancelling"}:
                         expires_at = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat(timespec="milliseconds")
                         connection.execute(
                             "UPDATE workspace_lease SET heartbeat_at = ?, expires_at = ? WHERE operation_id = ?",
                             (now, expires_at, operation_id),
                         )
-                    elif status == "blocked":
+                    else:
                         connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                     connection.commit()
                     return self._revision(connection)
                 revision = self._bump_revision(connection)
                 terminal_at = now if status in {"succeeded", "failed", "cancelled"} else None
+                phase_status = self._phase_status_for_operation(str(row["kind"]), status)
                 connection.execute(
                     """
                     UPDATE operations SET status = ?, message = ?, error_json = ?, updated_at = ?,
-                        completed_at = COALESCE(?, completed_at)
+                        completed_at = COALESCE(?, completed_at),
+                        phase_status = CASE WHEN superseded_by_operation_id IS NULL THEN ? ELSE phase_status END
                     WHERE operation_id = ?
                     """,
-                    (status, message, error_json, now, terminal_at, operation_id),
+                    (status, message, error_json, now, terminal_at, phase_status, operation_id),
                 )
-                if status in {"succeeded", "failed", "cancelled", "blocked"}:
+                if status not in {"queued", "running", "pausing", "cancelling"}:
                     connection.execute("DELETE FROM workspace_lease WHERE operation_id = ?", (operation_id,))
                 else:
                     expires_at = (datetime.now(timezone.utc) + timedelta(seconds=45)).isoformat(timespec="milliseconds")
@@ -5789,7 +6282,12 @@ class ControlStore:
                     "OperationStatusChanged",
                     "Operation",
                     operation_id,
-                    {"status": status, "message": message, "error": error},
+                    {
+                        "status": status, "message": message, "error": error,
+                        "workflow_phase": str(row["workflow_phase"] or ""),
+                        "phase_status": phase_status if row["superseded_by_operation_id"] is None else None,
+                        "phase_revision": int(row["phase_revision"] or 0),
+                    },
                 )
                 connection.commit()
                 return revision
@@ -5936,6 +6434,229 @@ class ControlStore:
                 connection.rollback()
                 raise
 
+    def create_batch_job(
+        self,
+        chapters: list[dict[str, Any]],
+        *,
+        job_id: str | None = None,
+        operation_id: str | None = None,
+        retry_policy: dict[str, Any] | None = None,
+        actor: str = "batch-worker",
+    ) -> dict[str, Any]:
+        """Create a durable chapter batch and its operation in one transaction."""
+        job_id = str(job_id or uuid.uuid4())
+        operation_id = str(operation_id or job_id)
+        existing = self.batch_job(job_id)
+        if existing is not None:
+            return existing
+        now = _now()
+        normalized = []
+        for position, chapter in enumerate(chapters):
+            chapter_id = str(chapter.get("chapter_id") or "").strip()
+            if not chapter_id:
+                raise ControlPlaneError("CHAPTER_ID_INVALID", "批量任务缺少 chapter_id。", status_code=400)
+            normalized.append({
+                "item_id": str(chapter.get("item_id") or uuid.uuid4()),
+                "chapter_id": chapter_id,
+                "chapter_title": str(chapter.get("chapter_title") or chapter.get("title") or ""),
+                "position": position,
+                "context_ref": chapter.get("context_ref") if isinstance(chapter.get("context_ref"), dict) else {},
+            })
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                phase_revision = int(connection.execute(
+                    "SELECT COALESCE(MAX(phase_revision), 0) + 1 FROM operations WHERE workflow_phase = 'writing'"
+                ).fetchone()[0])
+                connection.execute(
+                    "UPDATE operations SET superseded_by_operation_id = ? "
+                    "WHERE workflow_phase = 'writing' AND superseded_by_operation_id IS NULL",
+                    (operation_id,),
+                )
+                connection.execute(
+                    "INSERT INTO operations(operation_id, kind, status, fencing_token, created_at, updated_at, "
+                    "workflow_phase, phase_status, phase_revision) "
+                    "VALUES (?, 'chapter.generate_batch', 'background', 1, ?, ?, 'writing', 'in_progress', ?)",
+                    (operation_id, now, now, phase_revision),
+                )
+                connection.execute(
+                    "INSERT INTO chapter_batch_jobs(job_id, operation_id, status, chapter_ids_json, retry_policy_json, fencing_token, created_at, updated_at) "
+                    "VALUES (?, ?, 'queued', ?, ?, 1, ?, ?)",
+                    (job_id, operation_id, _json([item["chapter_id"] for item in normalized]), _json(retry_policy or {}), now, now),
+                )
+                for item in normalized:
+                    connection.execute(
+                        "INSERT INTO chapter_batch_items(item_id, job_id, chapter_id, chapter_title, position, status, stage, context_ref_json, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, 'queued', 'queued', ?, ?, ?)",
+                        (item["item_id"], job_id, item["chapter_id"], item["chapter_title"], item["position"], _json(item["context_ref"]), now, now),
+                    )
+                self._bump_revision(connection)
+                self._event(connection, self._revision(connection), "ChapterBatchCreated", "ChapterBatch", job_id, {"job_id": job_id, "operation_id": operation_id, "chapter_count": len(normalized), "actor": actor})
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.batch_job(job_id) or {}
+
+    @staticmethod
+    def _batch_decode(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+        item = dict(row)
+        for key in ("chapter_ids_json", "retry_policy_json", "context_ref_json", "artifact_refs_json", "data_json", "error_json"):
+            if key in item:
+                target = key.removesuffix("_json")
+                item[target] = _decode(item.pop(key), {} if key != "error_json" else None)
+        return item
+
+    def batch_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM chapter_batch_jobs WHERE job_id = ?", (str(job_id),)).fetchone()
+            if not row:
+                return None
+            result = self._batch_decode(row)
+            result["items"] = [self._batch_decode(item) for item in connection.execute("SELECT * FROM chapter_batch_items WHERE job_id = ? ORDER BY position", (str(job_id),)).fetchall()]
+        return result
+
+    def latest_batch_job(self) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT job_id FROM chapter_batch_jobs "
+                "ORDER BY CASE WHEN status IN ('queued', 'running', 'paused') THEN 0 ELSE 1 END, "
+                "updated_at DESC LIMIT 1"
+            ).fetchone()
+        return self.batch_job(str(row["job_id"])) if row else None
+
+    def update_batch_job(self, job_id: str, *, status: str | None = None, current_chapter_id: str | None = None, completed_count: int | None = None, failed_count: int | None = None, error: dict[str, Any] | None = None, fencing_token: int | None = None) -> dict[str, Any]:
+        fields, values = [], []
+        for name, value in (("status", status), ("current_chapter_id", current_chapter_id), ("completed_count", completed_count), ("failed_count", failed_count), ("error_json", _json(error) if error is not None else None), ("fencing_token", fencing_token)):
+            if value is not None:
+                fields.append(f"{name} = ?"); values.append(value)
+        if not fields:
+            return self.batch_job(job_id) or {}
+        now = _now(); fields.append("updated_at = ?"); values.append(now); values.append(str(job_id))
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(f"UPDATE chapter_batch_jobs SET {', '.join(fields)} WHERE job_id = ?", values)
+                operation_status = (
+                    status if status in {"succeeded", "failed", "cancelled"} else "background"
+                )
+                if status is not None:
+                    phase_status = self._phase_status_for_operation("chapter.generate_batch", operation_status)
+                    connection.execute(
+                        "UPDATE operations SET status = ?, updated_at = ?, phase_status = CASE "
+                        "WHEN superseded_by_operation_id IS NULL THEN ? ELSE phase_status END, "
+                        "completed_at = CASE WHEN ? IN ('succeeded', 'failed', 'cancelled') "
+                        "THEN COALESCE(completed_at, ?) ELSE completed_at END "
+                        "WHERE operation_id = (SELECT operation_id FROM chapter_batch_jobs WHERE job_id = ?)",
+                        (operation_status, now, phase_status, operation_status, now, str(job_id)),
+                    )
+                if status in {"succeeded", "failed", "cancelled"}:
+                    connection.execute("UPDATE chapter_batch_jobs SET completed_at = COALESCE(completed_at, ?) WHERE job_id = ?", (now, str(job_id)))
+                connection.commit()
+            except Exception:
+                connection.rollback(); raise
+        return self.batch_job(job_id) or {}
+
+    def update_batch_item(self, item_id: str, *, status: str | None = None, stage: str | None = None, attempt: int | None = None, context_ref: dict[str, Any] | None = None, content_revision: int | None = None, error: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        fields, values = [], []
+        for name, value in (("status", status), ("stage", stage), ("attempt", attempt), ("context_ref_json", _json(context_ref) if context_ref is not None else None), ("content_revision", content_revision), ("error_json", _json(error) if error is not None else None)):
+            if value is not None:
+                fields.append(f"{name} = ?"); values.append(value)
+        if not fields: return self.batch_item(item_id)
+        values.extend([_now(), str(item_id)])
+        with self._connection() as connection:
+            connection.execute(f"UPDATE chapter_batch_items SET {', '.join(fields)}, updated_at = ? WHERE item_id = ?", values)
+        return self.batch_item(item_id)
+
+    def batch_item(self, item_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute("SELECT * FROM chapter_batch_items WHERE item_id = ?", (str(item_id),)).fetchone()
+        return self._batch_decode(row) if row else None
+
+    def append_batch_event(self, job_id: str, *, event_type: str, status: str = "", stage: str = "", item_id: str | None = None, chapter_id: str | None = None, chapter_title: str = "", message: str = "", data: dict[str, Any] | None = None, error: dict[str, Any] | None = None, event_id: str | None = None) -> dict[str, Any]:
+        event_id = str(event_id or uuid.uuid4()); now = _now()
+        with self._connection() as connection:
+            connection.execute("INSERT INTO chapter_batch_events(event_id, job_id, item_id, chapter_id, chapter_title, stage, type, status, message, data_json, error_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", (event_id, str(job_id), item_id, chapter_id, chapter_title, stage, event_type, status, message, _json(data or {}), _json(error) if error else None, now))
+            row = connection.execute("SELECT * FROM chapter_batch_events WHERE event_id = ?", (event_id,)).fetchone()
+        return self._batch_decode(row)
+
+    def batch_events(self, job_id: str, *, after_sequence: int = 0, limit: int = 500) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM chapter_batch_events WHERE job_id = ? AND sequence > ? ORDER BY sequence LIMIT ?", (str(job_id), max(0, int(after_sequence)), max(1, min(int(limit), 2000)))).fetchall()
+        return [self._batch_decode(row) for row in rows]
+
+    def chapter_batch_events(self, chapter_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+        """Return durable batch-writing events for one chapter across all jobs."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM chapter_batch_events WHERE chapter_id = ? "
+                "ORDER BY created_at, sequence LIMIT ?",
+                (str(chapter_id), max(1, min(int(limit), 5000))),
+            ).fetchall()
+        return [self._batch_decode(row) for row in rows]
+
+    def save_batch_checkpoint(self, job_id: str, item_id: str, *, stage: str, input_hash: str = "", artifact_refs: dict[str, Any] | None = None, event_sequence: int = 0) -> dict[str, Any]:
+        checkpoint_id = str(uuid.uuid4())
+        with self._connection() as connection:
+            connection.execute("INSERT OR IGNORE INTO chapter_batch_checkpoints(checkpoint_id, job_id, item_id, stage, input_hash, artifact_refs_json, event_sequence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (checkpoint_id, str(job_id), str(item_id), stage, input_hash, _json(artifact_refs or {}), int(event_sequence), _now()))
+            row = connection.execute("SELECT * FROM chapter_batch_checkpoints WHERE job_id = ? AND item_id = ? AND stage = ? AND input_hash = ?", (str(job_id), str(item_id), stage, input_hash)).fetchone()
+        return self._batch_decode(row)
+
+    def batch_checkpoint(self, item_id: str, *, stage: str | None = None) -> dict[str, Any] | None:
+        query = "SELECT * FROM chapter_batch_checkpoints WHERE item_id = ?"
+        values: list[Any] = [str(item_id)]
+        if stage is not None:
+            query += " AND stage = ?"
+            values.append(str(stage))
+        query += " ORDER BY created_at DESC LIMIT 1"
+        with self._connection() as connection:
+            row = connection.execute(query, values).fetchone()
+        return self._batch_decode(row) if row else None
+
+    def recover_batch_jobs(self) -> list[dict[str, Any]]:
+        """Return jobs that can be resumed after a process restart."""
+        with self._connection() as connection:
+            rows = connection.execute("SELECT * FROM chapter_batch_jobs WHERE status IN ('queued', 'running', 'paused') ORDER BY created_at").fetchall()
+        return [self._batch_decode(row) for row in rows]
+
+    def claim_batch_job(self, job_id: str) -> dict[str, Any] | None:
+        """Claim a resumable job and invalidate writers holding an older token."""
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT status, fencing_token FROM chapter_batch_jobs WHERE job_id = ?",
+                    (str(job_id),),
+                ).fetchone()
+                if not row or str(row["status"] or "") in {"succeeded", "failed", "cancelled"}:
+                    connection.rollback()
+                    return None
+                token = int(row["fencing_token"] or 0) + 1
+                connection.execute(
+                    "UPDATE chapter_batch_jobs SET status = 'running', fencing_token = ?, updated_at = ? WHERE job_id = ?",
+                    (token, _now(), str(job_id)),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.batch_job(job_id)
+
+    def assert_batch_fence(self, job_id: str, fencing_token: int) -> None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT fencing_token, status FROM chapter_batch_jobs WHERE job_id = ?",
+                (str(job_id),),
+            ).fetchone()
+        if not row or int(row["fencing_token"] or 0) != int(fencing_token):
+            raise ControlPlaneError(
+                "CHAPTER_BATCH_LEASE_LOST",
+                "批量任务已由新的 Worker 接管，旧 Worker 已停止写入。",
+                status_code=409,
+            )
+        if str(row["status"] or "") == "cancelled":
+            raise ControlPlaneError("CHAPTER_BATCH_CANCELLED", "批量任务已取消。", status_code=409)
+
     def snapshot(self) -> dict[str, Any]:
         with self._connection() as connection:
             revision = self._revision(connection)
@@ -5963,7 +6684,7 @@ class ControlStore:
             stage_run["error"] = _decode(stage_run.pop("error_json", None), None)
             stage_run["output"] = _decode(stage_run.pop("output_json", None), None)
         current_operation = next(
-            (item for item in operations if str(item.get("status") or "") in self.ACTIVE_OPERATION_STATES),
+            (item for item in operations if str(item.get("status") or "") in self.LOCK_OPERATION_STATES),
             operations[0] if operations else None,
         )
         current_operation_id = str((current_operation or {}).get("operation_id") or "")
@@ -6069,6 +6790,7 @@ class CommandGateway:
                     "content",
                     "approval",
                     "unchanged",
+                    "batch_job",
                 )
                 if key in result
             }

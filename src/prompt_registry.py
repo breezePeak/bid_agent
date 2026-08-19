@@ -92,14 +92,6 @@ AGENT_SPECS: dict[str, AgentSpec] = {
         output_contract={"type": "json_object", "required_keys": ["selected_tender_chunks", "selected_company_chunks"]},
         context_budget={"max_context_chars": 18000, "max_chunks": 30},
     ),
-    "chapter_writer": AgentSpec(
-        name="chapter_writer",
-        prompt_file="write_chapter.md",
-        version="1.0.0",
-        input_contract={"documents": ["workspace/jobs/*.json", "workspace/contexts/*_context.json", "workspace/global_facts.json", "workspace/tender_requirements.json", "inputs/writing_brief.md"], "mode": "chapter_write"},
-        output_contract={"type": "markdown", "required_features": ["chapter_heading"]},
-        context_budget={"max_context_chars": 16000, "max_chunks": 16},
-    ),
     "chapter_reviewer": AgentSpec(
         name="chapter_reviewer",
         prompt_file="review_chapter.md",
@@ -107,14 +99,6 @@ AGENT_SPECS: dict[str, AgentSpec] = {
         input_contract={"documents": ["workspace/chapters/*.md", "workspace/jobs/*.json", "workspace/global_facts.json"], "mode": "chapter_review"},
         output_contract={"type": "json_object", "required_keys": ["score_coverage", "problems", "priority_fixes", "need_rewrite"]},
         context_budget={"max_context_chars": 14000},
-    ),
-    "chapter_rewriter": AgentSpec(
-        name="chapter_rewriter",
-        prompt_file="rewrite_chapter.md",
-        version="1.1.0",
-        input_contract={"documents": ["workspace/chapters/*.md", "workspace/reviews/*_review.json", "workspace/contexts/*_context.json"], "mode": "chapter_rewrite"},
-        output_contract={"type": "markdown", "required_features": ["chapter_heading"]},
-        context_budget={"max_context_chars": 17000, "max_chunks": 16},
     ),
     "chapter_summarizer": AgentSpec(
         name="chapter_summarizer",

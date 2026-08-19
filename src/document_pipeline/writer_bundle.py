@@ -8,17 +8,15 @@ from typing import Any
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 from utils import read_json, write_json
 
-from .canonicalization import canonical_hash
+from .canonicalization import canonical_hash, chapter_context_hash
 from .chapter_blueprint import load_promoted_chapter_blueprint
 from .contracts import (
     DOCUMENT_CONTRACT_ADAPTER,
     ContractNode,
-    DocumentPlan,
     TemplateContract,
     WriterInputBundle,
 )
 from .document_contract import DOCUMENT_CONTRACT_PATH
-from .document_planner import DOCUMENT_PLAN_PATH
 from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
@@ -77,7 +75,15 @@ class WriterInputBundleAssembler:
             evidence_ids: list[str] = []
             for item in batch.items:
                 evidence_ids.append(item.evidence_id)
-                content = str(item.content or "").strip()
+                extracted_points = [
+                    str(point).strip()
+                    for point in (item.extracted_points or [])
+                    if str(point).strip()
+                ]
+                supporting_excerpt = str(item.supporting_excerpt or "").strip()
+                # Older immutable batches have no semantic fields. Retain only
+                # their narrow evidence excerpt, never the complete web page.
+                content = "\n".join([*extracted_points, supporting_excerpt]).strip()
                 if content and content not in contents:
                     contents.append(content)
                 sources.append(
@@ -96,6 +102,11 @@ class WriterInputBundleAssembler:
                             item.matched_task_anchors
                         ),
                         "usage_constraints": list(item.usage_constraints),
+                        "supporting_excerpt": supporting_excerpt,
+                        "extracted_points": extracted_points,
+                        "relevance_reason": item.relevance_reason,
+                        "relevance_confidence": item.relevance_confidence,
+                        "usage_category": item.usage_category,
                     }
                 )
             combined = "\n\n".join(contents)
@@ -119,9 +130,12 @@ class WriterInputBundleAssembler:
         blueprint_artifact = self.store.v3_active_artifact("ChapterBlueprint")
         assert blueprint_artifact is not None
         contract = DOCUMENT_CONTRACT_ADAPTER.validate_python(read_json(self.root / DOCUMENT_CONTRACT_PATH))
-        plan = DocumentPlan.model_validate(read_json(self.root / DOCUMENT_PLAN_PATH))
-        if contract.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]) or plan.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]):
-            raise ControlPlaneError("WRITER_BUNDLE_BLOCKED", "DocumentContract/DocumentPlan 未绑定当前 H1 Blueprint。", status_code=409)
+        if contract.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]):
+            raise ControlPlaneError(
+                "WRITER_BUNDLE_BLOCKED",
+                "DocumentContract 未绑定当前 H1 Blueprint。",
+                status_code=409,
+            )
         blueprint = load_promoted_chapter_blueprint(self.context)
         if blueprint.planning_model != "score_direct":
             raise ControlPlaneError(
@@ -448,6 +462,12 @@ class WriterInputBundleAssembler:
                         "head_content_revision": int(
                             workspace.get("head_content_revision") or 0
                         ),
+                        "existing_content": "\n\n".join(
+                            str(block.get("content") or "")
+                            for block in ((content_head or {}).get("blocks") or [])
+                            if isinstance(block, dict)
+                            and str(block.get("content") or "").strip()
+                        ),
                         "locked_blocks": locked,
                         "content_history_summary": history,
                     }
@@ -492,8 +512,10 @@ class WriterInputBundleAssembler:
                     chapter_context_revision=int(
                         context_head.get("context_revision") or 0
                     ),
-                    chapter_context_hash=str(
-                        context_head.get("context_hash") or ""
+                    chapter_context_hash=chapter_context_hash(
+                        target_chapter_id,
+                        int(context_head.get("context_revision") or 0),
+                        context_head.get("items") or [],
                     ),
                     global_context_override=(
                         global_project_context
@@ -538,6 +560,10 @@ def load_writer_bundle(root: Path, bundle_id: str) -> WriterInputBundle:
             "locked_blocks",
             "content_history_summary",
             "research_decisions",
+            "operation",
+            "user_instruction",
+            "existing_content",
+            "overwrite_locked",
         ):
             legacy_body.pop(key, None)
         body_hash = canonical_hash(legacy_body)

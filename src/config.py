@@ -17,6 +17,7 @@ class Settings:
     api_key: str
     model: str
     provider: str = "openai"  # openai | anthropic
+    reasoning_effort: str = ""
     timeout: int = 300
     max_retries: int = 3
     retry_initial_delay: float = 2.0
@@ -89,6 +90,9 @@ def get_settings(root: Path | None = None) -> Settings:
     retry_max_delay = max(retry_initial_delay, float(values.get("OPENAI_RETRY_MAX_DELAY", 30)))
     stream = _parse_bool(values.get("OPENAI_STREAM"), default=False)
     verify_ssl = _parse_bool(values.get("OPENAI_VERIFY_SSL"), default=True)
+    reasoning_effort = str(values.get("OPENAI_REASONING_EFFORT") or "").strip().lower()
+    if reasoning_effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
+        reasoning_effort = ""
 
     provider = str(values.get("OPENAI_PROVIDER") or values.get("LLM_PROVIDER") or "openai").strip().lower()
     if provider not in {"openai", "anthropic"}:
@@ -99,6 +103,7 @@ def get_settings(root: Path | None = None) -> Settings:
         api_key=str(values["OPENAI_API_KEY"]).strip(),
         model=str(values["OPENAI_MODEL"]).strip(),
         provider=provider,
+        reasoning_effort=reasoning_effort,
         timeout=timeout,
         max_retries=max_retries,
         retry_initial_delay=retry_initial_delay,

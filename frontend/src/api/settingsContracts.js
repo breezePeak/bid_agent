@@ -15,6 +15,7 @@ export function llmModelFormFromApi(model = {}) {
     api_key: '',
     has_stored_api_key: Boolean(model.has_api_key),
     model: model.model || '',
+    reasoning_effort: model.reasoning_effort || '',
     timeout: Number(model.timeout ?? 300),
     max_retries: Number(model.max_retries ?? 3),
     retry_initial_delay: Number(model.retry_initial_delay ?? 2),
@@ -38,6 +39,7 @@ export function llmModelPayload(form, { isNew = false } = {}) {
     // Blank on an existing model is the explicit "keep stored key" contract.
     api_key: String(form?.api_key || '').trim(),
     model: String(form?.model || '').trim(),
+    reasoning_effort: String(form?.reasoning_effort || '').trim(),
     timeout: form?.timeout,
     max_retries: form?.max_retries,
     retry_initial_delay: form?.retry_initial_delay,

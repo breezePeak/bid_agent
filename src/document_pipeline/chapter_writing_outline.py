@@ -22,7 +22,7 @@ _ROLE_KIND = {
 }
 
 _WRITE_AS = {
-    "response": "写本章对应的可执行做法：步骤、分工、输入输出和责任边界。不要复述评分原文，也不要无依据补写交付物或验收。",
+    "response": "只围绕 Blueprint 原始章节目的和本块 must_answer 回答；按内容本身需要组织表达，不自动补写步骤、分工、输入输出、交付物或验收内容。",
     "evidence": "只写需要出示的证明类型、证明对象和放置位置；没有企业材料就写待补，禁止编造业绩、人员、证书。",
     "constraint": "把约束写进方案如何遵守，并给出可检查口径，不要单独喊口号。",
     "quality": "写成可检查的质控点：查什么、何时查、不合格怎么办；只有招标要求明确验收时才写验收点。",
@@ -35,7 +35,6 @@ _RUBRIC_LEAK = re.compile(
     r"满分条件|得分任务|得分点|评分要求|评分标准|本节用于|"
     r"按已确认的章节边界|展开具体响应内容"
 )
-
 
 def _clean(value: Any, limit: int = MAX_TEXT) -> str:
     text = _RUBRIC_LEAK.sub("", re.sub(r"\s+", " ", str(value or "")).strip())
@@ -71,6 +70,23 @@ def _write_as(kind: str, outcome_kind: str) -> str:
     return _WRITE_AS.get(kind, _WRITE_AS["response"])
 
 
+def _explicit_purpose_objectives(purpose: str) -> list[str]:
+    """Split only an explicit “分别 A 和 B” purpose into its stated objectives."""
+    text = _clean(purpose)
+    match = re.fullmatch(r"分别(.+?)(?:和|与|及)(.+)", text)
+    if not match:
+        return []
+    left = match.group(1).strip(" ，、；")
+    right = match.group(2).strip(" ，、；")
+    if not left or not right:
+        return []
+    for verb in ("论证", "说明", "分析", "阐明", "明确"):
+        if left.startswith(verb) and not right.startswith(verb):
+            right = f"{verb}{right}"
+            break
+    return [left, right]
+
+
 def compile_chapter_writing_outline(
     chapter: dict[str, Any],
     *,
@@ -82,24 +98,14 @@ def compile_chapter_writing_outline(
     """Build ordered writing blocks the chapter body must cover."""
     node = chapter.get("blueprint_node") if isinstance(chapter.get("blueprint_node"), dict) else {}
     title = str(chapter.get("title") or node.get("title") or "当前章节")
-    purpose = _clean(
-        (writing_orientation or {}).get("writing_purpose", {}).get("purpose")
-        if isinstance((writing_orientation or {}).get("writing_purpose"), dict)
-        else node.get("purpose")
-        or "",
-        180,
-    )
+    purpose = str(node.get("purpose") or "").strip()
     objectives = [
-        _clean(item, 80)
-        for item in (
-            ((writing_orientation or {}).get("writing_purpose") or {}).get("writing_objectives")
-            if isinstance((writing_orientation or {}).get("writing_purpose"), dict)
-            else None
-        )
-        or node.get("writing_objectives")
-        or []
+        str(item).strip()
+        for item in node.get("writing_objectives") or []
         if str(item or "").strip()
     ][:6]
+    if not objectives:
+        objectives = _explicit_purpose_objectives(purpose)
     primary_unit_ids = {
         str(item) for item in (node.get("primary_response_unit_ids") or []) if item
     }
@@ -247,11 +253,14 @@ def compile_chapter_writing_outline(
         "chapter_id": str(chapter.get("chapter_id") or node.get("chapter_id") or ""),
         "chapter_title": title,
         "purpose": purpose,
+        "writing_objectives": objectives,
         "block_count": len(blocks),
         "blocks": blocks,
         "usable_local_facts": local_facts,
         "writing_rule": (
-            "按 blocks 顺序写正文，每块至少一段；按每块 write_as 写清做法或检查口径。"
+            "Blueprint 的 purpose 与 writing_objectives 是唯一章节目标，必须按原文执行，不得分类、改写或扩展。"
+            "按 blocks 顺序回答评分条件明确要求的 must_answer；write_as 只是中性表达规则，不能另造章节写法。"
+            "输入材料只是证据池，不得因为材料中存在某项事实就把它写进正文。"
             "只有 outcome_kind=deliverable/acceptance 的块，才能写对应的交付成果或验收内容；"
             "其他块不得机械补写“本章交付物”。不要输出提纲标题本身，不要出现评分术语。"
         ),

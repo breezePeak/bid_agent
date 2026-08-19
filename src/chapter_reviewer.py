@@ -388,7 +388,7 @@ def review_chapter_markdown(
 
     with agent_run(
         root,
-        "review_fix_chapters",
+        "chapter_review",
         "chapter_reviewer",
         input_summary={
             "chapter_id": chapter_id,

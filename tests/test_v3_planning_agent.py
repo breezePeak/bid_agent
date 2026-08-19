@@ -34,7 +34,7 @@ from document_pipeline.chapter_blueprint import audit_chapter_blueprint
 
 
 class V3PlanningAgentTests(unittest.TestCase):
-    def test_promotes_controlled_project_projection_and_topic_duties(self) -> None:
+    def test_promotes_score_independent_project_projection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
             runs = base / "runs"
@@ -42,7 +42,7 @@ class V3PlanningAgentTests(unittest.TestCase):
             context = WorkspaceContext.resolve(runs, "alpha")
             tender = base / "tender.md"
             score = base / "score.md"
-            tender.write_text("系统须满足数据安全要求；供应商须具备相关资质证书；交付实施报告；通过采购人验收。", encoding="utf-8")
+            tender.write_text("项目名称：数据治理项目；项目范围包括系统实施。系统须满足数据安全要求；供应商须具备相关资质证书；交付实施报告；通过采购人验收。", encoding="utf-8")
             score.write_text("技术评分（10分）\n技术方案完整性，满分10分，提供业绩证明。", encoding="utf-8")
             inputs = InputManifestService(context)
             inputs.register_local_file(tender, InputRole.TENDER)
@@ -52,18 +52,12 @@ class V3PlanningAgentTests(unittest.TestCase):
             ledger = runner.run("analyze_requirements")
             scores = runner.run("analyze_scores")
             project = runner.run("plan_response")
-            graph = load_promoted_topic_graph(context)
             blueprint = runner.run("compile_chapter_blueprint")
 
-            self.assertEqual(project.requirement_ids, [item.requirement_id for item in ledger.requirements])
-            self.assertEqual(project.score_point_ids, [point.score_point_id for point in scores.points])
-            self.assertTrue(all(topic.source_anchors or topic.attributes.get("upstream_refs") for topic in graph.topics if topic.review_status == "confirmed"))
-            duty_requirements = {item for duty in graph.duties for item in duty.requirement_ids}
-            self.assertTrue({item.requirement_id for item in ledger.requirements if item.severity == "blocking"} <= duty_requirements)
-            duty_scores = {item for duty in graph.duties for item in duty.score_point_ids}
-            self.assertEqual(duty_scores, {item.score_point_id for item in scores.points})
+            self.assertEqual(project.requirement_ids, sorted(item.requirement_id for item in ledger.requirements))
+            self.assertEqual(project.score_point_ids, [])
             self.assertEqual(ControlStore(context).v3_active_artifact("ProjectModel")["revision"], 1)
-            self.assertEqual(ControlStore(context).v3_active_artifact("ResponseTopicGraph")["revision"], 1)
+            self.assertIsNone(ControlStore(context).v3_active_artifact("ResponseTopicGraph"))
             self.assertEqual(ControlStore(context).v3_active_artifact("ChapterBlueprint")["revision"], 1)
             self.assertEqual(blueprint.planning_model, "score_direct")
             self.assertEqual(blueprint.assignments, [])
@@ -82,7 +76,6 @@ class V3PlanningAgentTests(unittest.TestCase):
             self.assertEqual(actual_primary_units, expected_section_units)
             self.assertTrue(any(item.parent_chapter_id is None for item in blueprint.nodes))
             self.assertEqual(runner.run("plan_response").revision, 1)
-            self.assertEqual(load_promoted_topic_graph(context).revision, 1)
 
     def test_rejects_cyclic_execution_dependencies(self) -> None:
         topic_a = ResponseTopic(topic_id="T-A", topic_type="function", canonical_name="A", intent="响应", summary="A", attributes={"upstream_refs": ["RequirementLedger:R-A"]}, confidence=1)

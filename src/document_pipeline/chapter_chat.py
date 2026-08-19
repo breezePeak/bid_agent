@@ -11,6 +11,7 @@ write ContentBlock, Blueprint, or other promoted Artifacts.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import uuid
@@ -20,6 +21,7 @@ from typing import Any
 
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 
+from .chapter_writing_kernel import compile_chapter_writing_spec
 from .input_manifest import V3_ROOT
 
 CHAPTER_CHAT_DIR = V3_ROOT / "chapter_chats"
@@ -31,15 +33,10 @@ MAX_TURN_CHARS = 20_000
 AUTHORITY_MODES = ("human_review", "delegate_review", "full_authority")
 DEFAULT_AUTHORITY_MODE = "human_review"
 MAX_DELEGATE_ROUNDS = 2
-_CONFIRM_RE = re.compile(
-    r"^(确认|通过|同意|可以写|按这个写|按此提纲|开始写|审核通过|写吧)([，,。.\s].*)?$"
-)
-_REJECT_RE = re.compile(r"(不通过|重列|改提纲|提纲不对|重新列)")
-_DOCUMENT_WRITE_RE = re.compile(
-    r"(写|撰写|生成|开始|填入|写入|放到).{0,16}"
-    r"(正文|本章|章节内容|中间文档|屏幕中间文档|文档中|文档里)"
-    r"|(中间文档|屏幕中间文档).{0,8}(写|撰写|生成|填入|写入|放到)"
-    r"|^(写正文|生成正文)$"
+_RESEARCH_REQUEST_RE = re.compile(
+    r"(?:查(?:资料|一下|一查)?|检索|搜索|联网|网上查|帮我找|查找|再搜|重搜|重新搜).{0,24}"
+    r"|(?:资料|政策|规范|标准|文件).{0,12}(?:查|检索|搜索|找)",
+    re.I,
 )
 _DOCUMENT_WRITE_NOTICE = "提纲已确认，正文将写入中间文档；对话区只保留进度与结果。"
 
@@ -163,7 +160,7 @@ class ChapterChatService:
         chapter_id: str,
         *,
         outline: dict[str, Any] | None,
-        user_message: str = "",
+        agent_action: str = "respond_only",
     ) -> dict[str, Any]:
         """Decide whether to list the outline, wait, or write body."""
         authority = self.load_authority(chapter_id)
@@ -173,18 +170,24 @@ class ChapterChatService:
         review_status = str(authority.get("review_status") or "idle")
         if outline_hash and stored_hash and stored_hash != outline_hash:
             review_status = "idle"
-        intent = _user_review_intent(user_message)
+        action = _normalize_chapter_action(agent_action)
         mode = str(authority.get("mode") or DEFAULT_AUTHORITY_MODE)
         blocks = [
             item for item in (outline.get("blocks") or []) if isinstance(item, dict)
         ]
-        if not blocks:
+        if not blocks and mode != "full_authority":
+            self._update_chapter_review(
+                chapter_id,
+                review_status="pending",
+                outline_hash=outline_hash,
+                mode=mode,
+            )
             return {
                 **authority,
-                "write_phase": "write_body",
-                "review_status": "approved",
+                "write_phase": "list_for_review",
+                "review_status": "pending",
                 "outline_hash": outline_hash,
-                "reason": "没有可审提纲，直接写本章。",
+                "reason": "当前没有可审核的提纲，不能开始正文写作。",
             }
 
         if mode == "full_authority":
@@ -202,7 +205,7 @@ class ChapterChatService:
                 "reason": "完全权限：按提纲直接写正文。",
             }
 
-        if intent == "reject":
+        if action == "reject_outline":
             self._update_chapter_review(
                 chapter_id,
                 review_status="rejected",
@@ -218,7 +221,34 @@ class ChapterChatService:
             }
 
         if mode == "human_review":
-            if intent == "confirm" or review_status == "approved":
+            if action == "prepare_outline":
+                self._update_chapter_review(
+                    chapter_id,
+                    review_status="pending",
+                    outline_hash=outline_hash,
+                    mode=mode,
+                )
+                return {
+                    **authority,
+                    "write_phase": "list_for_review",
+                    "review_status": "pending",
+                    "outline_hash": outline_hash,
+                    "reason": "本章提纲已生成，等待用户确认后再写正文。",
+                }
+            if review_status == "approved":
+                return {
+                    **authority,
+                    "write_phase": "write_body",
+                    "review_status": "approved",
+                    "outline_hash": outline_hash,
+                    "reason": "提纲已经用户确认，可以编写正文。",
+                }
+            if (
+                action == "confirm_outline"
+                and review_status in {"pending", "rejected"}
+                and bool(stored_hash)
+                and stored_hash == outline_hash
+            ):
                 self._update_chapter_review(
                     chapter_id,
                     review_status="approved",
@@ -296,22 +326,31 @@ class ChapterChatService:
         authority = chat_context.get("authority") if isinstance(chat_context.get("authority"), dict) else {}
         outline = chat_context.get("writing_outline") if isinstance(chat_context.get("writing_outline"), dict) else {}
         blocks = [item for item in (outline.get("blocks") or []) if isinstance(item, dict)]
-        lines = [f"本章《{title}》准备这样写："]
+        lines = ["本章写作提纲", "", f"章节名称：{title}"]
         if purpose:
-            lines.append(f"章节目的：{purpose}")
+            lines.append(f"写作目的：{purpose}")
+        lines.extend(("", f"共 {len(blocks)} 个写作要点："))
         for index, item in enumerate(blocks, start=1):
             kind = _kind_label(str(item.get("kind") or ""))
             heading = str(item.get("heading") or f"要点{index}")
             must = str(item.get("must_answer") or "").strip()
             write_as = str(item.get("write_as") or "").strip()
-            lines.append(f"{index}. 【{kind}】{heading}")
+            lines.append("")
+            lines.append(f"{index}. {heading}")
+            lines.append(f"   内容类型：{kind}")
             if must:
-                lines.append(f"   要写清：{must}")
+                lines.append(f"   核心问题：{must}")
             if write_as:
-                lines.append(f"   写法：{write_as}")
+                lines.append(f"   表达要求：{write_as}")
         mode = str(authority.get("mode") or DEFAULT_AUTHORITY_MODE)
         if mode == "human_review":
-            lines.append("请审核这份提纲。回复「确认」后我按此写正文；要改就直接说改哪一块。")
+            lines.extend(
+                (
+                    "",
+                    "审核操作",
+                    "确认后将立即开始写正文，并把内容写入中间文档；如需调整，请直接指出要修改的序号。",
+                )
+            )
         elif mode == "delegate_review":
             review = authority.get("delegate_review") if isinstance(authority.get("delegate_review"), dict) else {}
             if review.get("passed"):
@@ -340,7 +379,7 @@ class ChapterChatService:
         phase = self.resolve_write_phase(
             chapter_id,
             outline=outline,
-            user_message="",
+            agent_action="respond_only",
         )
         ready = str(phase.get("write_phase") or "") == "write_body"
         return {
@@ -422,10 +461,62 @@ class ChapterChatService:
                     "content": content,
                     "thinking": thinking,
                     "created_at": created_at,
+                    "research_steps": list(item.get("research_steps") or []),
+                    "elapsed_seconds": item.get("elapsed_seconds"),
+                    "operation_id": str(item.get("operation_id") or ""),
+                    "status": str(item.get("status") or ""),
                 }
             )
         if limit > 0:
             return turns[-limit:]
+        return turns
+
+    def load_batch_history(self, chapter_id: str) -> list[dict[str, Any]]:
+        """Project durable batch-writing events into readable chapter chat turns."""
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in self.store.chapter_batch_events(chapter_id):
+            grouped.setdefault(str(event.get("job_id") or ""), []).append(event)
+
+        turns: list[dict[str, Any]] = []
+        for job_id, events in grouped.items():
+            if not job_id or not events:
+                continue
+            notes: list[str] = []
+            draft_parts: list[str] = []
+            status = ""
+            for event in events:
+                event_type = str(event.get("type") or "")
+                status = str(event.get("status") or status)
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if event_type == "draft_delta":
+                    delta = str(data.get("text") or "")
+                    if delta:
+                        draft_parts.append(delta)
+                    continue
+                message = str(event.get("message") or "").strip()
+                stage = str(event.get("stage") or "").strip()
+                if message:
+                    notes.append(f"{stage}：{message}" if stage else message)
+            title = str(events[-1].get("chapter_title") or chapter_id)
+            committed = any(str(event.get("type") or "") == "chapter_committed" for event in events)
+            failed = any(str(event.get("type") or "") == "chapter_failed" for event in events)
+            content = "".join(draft_parts).strip()
+            if committed:
+                content = content or f"《{title}》正文已生成并写入中间文档。"
+            elif failed:
+                content = content or f"《{title}》本次编写未完成。"
+            else:
+                content = content or f"《{title}》的批量编写记录。"
+            turns.append({
+                "turn_id": f"batch:{job_id}:{chapter_id}",
+                "role": "assistant",
+                "content": content,
+                "thinking": "\n".join(notes),
+                "created_at": str(events[0].get("created_at") or ""),
+                "status": "succeeded" if committed else ("failed" if failed else status),
+                "operation_id": f"chapter-batch:{job_id}",
+                "source": "batch_writing",
+            })
         return turns
 
     def append_turn(
@@ -436,6 +527,10 @@ class ChapterChatService:
         content: str,
         thinking: str = "",
         created_at: str | None = None,
+        research_steps: list[dict[str, Any]] | None = None,
+        elapsed_seconds: int | float | None = None,
+        operation_id: str = "",
+        status: str = "",
     ) -> dict[str, Any]:
         path = self.history_path(chapter_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -446,6 +541,10 @@ class ChapterChatService:
             "thinking": str(thinking or ""),
             "created_at": created_at or _utc_now(),
             "chapter_id": _safe_chapter_id(chapter_id),
+            "research_steps": list(research_steps or []),
+            "elapsed_seconds": elapsed_seconds,
+            "operation_id": str(operation_id or ""),
+            "status": str(status or ""),
         }
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -529,6 +628,54 @@ class ChapterChatService:
         self._write_history(chapter_id, turns)
         return updated
 
+    def delete_turn(
+        self,
+        chapter_id: str,
+        *,
+        turn_id: str = "",
+        created_at: str = "",
+        role: str = "",
+    ) -> None:
+        """Permanently remove one chapter-local collaboration turn."""
+        wanted_id = str(turn_id or "").strip()
+        wanted_created = str(created_at or "").strip()
+        wanted_role = str(role or "").strip()
+        if not wanted_id and not (wanted_created and wanted_role):
+            raise ControlPlaneError(
+                "CHAT_TURN_INVALID",
+                "删除消息需要 turn_id 或创建时间和角色。",
+                status_code=400,
+            )
+        turns = self.load_history(chapter_id, limit=0)
+        match_index = next(
+            (
+                index
+                for index, item in enumerate(turns)
+                if (wanted_id and str(item.get("turn_id") or "") == wanted_id)
+                or (
+                    not wanted_id
+                    and str(item.get("created_at") or "") == wanted_created
+                    and str(item.get("role") or "") == wanted_role
+                )
+            ),
+            -1,
+        )
+        if match_index < 0:
+            raise ControlPlaneError(
+                "CHAT_TURN_NOT_FOUND",
+                "未找到要删除的历史消息。",
+                status_code=404,
+            )
+        del turns[match_index]
+        self._write_history(chapter_id, turns)
+
+    def clear_history(self, chapter_id: str) -> int:
+        """Permanently remove all chapter-local collaboration turns."""
+        turns = self.load_history(chapter_id, limit=0)
+        deleted_count = len(turns)
+        self._write_history(chapter_id, [])
+        return deleted_count
+
     def _write_history(self, chapter_id: str, turns: list[dict[str, Any]]) -> None:
         path = self.history_path(chapter_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -545,6 +692,10 @@ class ChapterChatService:
                 "thinking": str(item.get("thinking") or ""),
                 "created_at": str(item.get("created_at") or _utc_now()),
                 "chapter_id": safe_id,
+                "research_steps": list(item.get("research_steps") or []),
+                "elapsed_seconds": item.get("elapsed_seconds"),
+                "operation_id": str(item.get("operation_id") or ""),
+                "status": str(item.get("status") or ""),
             }
             lines.append(json.dumps(record, ensure_ascii=False))
         path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -595,16 +746,6 @@ class ChapterChatService:
         ]
 
         gpc = global_project_context if isinstance(global_project_context, dict) else {}
-        identity = gpc.get("project_identity") if isinstance(gpc.get("project_identity"), dict) else {}
-        shared_facts = {
-            "global_context_revision": gpc.get("global_context_revision"),
-            "project_name": identity.get("project_name") or gpc.get("project_name"),
-            "buyer": identity.get("buyer") or gpc.get("buyer"),
-            "scope_summary": gpc.get("scope_summary") or identity.get("scope_summary"),
-            "confirmed_fact_count": len(gpc.get("confirmed_facts") or [])
-            if isinstance(gpc.get("confirmed_facts"), list)
-            else 0,
-        }
 
         sibling_payload = sibling_context if isinstance(sibling_context, dict) else {}
         if not sibling_payload:
@@ -675,6 +816,25 @@ class ChapterChatService:
         except Exception:
             writing_outline = {}
 
+        # Compile the same immutable chapter boundary used by the document
+        # writer.  Chat is allowed to discuss that boundary, never to create a
+        # second one from the title or from whatever project facts happen to
+        # be present.
+        writing_spec = compile_chapter_writing_spec(
+            chapter_id=str(chapter.get("chapter_id") or ""),
+            operation="rewrite" if draft_preview else "create",
+            chapter=chapter,
+            tender_requirements=tuple(tender_requirements or []),
+            scoring_requirements=tuple(scoring_requirements or []),
+            project_context=gpc,
+            chapter_context={"chapter_context_items": context_items},
+            writing_orientation=orientation_for_agent,
+            existing_content=draft_preview,
+        )
+        chapter_scope = writing_spec.scope_contract().payload()
+        writing_outline = writing_spec.writing_outline
+        shared_facts = writing_spec.project_context
+
         return {
             "chapter_id": str(chapter.get("chapter_id") or ""),
             "title": str(chapter.get("title") or node.get("title") or ""),
@@ -682,9 +842,8 @@ class ChapterChatService:
             "status": str(chapter.get("status") or ""),
             "approval_status": str(chapter.get("approval_status") or ""),
             "purpose": str(
-                (orientation_for_agent.get("writing_purpose") or {}).get("purpose")
-                or node.get("purpose")
-                or node.get("response_purpose")
+                writing_spec.purpose
+                or (orientation_for_agent.get("writing_purpose") or {}).get("purpose")
                 or ""
             ),
             "level": node.get("level"),
@@ -694,6 +853,7 @@ class ChapterChatService:
             "tender_requirements": list(tender_requirements or []),
             "scoring_requirements": list(scoring_requirements or []),
             "shared_project_facts": shared_facts,
+            "chapter_scope": chapter_scope,
             "writing_orientation": orientation_for_agent,
             "writing_outline": writing_outline,
             "role": "bid_chapter_writer",
@@ -706,6 +866,9 @@ class ChapterChatService:
             "formal_content_revision": int(chapter.get("formal_content_revision") or 0),
         }
 
+    # Non-streaming callers consume the exact same event producer as the
+    # streaming endpoint.  Keep this adapter next to the producer so phase,
+    # research, delegation and fallback behavior cannot drift.
     def answer(
         self,
         chapter_id: str,
@@ -719,109 +882,43 @@ class ChapterChatService:
         outline_context: dict[str, Any] | None = None,
         writing_orientation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        text = str(message or "").strip()
-        if not text:
-            raise ControlPlaneError(
-                "CHAT_MESSAGE_REQUIRED",
-                "请输入要处理的问题。",
-                status_code=400,
+        events = list(
+            self.iter_answer_events(
+                chapter_id,
+                message,
+                chapter=chapter,
+                global_project_context=global_project_context,
+                tender_requirements=tender_requirements,
+                scoring_requirements=scoring_requirements,
+                sibling_context=sibling_context,
+                outline_context=outline_context,
+                writing_orientation=writing_orientation,
             )
-
-        history = self.load_history(chapter_id, limit=PROMPT_HISTORY_TAIL)
-        chat_context = self.build_chapter_chat_context(
-            chapter,
-            global_project_context=global_project_context,
-            tender_requirements=tender_requirements,
-            scoring_requirements=scoring_requirements,
-            sibling_context=sibling_context,
-            outline_context=outline_context,
-            writing_orientation=writing_orientation,
         )
-        inspection = self._resolve_inspections(
-            chapter_id=chapter_id,
-            outline_context=outline_context or chat_context.get("document_outline_context"),
-            task=text,
+        done = next(
+            (item for item in reversed(events) if item.get("type") == "done"),
+            None,
         )
-        chat_context["inspected_chapters"] = list(inspection.get("views") or [])
-        phase = self.resolve_write_phase(
-            chapter_id,
-            outline=chat_context.get("writing_outline"),
-            user_message=text,
-        )
-        chat_context["authority"] = phase
-        thinking = ""
-        # delegate_review: 同步 LLM 审核 + 定向修改
-        if phase.get("review_status") == "pending_delegate":
-            current_outline = chat_context.get("writing_outline") or {}
-            for delegate_round in range(1, MAX_DELEGATE_ROUNDS + 1):
-                review_result = _llm_delegate_review_outline(current_outline, chat_context)
-                if review_result.get("passed"):
-                    self._update_chapter_review(
-                        chapter_id,
-                        review_status="delegated",
-                        outline_hash=_outline_hash(current_outline),
-                        mode="delegate_review",
-                    )
-                    phase["review_status"] = "delegated"
-                    phase["write_phase"] = "write_body"
-                    phase["delegate_review"] = review_result
-                    chat_context["authority"] = phase
-                    break
-                issues = review_result.get("issues") or []
-                if not issues or delegate_round >= MAX_DELEGATE_ROUNDS:
-                    self._update_chapter_review(
-                        chapter_id,
-                        review_status="rejected",
-                        outline_hash=_outline_hash(current_outline),
-                        mode="delegate_review",
-                    )
-                    phase["review_status"] = "rejected"
-                    phase["delegate_review"] = review_result
-                    chat_context["authority"] = phase
-                    break
-                fixed = self._apply_delegate_fixes(
-                    chapter_id, current_outline, issues, chat_context
-                )
-                current_outline = fixed
-                chat_context["writing_outline"] = current_outline
-
-        document_write_requested = _requests_document_write(text, phase)
-        if document_write_requested:
-            answer = _DOCUMENT_WRITE_NOTICE
-        elif phase.get("write_phase") == "list_for_review":
-            answer = self.render_outline_review(chat_context)
-        else:
-            messages = self._build_messages(chat_context, history, text)
-            try:
-                from llm_client import chat_with_meta
-
-                meta = chat_with_meta(messages, temperature=0.2)
-                answer = str(meta.get("content") or "").strip()
-                thinking = str(meta.get("reasoning") or "").strip()
-            except Exception:
-                answer = self._fallback_answer(chat_context, text)
-            if phase.get("mode") == "delegate_review" and phase.get("delegate_review"):
-                answer = self.render_outline_review(chat_context) + "\n\n" + answer
-
-        if not answer:
-            answer = "（无回复）"
-
-        user_record = self.append_turn(chapter_id, role="user", content=text)
-        assistant_record = self.append_turn(
-            chapter_id,
-            role="assistant",
-            content=answer,
-            thinking=thinking,
-        )
+        if done is None:
+            raise ControlPlaneError(
+                "CHAT_TURN_FAILED",
+                "Chapter chat did not return a done event.",
+                status_code=500,
+            )
         return {
-            "reply": answer,
-            "thinking": thinking,
-            "chapter_id": _safe_chapter_id(chapter_id),
-            "inspected_chapter_ids": list(inspection.get("inspect_ids") or []),
-            "user_turn": user_record,
-            "assistant_turn": assistant_record,
-            "history_tail": self.load_history(chapter_id, limit=HISTORY_TAIL),
-            "document_write_requested": document_write_requested,
+            "reply": done.get("reply") or "",
+            "thinking": done.get("thinking") or "",
+            "chapter_id": done.get("chapter_id") or _safe_chapter_id(chapter_id),
+            "inspected_chapter_ids": list(done.get("inspected_chapter_ids") or []),
+            "user_turn": done.get("user_turn"),
+            "assistant_turn": done.get("assistant_turn"),
+            "history_tail": done.get("turns") or self.load_history(
+                chapter_id, limit=HISTORY_TAIL
+            ),
+            "document_write_requested": bool(done.get("document_write_requested")),
+            "document_approval_requested": bool(
+                done.get("document_approval_requested")
+            ),
         }
 
     def iter_answer_events(
@@ -873,14 +970,73 @@ class ChapterChatService:
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
 
-        inspection_planning_note = "先看目录标题，判断是否需要打开他章详情…"
-        reasoning_parts.append(f"{inspection_planning_note}\n")
-        yield {
-            "type": "inspect_planning",
-            "chapter_id": safe_id,
-            "message": inspection_planning_note,
-        }
-        inspection = self._resolve_inspections(
+        agent_action = _decide_chapter_action(chat_context, history, text)
+        document_approval_action = agent_action["action"] == "approve_document"
+        head_revision = int(chat_context.get("head_content_revision") or 0)
+        formal_revision = int(chat_context.get("formal_content_revision") or 0)
+        document_approval_requested = (
+            document_approval_action
+            and head_revision > 0
+            and head_revision != formal_revision
+        )
+        if document_approval_action:
+            phase = {
+                **self.load_authority(chapter_id),
+                "write_phase": "document_approval",
+                "reason": "正在处理当前正文的确认请求。",
+            }
+        else:
+            phase = self.resolve_write_phase(
+                chapter_id,
+                outline=chat_context.get("writing_outline"),
+                agent_action=agent_action["action"],
+            )
+        phase["agent_action"] = agent_action
+        chat_context["authority"] = phase
+        document_write_requested = (
+            agent_action["action"] in {"write_document", "confirm_outline"}
+            and str(phase.get("write_phase") or "") == "write_body"
+        )
+        outline_analysis = str(phase.get("write_phase") or "") == "list_for_review"
+
+        if outline_analysis:
+            title = str(chat_context.get("title") or safe_id).strip()
+            title_note = f"1/4 章节名称：《{title}》"
+            reasoning_parts.append(f"{title_note}\n")
+            yield {
+                "type": "thinking_step",
+                "chapter_id": safe_id,
+                "step": "chapter_title",
+                "message": title_note,
+            }
+
+            orientation = (
+                chat_context.get("writing_orientation")
+                if isinstance(chat_context.get("writing_orientation"), dict)
+                else {}
+            )
+            writing_purpose = (
+                orientation.get("writing_purpose")
+                if isinstance(orientation.get("writing_purpose"), dict)
+                else {}
+            )
+            purpose = str(
+                writing_purpose.get("purpose") or chat_context.get("purpose") or "按已确认的章节边界组织内容"
+            ).strip()
+            situation_note = f"2/4 章节处境：{purpose}"
+            reasoning_parts.append(f"{situation_note}\n")
+            yield {
+                "type": "thinking_step",
+                "chapter_id": safe_id,
+                "step": "chapter_situation",
+                "message": situation_note,
+            }
+
+        inspection = {
+            "inspect_ids": [],
+            "reason": "正文写作阶段不重复执行提纲分析。",
+            "views": [],
+        } if (document_write_requested or document_approval_action) else self._resolve_inspections(
             chapter_id=chapter_id,
             outline_context=outline_context or chat_context.get("document_outline_context"),
             task=text,
@@ -906,22 +1062,53 @@ class ChapterChatService:
                 "reason": str(inspection.get("reason") or ""),
                 "message": inspection_note,
             }
-        else:
-            inspection_note = str(inspection.get("reason") or "仅依据目录标题继续回答。")
-            reasoning_parts.append(f"{inspection_note}\n")
+
+        research_requested = bool(_RESEARCH_REQUEST_RE.search(text))
+        if outline_analysis:
+            material_counts = {
+                "招标要求": len(chat_context.get("tender_requirements") or []),
+                "评分要求": len(chat_context.get("scoring_requirements") or []),
+                "本章资料": len(chat_context.get("chapter_context_items") or []),
+                "他章只读": len(inspection.get("views") or []),
+            }
+            material_note = "3/4 资料检查：" + "，".join(
+                f"{label} {count} 条" for label, count in material_counts.items()
+            )
+            reasoning_parts.append(f"{material_note}\n")
             yield {
-                "type": "inspect_skipped",
+                "type": "thinking_step",
                 "chapter_id": safe_id,
-                "reason": str(inspection.get("reason") or "标题树已足够"),
-                "message": inspection_note,
+                "step": "material_check",
+                "message": material_note,
+                "counts": material_counts,
             }
 
-        phase = self.resolve_write_phase(
-            chapter_id,
-            outline=chat_context.get("writing_outline"),
-            user_message=text,
-        )
-        chat_context["authority"] = phase
+            research_plan_note = (
+                "4/4 查询判断：发现明确的资料查询要求，正在检索并核验公开来源。"
+                if research_requested
+                else "4/4 查询判断：提纲先依据已有资料生成；正文写作前将按资料缺口判断是否需要公开查询。"
+            )
+            reasoning_parts.append(f"{research_plan_note}\n")
+            yield {
+                "type": "thinking_step",
+                "chapter_id": safe_id,
+                "step": "research_decision",
+                "message": research_plan_note,
+                "research_requested": research_requested,
+            }
+        research = self._research_for_message(chapter_id, text, chat_context)
+        if research:
+            chat_context["research"] = research
+            research_note = str(research["message"])
+            reasoning_parts.append(f"{research_note}\n")
+            yield {
+                "type": "research",
+                "chapter_id": safe_id,
+                "status": research["status"],
+                "message": research_note,
+                "sources": research["sources"],
+            }
+
         yield {
             "type": "authority",
             "chapter_id": safe_id,
@@ -929,7 +1116,9 @@ class ChapterChatService:
             "write_phase": phase.get("write_phase"),
             "review_status": phase.get("review_status"),
             "message": str(phase.get("reason") or ""),
-            "document_write_requested": _requests_document_write(text, phase),
+            "agent_action": agent_action,
+            "document_write_requested": document_write_requested,
+            "document_approval_requested": document_approval_requested,
         }
         # delegate review: LLM 深度审核 + 定向修改循环
         if phase.get("review_status") == "pending_delegate":
@@ -980,7 +1169,8 @@ class ChapterChatService:
                         "write_phase": "write_body",
                         "review_status": "delegated",
                         "message": f"代审通过：{review_result.get('reason', '')}",
-                        "document_write_requested": _requests_document_write(text, phase),
+                        "agent_action": agent_action,
+                        "document_write_requested": agent_action["action"] == "write_document",
                     }
                     break
                 else:
@@ -1040,8 +1230,26 @@ class ChapterChatService:
                             current_outline = data
                             chat_context["writing_outline"] = current_outline
 
-        document_write_requested = _requests_document_write(text, phase)
-        if document_write_requested:
+        document_write_requested = (
+            agent_action["action"] in {"write_document", "confirm_outline"}
+            and str(phase.get("write_phase") or "") == "write_body"
+        )
+        if document_approval_action:
+            if document_approval_requested:
+                answer = "正在确认当前正文，完成后会自动更新章节状态。"
+            elif head_revision <= 0:
+                answer = "当前没有可确认的正文草稿，请先在对话中生成正文。"
+            else:
+                answer = "当前正文已经确认，无需重复确认。"
+            content_parts.append(answer)
+            yield {
+                "type": "content_delta",
+                "chapter_id": safe_id,
+                "delta": answer,
+                "content_kind": "status",
+            }
+            messages = None
+        elif document_write_requested:
             answer = _DOCUMENT_WRITE_NOTICE
             content_parts.append(answer)
             yield {
@@ -1136,6 +1344,8 @@ class ChapterChatService:
             "assistant_turn": assistant_record,
             "turns": self.load_history(chapter_id, limit=HISTORY_TAIL),
             "document_write_requested": document_write_requested,
+            "document_approval_requested": document_approval_requested,
+            "agent_action": agent_action,
         }
 
     def _apply_delegate_fixes(
@@ -1270,60 +1480,196 @@ class ChapterChatService:
                 "decision_source": "error",
             }
 
+    def _research_for_message(
+        self,
+        chapter_id: str,
+        message: str,
+        chat_context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Run the bounded research tool when the user explicitly asks for it."""
+        if not _RESEARCH_REQUEST_RE.search(message):
+            return None
+        from .chapter_research_planner import plan_chapter_research
+        from .contracts import EvidenceNeed
+        from .research_adapters import create_research_adapter
+        from .research_service import ResearchService
+
+        title = str(chat_context.get("title") or chapter_id).strip()
+        purpose = str(chat_context.get("purpose") or "").strip()
+        requirements = [
+            str(item.get("normalized_requirement") or item.get("requirement") or "").strip()
+            for item in list(chat_context.get("tender_requirements") or [])[:3]
+            if isinstance(item, dict)
+        ]
+        research_chapter = {
+            "chapter_id": _safe_chapter_id(chapter_id),
+            "title": title,
+            "blueprint_node": {"title": title, "purpose": purpose},
+            "context": {"items": list(chat_context.get("chapter_context_items") or [])},
+        }
+        shared = chat_context.get("shared_project_facts")
+        shared = shared if isinstance(shared, dict) else {}
+        research_plan = plan_chapter_research(
+            research_chapter,
+            project_context={
+                "identity": {
+                    key: value
+                    for key, value in {
+                        "project_name": shared.get("project_name"),
+                        "buyer": shared.get("buyer"),
+                    }.items()
+                    if str(value or "").strip()
+                },
+                "scope": list(shared.get("scope") or []),
+            },
+            sibling_context=chat_context.get("sibling_chapter_context"),
+            writing_orientation=chat_context.get("writing_orientation"),
+            inspected_chapters=chat_context.get("inspected_chapters"),
+            tender_requirements=chat_context.get("tender_requirements"),
+            scoring_requirements=chat_context.get("scoring_requirements"),
+            instruction=message,
+            force_research=True,
+        )
+        if not research_plan.get("need_research"):
+            return {
+                "status": "skipped",
+                "message": str(research_plan.get("reason") or "章节 Agent 判断现有资料足够，无需公开检索。"),
+                "sources": [],
+            }
+        question_parts = [
+            f"请检索与投标章节“{title}”直接相关、可核验的公开资料。",
+            "优先采用政府部门、标准发布机构和采购人官网来源；逐项给出标题、发布机构、摘要和 URL。",
+            "仅补充项目背景、政策标准、技术方法或实施依据；不得推断投标企业资质、业绩、人员、报价或承诺。",
+        ]
+        if purpose:
+            question_parts.append(f"章节目的：{purpose}")
+        if requirements:
+            question_parts.append("关联要求：" + "；".join(requirements))
+        # A terse command such as “你去查资料啊” must become a usable,
+        # chapter-scoped query instead of being sent verbatim to the provider.
+        if len(message) > 12:
+            question_parts.append(f"用户关注点：{message}")
+        question = str(research_plan.get("search_query") or "").strip() or "\n".join(question_parts)
+        digest = hashlib.sha256(f"{chapter_id}:{question}".encode("utf-8")).hexdigest()[:16]
+        need = EvidenceNeed(
+            need_id=f"EN-CHAT-{digest}",
+            question=question,
+            topic_id=f"chapter-chat:{_safe_chapter_id(chapter_id)}",
+            priority="high",
+            blocking_scope="none",
+            deadline_stage="chapter_chat",
+            query_budget=3,
+            task_anchors=[title] if title else [],
+            relevance_context={
+                "chapter_title": title,
+                "chapter_purpose": purpose,
+                "tender_requirements": requirements,
+                "project_scope": list(shared.get("scope") or []),
+            },
+            max_adopted_items=3,
+        )
+        try:
+            batch = ResearchService(self.context, create_research_adapter()).resolve(
+                need,
+                force_refresh=True,
+            )
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "message": f"已发起本章公开资料检索，但检索工具未完成：{str(exc)[:240]}",
+                "sources": [],
+            }
+        sources = [
+            {
+                "evidence_id": item.evidence_id,
+                "title": item.title,
+                "publisher": item.publisher,
+                "source_url": item.source_url,
+                "excerpt": item.supporting_excerpt or item.content[:500],
+                "extracted_points": list(item.extracted_points or []),
+                "relevance_reason": item.relevance_reason,
+                "relevance_confidence": item.relevance_confidence,
+                "usage_category": item.usage_category,
+            }
+            for item in batch.items
+        ]
+        if batch.status == "published" and sources:
+            message_text = f"已完成本章公开资料检索，找到 {len(sources)} 条可采用来源。"
+        elif batch.status == "gap":
+            message_text = "已完成本章公开资料检索，但没有通过关联性和可核验筛选的来源。"
+        else:
+            message_text = f"本章公开资料检索未完成：{str(batch.error or '检索服务不可用')[:240]}"
+        return {"status": batch.status, "message": message_text, "sources": sources}
+
     @staticmethod
     def _build_messages(
         chat_context: dict[str, Any],
         history: list[dict[str, Any]],
         user_message: str,
     ) -> list[dict[str, str]]:
-        title = str(chat_context.get("title") or "当前章节")
-        purpose = str(chat_context.get("purpose") or "").strip()
         authority = chat_context.get("authority") if isinstance(chat_context.get("authority"), dict) else {}
         phase = str(authority.get("write_phase") or "write_body")
-        mode_label = str(authority.get("mode_label") or _mode_label(authority.get("mode")))
         system_prompt = (
-            f"你就是这份投标文件里「{title}」这一章的写作 Agent，不是顾问、不是检查员、不是产品经理。"
-            f"当前权限：{mode_label}。"
-            "用户在和你讨论本章，你的默认动作是写标书正文，或改本章正文。"
-            + (f"本章目的：{purpose}。" if purpose else "")
-            + "先按 writing_orientation 确认本章职责和目录位置，再按 writing_outline.blocks 逐块写。"
-            "每块写清做法或检查口径、交付物或记录方式；用标书口吻，直接给可粘贴的正文。"
+            "你是当前章节的写作 Agent。chapter_scope 是与正文写作器共用的唯一章节边界。"
+            "无论本轮是解释、评判、状态说明还是提纲讨论，都只能围绕 chapter_scope 中的 "
+            "purpose、writing_objectives、writing_outline.blocks 和 bound_requirements 回答。"
+            "项目事实只是这些目标的证据候选，不是必须写入的话题；不得因为上下文出现采购人、"
+            "部署、成果、交付物、流程或角色等事实，就把它们扩展成本章论证路线。"
+            "标题只是显示信息，不能据此推断章节职责。按每个 block 的 must_answer 回答，并遵循 write_as；"
+            "除非 scope 明确要求，不得增加职责、程序、输入输出、交付物、记录、验收或承诺。"
             + (
                 "当前阶段是列出提纲等用户审核：只整理本章要写什么，不要写完整正文。"
                 if phase == "list_for_review"
-                else "当前阶段是写正文：按已确认或已代审的提纲直接写。"
+                else "本轮动作已判定为只回复、不写文档；直接回答用户问题。"
             )
-            + "draft_preview 为空时，不要说“建议重新撰写”。"
-            "禁止反问“需要我给出框架吗”“要不要我展开”；有材料就写，缺企业证据就用待补表述继续写完。"
-            "不要输出满分条件、得分点、评分要求等内部术语。"
-            "document_outline_context 只有目录标题；只有 inspected_chapters 才是他章只读详情。"
-            "不得改写其他章节，不得把外部网页写成企业资质、业绩或人员。"
-            "提纲确认或用户明确要求写正文时，正文必须交给中间文档写作流落盘；对话区只回复进度和结果，不粘贴完整正文。"
-            "思考通道里分析本章提纲和材料缺口，面向用户只出标书正文或针对性改稿。"
+            + "draft_preview 为空时要明确说明当前没有可供检查的正文，不得假装看过正文。"
+            "既往 assistant 对话不具事实权威；用户质疑此前回答时，直接纠正且不得自我强化。"
+            "当前能收到本提示就表示本轮没有触发写作流，禁止声称已修改、已覆盖、已写入、已提交或已完成正文。"
         )
+        research = chat_context.get("research") if isinstance(chat_context.get("research"), dict) else {}
+        if research and research.get("status") != "skipped":
+            system_prompt += (
+                "用户已明确要求查资料，系统已实际调用公开资料检索工具。"
+                "只能基于 research.sources 中返回的来源描述检索结果，不得声称自己没有检索工具，"
+                "也不得编造未返回的政策名称、文号、年份或链接。"
+            )
+        elif research:
+            system_prompt += (
+                "检索规划器已判断现有资料足以回答本章；如解释该决定，只能依据 research.message，"
+                "不得捏造未检索的外部来源。"
+            )
+        # Assistant history is a conversation record only.  It is never a
+        # project fact or an instruction: an earlier answer may be wrong and
+        # must not reinforce itself on the next turn.
         recent = [
             {
                 "role": item.get("role"),
                 "content": item.get("content"),
+                "authority": "non_authoritative"
+                if item.get("role") == "assistant"
+                else "user_instruction",
             }
             for item in history
             if isinstance(item, dict) and item.get("content")
         ]
+        draft_requested = _is_draft_inspection_request(user_message)
+        history_critique = _is_history_critique_request(user_message)
         user_payload = {
             "role": "bid_chapter_writer",
-            "chapter_id": chat_context.get("chapter_id"),
-            "chapter_title": chat_context.get("title"),
-            "chapter_purpose": chat_context.get("purpose"),
-            "writing_outline": chat_context.get("writing_outline") or {},
+            "chapter_scope": chat_context.get("chapter_scope") or {},
             "authority": authority,
-            "draft_preview": chat_context.get("draft_preview") or "",
+            "draft_preview": (chat_context.get("draft_preview") or "") if draft_requested else "",
             "recent_chapter_dialogue": recent,
-            "chapter_context": chat_context,
             "inspected_chapters": list(chat_context.get("inspected_chapters") or []),
+            "research": research,
+            "draft_inspection_requested": draft_requested,
+            "history_critique_requested": history_critique,
+            "history_is_non_authoritative": True,
             "user_message": user_message,
             "instruction": (
-                "若用户在要正文、改写、展开或本章尚无草稿，直接输出本章标书正文；"
-                "不要给检查清单，不要征求是否继续写。"
+                "忠实回答 user_message，但任何论证、解释和建议均不得超出 chapter_scope。"
+                "只有 draft_inspection_requested 为 true 时才检查 draft_preview；为空则如实说明。"
+                "不得声称已经修改或写入文档。"
             ),
         }
         return [
@@ -1336,74 +1682,63 @@ class ChapterChatService:
 
     @staticmethod
     def _fallback_answer(chat_context: dict[str, Any], message: str) -> str:
-        title = str(chat_context.get("title") or chat_context.get("chapter_id") or "当前章节")
-        req_n = len(chat_context.get("tender_requirements") or [])
-        score_n = len(chat_context.get("scoring_requirements") or [])
-        ctx_n = len(chat_context.get("chapter_context_items") or [])
-        outline = chat_context.get("document_outline_context")
+        scope = chat_context.get("chapter_scope")
+        scope = scope if isinstance(scope, dict) else {}
+        purpose = str(scope.get("purpose") or chat_context.get("purpose") or "").strip()
+        objectives = [str(item).strip() for item in scope.get("writing_objectives") or [] if str(item).strip()]
+        outline = scope.get("writing_outline")
         outline = outline if isinstance(outline, dict) else {}
-        outline_nodes = outline.get("outline") if isinstance(outline.get("outline"), list) else []
-        inspected = (
-            chat_context.get("inspected_chapters")
-            if isinstance(chat_context.get("inspected_chapters"), list)
-            else []
-        )
-        path_label = str((outline.get("position") or {}).get("path_label") or "").strip()
-        sibling = chat_context.get("sibling_chapter_context")
-        sibling = sibling if isinstance(sibling, dict) else {}
-        missing = (
-            sibling.get("missing_upstream")
-            if isinstance(sibling.get("missing_upstream"), list)
-            else []
-        )
-        parts = [
-            f"这是章节「{title}」的专属对话。",
-            f"本章已挂接招标要求 {req_n} 条、评分要求 {score_n} 条、专属上下文 {ctx_n} 条。",
-            f"整份目录共 {len(outline_nodes)} 个标题节点（默认不预载他章正文）。",
-        ]
-        if path_label:
-            parts.append(f"当前位置：{path_label}。")
-        if inspected:
-            names = "、".join(
-                str(item.get("title") or item.get("chapter_id") or "")
-                for item in inspected
-                if isinstance(item, dict)
-            )
-            parts.append(f"已按需打开只读详情：{names}。")
-        if missing:
-            names = "、".join(
-                str(item.get("title") or item.get("chapter_id") or "")
-                for item in missing
-                if isinstance(item, dict)
-            )
-            parts.append(
-                f"图示/依赖章建议先完成：{names}，再按目录中相关章节骨架写本章。"
-            )
-        if not chat_context.get("is_leaf"):
-            parts.append("当前节点是目录父节点，正文应写在下级叶子章节。")
-        elif not chat_context.get("draft_preview"):
-            outline = chat_context.get("writing_outline")
-            blocks = (
-                outline.get("blocks")
-                if isinstance(outline, dict) and isinstance(outline.get("blocks"), list)
-                else []
-            )
-            if blocks:
-                parts.append("本章尚无落盘草稿。按提纲可先写：")
-                for item in blocks[:6]:
-                    if not isinstance(item, dict):
-                        continue
-                    heading = str(item.get("heading") or "").strip()
-                    must = str(item.get("must_answer") or "").strip()
-                    if heading:
-                        parts.append(f"{heading}：{must}" if must else heading)
-            else:
-                parts.append("本章尚无落盘草稿，我按本章目的直接起草正文。")
-        else:
-            parts.append("已有草稿，我按你的要求改本章正文。")
-        if "材料" in message or "证据" in message:
-            parts.append("缺企业资质/案例/产品实绩时，请走 Evidence 补证，不要用外部网页顶替。")
+        blocks = [item for item in outline.get("blocks") or [] if isinstance(item, dict)]
+        if _is_draft_inspection_request(message) and not chat_context.get("draft_preview"):
+            return "当前没有可供检查的本章正文。" + (f"本章编写目标是：{purpose}" if purpose else "")
+        parts = [f"本章编写目标是：{purpose}" if purpose else "本章仅按已确认的章节目标编写。"]
+        if objectives:
+            parts.append("具体目标：" + "；".join(objectives))
+        if blocks:
+            must_answer = [
+                str(item.get("must_answer") or "").strip()
+                for item in blocks
+                if str(item.get("must_answer") or "").strip()
+            ]
+            if must_answer:
+                parts.append("本章需要回答：" + "；".join(must_answer[:6]))
         return " ".join(parts)
+
+
+def _is_draft_inspection_request(message: str) -> bool:
+    text = str(message or "").lower()
+    markers = (
+        "draft",
+        "preview",
+        "正文",
+        "草稿",
+        "段落",
+        "第1段",
+        "第2段",
+        "第3段",
+        "paragraph",
+        "current copy",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _is_history_critique_request(message: str) -> bool:
+    text = str(message or "").lower()
+    markers = (
+        "history",
+        "previous",
+        "prior",
+        "assistant",
+        "dialogue",
+        "对话",
+        "回复",
+        "刚才",
+        "之前",
+        "为什么又",
+        "怎么又",
+        "仍然",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _normalize_mode(value: Any) -> str:
@@ -1447,23 +1782,108 @@ def _outline_hash(outline: dict[str, Any]) -> str:
     return canonical_hash({"blocks": blocks}) if blocks else ""
 
 
-def _user_review_intent(message: str) -> str:
-    text = str(message or "").strip()
-    if not text:
-        return ""
-    if _REJECT_RE.search(text):
-        return "reject"
-    if _CONFIRM_RE.match(text):
-        return "confirm"
-    return ""
+def _normalize_chapter_action(value: Any) -> str:
+    action = str(value or "").strip().lower()
+    if action in {
+        "write_document",
+        "prepare_outline",
+        "confirm_outline",
+        "approve_document",
+        "respond_only",
+        "reject_outline",
+    }:
+        return action
+    return "write_document"
 
 
-def _requests_document_write(message: str, phase: dict[str, Any]) -> bool:
-    """Route explicit body-writing requests to the document writer, not chat."""
-    if str(phase.get("write_phase") or "") != "write_body":
-        return False
-    text = str(message or "").strip()
-    return _user_review_intent(text) == "confirm" or bool(_DOCUMENT_WRITE_RE.search(text))
+def _decide_chapter_action(
+    chat_context: dict[str, Any],
+    history: list[dict[str, Any]],
+    user_message: str,
+) -> dict[str, str]:
+    """Let the chapter Agent choose its next action from meaning, not phrases.
+
+    Writing is the Agent's primary responsibility.  A conversational reply is
+    selected only when the user is explicitly asking for explanation, status,
+    assessment or outline discussion without requesting a document change.
+    """
+    scope = chat_context.get("chapter_scope")
+    scope = scope if isinstance(scope, dict) else {}
+    recent = [
+        {"role": item.get("role"), "content": item.get("content")}
+        for item in history[-6:]
+        if isinstance(item, dict) and item.get("content")
+    ]
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are the action controller inside a chapter-writing Agent. "
+                "Judge the user's meaning in context; never match keywords or fixed phrases. "
+                "The Agent's default duty is to create or improve the current chapter. "
+                "Choose write_document when the user asks, implies, approves, continues, "
+                "corrects, critiques with an expected fix, or otherwise wants chapter content changed. "
+                "Choose prepare_outline when the user asks to generate, show, list, regenerate, or review "
+                "the chapter outline before body writing. This remains true even if an older outline was approved. "
+                "Choose confirm_outline only when the user is explicitly approving the outline that was "
+                "shown in the immediately preceding dialogue; a request to start writing is not itself "
+                "outline approval when no outline has been shown. "
+                "Choose approve_document only when the user explicitly approves, confirms, finalizes, "
+                "or accepts the current body draft as the formal chapter. Distinguish this from outline approval. "
+                "Choose respond_only only for an explicit question, explanation, status check, "
+                "assessment, or outline discussion that requests no document change. "
+                "Choose reject_outline only when the user rejects the proposed outline and wants it reconsidered. "
+                "The action may not expand chapter_scope. Return one JSON object only: "
+                '{"action":"write_document|prepare_outline|confirm_outline|approve_document|respond_only|reject_outline","reason":"brief semantic reason",'
+                '"writing_instruction":"the user request preserved for the writer"}.'
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "chapter_scope": scope,
+                    "authority": chat_context.get("authority") or {},
+                    "has_current_draft": bool(chat_context.get("draft_preview")),
+                    "head_content_revision": int(
+                        chat_context.get("head_content_revision") or 0
+                    ),
+                    "formal_content_revision": int(
+                        chat_context.get("formal_content_revision") or 0
+                    ),
+                    "recent_dialogue": recent,
+                    "user_message": user_message,
+                },
+                ensure_ascii=False,
+            ),
+        },
+    ]
+    try:
+        from llm_client import chat_with_meta
+        from utils import extract_json_text
+
+        result = chat_with_meta(messages, temperature=0.0)
+        parsed = json.loads(extract_json_text(str(result.get("content") or "")))
+        if not isinstance(parsed, dict):
+            raise ValueError("chapter action must be an object")
+        action = _normalize_chapter_action(parsed.get("action"))
+        return {
+            "action": action,
+            "reason": str(parsed.get("reason") or "").strip()[:500],
+            "writing_instruction": str(
+                parsed.get("writing_instruction") or user_message
+            ).strip()[:MAX_TURN_CHARS],
+            "source": "chapter_agent",
+        }
+    except Exception as exc:
+        # Failure must not silently demote a writing Agent into generic chat.
+        return {
+            "action": "write_document",
+            "reason": "动作判断不可用，按章节 Agent 的默认写作职责继续。",
+            "writing_instruction": str(user_message or "").strip()[:MAX_TURN_CHARS],
+            "source": "safe_write_default",
+            "error": str(exc)[:240],
+        }
 
 
 def _delegate_review_outline(outline: dict[str, Any]) -> dict[str, Any]:

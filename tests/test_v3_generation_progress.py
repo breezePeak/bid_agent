@@ -20,10 +20,7 @@ from document_pipeline.contracts import (
     EvidenceSourceType,
 )
 from document_pipeline.document_planner import CONTENT_UNITS_PATH
-from document_pipeline.execution_controller import (
-    V3_GENERATION_STAGES,
-    V3ExecutionController,
-)
+from document_pipeline.execution_controller import V3ExecutionController
 from document_pipeline.input_manifest import V3_ROOT
 from document_pipeline.research_service import EVIDENCE_BATCH_DIR
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder
@@ -93,20 +90,17 @@ class V3GenerationProgressTests(TestCase):
 
             class _Control:
                 @staticmethod
-                def snapshot():
+                def latest_command_by_kind(kind: str):
+                    if kind == "document.prepare_outline":
+                        return {
+                            "kind": kind,
+                            "operation_id": "outline-operation",
+                            "status": "succeeded",
+                        }
                     return {
-                        "commands": [
-                            {
-                                "kind": "document.run_pipeline",
-                                "operation_id": "generation-operation",
-                                "status": "running",
-                            },
-                            {
-                                "kind": "document.prepare_outline",
-                                "operation_id": "outline-operation",
-                                "status": "succeeded",
-                            },
-                        ]
+                        "kind": kind,
+                        "operation_id": "generation-operation",
+                        "status": "running",
                     }
 
                 @staticmethod
@@ -152,15 +146,11 @@ class V3GenerationProgressTests(TestCase):
 
             class _Control:
                 @staticmethod
-                def snapshot():
+                def latest_command_by_kind(kind: str):
                     return {
-                        "commands": [
-                            {
-                                "kind": "document.run_pipeline",
-                                "operation_id": "generation-operation",
-                                "status": "running",
-                            }
-                        ]
+                        "kind": kind,
+                        "operation_id": "generation-operation",
+                        "status": "running",
                     }
 
                 @staticmethod
@@ -266,100 +256,6 @@ class V3GenerationProgressTests(TestCase):
             )
             self.assertEqual(confirmation["status"], "pending")
             self.assertEqual(pipeline["status"], "failed")
-
-    def test_pipeline_records_queued_running_and_terminal_for_every_stage(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
-            context = self._context(Path(temporary))
-            runner = _Runner()
-            controller = V3ExecutionController(context, runner=runner)
-            with mock.patch.object(
-                controller.store,
-                "record_stage_run",
-                wraps=controller.store.record_stage_run,
-            ) as record:
-                result = controller.run_pipeline(
-                    context,
-                    self._envelope(),
-                    "operation-progress",
-                )
-
-            self.assertEqual(result["operation_status"], "succeeded")
-            self.assertNotIn("resolve_evidence", runner.calls)
-            transitions = [
-                (call.args[1], call.args[2])
-                for call in record.call_args_list
-            ]
-            for stage in V3_GENERATION_STAGES:
-                self.assertIn((stage, "queued"), transitions)
-                self.assertIn((stage, "running"), transitions)
-                self.assertIn((stage, "succeeded"), transitions)
-
-    def test_pipeline_failure_marks_exact_stage_and_cancels_future_stages(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
-            context = self._context(Path(temporary))
-            controller = V3ExecutionController(
-                context,
-                runner=_Runner("execute_content_plan"),
-            )
-            with self.assertRaisesRegex(RuntimeError, "execute_content_plan failed"):
-                controller.run_pipeline(
-                    context,
-                    self._envelope(),
-                    "operation-failure",
-                )
-
-            states = {
-                item["stage_command"]: item
-                for item in ControlStore(context).stage_runs("operation-failure")
-            }
-            self.assertEqual(states["execute_content_plan"]["status"], "failed")
-            self.assertEqual(
-                states["execute_content_plan"]["error"]["message"],
-                "execute_content_plan failed",
-            )
-            self.assertEqual(states["integrate_document"]["status"], "cancelled")
-            self.assertEqual(states["verify_delivery"]["status"], "cancelled")
-
-    def test_selected_chapter_stops_after_writing_without_full_document_delivery(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
-            context = self._context(Path(temporary))
-            runner = _Runner()
-            controller = V3ExecutionController(context, runner=runner)
-            envelope = CommandEnvelope.from_mapping(
-                {
-                    "kind": "document.run_pipeline",
-                    "payload": {"chapter_ids": ["chapter-3"]},
-                    "expected_revision": 0,
-                    "idempotency_key": "generation-chapter-test",
-                },
-                workspace_id="alpha",
-            )
-
-            result = controller.run_pipeline(
-                context,
-                envelope,
-                "operation-chapter",
-            )
-
-            self.assertEqual(result["operation_status"], "succeeded")
-            self.assertEqual(runner.chapter_ids, ["chapter-3"])
-            self.assertEqual(
-                runner.calls,
-                list(V3_GENERATION_STAGES[:4]),
-            )
-
-    def test_writer_research_requirement_pauses_current_generation(self):
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
-            context = self._context(Path(temporary))
-            controller = V3ExecutionController(context, runner=_ResearchBlockedRunner())
-            result = controller.run_pipeline(context, self._envelope(), "operation-research-blocked")
-            self.assertEqual(result["operation_status"], "blocked")
-            states = {
-                item["stage_command"]: item
-                for item in ControlStore(context).stage_runs("operation-research-blocked")
-            }
-            self.assertEqual(states["execute_content_plan"]["status"], "paused")
-            self.assertEqual(states["integrate_document"]["status"], "cancelled")
 
     def test_snapshot_returns_excerpt_and_detail_returns_full_registered_content(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

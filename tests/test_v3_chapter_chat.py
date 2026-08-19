@@ -17,7 +17,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext  # noqa: E402
 from document_pipeline.canonicalization import canonical_payload_hash  # noqa: E402
-from document_pipeline.chapter_chat import CHAPTER_CHAT_DIR, ChapterChatService  # noqa: E402
+from document_pipeline.chapter_chat import (  # noqa: E402
+    CHAPTER_CHAT_DIR,
+    ChapterChatService,
+    _decide_chapter_action,
+)
 from document_pipeline.chapter_workspace import ChapterWorkspaceService  # noqa: E402
 from document_pipeline.contracts import (  # noqa: E402
     BlueprintNode,
@@ -137,6 +141,69 @@ def _nodes() -> list[BlueprintNode]:
 
 
 class ChapterChatServiceTests(unittest.TestCase):
+    def test_chapter_agent_semantically_selects_document_writing(self) -> None:
+        with mock.patch(
+            "llm_client.chat_with_meta",
+            return_value={
+                "content": json.dumps(
+                    {
+                        "action": "write_document",
+                        "reason": "用户要求纠正正文",
+                        "writing_instruction": "按当前章节目标重写",
+                    },
+                    ensure_ascii=False,
+                )
+            },
+        ) as decide:
+            action = _decide_chapter_action(
+                {"chapter_scope": {"purpose": "说明总体技术路线"}},
+                [],
+                "前面的理解不对，按本章目标处理",
+            )
+        self.assertEqual(action["action"], "write_document")
+        decision_payload = json.loads(decide.call_args.args[0][1]["content"])
+        self.assertEqual(decision_payload["chapter_scope"]["purpose"], "说明总体技术路线")
+
+    def test_chapter_agent_can_semantically_select_scoped_reply(self) -> None:
+        with mock.patch(
+            "llm_client.chat_with_meta",
+            return_value={
+                "content": '{"action":"respond_only","reason":"仅询问现状",'
+                '"writing_instruction":""}'
+            },
+        ):
+            action = _decide_chapter_action(
+                {"chapter_scope": {"purpose": "说明总体技术路线"}},
+                [],
+                "解释一下当前章节目标",
+            )
+        self.assertEqual(action["action"], "respond_only")
+
+    def test_chapter_agent_can_request_outline_preparation(self) -> None:
+        with mock.patch(
+            "llm_client.chat_with_meta",
+            return_value={
+                "content": '{"action":"prepare_outline","reason":"用户要求先看提纲",'
+                '"writing_instruction":"生成并展示本章提纲"}'
+            },
+        ):
+            action = _decide_chapter_action(
+                {"chapter_scope": {"purpose": "说明总体技术路线"}},
+                [],
+                "先生成提纲给我确认",
+            )
+        self.assertEqual(action["action"], "prepare_outline")
+
+    def test_action_failure_defaults_to_chapter_writing_not_generic_chat(self) -> None:
+        with mock.patch("llm_client.chat_with_meta", side_effect=RuntimeError("offline")):
+            action = _decide_chapter_action(
+                {"chapter_scope": {"purpose": "说明总体技术路线"}},
+                [],
+                "继续",
+            )
+        self.assertEqual(action["action"], "write_document")
+        self.assertEqual(action["source"], "safe_write_default")
+
     def test_histories_are_isolated_per_chapter(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))
@@ -147,8 +214,10 @@ class ChapterChatServiceTests(unittest.TestCase):
             chat = ChapterChatService(context)
 
             with mock.patch(
-                "llm_client.chat_with_meta",
-                side_effect=RuntimeError("offline"),
+                "document_pipeline.chapter_chat._decide_chapter_action",
+                return_value={"action": "respond_only", "reason": "question", "writing_instruction": ""},
+            ), mock.patch(
+                "llm_client.chat_with_meta", side_effect=RuntimeError("offline")
             ):
                 result_a = chat.answer(
                     "ch-a",
@@ -163,8 +232,8 @@ class ChapterChatServiceTests(unittest.TestCase):
 
             self.assertEqual(result_a["chapter_id"], "ch-a")
             self.assertEqual(result_b["chapter_id"], "ch-b")
-            self.assertIn("技术方案", result_a["reply"])
-            self.assertIn("实施计划", result_b["reply"])
+            self.assertIn("说明总体技术路线", result_a["reply"])
+            self.assertIn("说明实施与里程碑", result_b["reply"])
 
             history_a = chat.load_history("ch-a")
             history_b = chat.load_history("ch-b")
@@ -189,8 +258,10 @@ class ChapterChatServiceTests(unittest.TestCase):
             chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
             chat = ChapterChatService(context)
             with mock.patch(
-                "llm_client.chat_with_meta",
-                side_effect=RuntimeError("offline"),
+                "document_pipeline.chapter_chat._decide_chapter_action",
+                return_value={"action": "respond_only", "reason": "question", "writing_instruction": ""},
+            ), mock.patch(
+                "llm_client.chat_with_meta", side_effect=RuntimeError("offline")
             ):
                 chat.answer("ch-a", "初稿怎么写？", chapter=chapter)
             history = chat.load_history("ch-a")
@@ -212,6 +283,30 @@ class ChapterChatServiceTests(unittest.TestCase):
             self.assertEqual(updated[1]["content"], "先写阶段划分。")
             self.assertEqual(updated[1]["thinking"], "用户改了问题，回复也一起改。")
 
+    def test_history_turn_can_be_permanently_deleted(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chat = ChapterChatService(context)
+            first = chat.append_turn("ch-a", role="user", content="保留这条")
+            removed = chat.append_turn("ch-a", role="assistant", content="删除这条")
+            chat.delete_turn("ch-a", turn_id=removed["turn_id"])
+            history = chat.load_history("ch-a")
+            self.assertEqual([item["turn_id"] for item in history], [first["turn_id"]])
+
+    def test_history_can_be_cleared_for_one_chapter(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chat = ChapterChatService(context)
+            chat.append_turn("ch-a", role="user", content="清空我")
+            chat.append_turn("ch-a", role="assistant", content="已记录")
+            chat.append_turn("ch-b", role="user", content="保留我")
+
+            self.assertEqual(chat.clear_history("ch-a"), 2)
+            self.assertEqual(chat.load_history("ch-a"), [])
+            self.assertEqual(chat.load_history("ch-b")[0]["content"], "保留我")
+
     def test_human_review_lists_outline_before_writing(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))
@@ -219,17 +314,30 @@ class ChapterChatServiceTests(unittest.TestCase):
             chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
             chat = ChapterChatService(context)
             chat.set_authority(mode="human_review", chapter_id="ch-a")
-            with mock.patch("llm_client.chat_with_meta") as writer:
+            with mock.patch(
+                "document_pipeline.chapter_chat._decide_chapter_action",
+                side_effect=[
+                    {"action": "prepare_outline", "reason": "review", "writing_instruction": ""},
+                    {"action": "confirm_outline", "reason": "approved", "writing_instruction": "确认"},
+                    {"action": "prepare_outline", "reason": "show again", "writing_instruction": ""},
+                ],
+            ):
                 first = chat.answer("ch-a", "这一章怎么写？", chapter=chapter)
-                self.assertIn("准备这样写", first["reply"])
+                self.assertIn("本章写作提纲", first["reply"])
                 self.assertIn("确认", first["reply"])
-                writer.return_value = {
-                    "content": "总体技术路线分四步实施。",
-                    "reasoning": "",
-                }
                 second = chat.answer("ch-a", "确认", chapter=chapter)
+                third = chat.answer("ch-a", "重新生成提纲", chapter=chapter)
             self.assertTrue(second["document_write_requested"])
             self.assertIn("中间文档", second["reply"])
+            self.assertFalse(third["document_write_requested"])
+            self.assertIn("本章写作提纲", third["reply"])
+            self.assertEqual(chat.load_authority("ch-a")["review_status"], "pending")
+
+    def test_legacy_phrase_router_is_deleted(self) -> None:
+        source = (ROOT / "src/document_pipeline/chapter_chat.py").read_text(encoding="utf-8")
+        self.assertNotIn("_DOCUMENT_WRITE_RE", source)
+        self.assertNotIn("_requests_document_write", source)
+        self.assertIn("Judge the user's meaning in context", source)
 
     def test_full_authority_skips_review_wait(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -239,8 +347,8 @@ class ChapterChatServiceTests(unittest.TestCase):
             chat = ChapterChatService(context)
             chat.set_authority(mode="full_authority", chapter_id="ch-a")
             with mock.patch(
-                "llm_client.chat_with_meta",
-                return_value={"content": "总体技术路线分四步实施。", "reasoning": ""},
+                "document_pipeline.chapter_chat._decide_chapter_action",
+                return_value={"action": "write_document", "reason": "write", "writing_instruction": "写正文"},
             ):
                 result = chat.answer("ch-a", "写正文", chapter=chapter)
             self.assertTrue(result["document_write_requested"])
@@ -261,11 +369,75 @@ class ChapterChatServiceTests(unittest.TestCase):
             system = messages[0]["content"]
             payload = json.loads(messages[1]["content"])
             self.assertIn("写作 Agent", system)
-            self.assertIn("禁止反问", system)
+            self.assertIn("唯一章节边界", system)
             self.assertNotIn("只能给出写作建议", system)
+            self.assertNotIn("每块写清做法或检查口径、交付物", system)
             self.assertEqual(payload["role"], "bid_chapter_writer")
-            self.assertIn("writing_outline", payload)
-            self.assertIn("直接输出本章标书正文", payload["instruction"])
+            self.assertIn("chapter_scope", payload)
+            self.assertNotIn("chapter_context", payload)
+            self.assertEqual(
+                payload["chapter_scope"],
+                chat_context["chapter_scope"],
+            )
+            self.assertIn("忠实回答", payload["instruction"])
+            self.assertIn("不得声称已经修改", payload["instruction"])
+
+    def test_chat_context_uses_scope_projection_without_unrelated_fact_fallback(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat_context = ChapterChatService(context).build_chapter_chat_context(
+                chapter,
+                global_project_context={
+                    "global_context_revision": 3,
+                    "identity": {"project_name": "全国调查项目", "buyer": "采购单位"},
+                    "background": ["开展年度国土变更调查"],
+                    "scope": ["全国县级调查成果核查"],
+                    "confirmed_facts": [
+                        {
+                            "fact_id": "F-1",
+                            "statement": "项目包含国家级内业核查。",
+                            "source_ids": ["SRC-1"],
+                        }
+                    ],
+                },
+            )
+            shared = chat_context["shared_project_facts"]
+            self.assertEqual(shared["identity"], {"project_name": "全国调查项目"})
+            self.assertNotIn("buyer", shared["identity"])
+            self.assertNotIn("background", shared)
+            self.assertNotIn("scope", shared)
+            self.assertNotIn("confirmed_facts", shared)
+            self.assertEqual(
+                chat_context["chapter_scope"]["project_context"],
+                shared,
+            )
+
+    def test_fallback_reply_stays_on_chapter_goal(self) -> None:
+        reply = ChapterChatService._fallback_answer(
+            {
+                "purpose": "分别论证工作必要性与实施可行性",
+                "chapter_scope": {
+                    "purpose": "分别论证工作必要性与实施可行性",
+                    "writing_objectives": ["说明为何必须开展", "说明为何能够实施"],
+                    "writing_outline": {
+                        "blocks": [
+                            {"must_answer": "为什么必须开展本项工作"},
+                            {"must_answer": "现有条件为什么足以支撑实施"},
+                        ]
+                    },
+                },
+                "buyer": "采购人负责组织验收",
+                "deliverables": ["部署记录", "成果清单"],
+            },
+            "这章的目标是什么？",
+        )
+        self.assertIn("工作必要性", reply)
+        self.assertIn("实施可行性", reply)
+        self.assertNotIn("采购人", reply)
+        self.assertNotIn("部署记录", reply)
+        self.assertNotIn("成果清单", reply)
 
     def test_empty_message_rejected(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -353,6 +525,32 @@ class ChapterChatApiTests(unittest.TestCase):
                     "/api/v3/workspaces/alpha/chapters/ch-a/chat/history"
                 )
                 self.assertEqual(hist_a_again.json()["turns"][0]["content"], "A 章已改问题")
+                deleted = client.request(
+                    "DELETE",
+                    "/api/v3/workspaces/alpha/chapters/ch-a/chat/history",
+                    json={"turn_id": turns_a[1]["turn_id"]},
+                    headers=headers,
+                )
+                self.assertEqual(deleted.status_code, 200, deleted.text)
+                self.assertTrue(deleted.json()["ok"])
+                hist_a_deleted = client.get(
+                    "/api/v3/workspaces/alpha/chapters/ch-a/chat/history"
+                )
+                self.assertEqual(len(hist_a_deleted.json()["turns"]), 1)
+                cleared = client.request(
+                    "DELETE",
+                    "/api/v3/workspaces/alpha/chapters/ch-a/chat/history",
+                    json={"clear_all": True},
+                    headers=headers,
+                )
+                self.assertEqual(cleared.status_code, 200, cleared.text)
+                self.assertEqual(cleared.json()["deleted_count"], 1)
+                self.assertEqual(
+                    client.get(
+                        "/api/v3/workspaces/alpha/chapters/ch-a/chat/history"
+                    ).json()["turns"],
+                    [],
+                )
                 hist_b_again = client.get(
                     "/api/v3/workspaces/alpha/chapters/ch-b/chat/history"
                 )

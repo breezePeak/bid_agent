@@ -8,8 +8,6 @@ from typing import Any
 COLLECTION_STAGE_IDS = {
     "plan_chapter_jobs",
     "select_contexts",
-    "write_chapters",
-    "review_fix_chapters",
     "summarize_chapters",
 }
 
@@ -111,10 +109,6 @@ def stage_collection_status(root: Path, stage_id: str) -> dict[str, Any]:
             # Invalid or unavailable inputs must fail closed: a stale context
             # must never unlock chapter writing.
             actual = set()
-    elif stage_id == "write_chapters":
-        expected, actual = job_ids(root), chapter_ids(root)
-    elif stage_id == "review_fix_chapters":
-        expected, actual = chapter_ids(root), review_ids(root)
     elif stage_id == "summarize_chapters":
         expected, actual = chapter_ids(root), summary_ids(root)
     else:

@@ -40,6 +40,24 @@
         >
           编写 {{ selectedWritingChapterIds.length }} 章
         </button>
+        <button
+          v-if="isSelectingChapters"
+          type="button"
+          class="btn btn-sm"
+          :disabled="busy || !writableLeafChapters.length"
+          @click="selectAllWritingChapters"
+        >
+          全选叶子章节
+        </button>
+        <button
+          v-if="isSelectingChapters && selectedWritingChapterIds.length"
+          type="button"
+          class="btn btn-sm"
+          :disabled="busy"
+          @click="clearWritingChapterSelection"
+        >
+          清空已选
+        </button>
         <button v-if="isSelectingChapters" type="button" class="btn btn-sm" :disabled="busy" @click="cancelChapterSelection">取消选择</button>
         <button v-if="!isSelectingChapters" type="button" class="btn btn-sm btn-primary" :disabled="busy || !selectedIsLeaf" @click="writeCurrentChapter">
           一键编写
@@ -47,6 +65,9 @@
         <button type="button" class="btn btn-sm" :disabled="busy" @click="composeCheck">检查组装</button>
         <button type="button" class="btn btn-sm" :disabled="busy || !treeItems.length" @click="exportMarkdownOutline">
           导出 MD
+        </button>
+        <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="exportCurrentWord">
+          导出 Word
         </button>
       </div>
 
@@ -80,9 +101,9 @@
             :checked="isChapterWritingSelected(item)"
             :aria-label="`选择编写 ${item.title || item.chapter_id}`"
             @click.stop
-            @change="toggleChapterWritingSelection(item, $event)"
+            @change.stop="toggleChapterWritingSelection(item, $event)"
           />
-          <span class="tree-dot" :class="statusClass(item)" />
+          <span class="tree-dot" :class="[statusClass(item), batchChapterStatusClass(item)]" />
 
           <template v-if="editingChapterId === item.chapter_id">
             <input
@@ -171,23 +192,6 @@
           </div>
         </div>
         <div class="doc-actions">
-          <button
-            type="button"
-            class="btn btn-primary"
-            :disabled="busy || !selectedId || !selectedIsLeaf"
-            :title="selectedIsLeaf ? '生成当前叶子章节正文' : '目录父节点只保留标题，不生成正文'"
-            @click="generateDraft"
-          >
-            {{ busyAction === 'draft' ? '生成中…' : (selectedIsLeaf ? '生成草稿' : '目录节点') }}
-          </button>
-          <button
-            type="button"
-            class="btn"
-            :disabled="busy || !canApprove"
-            @click="approveHead"
-          >
-            H2 确认
-          </button>
           <button type="button" class="btn btn-sm" :disabled="busy || !selectedId" @click="showRevisions = true">
             版本
           </button>
@@ -195,11 +199,30 @@
       </header>
 
       <div v-if="actionError" class="banner error">{{ actionError }}</div>
+      <div v-if="researchGapConfirmation" class="banner warning">
+        {{ researchGapConfirmation.message }}
+        <details v-if="researchGapConfirmation.candidates?.length" class="research-gap-candidates">
+          <summary>查看本次检索到但未采用的资料（{{ researchGapConfirmation.candidates.length }} 条）</summary>
+          <ol>
+            <li v-for="item in researchGapConfirmation.candidates" :key="`${item.index}-${item.source_url}-${item.title}`">
+              <a v-if="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
+              <span v-else>{{ item.title }}</span>
+              <small>（{{ item.reason || '与本章无可用信息' }}）</small>
+            </li>
+          </ol>
+        </details>
+        <button type="button" class="btn btn-sm" :disabled="busy" @click="confirmResearchGapAndGenerate">
+          确认使用现有资料继续写作
+        </button>
+        <button type="button" class="btn btn-sm" :disabled="busy" @click="researchGapConfirmation = null">
+          取消
+        </button>
+      </div>
       <div v-if="actionMessage" class="banner ok">{{ actionMessage }}</div>
-      <div v-if="chapterWriteJob && chapterWriteJob.status !== 'succeeded'" class="banner" :class="chapterWriteJob.status === 'blocked' || chapterWriteJob.status === 'failed' ? 'error' : 'ok'">
-        批量编写：{{ chapterWriteJob.status }}
-        <span v-if="chapterWriteJob.current_chapter_id">，正在编写 {{ chapterWriteJob.current_chapter_id }}</span>
-        <span>；已完成 {{ chapterWriteJob.completed_count || 0 }} 章</span>
+      <div v-if="batchWritingProgress" class="banner ok">
+        批量编写：正在处理《{{ batchWritingProgress.current_title || '准备选中章节' }}》
+        <span>；第 {{ batchWritingProgress.current_index || 1 }}/{{ batchWritingProgress.total }} 章</span>
+        <span>；已完成 {{ batchWritingProgress.completed_count }} 章</span>
       </div>
 
       <div ref="docBodyEl" class="chapter-doc-body">
@@ -271,6 +294,16 @@
             {{ selectedChapter.title || selectedId }}
           </p>
           <p v-else class="chat-chapter-label muted">请先选择左侧章节</p>
+        </div>
+        <div class="chat-header-actions">
+          <button
+            type="button"
+            class="btn btn-sm danger-outline-btn"
+            :disabled="!selectedId || asking || chatLoading || !chatTurns.length"
+            @click="clearChatHistory"
+          >
+            一键清空对话
+          </button>
         </div>
       </header>
 
@@ -503,40 +536,94 @@
             class="chat-bubble"
             :class="[turn.role, { streaming: turn.streaming, editing: turn.editing }]"
           >
-            <strong>{{ turn.role === 'user' ? '你' : 'Agent' }}</strong>
-            <div
-              v-if="turn.role === 'assistant' || turn.thinking"
-              class="chat-thinking"
-            >
-              <div class="thinking-label">
-                {{ turn.streaming && !turn.content ? '正在思考…' : '思考过程' }}
-                <span v-if="turn.streaming && turn.thinking" class="thinking-live">实时</span>
-              </div>
+            <!-- 用户气泡：右对齐高对比深色大圆角，悬浮删除 -->
+            <template v-if="turn.role === 'user'">
+              <button
+                v-if="canDeleteChatTurn(turn)"
+                type="button"
+                class="chat-delete-btn"
+                title="删除此条对话"
+                aria-label="删除此条对话"
+                @click="deleteChatTurn(turn)"
+              >×</button>
               <div
-                class="thinking-body"
+                class="chat-content user-content"
                 :contenteditable="canEditChatTurn(turn)"
-                :data-field="`thinking:${turn.id}`"
+                :data-field="`content:${turn.id}`"
                 spellcheck="false"
                 @focus="onChatTurnFocus(turn)"
-                @blur="onChatTurnBlur(turn, 'thinking', $event)"
-              >{{ turn.thinking || (turn.streaming ? '（等待模型思考输出…）' : '') }}</div>
-            </div>
-            <div
-              v-if="turn.content || !turn.streaming"
-              class="chat-content"
-              :contenteditable="canEditChatTurn(turn)"
-              :data-field="`content:${turn.id}`"
-              spellcheck="false"
-              @focus="onChatTurnFocus(turn)"
-              @blur="onChatTurnBlur(turn, 'content', $event)"
-            >{{ turn.content }}</div>
-            <p v-else class="chat-streaming-hint">正在生成回复…</p>
-            <small v-if="canEditChatTurn(turn)" class="chat-edit-hint">点击可编辑，失焦后保存</small>
+                @blur="onChatTurnBlur(turn, 'content', $event)"
+              >{{ turn.content }}</div>
+            </template>
+
+            <!-- Agent 气泡：已处理时长 + 细分割线 + 正在思考折叠 + 正文 -->
+            <template v-else>
+              <div class="chat-agent-turn">
+                <div class="chat-processed-bar">
+                  <span v-if="turn.streaming">已处理 {{ formatTurnDuration(turn) }}</span>
+                  <span v-else-if="turn.elapsed_seconds != null || turn.duration">已处理 {{ formatTurnDuration(turn) }}</span>
+                  <span v-else>Agent 回复</span>
+                </div>
+                <div class="chat-divider" />
+                <details
+                  v-if="turn.thinking || turn.researchSteps?.length || (turn.streaming && !turn.content)"
+                  class="chat-thinking-details"
+                  :open="Boolean(turn.thinking)"
+                >
+                  <summary class="chat-thinking-summary">
+                    <span
+                      class="thinking-summary-label"
+                      :class="{ 'thinking-shimmer': turn.streaming && !turn.content }"
+                    >
+                      {{ turn.streaming ? '正在分析…' : '分析过程' }}
+                    </span>
+                    <svg v-if="turn.thinking" class="thinking-chevron" viewBox="0 0 20 20" aria-hidden="true">
+                      <path d="m7.5 5 5 5-5 5" />
+                    </svg>
+                  </summary>
+                  <div
+                    v-if="turn.thinking"
+                    class="thinking-body"
+                    :contenteditable="canEditChatTurn(turn)"
+                    :data-field="`thinking:${turn.id}`"
+                    spellcheck="false"
+                    @focus="onChatTurnFocus(turn)"
+                    @blur="onChatTurnBlur(turn, 'thinking', $event)"
+                  >{{ turn.thinking }}</div>
+                  <section v-if="turn.researchSteps?.length" class="research-process" aria-label="公开资料搜索过程">
+                    <h4>公开资料搜索过程</h4>
+                    <ol>
+                      <li v-for="(step, stepIndex) in turn.researchSteps" :key="`${step.status}-${stepIndex}`">
+                        <strong>{{ researchStepLabel(step.status) }}</strong>
+                        <span>{{ step.message }}</span>
+                        <div v-if="step.queries?.length" class="research-queries">
+                          <span v-for="query in step.queries" :key="query">搜索词：{{ query }}</span>
+                        </div>
+                        <ul v-if="step.sources?.length" class="research-source-list">
+                          <li v-for="(source, sourceIndex) in step.sources" :key="source.source_url || source.url || sourceIndex">
+                            <a v-if="source.source_url || source.url" :href="source.source_url || source.url" target="_blank" rel="noopener noreferrer">
+                              {{ source.title || source.name || `来源 ${sourceIndex + 1}` }}
+                            </a>
+                            <span v-else>{{ source.title || source.name || `来源 ${sourceIndex + 1}` }}</span>
+                          </li>
+                        </ul>
+                      </li>
+                    </ol>
+                  </section>
+                </details>
+
+                <div
+                  v-if="turn.content"
+                  class="chat-content agent-content"
+                  :contenteditable="canEditChatTurn(turn)"
+                  :data-field="`content:${turn.id}`"
+                  spellcheck="false"
+                  @focus="onChatTurnFocus(turn)"
+                  @blur="onChatTurnBlur(turn, 'content', $event)"
+                >{{ turn.content }}</div>
+              </div>
+            </template>
           </article>
-          <div v-if="chatAuthority.review_status === 'pending' && chatAuthority.mode === 'human_review'" class="chat-review-actions">
-            <button type="button" class="btn btn-primary" :disabled="asking" @click="confirmChapterOutline">确认提纲，开始写</button>
-            <button type="button" class="btn" :disabled="asking" @click="rejectChapterOutline">退回重列</button>
-          </div>
         </div>
         <div class="chat-compose">
           <textarea
@@ -606,11 +693,13 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   fetchChapterChatHistory,
+  clearChapterChatHistory,
   fetchChapterReadonlyView,
   fetchChapter,
   fetchChapterRevisions,
   fetchChapters,
   fetchDocumentCompose,
+  downloadV3CurrentWord,
   fetchSnapshot,
   submitV3Command,
   createChapter,
@@ -619,9 +708,20 @@ import {
   streamChapterDraft,
   streamChapterChat,
   saveChapterChatTurn,
+  appendChapterChatTurn,
+  deleteChapterChatTurn,
   saveChapterChatAuthority,
   subscribeV3Workspace,
+  createChapterBatchJob,
+  fetchCurrentChapterBatchJob,
+  fetchChapterBatchJob,
+  fetchChapterBatchEvents,
 } from '../api'
+import {
+  hydrateBatchChapterJob,
+  initialBatchChapterJobState,
+  reduceBatchChapterJobEvents,
+} from '../batchChapterJobReducer.js'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
 
@@ -692,7 +792,18 @@ const composeResult = ref(null)
 const workspaceRevision = ref(0)
 const globalProjectContext = ref({})
 const chapterWriteJob = ref(null)
+const batchWritingProgress = ref(null)
+const batchJobState = ref(initialBatchChapterJobState())
+let batchPollTimer = null
+let batchPolling = false
+let batchAutoOpenedJobId = ''
+let batchAutoOpenedChapterId = ''
 
+const batchJobItems = computed(() => {
+  const jobItems = chapterWriteJob.value?.items
+  if (Array.isArray(jobItems)) return jobItems
+  return Object.values(batchJobState.value.items || {})
+})
 const busy = ref(false)
 const busyAction = ref('')
 const detailLoading = ref(false)
@@ -700,6 +811,7 @@ const detailError = ref('')
 const listError = ref('')
 const actionError = ref('')
 const actionMessage = ref('')
+const researchGapConfirmation = ref(null)
 const remoteHint = ref('')
 const showRevisions = ref(false)
 const streamingDraft = ref(false)
@@ -741,6 +853,9 @@ async function handleCreateChapter() {
     if (!data.ok) throw new Error(data.message || '创建章节失败')
     showCreateModal.value = false
     await loadChapterList()
+    if (isSelectingChapters.value && isLeafChapter(items.value.find(item => item.chapter_id === cid))) {
+      selectedWritingChapterIds.value = [...new Set([...selectedWritingChapterIds.value, cid])]
+    }
     selectChapter(cid)
     actionMessage.value = `章节 ${cid} 创建成功`
   } catch (e) {
@@ -806,6 +921,7 @@ async function handleArchiveChapter(item, e) {
     const { data } = await archiveChapter(props.workspaceId, item.chapter_id)
     if (!data.ok) throw new Error(data.message || '归档章节失败')
     await loadChapterList()
+    reconcileWritingChapterSelection()
     if (selectedId.value === item.chapter_id) {
       const remaining = items.value.find(i => i.status !== 'archived')
       if (remaining) selectChapter(remaining.chapter_id)
@@ -857,6 +973,10 @@ function exportMarkdownOutline() {
   a.download = `章节目录_${props.workspaceId || 'outline'}.md`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+function exportCurrentWord() {
+  downloadV3CurrentWord(props.workspaceId)
 }
 
 const rightTab = ref('chat')
@@ -991,15 +1111,6 @@ const materializedCount = computed(() =>
 const formalCount = computed(() =>
   items.value.filter(item => Number(item.formal_content_revision || 0) > 0).length,
 )
-const canApprove = computed(() => {
-  const head = Number(chapterDetail.value?.head_content_revision || 0)
-  const formal = Number(chapterDetail.value?.formal_content_revision || 0)
-  return selectedIsLeaf.value
-    && Boolean(chapterDetail.value)
-    && head > 0
-    && head !== formal
-})
-
 const treeItems = computed(() => {
   const byId = new Map(items.value.map(item => [item.chapter_id, item]))
   const childrenByParent = new Map()
@@ -1062,9 +1173,23 @@ function beginChapterSelection() {
   isSelectingChapters.value = true
 }
 
+function selectAllWritingChapters() {
+  selectedWritingChapterIds.value = writableLeafChapters.value.map(item => item.chapter_id)
+}
+
+function clearWritingChapterSelection() {
+  selectedWritingChapterIds.value = []
+}
+
 function cancelChapterSelection() {
   isSelectingChapters.value = false
-  selectedWritingChapterIds.value = []
+  clearWritingChapterSelection()
+}
+
+function reconcileWritingChapterSelection() {
+  if (!isSelectingChapters.value) return
+  const available = new Set(writableLeafChapters.value.map(item => item.chapter_id))
+  selectedWritingChapterIds.value = selectedWritingChapterIds.value.filter(id => available.has(id))
 }
 
 function leafIdsForChapter(chapter) {
@@ -1098,10 +1223,155 @@ function toggleChapterWritingSelection(chapter, event) {
   selectedWritingChapterIds.value = [...selected]
 }
 
-async function startWritingChapters(chapterIds, { autoReview = false } = {}) {
-  const ids = [...new Set(chapterIds)].filter(id => (
-    writableLeafChapters.value.some(chapter => chapter.chapter_id === id)
-  ))
+function applyBatchJob(job) {
+  if (!job) return
+  batchJobState.value = hydrateBatchChapterJob(batchJobState.value, job)
+  chapterWriteJob.value = job
+  openActiveBatchChapter(job)
+}
+
+function openActiveBatchChapter(job) {
+  const jobId = String(job?.job_id || '')
+  const jobItems = Array.isArray(job?.items) ? job.items : []
+  const isWritableLeafId = (chapterId) => isLeafChapter(
+    items.value.find(item => item.chapter_id === chapterId),
+  )
+  const candidates = [
+    job?.current_chapter_id,
+    ...jobItems
+      .filter(item => ['running', 'preflight', 'analyzing', 'researching', 'drafting', 'validating', 'committing', 'queued'].includes(item?.status))
+      .map(item => item?.chapter_id),
+  ].map(value => String(value || '')).filter(Boolean)
+  const chapterId = candidates.find(isWritableLeafId) || ''
+  if (!jobId || !chapterId || (batchAutoOpenedJobId === jobId && batchAutoOpenedChapterId === chapterId)) return
+  batchAutoOpenedJobId = jobId
+  batchAutoOpenedChapterId = chapterId
+  rightTab.value = 'chat'
+  if (selectedId.value !== chapterId) selectChapter(chapterId)
+
+  const cached = chatByChapter.get(chapterId) || []
+  const placeholderId = `batch-${jobId}-${chapterId}-queued`
+  if (!cached.some(turn => turn.id === placeholderId)) {
+    const item = jobItems.find(candidate => candidate?.chapter_id === chapterId) || {}
+    const next = [...cached, {
+      id: placeholderId,
+      turn_id: '',
+      role: 'assistant',
+      content: '',
+      thinking: `已进入批量编写队列，正在准备《${item.chapter_title || chapterId}》的执行上下文。`,
+      thinkingOpen: true,
+      streaming: true,
+      editing: false,
+      batchEvent: true,
+    }]
+    chatByChapter.set(chapterId, next)
+    if (selectedId.value === chapterId) chatTurns.value = next
+  }
+}
+
+function appendBatchEventToChapterChat(event) {
+  const chapterId = String(event?.chapter_id || '')
+  if (!chapterId) return
+  const eventId = String(event?.event_id || `${event.sequence || 0}:${event.type || 'event'}`)
+  const turnId = `batch-${eventId}`
+  const cached = chatByChapter.get(chapterId) || []
+  if (cached.some(turn => turn.id === turnId)) return
+  const settled = cached.map(turn => turn.batchEvent && turn.streaming
+    ? { ...turn, streaming: false }
+    : turn)
+  const failed = event.type === 'chapter_failed'
+  const committed = event.type === 'chapter_committed'
+  const message = String(event?.error?.message || event?.message || event?.delta || event?.data?.delta || event?.data?.text || '').trim()
+  const code = String(event?.error?.code || '').trim()
+  const stage = String(event?.stage || '').trim()
+  const title = String(event?.chapter_title || chapterId)
+  const content = failed
+    ? `《${title}》在 ${stage || '执行'} 阶段失败：${message || '未知错误'}${code ? ` [${code}]` : ''}`
+    : (committed ? message : '')
+  const thinking = committed || failed
+    ? ''
+    : `${stage ? `${stage}：` : ''}${message || '章节 Agent 正在处理。'}`
+  const next = [...settled, {
+    id: turnId,
+    turn_id: '',
+    role: 'assistant',
+    content,
+    thinking,
+    thinkingOpen: true,
+    streaming: !failed && !committed && !['succeeded', 'paused', 'cancelled'].includes(event.status),
+    editing: false,
+    batchEvent: true,
+  }]
+  chatByChapter.set(chapterId, next)
+  if (selectedId.value === chapterId) chatTurns.value = next
+}
+
+function applyBatchEvents(events) {
+  if (!Array.isArray(events) || !events.length) return
+  events.forEach(appendBatchEventToChapterChat)
+  batchJobState.value = reduceBatchChapterJobEvents(batchJobState.value, events)
+}
+
+async function pollBatchJob() {
+  const jobId = String(chapterWriteJob.value?.job_id || '')
+  if (!jobId || batchPolling) return
+  batchPolling = true
+  try {
+    const [jobResponse, eventsResponse] = await Promise.all([
+      fetchChapterBatchJob(props.workspaceId, jobId),
+      fetchChapterBatchEvents(props.workspaceId, jobId, batchJobState.value.lastSequence || 0),
+    ])
+    if (jobResponse.data?.job) applyBatchJob(jobResponse.data.job)
+    const events = eventsResponse.data?.events || []
+    applyBatchEvents(events)
+    if (events.some(event => event.type === 'chapter_committed' && event.chapter_id === selectedId.value)) {
+      await loadChapterDetail({ force: false, background: true })
+    }
+    const status = String(jobResponse.data?.job?.status || '')
+    if (status === 'succeeded') {
+      actionMessage.value = `批量编写完成，共 ${jobResponse.data.job.completed_count || 0} 章。`
+      await loadChapterList()
+      if (selectedId.value) await loadChapterDetail({ force: false, background: true })
+      stopBatchPolling()
+    } else if (['paused', 'failed', 'cancelled'].includes(status)) {
+      stopBatchPolling()
+    }
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  } finally {
+    batchPolling = false
+  }
+}
+
+function startBatchPolling() {
+  stopBatchPolling()
+  void pollBatchJob()
+  batchPollTimer = window.setInterval(() => { void pollBatchJob() }, 1500)
+}
+
+function stopBatchPolling() {
+  if (batchPollTimer) window.clearInterval(batchPollTimer)
+  batchPollTimer = null
+}
+
+async function restoreCurrentBatchJob() {
+  try {
+    const { data } = await fetchCurrentChapterBatchJob(props.workspaceId)
+    if (!data?.job) return
+    applyBatchJob(data.job)
+    const events = await fetchChapterBatchEvents(props.workspaceId, data.job.job_id, 0)
+    applyBatchEvents(events.data?.events || [])
+    if (['queued', 'running'].includes(data.job.status)) startBatchPolling()
+  } catch (_) {
+    // Workspace remains usable if no durable batch exists yet.
+  }
+}
+
+async function startWritingChapters(chapterIds) {
+  // The server is authoritative for expanding selected directories into
+  // ordered writable leaves. Keep parent IDs here so they are not silently
+  // discarded by a stale client-side outline snapshot.
+  const ids = [...new Set(chapterIds.map(id => String(id || '').trim()))].filter(Boolean)
   if (!ids.length) {
     actionError.value = '没有可编写的叶子章节。'
     return
@@ -1115,47 +1385,15 @@ async function startWritingChapters(chapterIds, { autoReview = false } = {}) {
   actionError.value = ''
   actionMessage.value = ''
   try {
-    // 章节工作台已有独立的正文落盘流。批量编写沿用该流，避免重新触发
-    // 全局 ScoreModel/Blueprint 推理；后者在模型配置更新后会要求重新规划。
-    let completed = 0
-    const failed = []
-    for (const chapterId of ids) {
-      selectChapter(chapterId)
-      await loadChapterDetail({ force: true })
-      // 批量编写由章节 Agent 自主完成提纲审核与正文生成，不能因为
-      // 新章节默认的“用户审核”模式而停在等待确认状态。
-      if (autoReview) {
-        const { data: authorityData } = await saveChapterChatAuthority(props.workspaceId, chapterId, {
-          mode: 'full_authority',
-          scope: 'chapter',
-        })
-        if (!authorityData?.ok) {
-          throw new Error(authorityData?.message || '设置章节自动审核权限失败')
-        }
-        applyChatAuthority(authorityData.authority)
-      }
-      const revisionBefore = Number(chapterDetail.value?.head_content_revision || 0)
-      actionError.value = ''
-      await generateDraft()
-      // 不以“流连接结束”作为完成标准：必须重新读取到已落盘的正文版本，
-      // 当前章节确认保存后，队列才会进入下一章。
-      await loadChapterDetail({ force: true })
-      const revisionAfter = Number(chapterDetail.value?.head_content_revision || 0)
-      const hasSavedBlocks = Array.isArray(chapterDetail.value?.content?.blocks)
-        && chapterDetail.value.content.blocks.length > 0
-      if (actionError.value || revisionAfter <= revisionBefore || !hasSavedBlocks) {
-        failed.push(chapterId)
-        if (!actionError.value) {
-          actionError.value = '本章正文未确认写入中间文档，已停止队列，未开始下一章。'
-        }
-        break
-      }
-      completed += 1
-    }
-    actionMessage.value = failed.length
-      ? `已完成 ${completed} 章；${failed.length} 章未完成，请在目录中查看错误提示。`
-      : `已完成 ${completed} 个章节的编写。`
-    await loadChapterList()
+    const { data } = await createChapterBatchJob(
+      props.workspaceId,
+      ids,
+      `chapter-batch-${Date.now()}`,
+    )
+    if (!data?.ok || !data?.job) throw new Error(data?.message || '创建批量编写任务失败')
+    applyBatchJob(data.job)
+    actionMessage.value = `已提交 ${data.job.items?.length || ids.length} 个叶子章节，章节 Agent 已开始处理。`
+    startBatchPolling()
   } catch (e) {
     actionError.value = e?.response?.data?.message || e?.response?.data?.error?.message || e.message || String(e)
   } finally {
@@ -1168,29 +1406,7 @@ async function writeSelectedChapters() {
   const ids = [...selectedWritingChapterIds.value]
   isSelectingChapters.value = false
   if (!ids.length) return
-  busy.value = true
-  busyAction.value = 'batch-draft'
-  actionError.value = ''
-  actionMessage.value = ''
-  try {
-    await refreshSnapshotRevision()
-    const { data } = await submitV3Command(props.workspaceId, {
-      kind: 'chapter.batch.generate',
-      payload: { chapter_ids: ids },
-      expected_revision: workspaceRevision.value,
-      idempotency_key: `chapter.batch.generate-${Date.now()}`,
-    })
-    if (!data?.ok) {
-      throw new Error(data?.receipt?.error?.message || data?.message || '批量章节编写失败')
-    }
-    await reloadAll()
-    actionMessage.value = data.message || data.receipt?.message || '批量章节编写已完成。'
-  } catch (e) {
-    actionError.value = e?.response?.data?.message || e?.response?.data?.error?.message || e.message || String(e)
-  } finally {
-    busy.value = false
-    busyAction.value = ''
-  }
+  await startWritingChapters(ids)
 }
 
 async function writeCurrentChapter() {
@@ -1198,7 +1414,9 @@ async function writeCurrentChapter() {
     actionError.value = '请先在目录中选择一个叶子章节，或使用“选择章节编写”勾选多个章节。'
     return
   }
-  await startWritingChapters([selectedId.value])
+  // 单章“一键编写”必须与“生成草稿”共用同一条可见的流式 Agent 流程；
+  // 只有多章节选择才创建后台批量任务。
+  await generateDraft()
 }
 
 function shortStatus(item) {
@@ -1216,8 +1434,20 @@ function statusClass(item) {
   if (item.status === 'archived') return 'archived'
   if (item.approval_status === 'approved' || Number(item.formal_content_revision || 0) > 0) return 'ok'
   if (Number(item.head_content_revision || 0) > 0) return 'draft'
+  // 工作台初始化会自动物化章节；“已开”不是批量编写状态，不能显示为蓝色。
+  // 只有当前批量任务的状态才覆盖默认灰色圆点。
   if (item.materialized || item.status === 'active') return 'ready'
   return 'projected'
+}
+
+function batchChapterStatusClass(item) {
+  if (item?.approval_status === 'approved' || Number(item?.formal_content_revision || 0) > 0) {
+    return ''
+  }
+  const status = String(batchJobItems.value.find(candidate => (
+    candidate.chapter_id === item?.chapter_id
+  ))?.status || '')
+  return status ? `batch-${status}` : ''
 }
 
 function relevanceTierLabel(tier) {
@@ -1241,7 +1471,13 @@ async function refreshSnapshotRevision() {
   if (snap.data?.ok) {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
     globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
-    chapterWriteJob.value = snap.data.snapshot?.chapter_write_job || null
+    const job = snap.data.snapshot?.chapter_write_job || null
+    // Blocked and failed jobs are historical results.  Keeping them in this
+    // banner makes a later one-click draft look like it was rejected by that
+    // old batch operation.
+    if (!chapterWriteJob.value?.job_id && ['queued', 'running'].includes(job?.status)) {
+      chapterWriteJob.value = job
+    }
   }
 }
 
@@ -1252,6 +1488,8 @@ async function loadChapterList() {
     if (!data.ok) throw new Error(data.message || '加载目录失败')
     items.value = data.chapters?.items || []
     await ensureChaptersReady()
+    reconcileWritingChapterSelection()
+    if (chapterWriteJob.value) openActiveBatchChapter(chapterWriteJob.value)
     if (!selectedId.value) {
       const prefer = props.initialChapterId
         || items.value.find(item => item.materialized)?.chapter_id
@@ -1265,6 +1503,9 @@ async function loadChapterList() {
 }
 
 async function ensureChaptersReady() {
+  // 批量 Worker 正在管理章节物化和写入；此时不能再发起全量初始化命令，
+  // 否则会被工作区互斥锁拒绝，并把正常的任务状态误显示成页面错误。
+  if (['queued', 'running'].includes(String(chapterWriteJob.value?.status || ''))) return
   const pending = items.value.filter(item => !item.materialized && item.status === 'projected')
   if (!pending.length) return
   await refreshSnapshotRevision()
@@ -1433,11 +1674,13 @@ async function runCommand(kind, payload, successText = '', action = '') {
       if (rev.data?.ok) revisions.value = rev.data.revisions || []
     }
     actionMessage.value = successText || data.message || data.receipt?.message || '已完成'
+    return true
   } catch (e) {
     actionError.value = e?.response?.data?.message
       || e?.response?.data?.error?.message
       || e.message
       || String(e)
+    return false
   } finally {
     busy.value = false
     busyAction.value = ''
@@ -1466,7 +1709,7 @@ async function appendDraftDelta(text) {
   }
 }
 
-async function generateDraft() {
+async function generateDraft(options = {}) {
   if (!selectedId.value) return
   if (!selectedIsLeaf.value) {
     actionError.value = '目录父节点只保留标题，不生成正文；请选择下级叶子章节。'
@@ -1477,6 +1720,7 @@ async function generateDraft() {
     return
   }
   const chapterId = selectedId.value
+  const allowResearchGap = Boolean(options.allowResearchGap)
   draftAbortController?.abort()
   draftAbortController = new AbortController()
   const controller = draftAbortController
@@ -1490,7 +1734,9 @@ async function generateDraft() {
   busyAction.value = 'draft'
   actionError.value = ''
   actionMessage.value = ''
+  researchGapConfirmation.value = null
   rightTab.value = 'chat'
+  const draftStartedAt = Date.now()
   const draftTurnId = `draft-${operationId}`
   const draftTurn = {
     id: draftTurnId,
@@ -1501,19 +1747,25 @@ async function generateDraft() {
     thinkingOpen: true,
     streaming: true,
     editing: false,
+    started_at: draftStartedAt,
+    researchSteps: [],
   }
+  startStreamingTimer()
   chatTurns.value = [...chatTurns.value, draftTurn]
   rememberChapterChat(chapterId, chatTurns.value)
   await scrollChatToBottom()
   const patchDraftTurn = (mutator) => {
-    if (selectedId.value !== chapterId) return
-    chatTurns.value = chatTurns.value.map((turn) => {
+    const source = selectedId.value === chapterId
+      ? chatTurns.value
+      : (chatByChapter.get(chapterId) || [])
+    const next = source.map((turn) => {
       if (turn.id !== draftTurnId) return turn
       const copy = { ...turn }
       mutator(copy)
       return copy
     })
-    rememberChapterChat(chapterId, chatTurns.value)
+    rememberChapterChat(chapterId, next)
+    if (selectedId.value === chapterId) chatTurns.value = next
   }
   let streamCompleted = false
   let completedChapter = null
@@ -1539,6 +1791,8 @@ async function generateDraft() {
       chapter_context_id: chapterRef.chapter_context_id,
       chapter_context_revision: Number(chapterRef.chapter_context_revision || 0),
       chapter_context_hash: chapterRef.chapter_context_hash,
+      allow_research_gap: allowResearchGap,
+      instruction: String(options.instruction || '').trim(),
     }, {
       signal: controller.signal,
       onEvent: (event) => {
@@ -1546,14 +1800,32 @@ async function generateDraft() {
         const type = String(event?.type || event?.event || '').toLowerCase()
         if (type === 'meta') {
           streamOperationId.value = String(event.operation_id || event?.data?.operation_id || operationId)
+        } else if (type === 'thinking_step') {
+          const note = normalizeAgentMessage(event.message || event?.data?.message || '')
+          if (!note) return
+          patchDraftTurn((turn) => {
+            turn.thinking = turn.thinking ? `${turn.thinking}\n${note}` : note
+            turn.thinkingOpen = true
+            turn.streaming = true
+          })
+          scrollChatToBottom()
         } else if (type === 'research') {
           const payload = event?.data && typeof event.data === 'object' ? event.data : event
-          const note = String(payload.message || '正在检索公开资料…').trim()
+          const note = normalizeAgentMessage(payload.message || '正在检索公开资料…')
           researchStatus.value = note
           researchSources.value = Array.isArray(payload.sources) ? payload.sources : []
           if (note) {
             patchDraftTurn((turn) => {
               turn.thinking = turn.thinking ? `${turn.thinking}\n${note}` : note
+              turn.researchSteps = [
+                ...(turn.researchSteps || []),
+                {
+                  status: String(payload.status || 'processing'),
+                  message: note,
+                  queries: Array.isArray(payload.queries) ? payload.queries.filter(Boolean) : [],
+                  sources: Array.isArray(payload.sources) ? payload.sources : [],
+                },
+              ]
               turn.thinkingOpen = true
               turn.streaming = true
             })
@@ -1579,10 +1851,11 @@ async function generateDraft() {
           completedContent = payload?.content && typeof payload.content === 'object'
             ? payload.content
             : null
-        } else if (type === 'error') {
-          const payload = event?.data && typeof event.data === 'object' ? event.data : event
-          const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
-          const message = String(payload?.message || '流式生成失败')
+          } else if (type === 'error') {
+            const payload = event?.data && typeof event.data === 'object' ? event.data : event
+            const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
+            const message = String(payload?.message || '流式生成失败')
+            const code = String(payload?.code || '').trim()
           if (String(payload?.code || '') === 'CHAPTER_RESEARCH_UNAVAILABLE') {
             researchStatus.value = reason ? `公开资料检索失败：${reason}` : message
           }
@@ -1591,8 +1864,12 @@ async function generateDraft() {
             applyChatAuthority(payload.authority || { mode: 'human_review', review_status: 'pending' })
             chatInput.value = chatInput.value || '先列出本章要写的内容'
           }
-          throw new Error(reason ? `${message}（${reason}）` : message)
-        }
+            const detail = draftUserErrorMessage(code, message, reason)
+            const error = new Error(detail)
+            error.code = code
+            error.details = payload?.details || {}
+            throw error
+          }
       },
     })
     if (controller.signal.aborted || chapterId !== selectedId.value) return
@@ -1614,6 +1891,7 @@ async function generateDraft() {
     patchDraftTurn((turn) => {
       turn.streaming = false
       turn.thinkingOpen = true
+      turn.elapsed_seconds = Math.max(1, Math.round((Date.now() - draftStartedAt) / 1000))
       if (!turn.content) turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
     })
     await loadChapterList()
@@ -1621,6 +1899,15 @@ async function generateDraft() {
   } catch (e) {
     if (e?.name !== 'AbortError') {
       actionError.value = e?.message || String(e)
+      if (e?.code === 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED') {
+        researchGapConfirmation.value = {
+        message: Number(e?.details?.candidate_count || 0) > 0
+          ? `检索返回了 ${e.details.candidate_count} 条候选资料，但均未通过本章的关联性和可核验筛选。确认后将只使用现有项目资料继续写作。`
+          : '未得到可用于本章的公开资料。确认后将只使用现有项目资料继续写作。',
+          details: e.details || {},
+          candidates: Array.isArray(e?.details?.candidates) ? e.details.candidates : [],
+        }
+      }
       remoteHint.value = '流式连接已中断，已保留当前预览；可刷新检查后端是否已完成。'
     }
   } finally {
@@ -1629,19 +1916,32 @@ async function generateDraft() {
       streamingDraft.value = false
       busy.value = false
       busyAction.value = ''
-      patchDraftTurn((turn) => {
-        turn.streaming = false
-        if (turn.content) return
-        if (controller.signal.aborted) {
-          turn.content = '草稿生成已中断。思考过程保留在本条对话中。'
-        } else if (actionError.value) {
-          turn.content = `草稿未完成：${actionError.value}`
-        } else if (turn.thinking) {
-          turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
-        }
-      })
     }
+    patchDraftTurn((turn) => {
+      turn.streaming = false
+      turn.elapsed_seconds = Math.max(1, Math.round((Date.now() - draftStartedAt) / 1000))
+      if (turn.content) return
+      if (controller.signal.aborted) {
+        turn.content = '草稿生成已中断。思考过程保留在本条对话中。'
+      } else if (actionError.value) {
+        turn.content = `草稿未完成：${actionError.value}`
+      } else if (turn.thinking) {
+        turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
+      }
+    })
+    await persistDraftTurn(
+      chapterId,
+      draftTurnId,
+      streamOperationId.value || operationId,
+      streamCompleted ? 'succeeded' : (controller.signal.aborted ? 'interrupted' : 'failed'),
+    )
+    stopStreamingTimer()
   }
+}
+
+async function confirmResearchGapAndGenerate() {
+  if (!researchGapConfirmation.value) return
+  await generateDraft({ allowResearchGap: true })
 }
 
 function onSaveBlocks(operations) {
@@ -1666,14 +1966,14 @@ function onApproveRevision(item) {
     expected_chapter_revision: Number(chapterDetail.value?.chapter_revision || 0),
     content_revision: Number(item.content_revision),
     content_hash: item.content_hash,
-  }, `H2 已确认 r${item.content_revision}`)
+  }, `正文已确认 r${item.content_revision}`)
 }
 
 function approveHead() {
   const content = chapterDetail.value?.content
   if (!content) {
-    actionError.value = '没有 head 正文可确认'
-    return
+    actionError.value = '当前没有可确认的正文草稿'
+    return false
   }
   return onApproveRevision(content)
 }
@@ -1703,22 +2003,163 @@ watch(showRevisions, (open) => {
   if (open) openRevisions()
 })
 
+const currentTimestamp = ref(Date.now())
+let streamingTimer = null
+
+function startStreamingTimer() {
+  if (streamingTimer) return
+  currentTimestamp.value = Date.now()
+  streamingTimer = setInterval(() => {
+    currentTimestamp.value = Date.now()
+  }, 300)
+}
+
+function stopStreamingTimer() {
+  if (streamingTimer) {
+    clearInterval(streamingTimer)
+    streamingTimer = null
+  }
+}
+
+onUnmounted(() => {
+  stopStreamingTimer()
+})
+
 function mapChatTurns(turns) {
   return (Array.isArray(turns) ? turns : []).map((turn, index) => ({
     id: String(turn.turn_id || `${turn.role || 'turn'}-${turn.created_at || index}-${index}`),
     turn_id: String(turn.turn_id || ''),
     role: turn.role === 'user' ? 'user' : 'assistant',
-    content: String(turn.content || ''),
-    thinking: String(turn.thinking || ''),
+    content: normalizeDisplayedText(turn.content),
+    thinking: normalizeDisplayedText(turn.thinking),
     thinkingOpen: true,
     streaming: false,
     editing: false,
     created_at: turn.created_at || '',
+    duration: turn.duration || '',
+    elapsed_seconds: turn.elapsed_seconds != null ? Number(turn.elapsed_seconds) : null,
+    researchSteps: Array.isArray(turn.researchSteps)
+      ? turn.researchSteps
+      : (Array.isArray(turn.research_steps) ? turn.research_steps : []),
+    operation_id: String(turn.operation_id || ''),
+    status: String(turn.status || ''),
   }))
+}
+
+function normalizeAgentMessage(message) {
+  const text = String(message || '').trim()
+  if (/^queued\s*:/i.test(text)) return text.replace(/^queued\s*:/i, '已进入编写队列：')
+  return text
+}
+
+function normalizeDisplayedText(value) {
+  const text = normalizeAgentMessage(value)
+  if (text.includes('G4_CONTENT_TOO_SHORT_OR_HOLLOW')) {
+    return '草稿未完成：本次生成的正文过短或缺少实质内容，已停止写入。请补充本章写作要点后重试。'
+  }
+  if (text.includes('CHAPTER_WRITE_REQUEST_INVALID')) {
+    return '草稿未完成：正文生成请求未通过校验，请检查本章提纲和上下文后重试。'
+  }
+  const sanitized = text
+    .replace(/\[[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\]/g, '')
+    .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g, '')
+    .replace(/^\s*[:：-]\s*/, '')
+    .trim()
+  return sanitized || (text ? '操作未完成，请重试。' : '')
+}
+
+function researchStepLabel(status) {
+  return ({
+    required: '需要搜索',
+    not_required: '无需搜索',
+    searching: '正在搜索',
+    published: '搜索完成',
+    skipped: '已跳过搜索',
+    failed: '搜索失败',
+    processing: '正在处理',
+  })[String(status || '')] || '搜索进度'
+}
+
+function draftUserErrorMessage(code, message, reason) {
+  const raw = `${message || ''} ${reason || ''}`
+  if (raw.includes('G4_CONTENT_TOO_SHORT_OR_HOLLOW')) {
+    return '本次生成的正文过短或缺少实质内容，已停止写入草稿。请补充本章写作要点后重试。'
+  }
+  if (code === 'CHAPTER_WRITE_REQUEST_INVALID') {
+    return normalizeAgentMessage(message) || '正文生成请求未通过校验，请检查本章提纲和上下文后重试。'
+  }
+  const detail = reason ? `${message}（${reason}）` : message
+  return normalizeAgentMessage(detail || '正文生成失败，请重试。')
+}
+
+function formatTurnDuration(turn) {
+  if (!turn) return '1秒'
+  if (turn.streaming) {
+    const started = Number(turn.started_at) || currentTimestamp.value
+    const sec = Math.max(1, Math.floor((currentTimestamp.value - started) / 1000))
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return m > 0 ? `${m}分 ${s}秒` : `${s}秒`
+  }
+  if (turn.duration) return turn.duration
+  if (turn.elapsed_seconds != null) {
+    const sec = Number(turn.elapsed_seconds) || 0
+    const m = Math.floor(sec / 60)
+    const s = sec % 60
+    return m > 0 ? `${m}分 ${s}秒` : `${s}秒`
+  }
+  return '1秒'
 }
 
 function canEditChatTurn(turn) {
   return Boolean(selectedId.value && turn && !turn.streaming && !asking.value)
+}
+
+function canDeleteChatTurn(turn) {
+  return Boolean(
+    selectedId.value
+    && turn
+    && !turn.streaming
+    && !asking.value
+    && (turn.turn_id || turn.created_at),
+  )
+}
+
+async function deleteChatTurn(turn) {
+  const chapterId = String(selectedId.value || '').trim()
+  if (!chapterId || !canDeleteChatTurn(turn)) return
+  if (!window.confirm('确定删除这条对话吗？删除后无法恢复。')) return
+  const currentTurns = chatTurns.value
+  try {
+    const { data } = await deleteChapterChatTurn(props.workspaceId, chapterId, {
+      turn_id: turn.turn_id || '',
+      created_at: turn.created_at || '',
+      role: turn.role || '',
+    })
+    if (!data?.ok) throw new Error(data?.message || '删除对话失败')
+    const nextTurns = currentTurns.filter(item => item.id !== turn.id)
+    chatTurns.value = nextTurns
+    rememberChapterChat(chapterId, nextTurns)
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  }
+}
+
+async function clearChatHistory() {
+  const chapterId = String(selectedId.value || '').trim()
+  if (!chapterId || asking.value || chatLoading.value || !chatTurns.value.length) return
+  const chapterName = selectedChapter.value?.title || chapterId
+  if (!window.confirm(`确定清空「${chapterName}」的全部 Agent 对话吗？删除后无法恢复。`)) return
+  try {
+    const { data } = await clearChapterChatHistory(props.workspaceId, chapterId)
+    if (!data?.ok) throw new Error(data?.message || '清空对话失败')
+    const emptyTurns = []
+    rememberChapterChat(chapterId, emptyTurns)
+    if (selectedId.value === chapterId) chatTurns.value = emptyTurns
+    actionMessage.value = `已清空「${chapterName}」的 Agent 对话`
+  } catch (e) {
+    actionError.value = e?.response?.data?.message || e.message || String(e)
+  }
 }
 
 function onChatComposeKeydown(event) {
@@ -1783,6 +2224,74 @@ function rememberChapterChat(chapterId, turns) {
   chatByChapter.set(chapterId, turns)
 }
 
+async function persistDraftTurn(chapterId, draftTurnId, operationId, status) {
+  const source = selectedId.value === chapterId
+    ? chatTurns.value
+    : (chatByChapter.get(chapterId) || [])
+  const turn = source.find(item => item.id === draftTurnId)
+  if (!turn || turn.turn_id) return
+  try {
+    const { data } = await appendChapterChatTurn(props.workspaceId, chapterId, {
+      role: 'assistant',
+      content: turn.content || '本次正文生成未留下结果。',
+      thinking: turn.thinking || '',
+      research_steps: Array.isArray(turn.researchSteps) ? turn.researchSteps : [],
+      elapsed_seconds: turn.elapsed_seconds ?? null,
+      operation_id: operationId,
+      status,
+    })
+    if (!data?.ok || !data.turn) return
+    const persisted = mapChatTurns([data.turn])[0]
+    const next = source.map(item => (
+      item.id === draftTurnId
+        ? { ...item, ...persisted, researchSteps: turn.researchSteps || [] }
+        : item
+    ))
+    rememberChapterChat(chapterId, next)
+    if (selectedId.value === chapterId) chatTurns.value = next
+  } catch (_) {
+    remoteHint.value = '本次执行现场未能保存；请勿刷新页面，并检查服务连接。'
+  }
+}
+
+async function appendChatOperationResult(chapterId, message) {
+  const source = selectedId.value === chapterId
+    ? chatTurns.value
+    : (chatByChapter.get(chapterId) || [])
+  let targetIndex = -1
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    if (source[index]?.role === 'assistant') {
+      targetIndex = index
+      break
+    }
+  }
+  if (targetIndex < 0) return
+  const target = source[targetIndex]
+  const content = [String(target.content || '').trim(), String(message || '').trim()]
+    .filter(Boolean)
+    .join('\n\n')
+  const next = source.map((turn, index) => (
+    index === targetIndex ? { ...turn, content, streaming: false } : turn
+  ))
+  rememberChapterChat(chapterId, next)
+  if (selectedId.value === chapterId) {
+    chatTurns.value = next
+    await scrollChatToBottom()
+  }
+  if (!target.turn_id) return
+  try {
+    await saveChapterChatTurn(props.workspaceId, chapterId, {
+      turn_id: target.turn_id,
+      created_at: target.created_at || '',
+      role: 'assistant',
+      content,
+      thinking: target.thinking || '',
+    })
+  } catch (_) {
+    // The operation result remains visible locally even if history persistence fails.
+  }
+}
+
 async function loadChapterChat(chapterId, { force = false } = {}) {
   const id = String(chapterId || '').trim()
   if (!id) {
@@ -1803,7 +2312,10 @@ async function loadChapterChat(chapterId, { force = false } = {}) {
     if (token !== chatLoadToken || selectedId.value !== id) return
     if (!data?.ok) throw new Error(data?.message || '加载本章对话失败')
     applyChatAuthority(data.authority)
-    const turns = mapChatTurns(data.turns)
+    const turns = mapChatTurns([
+      ...(Array.isArray(data.batch_turns) ? data.batch_turns : []),
+      ...(Array.isArray(data.turns) ? data.turns : []),
+    ])
     rememberChapterChat(id, turns)
     chatTurns.value = turns
     await nextTick()
@@ -1835,22 +2347,13 @@ async function setChatAuthority(mode) {
   }
 }
 
-async function confirmChapterOutline() {
-  chatInput.value = '确认'
-  await sendChat()
-}
-
-async function rejectChapterOutline() {
-  chatInput.value = '不通过，请重列提纲'
-  await sendChat()
-}
-
 async function sendChat() {
   const text = chatInput.value.trim()
   const chapterId = String(selectedId.value || '').trim()
   if (!text || asking.value || !chapterId) return
   asking.value = true
   actionError.value = ''
+  const startTime = Date.now()
   const userTurn = {
     id: `u-${Date.now()}`,
     turn_id: '',
@@ -1860,6 +2363,7 @@ async function sendChat() {
     thinkingOpen: true,
     streaming: false,
     editing: false,
+    created_at: '',
   }
   const assistantId = `a-${Date.now()}`
   const assistantTurn = {
@@ -1871,11 +2375,14 @@ async function sendChat() {
     thinkingOpen: true,
     streaming: true,
     editing: false,
+    started_at: startTime,
+    created_at: '',
   }
   const seedTurns = [...chatTurns.value, userTurn, assistantTurn]
   chatTurns.value = seedTurns
   rememberChapterChat(chapterId, seedTurns)
   chatInput.value = ''
+  startStreamingTimer()
   await scrollChatToBottom()
 
   const patchAssistant = (mutator) => {
@@ -1895,10 +2402,19 @@ async function sendChat() {
   try {
     let completedTurns = null
     let documentWriteRequested = false
+    let documentApprovalRequested = false
     await streamChapterChat(props.workspaceId, chapterId, text, {
       onEvent: async (event) => {
         const type = String(event?.type || '').toLowerCase()
-        if (type === 'inspect_planning' || type === 'inspecting' || type === 'inspect_skipped') {
+        if ([
+          'thinking_step',
+          'inspect_planning',
+          'inspecting',
+          'inspect_skipped',
+          'research',
+          'delegate_reviewing',
+          'delegate_fixing',
+        ].includes(type)) {
           const note = String(event.message || event.reason || '').trim()
           if (!note) return
           patchAssistant((turn) => {
@@ -1912,6 +2428,7 @@ async function sendChat() {
         } else if (type === 'authority') {
           applyChatAuthority(event)
           documentWriteRequested = documentWriteRequested || event.document_write_requested === true
+          documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
         } else if (type === 'thinking_delta') {
           const delta = String(event.delta || '')
           if (!delta) return
@@ -1931,14 +2448,23 @@ async function sendChat() {
           if (selectedId.value === chapterId) await scrollChatToBottom()
         } else if (type === 'done') {
           documentWriteRequested = documentWriteRequested || event.document_write_requested === true
+          documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
+          const elapsedSec = Math.max(1, Math.round((Date.now() - startTime) / 1000))
           if (Array.isArray(event.turns) && event.turns.length) {
             completedTurns = mapChatTurns(event.turns)
+            if (completedTurns.length) {
+              const last = completedTurns[completedTurns.length - 1]
+              if (last.role === 'assistant' && last.elapsed_seconds == null) {
+                last.elapsed_seconds = elapsedSec
+              }
+            }
           } else {
             patchAssistant((turn) => {
               turn.content = String(event.reply || turn.content || '（无回复）')
               turn.thinking = String(event.thinking || turn.thinking || '')
               turn.streaming = false
               turn.thinkingOpen = true
+              turn.elapsed_seconds = elapsedSec
             })
           }
           if (event.workspace_revision != null && selectedId.value === chapterId) {
@@ -1950,6 +2476,7 @@ async function sendChat() {
       },
     })
 
+    const finalElapsed = Math.max(1, Math.round((Date.now() - startTime) / 1000))
     if (completedTurns) {
       rememberChapterChat(chapterId, completedTurns)
       if (selectedId.value === chapterId) {
@@ -1959,14 +2486,24 @@ async function sendChat() {
     } else {
       patchAssistant((turn) => {
         turn.streaming = false
+        turn.elapsed_seconds = turn.elapsed_seconds || finalElapsed
         if (!turn.content) turn.content = '（无回复）'
       })
     }
     if (documentWriteRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
-      await generateDraft()
+      await generateDraft({ instruction: text })
+    } else if (documentApprovalRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
+      const approved = await approveHead()
+      await appendChatOperationResult(
+        chapterId,
+        approved
+          ? '当前正文已确认，并已更新为正式版本。'
+          : `正文确认失败：${normalizeDisplayedText(actionError.value || '请刷新章节后重试。')}`,
+      )
     }
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
+    const errElapsed = Math.max(1, Math.round((Date.now() - startTime) / 1000))
     if (selectedId.value !== chapterId) {
       const cached = chatByChapter.get(chapterId) || []
       rememberChapterChat(
@@ -1976,6 +2513,7 @@ async function sendChat() {
             ? {
                 ...turn,
                 streaming: false,
+                elapsed_seconds: errElapsed,
                 content: turn.content || `请求失败：${actionError.value}`,
               }
             : turn
@@ -1985,12 +2523,14 @@ async function sendChat() {
     }
     patchAssistant((turn) => {
       turn.streaming = false
+      turn.elapsed_seconds = errElapsed
       turn.content = turn.content
         ? `${turn.content}\n\n请求失败：${actionError.value}`
         : `请求失败：${actionError.value}`
     })
   } finally {
     asking.value = false
+    stopStreamingTimer()
   }
 }
 
@@ -2030,11 +2570,13 @@ watch(
 
 onMounted(async () => {
   if (props.initialChapterId) selectedId.value = props.initialChapterId
+  await restoreCurrentBatchJob()
   await reloadAll()
   connectWorkspaceStream()
 })
 
 onUnmounted(() => {
+  stopBatchPolling()
   closeWorkspaceStream?.()
   closeWorkspaceStream = null
   draftAbortController?.abort()
@@ -2129,6 +2671,20 @@ onUnmounted(() => {
 .chat-chapter-label.muted {
   color: #94a3b8;
 }
+.chat-header-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+}
+.danger-outline-btn {
+  border-color: #fecaca;
+  color: #b91c1c;
+  background: #fff;
+}
+.danger-outline-btn:hover:not(:disabled) {
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
 .tree-toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -2213,6 +2769,19 @@ onUnmounted(() => {
 .tree-dot.ready { background: #3b82f6; }
 .tree-dot.projected { background: #cbd5e1; }
 .tree-dot.archived { background: #94a3b8; }
+.tree-dot.batch-queued { background: #2563eb; }
+.tree-dot.batch-preflight,
+.tree-dot.batch-analyzing,
+.tree-dot.batch-researching,
+.tree-dot.batch-drafting,
+.tree-dot.batch-validating,
+.tree-dot.batch-committing,
+.tree-dot.batch-running { background: #2563eb; }
+.tree-dot.batch-succeeded { background: #22c55e; }
+.tree-dot.batch-failed,
+.tree-dot.batch-paused { background: #ef4444; }
+.tree-dot.batch-skipped,
+.tree-dot.batch-cancelled { background: #94a3b8; }
 .tree-title {
   flex: 1;
   min-width: 0;
@@ -2394,6 +2963,14 @@ onUnmounted(() => {
 }
 .banner.error { background: #fef2f2; color: #b91c1c; border-bottom: 1px solid #fecaca; }
 .banner.ok { background: #ecfdf5; color: #166534; border-bottom: 1px solid #a7f3d0; }
+.banner.warning { background: #fffbeb; color: #92400e; border-bottom: 1px solid #fde68a; }
+.banner.warning .btn { margin-left: 8px; }
+.batch-job-items { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.batch-job-item { border: 1px solid currentColor; border-radius: 999px; padding: 3px 8px; background: rgb(255 255 255 / 70%); color: inherit; font-size: 11px; cursor: pointer; }
+.batch-job-item.succeeded { color: #166534; }
+.batch-job-item.failed { color: #b91c1c; font-weight: 700; }
+.batch-job-item.running { color: #1d4ed8; font-weight: 700; }
+.batch-job-actions { display: flex; gap: 6px; margin-top: 7px; }
 .chat-tabs {
   display: flex;
   gap: 4px;
@@ -2440,11 +3017,6 @@ onUnmounted(() => {
   background: #eff6ff;
   color: #1d4ed8;
   font-weight: 700;
-}
-.chat-review-actions {
-  display: flex;
-  gap: 8px;
-  padding: 4px 2px 8px;
 }
 .context-panel,
 .chat-panel {
@@ -2615,96 +3187,170 @@ onUnmounted(() => {
   gap: 8px;
 }
 .chat-bubble {
+  position: relative;
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 13px;
   line-height: 1.45;
 }
+.chat-delete-btn {
+  position: absolute;
+  top: 6px;
+  right: 7px;
+  display: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 18px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.chat-bubble:hover .chat-delete-btn,
+.chat-delete-btn:focus-visible { display: block; }
+.chat-delete-btn:hover { background: #fecaca; }
 .chat-bubble.user {
-  background: #eff6ff;
-  border: 1px solid #bfdbfe;
+  background: #27272a;
+  border: none;
   align-self: flex-end;
-  max-width: 92%;
+  max-width: 88%;
+  border-radius: 16px;
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+  padding: 12px 18px;
+}
+.chat-bubble.user .chat-content {
+  color: #ffffff;
 }
 .chat-bubble.assistant {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: transparent;
+  border: none;
   align-self: flex-start;
-  max-width: 96%;
+  max-width: 100%;
+  padding: 4px 0;
+  box-shadow: none;
 }
-.chat-bubble strong {
-  display: block;
-  font-size: 11px;
+.chat-processed-bar {
+  font-size: 13px;
   color: #64748b;
-  margin-bottom: 2px;
+  margin-bottom: 8px;
+  font-weight: 500;
 }
-.chat-bubble p,
-.chat-content {
-  margin: 0;
-  white-space: pre-wrap;
-  color: #0f172a;
-  outline: none;
+.chat-divider {
+  height: 1px;
+  background: #e2e8f0;
+  margin: 6px 0 10px;
+  width: 100%;
 }
-.chat-content[contenteditable="true"],
-.thinking-body[contenteditable="true"] {
-  cursor: text;
-  border-radius: 6px;
+.chat-thinking-details {
+  margin-bottom: 12px;
 }
-.chat-content[contenteditable="true"]:focus,
-.thinking-body[contenteditable="true"]:focus {
-  box-shadow: inset 0 0 0 1px #93c5fd;
-  background: #fff;
-}
-.chat-bubble.streaming {
-  border-color: #93c5fd;
-  box-shadow: 0 0 0 1px rgb(147 197 253 / 35%);
-}
-.chat-thinking {
-  margin: 6px 0 8px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #eef2ff;
-  padding: 6px 8px;
-}
-.thinking-label {
-  color: #4338ca;
-  font-size: 12px;
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.thinking-live {
+.chat-thinking-summary {
   display: inline-flex;
   align-items: center;
-  border-radius: 999px;
-  background: #dbeafe;
-  color: #1d4ed8;
-  font-size: 10px;
-  padding: 1px 6px;
-  font-weight: 700;
+  gap: 6px;
+  cursor: pointer;
+  color: #64748b;
+  font-size: 13px;
+  font-weight: 500;
+  user-select: none;
+  list-style: none;
+  padding: 2px 0;
+}
+.chat-thinking-summary::-webkit-details-marker { display: none; }
+.chat-thinking-summary:hover { color: #334155; }
+.thinking-summary-label {
+  transition: color 0.2s ease;
+}
+.thinking-summary-label.thinking-shimmer {
+  display: inline-block;
+  background: linear-gradient(
+    90deg,
+    #64748b 0%,
+    #2563eb 25%,
+    #60a5fa 50%,
+    #2563eb 75%,
+    #64748b 100%
+  );
+  background-size: 200% 100%;
+  color: transparent !important;
+  -webkit-background-clip: text;
+  background-clip: text;
+  animation: thinkingSweep 2s infinite linear;
+  font-weight: 600;
+}
+@keyframes thinkingSweep {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+.thinking-chevron {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  transition: transform 0.2s ease;
+}
+.chat-thinking-details[open] .thinking-chevron {
+  transform: rotate(90deg);
 }
 .thinking-body {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
   white-space: pre-wrap;
   word-break: break-word;
-  color: #334155;
-  font-size: 12px;
-  line-height: 1.55;
+  color: #475569;
+  font-size: 12.5px;
+  line-height: 1.6;
   max-height: 280px;
   overflow: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-family: inherit;
   outline: none;
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  border-radius: 8px;
+  padding: 10px 14px;
 }
-.chat-edit-hint {
-  display: block;
-  margin-top: 6px;
-  color: #94a3b8;
-  font-size: 11px;
+.research-process {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #334155;
+}
+.research-process h4 { margin: 0 0 8px; color: #1e3a8a; font-size: 12.5px; }
+.research-process ol { margin: 0; padding-left: 20px; }
+.research-process ol > li { margin: 0 0 8px; padding-left: 2px; }
+.research-process ol > li:last-child { margin-bottom: 0; }
+.research-process strong { display: block; margin-bottom: 2px; color: #1d4ed8; font-size: 12px; }
+.research-process span { display: block; font-size: 12px; line-height: 1.55; }
+.research-queries { margin-top: 4px; color: #475569; }
+.research-source-list { margin: 5px 0 0; padding-left: 16px; }
+.research-source-list li { margin: 2px 0; }
+.research-source-list a { color: #1d4ed8; overflow-wrap: anywhere; }
+.chat-content.agent-content {
+  color: #1e293b;
+  font-size: 14px;
+  line-height: 1.65;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 14px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 .chat-streaming-hint {
   color: #64748b !important;
   font-style: italic;
+  font-size: 13px;
+  margin: 6px 0 0;
 }
 .chat-compose {
   border-top: 1px solid #e2e8f0;

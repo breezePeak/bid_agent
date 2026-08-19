@@ -26,29 +26,12 @@ from .canonicalization import canonical_hash
 SIBLING_SUMMARY_CHARS = 1600
 MAX_SIBLINGS = 12
 
-_VISUAL_TITLE = re.compile(
-    r"路线图|架构图|流程图|示意图|拓扑图|框架图|图面|图示"
-)
-_OVERVIEW_TITLE = re.compile(
-    r"总体|总则|总述|概述|总路线|技术路线(?!图)|实施方案(?!细则)|整体方案|总体方案"
-)
-_METHOD_TITLE = re.compile(
-    r"关键技术|技术方法|核心方法|工艺|实施方法|方法与措施"
-)
-
-
 def _title_of(node: dict[str, Any], fallback: str = "") -> str:
     return str(node.get("title") or fallback or "").strip()
 
 
 def _chapter_role(title: str, purpose: str = "") -> str:
-    raw = f"{title} {purpose}".strip()
-    if _VISUAL_TITLE.search(raw):
-        return "visual"
-    if _METHOD_TITLE.search(raw):
-        return "method"
-    if _OVERVIEW_TITLE.search(raw):
-        return "overview"
+    """Do not infer execution behavior from chapter naming conventions."""
     return "general"
 
 

@@ -19,6 +19,8 @@ from .contracts import (
 )
 from .planning_inference import (
     OutlineDecompositionInput,
+    PROJECT_INPUT_MAX_CHARS,
+    PROJECT_INPUT_PROJECTION_VERSION,
     ProjectUnderstandingInput,
     TopicDutyPlanningInput,
 )
@@ -51,6 +53,111 @@ PROJECT_CONTEXT_TOKENS = (
     "项目需求",
 )
 
+PROJECT_SOURCE_BLOCK_LIMIT = 18
+PROJECT_SOURCE_TEXT_LIMIT = 600
+
+_PROJECT_PRIORITY_TOKENS = (
+    ("blocking", 100),
+    ("阻断", 100),
+    ("deliverable", 90),
+    ("交付", 90),
+    ("acceptance", 85),
+    ("验收", 85),
+    ("contract", 80),
+    ("合同", 80),
+    ("project_name", 75),
+    ("项目名称", 75),
+    ("project", 70),
+    ("项目", 70),
+    ("goal", 65),
+    ("目标", 65),
+    ("scope", 60),
+    ("范围", 60),
+    ("schedule", 55),
+    ("工期", 55),
+    ("role", 50),
+    ("角色", 50),
+    ("constraint", 45),
+    ("约束", 45),
+)
+
+_PROJECT_EXCLUDED_SECTION_TOKENS = (
+    "评标办法",
+    "评标方法",
+    "评分办法",
+    "评分标准",
+    "评审标准",
+    "评分标准",
+    "投标文件格式",
+    "响应文件格式",
+    "报价文件格式",
+    "开标一览表",
+    "附件格式",
+    "商品包装",
+    "快递包装",
+)
+
+_PROJECT_FACT_CATEGORY_TOKENS = (
+    ("name", ("项目名称", "采购项目名称")),
+    ("background", ("项目背景", "工作背景", "建设背景", "项目概况")),
+    ("goal", ("项目目标", "工作目标", "建设目标", "总体目标")),
+    (
+        "scope",
+        (
+            "项目范围",
+            "采购范围",
+            "服务范围",
+            "工作范围",
+            "工作内容",
+            "主要任务",
+            "主要工作",
+            "建设内容",
+        ),
+    ),
+    ("deliverable", ("交付成果", "成果清单", "成果要求", "提交成果")),
+    ("acceptance", ("验收标准", "验收要求", "成果验收")),
+    ("schedule", ("服务期限", "项目周期", "工作期限", "工期要求")),
+    ("role", ("人员要求", "人员配置", "项目团队", "组织分工")),
+    ("constraint", ("质量要求", "保密要求", "安全要求", "技术要求")),
+)
+
+
+def _project_block_rank(
+    block: SourceBlock,
+    *,
+    cited_chunks: set[str],
+) -> int:
+    heading_text = " ".join(block.heading_path)
+    text = f"{heading_text} {block.content}"
+    score = 30 if block.source_anchor.chunk_id in cited_chunks else 0
+    score += _project_priority(
+        text,
+        kind=block.block_kind,
+        severity=block.input_role.value,
+    )
+    if "采购需求" in heading_text:
+        score += 100
+    if "合同条款" in heading_text:
+        score -= 35
+    if any(token in text for token in _PROJECT_EXCLUDED_SECTION_TOKENS):
+        score -= 300
+    score += 12 * sum(
+        1
+        for _, tokens in _PROJECT_FACT_CATEGORY_TOKENS
+        if any(token in text for token in tokens)
+    )
+    return score
+
+
+def _project_priority(text: str, *, kind: str = "", severity: str = "") -> int:
+    haystack = f"{kind} {severity} {text}".casefold()
+    # The weights encode an ordered bucket, rather than an additive score:
+    # several low-priority hints must not outrank one blocking/acceptance hint.
+    return max(
+        (weight for token, weight in _PROJECT_PRIORITY_TOKENS if token.casefold() in haystack),
+        default=0,
+    )
+
 
 def select_planning_source_context(
     source_blocks: list[SourceBlock],
@@ -58,33 +165,47 @@ def select_planning_source_context(
     requirement_chunk_ids: set[str],
     score_chunk_ids: set[str],
     compact: bool = False,
+    project_input: bool = False,
 ) -> list[dict[str, Any]]:
     """Select the exact bounded source context supplied to planning Providers."""
 
-    cited_chunks = requirement_chunk_ids | score_chunk_ids
+    cited_chunks = (
+        requirement_chunk_ids
+        if project_input
+        else requirement_chunk_ids | score_chunk_ids
+    )
     selected = [
         block
         for block in source_blocks
-        if block.source_anchor.chunk_id in cited_chunks
-        or block.input_role == InputRole.COMPANY
-        or (
-            block.input_role
-            in {
-                InputRole.TENDER,
-                InputRole.AMENDMENT,
-                InputRole.SCORE,
-            }
-            and (
-                block.block_kind == "heading"
-                or any(
-                    token
-                    in " ".join(
-                        (
-                            *block.heading_path,
-                            block.content[:240],
+        if (
+            not project_input
+            or block.input_role in {InputRole.TENDER, InputRole.AMENDMENT}
+        )
+        and (
+            block.source_anchor.chunk_id in cited_chunks
+            or (
+                not project_input
+                and block.input_role == InputRole.COMPANY
+            )
+            or (
+                block.input_role
+                in (
+                    {InputRole.TENDER, InputRole.AMENDMENT}
+                    if project_input
+                    else {InputRole.TENDER, InputRole.AMENDMENT, InputRole.SCORE}
+                )
+                and (
+                    block.block_kind == "heading"
+                    or any(
+                        token
+                        in " ".join(
+                            (
+                                *block.heading_path,
+                                block.content[:240],
+                            )
                         )
+                        for token in PROJECT_CONTEXT_TOKENS
                     )
-                    for token in PROJECT_CONTEXT_TOKENS
                 )
             )
         )
@@ -97,6 +218,52 @@ def select_planning_source_context(
     # made a large tender produce >1 MB requests and the local gateway returned
     # HTTP 400 before the model was invoked.  Keep every selected block and its
     # stable anchors, while omitting only non-semantic layout/hash fields.
+    if project_input:
+        # Project facts must not depend on a brittle keyword hit.  Real tender
+        # documents often describe the work directly without headings such as
+        # “项目范围”.  Rank every tender/amendment block, while still placing
+        # cited and project-like blocks first.
+        project_blocks = [
+            block
+            for block in source_blocks
+            if block.input_role in {InputRole.TENDER, InputRole.AMENDMENT}
+        ]
+        ranked = sorted(
+            enumerate(project_blocks),
+            key=lambda pair: (
+                -_project_block_rank(pair[1], cited_chunks=cited_chunks),
+                pair[0],
+            ),
+        )
+        pinned: list[SourceBlock] = []
+        for _, tokens in _PROJECT_FACT_CATEGORY_TOKENS:
+            match = next(
+                (
+                    block
+                    for _, block in ranked
+                    if any(
+                        token in " ".join((*block.heading_path, block.content))
+                        for token in tokens
+                    )
+                    and not any(
+                        excluded
+                        in " ".join((*block.heading_path, block.content[:120]))
+                        for excluded in _PROJECT_EXCLUDED_SECTION_TOKENS
+                    )
+                ),
+                None,
+            )
+            if match is not None and match not in pinned:
+                pinned.append(match)
+        selected = []
+        seen_block_ids: set[str] = set()
+        for block in [*pinned, *(item for _, item in ranked)]:
+            if block.block_id in seen_block_ids:
+                continue
+            seen_block_ids.add(block.block_id)
+            selected.append(block)
+            if len(selected) >= PROJECT_SOURCE_BLOCK_LIMIT:
+                break
     return [
         {
             "block_id": block.block_id,
@@ -104,7 +271,11 @@ def select_planning_source_context(
             "input_role": block.input_role.value,
             "block_kind": block.block_kind,
             "ordinal": block.ordinal,
-            "content": block.content,
+            "content": (
+                block.content[:PROJECT_SOURCE_TEXT_LIMIT]
+                if project_input
+                else block.content
+            ),
             "heading_path": list(block.heading_path),
             "source_anchor": {
                 "source_input_id": block.source_anchor.source_input_id,
@@ -118,60 +289,104 @@ def select_planning_source_context(
 
 
 def _project_requirement_snapshot(ledger: RequirementLedger) -> dict[str, Any]:
-    """Return the semantic subset of the ledger needed by project planning.
+    """Keep only compiler metadata; project prose comes from raw SourceIndex blocks."""
 
-    ``coverage_audit`` is a promotion/audit record and can contain the full
-    batch classification transcript.  It is not an input fact for project
-    understanding, so including it needlessly inflated the prompt by roughly
-    150k characters in the failing workspace.
-    """
+    return {
+        "projection_version": PROJECT_INPUT_PROJECTION_VERSION,
+        "revision": ledger.revision,
+    }
 
-    requirements: list[dict[str, Any]] = []
-    for item in ledger.requirements:
-        value = item.model_dump(mode="json")
-        snapshot = {
-            key: value[key]
-            for key in (
-                "requirement_id",
-                "kind",
-                "normalized_requirement",
-                "status",
-                "severity",
-            )
-            if key in value
-        }
-        # Preserve the source wording only when normalization changed it.  In
-        # the common case the two fields are identical and duplicating them
-        # contributes substantial prompt noise without new evidence.
-        if value.get("original_text") != value.get("normalized_requirement"):
-            snapshot["original_text"] = value.get("original_text")
-        requirements.append(snapshot)
 
-    return {"requirements": requirements}
+def _bounded_project_source_context(
+    source_context: list[dict[str, Any]],
+    requirement_ledger: dict[str, Any],
+    scanned_source_block_count: int,
+    review_feedback: str = "",
+) -> ProjectUnderstandingInput:
+    """Build a non-empty, raw-source-first request within the input budget."""
+
+    def make(
+        blocks: list[dict[str, Any]],
+        ledger_snapshot: dict[str, Any] = requirement_ledger,
+    ) -> ProjectUnderstandingInput:
+        return ProjectUnderstandingInput(
+            requirement_ledger=ledger_snapshot,
+            source_context=blocks,
+            scanned_source_block_count=scanned_source_block_count,
+            review_feedback=str(review_feedback or "").strip()[:2000],
+        )
+
+    if len(canonical_json(make(source_context).model_dump(mode="json"))) <= PROJECT_INPUT_MAX_CHARS:
+        return make(source_context)
+
+    # Reduce the number/length of lower-ranked blocks, never the entire raw
+    # source context.  The previous fallback retained 60 derived requirements
+    # and silently sent zero tender blocks to the model.
+    for block_limit in (18, 15, 12, 10, 8, 6, 4, 2, 1):
+        for content_limit in (600, 500, 400, 300, 200, 120, 80):
+            compact_blocks = [
+                {
+                    **block,
+                    "content": str(block.get("content") or "")[:content_limit],
+                }
+                for block in source_context[:block_limit]
+            ]
+            candidate = make(compact_blocks)
+            if (
+                compact_blocks
+                and len(canonical_json(candidate.model_dump(mode="json")))
+                <= PROJECT_INPUT_MAX_CHARS
+            ):
+                return candidate
+    raise ValueError(
+        "ProjectUnderstandingInput 无法在 16000 字符内保留任何招标原文块"
+    )
 
 
 def build_project_understanding_input(
     ledger: RequirementLedger,
-    scores: ScoreModel,
     source_index: SourceIndex,
+    *,
+    review_feedback: str = "",
 ) -> ProjectUnderstandingInput:
     source_context = select_planning_source_context(
         list(source_index.blocks),
         requirement_chunk_ids={
-            item.source_anchor.chunk_id for item in ledger.requirements
+            item.source_anchor.chunk_id
+            for item in ledger.requirements
+            if item.status not in {"blocked", "waived"}
         },
-        score_chunk_ids={
-            anchor.chunk_id
-            for point in scores.points
-            for anchor in point.source_anchors
-        },
+        score_chunk_ids=set(),
         compact=True,
+        project_input=True,
     )
-    return ProjectUnderstandingInput(
-        requirement_ledger=_project_requirement_snapshot(ledger),
-        score_model=scores.model_dump(mode="json"),
-        source_context=source_context,
+    candidate = _bounded_project_source_context(
+        source_context,
+        _project_requirement_snapshot(ledger),
+        len(source_index.blocks),
+        review_feedback,
     )
+    has_project_text = any(
+        str(block.get("content") or "").strip()
+        for block in candidate.source_context
+    ) or any(
+        str(item.get("normalized_requirement") or "").strip()
+        for item in candidate.requirement_ledger.get("requirements", [])
+    )
+    if not has_project_text:
+        error = ValueError(
+            "ProjectUnderstandingInput 缺少可用于项目理解的招标正文或项目要求"
+        )
+        error.code = "PROJECT_INPUT_MISSING_TENDER_EVIDENCE"
+        error.retryable = True
+        error.details = {
+            "input_chars": len(canonical_json(candidate.model_dump(mode="json"))),
+            "source_block_count": len(candidate.source_context),
+            "scanned_source_block_count": len(source_index.blocks),
+            "missing": "tender_project_evidence",
+        }
+        raise error
+    return candidate
 
 
 def build_score_semantic_input(
@@ -397,18 +612,17 @@ def reconstruct_inference_input_snapshot(
                 source_index,
                 ledger,
             )
+    elif artifact_kind == "ProjectModel":
+        source_index = SourceIndex.model_validate(
+            dependency_payloads["SourceIndex"]
+        )
+        request = build_project_understanding_input(
+            ledger,
+            source_index,
+        )
     else:
         scores = ScoreModel.model_validate(dependency_payloads["ScoreModel"])
-        if artifact_kind == "ProjectModel":
-            source_index = SourceIndex.model_validate(
-                dependency_payloads["SourceIndex"]
-            )
-            request = build_project_understanding_input(
-                ledger,
-                scores,
-                source_index,
-            )
-        elif artifact_kind == "ResponseTopicGraph":
+        if artifact_kind == "ResponseTopicGraph":
             source_index = SourceIndex.model_validate(
                 dependency_payloads["SourceIndex"]
             )

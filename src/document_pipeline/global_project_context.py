@@ -312,20 +312,62 @@ class GlobalProjectContextService:
     def prompt_projection(
         global_context: dict[str, Any],
         chapter_context: dict[str, Any],
+        *,
+        purpose: str = "",
+        writing_objectives: list[str] | None = None,
+        scoring_requirements: list[dict[str, Any]] | None = None,
+        fact_limit: int = 12,
     ) -> dict[str, Any]:
-        """Return common core plus chapter-relevant references from the same source."""
-        projected = dict(global_context)
-        fact_ids = {
-            str(item)
-            for item in chapter_context.get("highlighted_fact_ids") or []
+        """Project only facts directly supported by the unmodified Blueprint GOAL.
+
+        Project facts are candidates, not a body checklist.  A generic overlap on
+        words such as ``项目`` or ``任务`` is insufficient; uncertain facts are
+        deliberately omitted from the writer prompt.
+        """
+        focus_text = json.dumps(
+            {
+                "purpose": str(purpose or ""),
+                "writing_objectives": [str(item) for item in writing_objectives or []],
+                "scoring_requirements": list(scoring_requirements or []),
+            },
+            ensure_ascii=False,
+        )
+        focus_compact = _compact(focus_text)
+        identity = global_context.get("identity")
+        identity = identity if isinstance(identity, dict) else {}
+        purchaser_cues = ("purchaser", "procurer", "buyer", "采购人", "招标人", "采购单位")
+        include_purchaser = any(_compact(cue) in focus_compact for cue in purchaser_cues)
+        projected_identity = {
+            key: value
+            for key, value in identity.items()
+            if include_purchaser
+            or not any(_compact(cue) in _compact(key) for cue in purchaser_cues)
         }
+        projected = {
+            key: global_context.get(key)
+            for key in (
+                "schema_version", "global_context_id", "global_context_revision",
+                "global_context_hash", "project_id", "terminology",
+            )
+            if key in global_context
+        }
+        projected["identity"] = projected_identity
+        focus_grams = _bigrams(focus_text)
         facts = global_context.get("confirmed_facts")
         facts = facts if isinstance(facts, list) else []
-        projected["confirmed_facts"] = [
-            dict(item)
-            for item in facts
-            if isinstance(item, dict) and str(item.get("fact_id") or "") in fact_ids
-        ]
+        ranked: list[tuple[float, str, dict[str, Any]]] = []
+        for item in facts:
+            if not isinstance(item, dict) or not item.get("fact_id"):
+                continue
+            grams = _bigrams(str(item.get("statement") or ""))
+            overlap = len(grams & focus_grams)
+            ratio = overlap / max(1, len(grams))
+            if overlap >= 3 and ratio >= 0.32:
+                ranked.append((ratio, str(item.get("fact_id")), dict(item)))
+        ranked.sort(key=lambda row: (-row[0], row[1]))
+        selected_facts = [row[2] for row in ranked[:fact_limit]]
+        fact_ids = {str(item.get("fact_id")) for item in selected_facts}
+        projected["confirmed_facts"] = selected_facts[:fact_limit]
         projected["confirmed_fact_count"] = len(facts)
         projected["selected_fact_ids"] = sorted(fact_ids)
         return projected

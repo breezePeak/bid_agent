@@ -24,6 +24,57 @@
             <span>流程尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
             <span>模型请求 {{ selectedDrawerStage.llm_request_count || 0 }} 次</span>
           </div>
+          <section
+            v-if="selectedDrawerStage.stage_id === 'plan_response'"
+            class="project-fact-drawer-panel"
+            aria-labelledby="project-fact-drawer-heading"
+          >
+            <div class="project-fact-drawer-heading">
+              <div>
+                <p class="section-kicker">全局项目事实</p>
+                <h4 id="project-fact-drawer-heading">
+                  {{ selectedDrawerStage.status === 'reused' ? '复用已验证结果' : '本次生成明细' }}
+                </h4>
+              </div>
+              <span v-if="selectedDrawerStage.status === 'reused'" class="project-fact-reused-pill">已验证复用</span>
+            </div>
+            <dl class="project-fact-metrics">
+              <div><dt>输入字符</dt><dd>{{ selectedDrawerStageData.input_chars || 0 }}</dd></div>
+              <div><dt>扫描原文</dt><dd>{{ selectedDrawerStageData.scanned_source_block_count || 0 }}</dd></div>
+              <div><dt>送入模型</dt><dd>{{ selectedDrawerStageData.source_block_count || 0 }}</dd></div>
+              <div><dt>模型请求</dt><dd>{{ selectedDrawerStageData.llm_request_count || 0 }}</dd></div>
+              <div><dt>自动处理引用</dt><dd>{{ selectedDrawerStageData.normalized_reference_count || 0 }}</dd></div>
+            </dl>
+            <p
+              v-if="selectedDrawerStage.status === 'reused'"
+              class="project-fact-reuse-note"
+            >当前结果经过依赖、版本和哈希校验，本次没有重新调用模型。</p>
+            <div v-if="selectedDrawerStageData.summary && Object.keys(selectedDrawerStageData.summary).length" class="project-fact-summary">
+              <strong>事实摘要</strong>
+              <p v-if="selectedDrawerStageData.summary.project_name">项目：{{ selectedDrawerStageData.summary.project_name }}</p>
+              <p v-if="selectedDrawerStageData.summary.fact_count !== undefined">已确认事实 {{ selectedDrawerStageData.summary.fact_count }} 条</p>
+              <p v-if="selectedDrawerStageData.summary.evidence_need_count !== undefined">待补证据 {{ selectedDrawerStageData.summary.evidence_need_count }} 条</p>
+            </div>
+            <div v-if="['failed', 'paused', 'blocked'].includes(selectedDrawerStage.status) && selectedDrawerStageData.validation_errors?.length" class="project-fact-validation-list">
+              <strong>自动修复记录</strong>
+              <ol>
+                <li v-for="(item, index) in selectedDrawerStageData.validation_errors" :key="`${item.code || item.rule || index}-${index}`">
+                  <span>第 {{ item.attempt || index + 1 }} 次</span>
+                  <p>{{ item.message || item.error || item }}</p>
+                </li>
+              </ol>
+            </div>
+            <div v-if="['failed', 'paused', 'blocked'].includes(selectedDrawerStage.status)" class="project-fact-recovery-actions">
+              <textarea
+                v-model="projectFactFeedback"
+                rows="3"
+                placeholder="可选：告诉 Agent 哪些项目事实需要调整；不能覆盖招标文件中的正式要求"
+              />
+              <button class="btn btn-primary" type="button" :disabled="outlineActionDisabled" @click="retryProjectFacts(false)">再试一次</button>
+              <button class="btn" type="button" :disabled="outlineActionDisabled || !projectFactFeedback.trim()" @click="retryProjectFacts(true)">带意见重试</button>
+              <button class="btn" type="button" @click="closeStageDrawer">稍后处理</button>
+            </div>
+          </section>
           <dl
             v-if="selectedDrawerStage.started_at || selectedDrawerStage.completed_at"
             class="drawer-timestamps"
@@ -103,8 +154,8 @@
             </ul>
           </div>
 
-          <div v-if="selectedDrawerStage.status === 'failed' && selectedDrawerStage.error?.message" class="drawer-error-alert">
-            <strong>错误明细：</strong>
+          <div v-if="['failed', 'paused', 'blocked'].includes(selectedDrawerStage.status) && selectedDrawerStage.error?.message" class="drawer-error-alert">
+            <strong>{{ selectedDrawerStage.status === 'failed' ? '错误明细：' : '需要处理：' }}</strong>
             <p>{{ pipelineStageError(selectedDrawerStage) }}</p>
           </div>
 
@@ -554,32 +605,20 @@
             </div>
           </div>
 
-          <!-- 步骤 1.1：已登记材料卡片消息 -->
-          <div v-if="activeInputs.length" class="chat-msg bot-msg timeline-step-msg">
-            <div class="msg-avatar material-avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M9 12h6M9 16h6" /></svg>
-            </div>
-            <div class="msg-bubble materials-card-bubble">
-              <header class="card-title-row">
-                <div>
-                  <span class="workflow-result-kicker">步骤结果</span>
-                  <h4>已接收材料（{{ activeInputs.length }} 份）</h4>
-                </div>
-                <span class="material-status-tag ok">✓ 已就绪</span>
-              </header>
-              <ul class="chat-materials-grid">
-                <li v-for="item in activeInputs" :key="item.input_id" class="chat-material-card">
-                  <span class="file-icon" aria-hidden="true">
-                    <svg v-if="item.role === 'tender'" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5" /></svg>
-                    <svg v-else viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
+          <!-- 步骤 1.1：已登记材料卡片消息（Cursor 风格文件变动卡片） -->
+          <div v-if="activeInputs.length" class="chat-msg bot-msg">
+            <div class="file-changes-card" style="width: 100%; max-width: 640px;">
+              <div class="file-changes-list">
+                <div v-for="item in activeInputs" :key="item.input_id" class="file-change-item">
+                  <span class="file-path">
+                    <span class="dir">{{ roleLabel(item.role) }} / </span>
+                    <span class="name">{{ item.filename }}</span>
                   </span>
-                  <div class="file-info">
-                    <strong>{{ item.filename }}</strong>
-                    <small>{{ roleLabel(item.role) }} · {{ sourceStatusLabel(item) }}</small>
+                  <div class="file-diff-stats">
+                    <span class="diff-tag add">✓ {{ sourceStatusLabel(item) }}</span>
                   </div>
-                  <span class="file-badge">✓ 已就绪</span>
-                </li>
-              </ul>
+                </div>
+              </div>
             </div>
           </div>
 
@@ -606,17 +645,22 @@
             class="chat-msg"
             :class="turn.role === 'user' ? 'user-msg' : 'bot-msg'"
           >
-            <div class="msg-avatar conversation-avatar" aria-hidden="true">{{ turn.role === 'user' ? '你' : 'AI' }}</div>
             <div class="msg-bubble conversation-bubble">
+              <button
+                v-if="turn.role === 'user'"
+                type="button"
+                class="chat-delete-btn"
+                title="删除此条对话"
+                aria-label="删除此条对话"
+                @click="deleteInitialChatTurn(turn)"
+              >×</button>
               <p>{{ turn.content }}</p>
             </div>
           </div>
 
           <!-- 阶段 2 从开始、失败到完成始终只占一条 AI 消息。 -->
-          <div v-if="showOutlineProcessMessage" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
-            <div class="msg-avatar outline-avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H20v16H7.5A2.5 2.5 0 0 0 5 20.5zm2.5 0H20M9 7h7M9 11h7M9 15h4" /></svg>
-            </div>
+          <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
+            <div class="msg-avatar outline-avatar" aria-hidden="true">2</div>
             <div class="msg-bubble outline-card-bubble">
               <header class="card-title-row">
                 <div>
@@ -682,7 +726,7 @@
           </div>
 
           <!-- 阶段 3 也只保留一条消息，详情按需展开。 -->
-          <div v-if="showGenerationPipeline" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
+          <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
             <div class="msg-avatar generation-avatar" aria-hidden="true">3</div>
             <div class="msg-bubble generation-stage-bubble">
               <header class="workflow-step-header">
@@ -1250,7 +1294,7 @@
               <small class="pipeline-llm-count">
                 大模型请求 {{ stage.llm_request_count }} 次
               </small>
-              <em v-if="stage.status === 'failed' && stage.error?.message">
+              <em v-if="['failed', 'paused', 'blocked'].includes(stage.status) && stage.error?.message">
                 {{ pipelineStageError(stage) }}
               </em>
               <details v-if="stage.llm_requests?.length" class="pipeline-llm-requests">
@@ -1462,9 +1506,9 @@
           </div>
         </div>
 
-        <div v-if="pipelineStatus === 'failed' && !hasOutline" class="planning-failed-box">
+        <div v-if="['failed', 'needs_handling'].includes(pipelineStatus) && !hasOutline" class="planning-failed-box">
           <div class="failed-icon">⚠️</div>
-          <h3>评分目录生成中断</h3>
+          <h3>{{ pipelineStatus === 'needs_handling' ? '全局项目事实需要处理' : '评分目录生成中断' }}</h3>
           <p class="failed-msg">{{ error || '后台大模型拆分响应未成功完成，已暂停生成目录。' }}</p>
           <div class="failed-actions">
             <button
@@ -1925,6 +1969,7 @@ const initialChatTurns = ref([])
 const secondStageConfirmed = ref(false)
 const dismissedPlanningReviewOperationId = ref('')
 const planningReviewFeedback = ref('')
+const projectFactFeedback = ref('')
 const initialPendingCount = ref(0)
 const initialAsking = computed(() => initialPendingCount.value > 0)
 const assistantClockNow = ref(Date.now())
@@ -2090,6 +2135,12 @@ async function sendInitialChat() {
     startedAt,
     finishedAt: 0,
   })
+function deleteInitialChatTurn(turn) {
+  if (!turn) return
+  if (!window.confirm('确定删除此条对话吗？')) return
+  initialChatTurns.value = initialChatTurns.value.filter(t => t.id !== turn.id)
+}
+
   initialChatTurns.value.push(userTurn)
   initialChatTurns.value.push(assistantTurn)
   initialPendingCount.value += 1
@@ -2129,6 +2180,13 @@ let stageDetailRequestToken = 0
 const selectedDrawerStage = computed(() => (
   topPipelineStages.value.find(s => s.stage_id === activeStageDrawerId.value) || null
 ))
+// The list row is already a snapshot projection; the detail endpoint may add
+// the persisted artifact summary and repair history.  Merge both without
+// letting the client derive status or model-call counts.
+const selectedDrawerStageData = computed(() => ({
+  ...(selectedDrawerStage.value || {}),
+  ...(stageDetail.value || {}),
+}))
 
 async function loadStageDetail(stageId, { showLoading = false } = {}) {
   const normalized = String(stageId || '')
@@ -2358,17 +2416,21 @@ const generationErrorMessage = computed(() => (
   || '完整标书生成失败。'
 ))
 const generationHeadline = computed(() => {
-  if (generationBusy.value) {
+  const status = String(writingPhaseState.value.phase_status || 'not_started')
+  if (status === 'in_progress') {
+    return currentGenerationStage.value?.label
+      ? `正在执行“${currentGenerationStage.value.label}”。`
+      : '正在编写章节正文。'
+  }
+  if (status === 'running') {
     return currentGenerationStage.value?.label
       ? `正在执行“${currentGenerationStage.value.label}”，页面每 2 秒自动更新。`
       : '任务已启动，正在等待后端阶段状态。'
   }
-  if (generationContent.value.stale_units) {
-    return '旧正文与当前写作器、模型或研究策略不一致，必须重新生成。'
-  }
-  if (generation.value.status === 'succeeded') return '全部阶段已完成，可查看章节正文并下载 Word。'
-  if (generation.value.status === 'blocked') return `已暂停，等待处理：${generationErrorMessage.value}`
-  if (generation.value.status === 'failed') return `生成已停止：${generationErrorMessage.value}`
+  if (status === 'outdated') return '写作结果已过期，需要根据新的业务输入重新生成。'
+  if (status === 'completed') return '全部阶段已完成，可查看章节正文并下载 Word。'
+  if (status === 'blocked') return `已暂停，等待处理：${writingPhaseState.value.message || generationErrorMessage.value}`
+  if (status === 'failed') return `生成已停止：${writingPhaseState.value.error?.message || writingPhaseState.value.message || generationErrorMessage.value}`
   return '确认目录后可生成整本标书，也可在左侧选择目录后只生成该章。'
 })
 const generationTabLabel = computed(() => {
@@ -2382,6 +2444,12 @@ const generationTabLabel = computed(() => {
 const evidenceNeeds = computed(() => snapshot.value.evidence_needs || [])
 const planning = computed(() => snapshot.value.planning || {})
 const workflow = computed(() => snapshot.value.workflow || {})
+const phaseStates = computed(() => workflow.value.phase_states || {})
+const planningPhaseState = computed(() => phaseStates.value.planning || { phase_status: 'not_started' })
+const writingPhaseState = computed(() => phaseStates.value.writing || { phase_status: 'not_started' })
+const workflowIsWriting = computed(() => !['not_started', 'ready', 'blocked'].includes(
+  String(writingPhaseState.value.phase_status || 'not_started'),
+))
 const pendingReviews = computed(() => workflow.value.pending_reviews || [])
 const planningStatus = computed(() => planning.value.status || 'not_ready')
 const deliveryStatus = computed(() => document.value.delivery?.status || 'new')
@@ -2391,8 +2459,14 @@ const deliveryReady = computed(() => (
 ))
 const hasScorePoints = computed(() => planningView.value.summary.score_point_count > 0)
 const hasOutline = computed(() => (
-  ['planning_review', 'writing'].includes(String(workflow.value.phase || ''))
-  && String(workflow.value.status || '') !== 'failed'
+  // A later document-generation failure must not make an already confirmed
+  // outline disappear.  `workflow.status` represents the latest workflow
+  // operation and may therefore be `failed` while the confirmed blueprint and
+  // its chapter workspaces are still valid.
+  (
+    ['needs_human', 'confirmed'].includes(planningStatus.value)
+    || workflowIsWriting.value
+  )
   && planningView.value.summary.chapter_count > 0
 ))
 watch(
@@ -2436,7 +2510,11 @@ const latestOutlineOperationBusy = computed(() => (
 ))
 const pipelineStatus = computed(() => {
   const workflowStatus = String(workflow.value.status || '')
-  if (workflowStatus === 'failed') return 'failed'
+  // Once the directory is confirmed, a failure belongs to the generation
+  // workflow (stage 3), not to score analysis / directory generation (stage
+  // 2).  Do not overwrite the stage-2 timeline with that later failure.
+  if (workflowStatus === 'failed' && planningStatus.value !== 'confirmed') return 'failed'
+  if (workflowStatus === 'needs_handling') return 'needs_handling'
   if (workflowStatus === 'blocked_human') return 'blocked_human'
   if (workflowStatus === 'running') return 'running'
   const status = String(analysisPipeline.value.status || 'not_started')
@@ -2444,6 +2522,7 @@ const pipelineStatus = computed(() => {
     return 'running'
   }
   if (pipelineStages.value.some(stage => stage.status === 'failed')) return 'failed'
+  if (pipelineStages.value.some(stage => ['paused', 'blocked'].includes(stage.status))) return 'needs_handling'
   if (pipelineStages.value.some(stage => stage.status === 'blocked_human')) return 'blocked_human'
   return status
 })
@@ -2561,7 +2640,10 @@ function formatLlmParameters(req) {
 const showGenerationPipeline = computed(() => (
   hasOutline.value
   && planningStatus.value === 'confirmed'
-  && generationBusy.value
+  && (
+    generationBusy.value
+    || ['failed', 'blocked', 'succeeded'].includes(String(generation.value.status || ''))
+  )
 ))
 // Once Step 3 is visible, Step 2 is necessarily complete and its launch CTA
 // must never be rendered again. Planning status and chapter data cover both
@@ -2606,11 +2688,20 @@ function timestampMilliseconds(value) {
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
-function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0) {
+function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0, operation = null) {
   const startedAt = stages
     .map(stage => timestampMilliseconds(stage.started_at))
     .filter(Boolean)
-  if (!startedAt.length) return fallbackSeconds
+  if (!startedAt.length) {
+    if (operation && (operation.started_at || operation.created_at)) {
+      const opStart = timestampMilliseconds(operation.started_at || operation.created_at)
+      const opEnd = isRunning ? assistantClockNow.value : timestampMilliseconds(operation.updated_at || operation.completed_at || operation.created_at)
+      if (opStart && opEnd) {
+        return Math.max(0, Math.floor((opEnd - opStart) / 1000))
+      }
+    }
+    return fallbackSeconds
+  }
   const completedAt = stages
     .map(stage => timestampMilliseconds(stage.completed_at))
     .filter(Boolean)
@@ -2624,26 +2715,19 @@ function assistantTurnElapsedSeconds(turn) {
   return Math.max(0, Math.floor((finishedAt - startedAt) / 1000))
 }
 
-const outlineElapsedSeconds = computed(() => workflowElapsedSeconds(
-  pipelineStages.value,
-  outlineBusy.value,
-  runningDurationSeconds.value,
-))
-const generationElapsedSeconds = computed(() => workflowElapsedSeconds(
-  generationExecutionStages.value,
-  generationBusy.value,
-  runningDurationSeconds.value,
-))
+const outlineElapsedSeconds = computed(() => planningPhaseState.value.elapsed_seconds ?? null)
+const generationElapsedSeconds = computed(() => writingPhaseState.value.elapsed_seconds ?? null)
+function phaseProcessStatus(status) {
+  if (['running', 'in_progress'].includes(status)) return 'processing'
+  if (status === 'completed') return 'completed'
+  if (['failed', 'blocked', 'outdated'].includes(status)) return 'failed'
+  return 'waiting'
+}
 const outlineProcessStatus = computed(() => {
-  if (outlineBusy.value) return 'processing'
-  if (pipelineStatus.value === 'failed') return 'failed'
-  if (planningStatus.value === 'needs_human') return 'waiting'
-  return 'completed'
+  return phaseProcessStatus(String(planningPhaseState.value.phase_status || 'not_started'))
 })
 const generationProcessStatus = computed(() => {
-  if (generationBusy.value) return 'processing'
-  if (['failed', 'blocked'].includes(String(generation.value.status || ''))) return 'failed'
-  return 'completed'
+  return phaseProcessStatus(String(writingPhaseState.value.phase_status || 'not_started'))
 })
 const showOutlineProcessMessage = computed(() => (
   hasOutline.value
@@ -2652,12 +2736,16 @@ const showOutlineProcessMessage = computed(() => (
   || pipelineStages.value.some(stage => stage.status !== 'pending')
 ))
 const outlineWorkflowTitle = computed(() => {
+  const status = String(planningPhaseState.value.phase_status || 'not_started')
+  if (['not_started', 'ready'].includes(status)) return '等待进入第二阶段'
   if (outlineProcessStatus.value === 'processing') return '正在解析评分点并生成目录'
   if (outlineProcessStatus.value === 'failed') return '评分点解析与目录生成失败'
-  if (outlineProcessStatus.value === 'waiting') return '编写计划已生成，等待您审核'
+  if (status === 'waiting_confirmation') return '编写计划已生成，等待您审核'
   return `编写计划已生成（${planningView.value.summary.chapter_count} 个章节节点）`
 })
 const outlineWorkflowDescription = computed(() => {
+  const status = String(planningPhaseState.value.phase_status || 'not_started')
+  if (['not_started', 'ready'].includes(status)) return '材料准备完成后即可开始解析评分点并生成目录。'
   if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
   if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
   return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
@@ -2866,11 +2954,14 @@ const generationWorkflowStatusLabel = computed(() => {
   return '已启动'
 })
 const generationWorkflowTitle = computed(() => {
-  if (generationBusy.value) return '完整标书正在生成'
-  if (generation.value.status === 'succeeded') return '完整标书生成完成'
-  if (generation.value.status === 'failed') return '完整标书生成失败'
-  if (generation.value.status === 'blocked') return '完整标书生成已暂停'
-  return '完整标书生成已启动'
+  const status = String(writingPhaseState.value.phase_status || 'not_started')
+  if (status === 'in_progress') return '正在编写章节正文'
+  if (status === 'running') return '完整标书正在生成'
+  if (status === 'completed') return '完整标书生成完成'
+  if (status === 'failed') return '完整标书生成失败'
+  if (status === 'blocked') return '完整标书生成已暂停'
+  if (status === 'outdated') return '写作结果已过期'
+  return '等待第二阶段完成并确认目录'
 })
 watch(
   () => [
@@ -3170,6 +3261,32 @@ async function prepareOutline() {
   }
 }
 
+async function retryProjectFacts(withFeedback) {
+  if (outlineBusy.value || (running.value && runningAction.value === 'outline')) return
+  const feedback = withFeedback ? projectFactFeedback.value.trim() : ''
+  if (withFeedback && !feedback) return
+  running.value = true
+  runningAction.value = 'outline'
+  clearError()
+  try {
+    const { data } = await prepareV3Outline(
+      props.runId,
+      feedback ? { projectFeedback: feedback } : {},
+    )
+    assertCommandAccepted(data, '全局项目事实重新生成失败。')
+    projectFactFeedback.value = ''
+    await refresh()
+    closeStageDrawer()
+    message.value = data.message || data.receipt?.message || '已重新生成全局项目事实。'
+  } catch (cause) {
+    await refresh().catch(() => {})
+    reportError(cause, '全局项目事实重新生成失败。')
+  } finally {
+    running.value = false
+    runningAction.value = ''
+  }
+}
+
 async function submitPlanningFeedback() {
   const feedback = planningReviewFeedback.value.trim()
   if (!feedback) return
@@ -3216,7 +3333,12 @@ async function confirmPlanning() {
 }
 
 function openWritingWorkbench() {
-  router.push({ name: 'ProjectHome', params: { workspaceId: props.runId } })
+  const firstChapterId = flatOutline.value[0]?.chapter_id || ''
+  if (firstChapterId) {
+    router.push({ name: 'ChapterWorkspace', params: { workspaceId: props.runId, chapterId: firstChapterId } })
+  } else {
+    router.push({ name: 'ProjectHome', params: { workspaceId: props.runId } })
+  }
 }
 
 async function runDocument(chapterIds = []) {
@@ -3550,6 +3672,14 @@ function reportOutlineOperationFailure(operation) {
 }
 
 function pipelineStageStatus(stage) {
+  if (
+    stage?.stage_id === 'plan_response'
+    && Number(stage?.repair_round || 0) > 0
+    && ['succeeded', 'reused'].includes(stage?.status)
+  ) {
+    const maxRounds = Number(stage?.max_repair_rounds || 2)
+    return `已自动修复第 ${stage.repair_round}/${maxRounds} 轮`
+  }
   const status = {
     pending: '等待上游阶段',
     queued: '已排队',
@@ -3557,6 +3687,8 @@ function pipelineStageStatus(stage) {
     succeeded: '执行完成',
     reused: '复用已验证产物',
     failed: '执行失败',
+    paused: '需要处理',
+    blocked: '需要处理',
     blocked_human: '等待人工确认',
     cancelled: '已取消',
   }[stage.status] || stage.status
@@ -3570,6 +3702,7 @@ function pipelineStageOperation(stage) {
     compile_template_structure: '操作：识别模板目录与可写位置',
     build_requirement_ledger: '操作：提取采购要求和约束',
     analyze_scores: '操作：解析评分点与满分条件',
+    plan_response: '操作：生成全局项目事实，供全部章节统一引用',
     compile_chapter_blueprint: '操作：生成评分驱动章节目录',
     confirm_planning: '用户操作：审阅并确认目录',
     sync_material_requirements: '操作：匹配公司资料并列出证据缺口',
@@ -3634,7 +3767,7 @@ function stageResultSummary(stage) {
       .join(' · ')
   }
   if (['succeeded', 'reused'].includes(stage?.status)) return '步骤已完成，产物已持久化。'
-  if (stage?.status === 'failed') return pipelineStageError(stage)
+  if (['failed', 'paused', 'blocked'].includes(stage?.status)) return pipelineStageError(stage)
   if (stage?.status === 'blocked_human') return '需要人工处理后才能继续。'
   return ''
 }
@@ -6827,14 +6960,37 @@ onUnmounted(() => {
   box-shadow: 0 1px 3px rgba(0,0,0,0.02);
 }
 .user-msg .msg-bubble {
-  background: #2563eb;
+  position: relative;
+  background: #27272a;
   color: #ffffff;
-  border-color: #2563eb;
+  border: none;
+  border-radius: 16px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  padding: 12px 18px;
 }
-.materials-card-bubble {
-  width: 100%;
-  max-width: 520px;
-  background: #f8fafc;
+.user-msg .msg-bubble p {
+  color: #ffffff;
+}
+.user-msg .msg-bubble .chat-delete-btn {
+  position: absolute;
+  top: -8px;
+  left: -8px;
+  display: none;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 50%;
+  background: #fee2e2;
+  color: #b91c1c;
+  font-size: 16px;
+  line-height: 18px;
+  cursor: pointer;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+  align-items: center;
+  justify-content: center;
+}
+.user-msg .msg-bubble:hover .chat-delete-btn {
+  display: flex;
 }
 .upload-start-bubble {
   width: 100%;
@@ -7511,7 +7667,10 @@ onUnmounted(() => {
 }
 
 .user-msg .msg-bubble {
-  border-radius: 16px 4px 16px 16px;
+  border-radius: 16px;
+  background: #27272a;
+  color: #ffffff;
+  border: none;
 }
 
 .materials-card-bubble,
@@ -8550,6 +8709,62 @@ onUnmounted(() => {
 .planning-review-feedback { display: grid; gap: 6px; margin: 0 0 18px; color: #334155; font-size: 13px; font-weight: 700; }
 .planning-review-feedback textarea { width: 100%; resize: vertical; padding: 9px 10px; border: 1px solid #bfdbfe; border-radius: 9px; color: #172554; font: inherit; font-weight: 400; line-height: 1.5; }
 .planning-review-actions { display: flex; justify-content: flex-end; gap: 10px; }
+
+.project-fact-drawer-panel {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  padding: 14px;
+  border: 1px solid #dbe4f0;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+.project-fact-drawer-heading {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+.project-fact-drawer-heading h4 { margin: 2px 0 0; color: #172554; }
+.project-fact-reused-pill {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #166534;
+  background: #dcfce7;
+  font-size: 11px;
+  font-weight: 750;
+}
+.project-fact-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.project-fact-metrics div { padding: 8px 10px; border: 1px solid #e0e7ff; border-radius: 9px; background: #fff; }
+.project-fact-metrics dt { color: #64748b; font-size: 11px; }
+.project-fact-metrics dd { margin: 3px 0 0; color: #1d4ed8; font-size: 17px; font-weight: 800; }
+.project-fact-reuse-note,
+.project-fact-summary p { margin: 0; color: #475569; font-size: 12px; line-height: 1.55; }
+.project-fact-summary,
+.project-fact-validation-list { display: grid; gap: 5px; color: #334155; font-size: 12px; line-height: 1.5; }
+.project-fact-summary strong,
+.project-fact-validation-list > strong { color: #172554; }
+.project-fact-validation-list ol { display: grid; gap: 7px; margin: 0; padding-left: 20px; }
+.project-fact-validation-list li span { color: #b45309; font-weight: 750; }
+.project-fact-validation-list li p { margin: 2px 0 0; overflow-wrap: anywhere; }
+.project-fact-recovery-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.project-fact-recovery-actions textarea {
+  flex: 1 0 100%;
+  width: 100%;
+  resize: vertical;
+  padding: 9px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  background: #fff;
+  color: #172554;
+  font: inherit;
+  line-height: 1.45;
+}
 
 /* 执行计划固定在输入框上方；实时动作作为普通聊天消息进入消息流。 */
 .legacy-chat-stream .bot-msg > .msg-bubble {

@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 
 from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext
-from document_pipeline.canonicalization import canonical_hash
+from document_pipeline.canonicalization import canonical_hash, chapter_context_hash
 from document_pipeline.contracts import InputRole
 from document_pipeline.execution_controller import V3ExecutionController
 from document_pipeline.document_preview import DocumentPreviewService
@@ -106,6 +106,16 @@ def _reconcile_interrupted_workspaces() -> list[dict[str, Any]]:
             store = ControlStore(context)
             for item in store.reconcile_expired_operations():
                 recovered.append({"workspace_id": workspace_root.name, **item})
+            from document_pipeline.chapter_batch import ChapterBatchService
+
+            for job_id in ChapterBatchService.recover(context):
+                recovered.append(
+                    {
+                        "workspace_id": workspace_root.name,
+                        "job_id": job_id,
+                        "kind": "chapter_batch_resumed",
+                    }
+                )
         except Exception:
             # A damaged or concurrently migrated workspace must not prevent the
             # HTTP service from starting; its own health diagnostics can expose
@@ -771,6 +781,92 @@ async def command(workspace_id: str, request: Request) -> JSONResponse:
     except ControlPlaneError as exc: return _error(exc)
 
 
+@app.post("/api/v3/workspaces/{workspace_id}/chapter-batch-jobs")
+async def create_chapter_batch_job(workspace_id: str, request: Request) -> JSONResponse:
+    """Create a durable batch; generation continues after this request returns."""
+    try:
+        from document_pipeline.chapter_batch import ChapterBatchService
+
+        body = await request.json()
+        chapter_ids = body.get("chapter_ids") if isinstance(body, dict) else None
+        if not isinstance(chapter_ids, list):
+            raise ControlPlaneError("CHAPTER_BATCH_INVALID", "chapter_ids 必须是数组。", status_code=400)
+        actor = {"type": "user", "id": str(_principal(request).get("id") or "")}
+        job = ChapterBatchService(_context(workspace_id)).create(
+            [str(item) for item in chapter_ids],
+            actor=actor,
+            idempotency_key=str(body.get("idempotency_key") or ""),
+        )
+        events = ControlStore(_context(workspace_id)).batch_events(str(job.get("job_id") or ""))
+        return JSONResponse(
+            {
+                "ok": True,
+                "job": job,
+                "job_id": job.get("job_id"),
+                "operation_id": job.get("operation_id"),
+                "initial_sequence": max((int(item.get("sequence") or 0) for item in events), default=0),
+            },
+            status_code=202,
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapter-batch-jobs/current")
+def get_current_chapter_batch_job(workspace_id: str) -> JSONResponse:
+    job = ControlStore(_context(workspace_id)).latest_batch_job()
+    return JSONResponse({"ok": True, "job": job})
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapter-batch-jobs/{job_id}")
+def get_chapter_batch_job(workspace_id: str, job_id: str) -> JSONResponse:
+    try:
+        job = ControlStore(_context(workspace_id)).batch_job(job_id)
+        if not job:
+            raise ControlPlaneError("CHAPTER_BATCH_NOT_FOUND", "批量编写任务不存在。", status_code=404)
+        return JSONResponse({"ok": True, "job": job})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapter-batch-jobs/{job_id}/events")
+def get_chapter_batch_events(
+    workspace_id: str,
+    job_id: str,
+    after_sequence: int = 0,
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_batch import ChapterBatchService
+
+        events = ChapterBatchService(_context(workspace_id)).events(
+            job_id,
+            after_sequence=max(0, int(after_sequence)),
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "events": events,
+                "last_sequence": max(
+                    (int(item.get("sequence") or 0) for item in events),
+                    default=max(0, int(after_sequence)),
+                ),
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.post("/api/v3/workspaces/{workspace_id}/chapter-batch-jobs/{job_id}/{action}")
+def act_on_chapter_batch_job(workspace_id: str, job_id: str, action: str) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_batch import ChapterBatchService
+
+        job = ChapterBatchService(_context(workspace_id)).action(job_id, action)
+        return JSONResponse({"ok": True, "job": job}, status_code=202)
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 @app.get("/api/v3/workspaces/{workspace_id}/planning/confirmation")
 def planning_confirmation(workspace_id: str) -> JSONResponse:
     try:
@@ -783,25 +879,10 @@ def planning_confirmation(workspace_id: str) -> JSONResponse:
 async def chat_turn(workspace_id: str, request: Request) -> JSONResponse:
     body = await request.json(); message = str(body.get("message") or "").strip()
     if not message: return JSONResponse({"ok": False, "message": "请输入要处理的问题。"}, status_code=400)
-    context = _context(workspace_id); snapshot_data = V3WorkspaceSnapshotBuilder(context).build()
-    history_path = context.root / V3_ROOT / "chat_history.jsonl"; history_path.parent.mkdir(parents=True, exist_ok=True)
-    history = []
-    if history_path.is_file():
-        for line in history_path.read_text(encoding="utf-8").splitlines()[-12:]:
-            try: history.append(json.loads(line))
-            except json.JSONDecodeError: pass
-    prompt = "你是正在编制标书的协作 Agent。用自然、直接的中文回答，不复述问题，不说套话。基于工作区状态给出判断和下一步；不确定就明确缺什么证据。不得把外部信息当企业资质。"
-    try:
-        from llm_client import chat
-        answer = chat([{"role": "system", "content": prompt}, {"role": "user", "content": f"最近对话：{history}\n工作区状态：{snapshot_data}\n\n用户：{message}"}]).strip()
-    except Exception:
-        document = snapshot_data.get("document") or {}; needs = snapshot_data.get("evidence_needs") or []
-        answer = f"当前文档状态：{(document.get('delivery') or {}).get('status', 'new')}。"
-        if needs: answer += f" 还缺 {len(needs)} 项证据，先补“{needs[0].get('question', '')}”。"
-    with history_path.open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"role": "user", "content": message}, ensure_ascii=False) + "\n")
-        stream.write(json.dumps({"role": "assistant", "content": answer}, ensure_ascii=False) + "\n")
-    return JSONResponse({"ok": True, "reply": answer, "workspace_revision": snapshot_data.get("workspace_revision", 0)})
+    from document_pipeline.workspace_chat import WorkspaceChatService
+
+    result = WorkspaceChatService(_context(workspace_id)).answer(message)
+    return JSONResponse({"ok": True, **result})
 
 @app.get("/api/v3/workspaces/{workspace_id}/snapshot")
 def snapshot(workspace_id: str) -> JSONResponse:
@@ -940,21 +1021,18 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
             "chapter_context_revision": int(
                 context_record.get("context_revision") or 0
             ),
-            "chapter_context_hash": str(
-                context_record.get("context_hash")
-                or canonical_hash(
-                    {
-                        "chapter_id": chapter_id,
-                        "chapter_context_revision": int(
-                            context_record.get("context_revision") or 0
-                        ),
-                        "items": list(context_record.get("items") or []),
-                    }
-                )
+            "chapter_context_hash": chapter_context_hash(
+                chapter_id,
+                int(context_record.get("context_revision") or 0),
+                context_record.get("items") or [],
             ),
         }
         try:
-            requirements, scoring = _chapter_semantic_requirements(
+            from document_pipeline.chapter_semantics import (
+                project_chapter_semantic_requirements,
+            )
+
+            requirements, scoring = project_chapter_semantic_requirements(
                 context, chapter
             )
             chapter["chapter_requirements"] = requirements
@@ -1079,12 +1157,14 @@ def chapter_chat_history(
         chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
         service = ChapterChatService(context)
         turns = service.load_history(chapter_id, limit=limit)
+        batch_turns = service.load_batch_history(chapter_id)
         return JSONResponse(
             {
                 "ok": True,
                 "chapter_id": str(chapter.get("chapter_id") or chapter_id),
                 "title": str(chapter.get("title") or ""),
                 "turns": turns,
+                "batch_turns": batch_turns,
                 "authority": service.load_authority(chapter_id),
             }
         )
@@ -1194,6 +1274,83 @@ async def chapter_chat_history_update(
         return _error(exc)
 
 
+@app.post("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/history")
+async def chapter_chat_history_append(
+    workspace_id: str,
+    chapter_id: str,
+    request: Request,
+) -> JSONResponse:
+    """Persist an Agent execution record so it survives page or service restarts."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from document_pipeline.chapter_chat import ChapterChatService
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = _context(workspace_id)
+        chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
+        record = ChapterChatService(context).append_turn(
+            chapter_id,
+            role="assistant",
+            content=str((body or {}).get("content") or ""),
+            thinking=str((body or {}).get("thinking") or ""),
+            research_steps=list((body or {}).get("research_steps") or []),
+            elapsed_seconds=(body or {}).get("elapsed_seconds"),
+            operation_id=str((body or {}).get("operation_id") or ""),
+            status=str((body or {}).get("status") or ""),
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "chapter_id": str(chapter.get("chapter_id") or chapter_id),
+                "turn": record,
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.delete("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/history")
+async def chapter_chat_history_delete(
+    workspace_id: str,
+    chapter_id: str,
+    request: Request,
+) -> JSONResponse:
+    """Permanently delete one persisted chapter-chat turn."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from document_pipeline.chapter_chat import ChapterChatService
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = _context(workspace_id)
+        chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
+        service = ChapterChatService(context)
+        if bool((body or {}).get("clear_all")):
+            deleted_count = service.clear_history(chapter_id)
+        else:
+            service.delete_turn(
+                chapter_id,
+                turn_id=str((body or {}).get("turn_id") or ""),
+                created_at=str((body or {}).get("created_at") or ""),
+                role=str((body or {}).get("role") or ""),
+            )
+            deleted_count = 1
+        return JSONResponse(
+            {
+                "ok": True,
+                "chapter_id": str(chapter.get("chapter_id") or chapter_id),
+                "deleted_count": deleted_count,
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
     """Load chapter-scoped chat inputs shared by turn and stream endpoints."""
     from document_pipeline.chapter_chat import ChapterChatService
@@ -1202,11 +1359,21 @@ def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
     context = _context(workspace_id)
     chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
     try:
-        requirements, scoring = _chapter_semantic_requirements(context, chapter)
+        from document_pipeline.chapter_semantics import (
+            project_chapter_semantic_requirements,
+        )
+
+        requirements, scoring = project_chapter_semantic_requirements(
+            context, chapter
+        )
     except (ControlPlaneError, ValueError):
         requirements, scoring = [], []
     try:
-        global_project_context = _chapter_project_context(context)
+        from document_pipeline.chapter_semantics import (
+            load_chapter_project_context,
+        )
+
+        global_project_context = load_chapter_project_context(context)
     except ControlPlaneError:
         global_project_context = None
     try:
@@ -1294,6 +1461,9 @@ async def chapter_chat_turn(
                 "turns": result.get("history_tail") or [],
                 "document_write_requested": bool(
                     result.get("document_write_requested")
+                ),
+                "document_approval_requested": bool(
+                    result.get("document_approval_requested")
                 ),
                 "workspace_revision": snapshot_data.get("workspace_revision", 0),
             }
@@ -1384,453 +1554,6 @@ def _ndjson_event(event_type: str, **payload: Any) -> bytes:
     ).encode("utf-8")
 
 
-_GROUNDING_REPAIRABLE_CODES = frozenset(
-    {
-        "PROJECT_IDENTITY_MISSING",
-        "PROJECT_SPECIFICITY_MISSING",
-        "CHAPTER_REQUIREMENT_MISSING",
-        "PUBLIC_EVIDENCE_NOT_USED",
-        "PROJECT_BACKGROUND_MISSING",
-    }
-)
-
-
-def _chapter_repair_messages(
-    *,
-    chapter: dict[str, Any],
-    content: str,
-    project_context: dict[str, Any],
-    grounding_details: dict[str, Any],
-    tender_requirements: list[dict[str, Any]],
-    scoring_requirements: list[dict[str, Any]],
-) -> list[dict[str, str]]:
-    """Build one bounded repair request without turning the chapter into a preamble."""
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    title = str(chapter.get("title") or node.get("title") or "当前章节")
-    from document_pipeline.content_grounding import chapter_opening_policy
-
-    opening_policy = chapter_opening_policy(chapter)
-    fields = (
-        "background", "scope", "work_packages", "processing", "inputs",
-        "outputs", "deliverables", "acceptance_conditions", "constraints",
-    )
-    project_facts = {
-        field: [str(item) for item in (project_context.get(field) or [])[:5]]
-        for field in fields
-        if project_context.get(field)
-    }
-    requirements = [
-        str(item.get("text") or item.get("normalized_requirement") or item.get("statement") or "")
-        for item in [*(tender_requirements or []), *(scoring_requirements or [])]
-        if isinstance(item, dict)
-    ]
-    payload = {
-        "chapter_title": title,
-        "chapter_purpose": str(node.get("purpose") or ""),
-        "writing_objectives": list(node.get("writing_objectives") or []),
-        "opening_policy": opening_policy,
-        "current_draft": content,
-        "grounding_findings": grounding_details,
-        "project_facts": project_facts,
-        "requirements": [item for item in requirements if item][:16],
-    }
-    return [
-        {
-            "role": "system",
-            "content": (
-                "你是技术标书正文修复器。只修复当前章节项目关联不足的问题，保留原文中"
-                "已经正确的结构、步骤和技术内容。只能使用输入提供的项目事实。"
-                "普通技术章节不得机械添加项目全称、统一项目总述或‘本项目’套话；"
-                "应将本章相关的对象、范围、输入、处理、输出、交付物或验收口径自然融入"
-                "相应段落。项目概况类章节才需要在开篇明确项目身份。"
-                "只输出修复后的完整正文，不要解释修改过程，不要输出 JSON 或 Markdown 代码围栏。"
-            ),
-        },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-
-
-def _chapter_draft_messages(
-    chapter: dict[str, Any],
-    *,
-    instruction: str = "",
-    research_sources: list[dict[str, Any]] | None = None,
-    project_context: dict[str, Any] | None = None,
-    chapter_grounding_context: dict[str, Any] | None = None,
-    tender_requirements: list[dict[str, Any]] | None = None,
-    scoring_requirements: list[dict[str, Any]] | None = None,
-    sibling_context: dict[str, Any] | None = None,
-    outline_context: dict[str, Any] | None = None,
-    writing_orientation: dict[str, Any] | None = None,
-    inspected_chapters: list[dict[str, Any]] | None = None,
-) -> list[dict[str, str]]:
-    from document_pipeline.content_grounding import chapter_opening_policy
-    from document_pipeline.document_outline_context import (
-        compact_outline_for_prompt,
-        compact_sibling_for_prompt,
-    )
-    from document_pipeline.sibling_chapter_context import _chapter_role
-    from document_pipeline.writing_orientation import compact_orientation_for_prompt
-    from document_pipeline.chapter_writing_outline import compile_chapter_writing_outline
-
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    chapter_context = chapter.get("context")
-    chapter_context = chapter_context if isinstance(chapter_context, dict) else {}
-    context_items = [
-        {
-            "kind": str(item.get("kind") or ""),
-            "title": str(item.get("title") or ""),
-            "body": str(item.get("body") or ""),
-            "source": str(item.get("source") or ""),
-        }
-        for item in (chapter_context.get("items") or [])
-        if isinstance(item, dict)
-    ]
-    sibling_payload = compact_sibling_for_prompt(dict(sibling_context or {}))
-    outline_payload = compact_outline_for_prompt(dict(outline_context or {}))
-    orientation_payload = compact_orientation_for_prompt(writing_orientation)
-    writing_outline = compile_chapter_writing_outline(
-        chapter,
-        tender_requirements=tender_requirements,
-        scoring_requirements=scoring_requirements,
-        writing_orientation=orientation_payload,
-        chapter_context_items=context_items,
-    )
-    inspected = list(inspected_chapters or [])
-    title = str(chapter.get("title") or node.get("title") or "")
-    purpose = str(
-        (orientation_payload.get("writing_purpose") or {}).get("purpose")
-        or node.get("purpose")
-        or ""
-    )
-    chapter_role = str(
-        (orientation_payload.get("writing_purpose") or {}).get("role")
-        or outline_payload.get("current_role")
-        or sibling_payload.get("chapter_role")
-        or _chapter_role(title, purpose)
-    )
-    is_visual = chapter_role == "visual"
-    writing_input = {
-        "chapter_id": str(chapter.get("chapter_id") or ""),
-        "chapter_title": title,
-        "purpose": purpose,
-        "writing_objectives": list(
-            (orientation_payload.get("writing_purpose") or {}).get("writing_objectives")
-            or node.get("writing_objectives")
-            or []
-        ),
-        "content_format": "technical_roadmap_diagram" if is_visual else "prose",
-        "tender_requirements": list(tender_requirements or []),
-        "scoring_requirements": list(scoring_requirements or []),
-        "chapter_context": context_items,
-        "global_project_context": dict(project_context or {}),
-        "chapter_grounding_context": dict(chapter_grounding_context or {}),
-        "writing_orientation": orientation_payload,
-        "writing_outline": writing_outline,
-        # Titles-first outline; peer bodies only appear in inspected_chapters.
-        "document_outline_context": outline_payload,
-        "sibling_chapter_context": sibling_payload,
-        "inspected_chapters": inspected,
-        "user_instruction": instruction,
-        "verified_public_sources": list(research_sources or []),
-        "opening_policy": chapter_opening_policy(chapter),
-    }
-    structure_rules = ""
-    policy = (
-        (outline_payload.get("writing_policy") if isinstance(outline_payload, dict) else None)
-        or (sibling_payload.get("writing_policy") if isinstance(sibling_payload, dict) else None)
-    )
-    if isinstance(policy, dict):
-        rules = [str(item).strip() for item in (policy.get("rules") or []) if str(item).strip()]
-        guidance = str(policy.get("guidance") or "").strip()
-        if rules or guidance:
-            structure_rules = (
-                "目录处境约束："
-                + "；".join(rules)
-                + (f"。补充说明：{guidance}" if guidance else "")
-                + "。"
-            )
-    orientation_rules = (
-        "必须先按 writing_orientation 确认：本章写作目的、在整份标书中的目录位置、"
-        "以及与其他章节的关系；只完成本章职责，不要越权写他章主责。"
-        "必须按 writing_outline.blocks 的顺序写正文，一块至少一段；"
-        "每段按对应 block 的 write_as 写清做法或检查口径；"
-        "只有 outcome_kind=deliverable 或 acceptance 的 block，才能写招标文件明确要求的"
-        "交付成果或验收内容，其他 block 不得机械添加“本章交付物”。"
-        "不要输出提纲小标题本身，不要出现“满分条件、得分点、评分要求、本节用于”等词。"
-        "supporting 块只点到为止，不要写成他章主责的完整方案。"
-    )
-    if is_visual:
-        system = (
-            "你是技术标书中的「技术路线图/流程图」撰写器，不是普通论述写作器。"
-            "本章 content_format=technical_roadmap_diagram：输出必须以图示结构为主，"
-            "禁止写成总体技术路线或关键技术方法的长文复述。"
-            + orientation_rules
-            + "固定输出顺序（不要输出章节标题本身）："
-            "1) 一句话图题（说明本图展示什么阶段/节点关系）；"
-            "2) 用 Mermaid flowchart 或清晰 ASCII/文本流程图画出阶段、先后/并行、"
-            "关键质控节点与主要输入输出（节点命名对齐已 inspect 的上游总体技术路线骨架）；"
-            "3) 图注不超过 5 条短要点（每条一行，只解释读图，不展开方法细则）。"
-            "不得虚构企业资质、业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，"
-            "不要使用 Markdown 代码围栏包裹全文（Mermaid 代码块本身除外）。"
-            "若提供已核验公开资料，仅可补充通用阶段命名或质控节点习惯，不得改写项目事实。"
-            "document_outline_context 默认只有目录标题树；只有 inspected_chapters 才有他章只读详情。"
-            "不得修改或搬空其他章节主责内容。"
-            + structure_rules
-        )
-    else:
-        system = (
-            "你是技术标书正文写作器。请直接撰写当前章节的完整中文正文。"
-            + orientation_rules
-            + "内容必须具体、专业、可执行，只使用输入中提供的事实，不得虚构企业资质、"
-            "业绩、人员、报价或承诺。不要解释写作过程，不要输出 JSON，不要使用 Markdown"
-            "代码围栏，也不要输出章节标题；只输出可直接保存的正文。若提供了“已核验公开资料”，"
-            "只能依据其中的原文摘要归纳政策、标准或通用方法；资料不足时使用条件化表述，"
-            "不得把公开资料推断成项目或投标人的既有事实。项目背景、任务范围、建设目标、"
-            "标记为同类项目资料或行业标准的来源只能支持方法、质量、风险和验收思路，"
-            "不得改写当前项目的采购人、范围、任务或成果。"
-            "成果和约束必须优先取自 global_project_context 与 chapter_context；尤其是“项目背景/"
-            "任务背景”章节，开篇必须先说明本招标项目的具体对象、任务和需求，再补充与其"
-            "直接相关的政策、标准或行业依据。禁止用泛化政策介绍替代项目事实。"
-            "严格执行输入中的 opening_policy：只有 mode=project_overview 的章节可以用项目概况"
-            "开篇；mode=chapter_focus 的章节必须从本章主题直接起笔，禁止重复介绍覆盖区域、"
-            "总体任务和成果清单，禁止在多个子章节套用同一段项目总述。"
-            "document_outline_context 默认只有目录标题与状态；"
-            "只有 inspected_chapters 中的章节才提供只读详情。"
-            "可据此判断处境与交叉引用，但不得改写或整段复制其他章节主责正文。"
-            + structure_rules
-        )
-    return [
-        {"role": "system", "content": system},
-        {
-            "role": "user",
-            "content": json.dumps(writing_input, ensure_ascii=False),
-        },
-    ]
-
-
-def _chapter_research_question(
-    chapter: dict[str, Any],
-    instruction: str,
-    project_context: dict[str, Any] | None = None,
-    *,
-    sibling_context: dict[str, Any] | None = None,
-    tender_requirements: list[dict[str, Any]] | None = None,
-    scoring_requirements: list[dict[str, Any]] | None = None,
-) -> str:
-    """Return model-decided search query from distilled chapter-relevant facts."""
-    plan = _chapter_research_plan(
-        chapter,
-        instruction=instruction,
-        project_context=project_context,
-        sibling_context=sibling_context,
-        tender_requirements=tender_requirements,
-        scoring_requirements=scoring_requirements,
-    )
-    return str(plan.get("search_query") or "")
-
-
-def _chapter_research_plan(
-    chapter: dict[str, Any],
-    *,
-    instruction: str = "",
-    project_context: dict[str, Any] | None = None,
-    sibling_context: dict[str, Any] | None = None,
-    writing_orientation: dict[str, Any] | None = None,
-    inspected_chapters: list[dict[str, Any]] | None = None,
-    tender_requirements: list[dict[str, Any]] | None = None,
-    scoring_requirements: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
-    from document_pipeline.chapter_research_planner import plan_chapter_research
-
-    return plan_chapter_research(
-        chapter,
-        project_context=project_context,
-        sibling_context=sibling_context,
-        writing_orientation=writing_orientation,
-        inspected_chapters=inspected_chapters,
-        tender_requirements=tender_requirements,
-        scoring_requirements=scoring_requirements,
-        instruction=instruction,
-    )
-
-
-def _chapter_project_context(context: WorkspaceContext) -> dict[str, Any]:
-    """Load the promoted tender facts available to the chapter writer.
-
-    Public research is supplementary.  The promoted project model is the source
-    of truth for what this particular procurement is about.
-    """
-    from document_pipeline.global_project_context import GlobalProjectContextService
-
-    return GlobalProjectContextService(context).load()
-
-
-def _chapter_semantic_requirements(
-    context: WorkspaceContext,
-    chapter: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Resolve chapter IDs to the actual tender and scoring text."""
-    from document_pipeline.requirement_ledger import load_promoted_requirement_ledger
-    from document_pipeline.score_model import load_promoted_score_model
-
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    requirement_ids = {str(item) for item in node.get("requirement_ids") or []}
-    score_ids = {str(item) for item in node.get("score_point_ids") or []}
-    condition_ids = {str(item) for item in node.get("score_condition_ids") or []}
-    ledger = load_promoted_requirement_ledger(context)
-    scores = load_promoted_score_model(context)
-    requirements = [
-        {
-            "requirement_id": item.requirement_id,
-            "text": str(item.normalized_requirement or ""),
-            "severity": item.severity,
-        }
-        for item in ledger.requirements
-        if item.requirement_id in requirement_ids
-    ]
-    scoring: list[dict[str, Any]] = []
-    for point in scores.points:
-        selected_conditions = [
-            condition.model_dump(mode="json")
-            for condition in point.score_conditions
-            if condition.condition_id in condition_ids
-        ]
-        if point.score_point_id in score_ids or selected_conditions:
-            scoring.append({
-                "score_point_id": point.score_point_id,
-                "title": point.title,
-                "response_expectation": point.response_expectation,
-                "conditions": selected_conditions,
-            })
-    return requirements, scoring
-
-
-def _assert_requested_global_context(
-    body: dict[str, Any],
-    global_context: dict[str, Any],
-) -> None:
-    requested_id = str(body.get("global_context_id") or "").strip()
-    requested_hash = str(body.get("global_context_hash") or "").strip()
-    try:
-        requested_revision = int(body.get("global_context_revision"))
-    except (TypeError, ValueError) as exc:
-        raise ControlPlaneError(
-            "GLOBAL_PROJECT_CONTEXT_REQUIRED",
-            "章节生成必须携带全局项目上下文版本。",
-            status_code=409,
-        ) from exc
-    if not requested_id or not requested_hash:
-        raise ControlPlaneError(
-            "GLOBAL_PROJECT_CONTEXT_REQUIRED",
-            "章节生成必须携带全局项目上下文标识和哈希。",
-            status_code=409,
-        )
-    expected = (
-        str(global_context.get("global_context_id") or ""),
-        int(global_context.get("global_context_revision") or 0),
-        str(global_context.get("global_context_hash") or ""),
-    )
-    actual = (requested_id, requested_revision, requested_hash)
-    if actual != expected:
-        raise ControlPlaneError(
-            "GLOBAL_PROJECT_CONTEXT_CONFLICT",
-            "全局项目事实已更新，请刷新后重新生成本章。",
-            status_code=409,
-            details={
-                "requested": {
-                    "global_context_id": requested_id,
-                    "global_context_revision": requested_revision,
-                    "global_context_hash": requested_hash,
-                },
-                "current": {
-                    "global_context_id": expected[0],
-                    "global_context_revision": expected[1],
-                    "global_context_hash": expected[2],
-                },
-            },
-        )
-
-
-def _assert_requested_chapter_context(
-    body: dict[str, Any],
-    chapter_context: dict[str, Any],
-) -> None:
-    requested_id = str(body.get("chapter_context_id") or "").strip()
-    requested_hash = str(body.get("chapter_context_hash") or "").strip()
-    try:
-        requested_revision = int(body.get("chapter_context_revision"))
-    except (TypeError, ValueError) as exc:
-        raise ControlPlaneError(
-            "CHAPTER_CONTEXT_REQUIRED",
-            "章节生成必须携带本章上下文版本。",
-            status_code=409,
-        ) from exc
-    expected = (
-        str(chapter_context.get("chapter_context_id") or ""),
-        int(chapter_context.get("chapter_context_revision") or 0),
-        str(chapter_context.get("chapter_context_hash") or ""),
-    )
-    actual = (requested_id, requested_revision, requested_hash)
-    if not requested_id or not requested_hash:
-        raise ControlPlaneError(
-            "CHAPTER_CONTEXT_REQUIRED",
-            "章节生成必须携带本章上下文标识和哈希。",
-            status_code=409,
-        )
-    if actual != expected:
-        raise ControlPlaneError(
-            "CHAPTER_CONTEXT_CONFLICT",
-            "本章上下文已更新，请刷新后重新生成。",
-            status_code=409,
-            details={"requested": actual, "current": expected},
-        )
-
-
-def _research_anchors(
-    global_context: dict[str, Any],
-) -> tuple[list[str], list[str]]:
-    from document_pipeline.global_project_context import GlobalProjectContextService
-
-    return GlobalProjectContextService.research_anchors(global_context)
-
-
-def _research_source_rows(batch: Any) -> list[dict[str, Any]]:
-    """Project immutable evidence into a small, prompt-safe source list."""
-    rows: list[dict[str, Any]] = []
-    for item in list(getattr(batch, "items", []) or []):
-        url = str(getattr(item, "source_url", "") or "").strip()
-        content = str(getattr(item, "content", "") or "").strip()
-        if not url or not content:
-            continue
-        relevance_tier = getattr(item, "relevance_tier", "")
-        relevance_tier = getattr(relevance_tier, "value", relevance_tier)
-        rows.append({
-            "batch_id": str(getattr(batch, "batch_id", "") or ""),
-            "evidence_id": str(getattr(item, "evidence_id", "") or ""),
-            "title": str(getattr(item, "title", "") or "公开资料"),
-            "publisher": str(getattr(item, "publisher", "") or ""),
-            "source_url": url,
-            "snippet": content[:3000],
-            "relevance_tier": str(
-                relevance_tier or "general_reference"
-            ),
-            "matched_project_anchors": list(
-                getattr(item, "matched_project_anchors", []) or []
-            ),
-            "matched_task_anchors": list(
-                getattr(item, "matched_task_anchors", []) or []
-            ),
-            "usage_constraints": list(
-                getattr(item, "usage_constraints", []) or []
-            ),
-        })
-    return rows
-
-
 @app.post(
     "/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/draft/stream"
 )
@@ -1839,596 +1562,57 @@ async def stream_chapter_draft(
     chapter_id: str,
     request: Request,
 ) -> StreamingResponse:
-    """Stream visible draft text, then commit the complete draft through CommandGateway."""
+    """Forward ChapterWritingService events; HTTP owns no writing orchestration."""
     try:
         body = await request.json()
     except Exception:
         body = {}
     body = body if isinstance(body, dict) else {}
-    principal_id = str(_principal(request).get("id") or "")
-    instruction = str(body.get("instruction") or "").strip()
-    overwrite_locked = bool(body.get("overwrite_locked"))
-    idempotency_key = str(body.get("idempotency_key") or "").strip() or (
-        f"chapter-draft-stream:{chapter_id}:{uuid.uuid4()}"
+    principal = _principal(request)
+    normalized_chapter_id = str(chapter_id or "").strip()
+    operation_id = str(body.get("idempotency_key") or "").strip() or (
+        f"chapter-write:{normalized_chapter_id}:{uuid.uuid4()}"
     )
 
     def generate():
-        context = _context(workspace_id)
-        normalized_chapter_id = str(chapter_id or "").strip()
         try:
-            expected_workspace_revision = int(body.get("expected_revision"))
-        except (TypeError, ValueError):
-            yield _ndjson_event(
-                "error",
-                chapter_id=normalized_chapter_id,
-                code="WORKSPACE_REVISION_INVALID",
-                message="expected_revision 必须是整数。",
+            from document_pipeline.chapter_writing_service import (
+                ChapterWritingRequest,
+                ChapterWritingService,
             )
-            return
-        try:
-            expected_chapter_revision = int(body.get("expected_chapter_revision"))
-        except (TypeError, ValueError):
-            yield _ndjson_event(
-                "error",
-                chapter_id=normalized_chapter_id,
-                code="CHAPTER_REVISION_INVALID",
-                message="expected_chapter_revision 必须是整数。",
-            )
-            return
-
-        try:
             from document_pipeline.chapter_workspace import ChapterWorkspaceService
-            from document_pipeline.contracts import EvidenceNeed
-            from document_pipeline.research_adapters import create_research_adapter
-            from document_pipeline.research_service import ResearchService
-            from llm_client import chat, chat_stream_chunks
 
+            context = _context(workspace_id)
             chapter = ChapterWorkspaceService(context).get_chapter(
                 normalized_chapter_id
             )
-            if chapter.get("is_leaf") is False:
-                raise ControlPlaneError(
-                    "CHAPTER_BODY_REQUIRES_LEAF",
-                    "目录父节点只作为结构标题，不生成正文；请选择其下级叶子章节。",
-                    status_code=409,
-                )
-            if not chapter.get("materialized"):
-                raise ControlPlaneError(
-                    "CHAPTER_NOT_MATERIALIZED",
-                    f"章节 Workspace 尚未创建: {normalized_chapter_id}",
-                    status_code=409,
-                )
-            current_revision = int(chapter.get("chapter_revision") or 0)
-            if current_revision != expected_chapter_revision:
-                raise ControlPlaneError(
-                    "CHAPTER_REVISION_CONFLICT",
-                    "章节已被其他操作更新，请刷新后重试。",
-                    status_code=409,
-                    details={
-                        "expected_chapter_revision": expected_chapter_revision,
-                        "actual_chapter_revision": current_revision,
-                    },
-                )
-
-            yield _ndjson_event(
-                "meta",
+            expected_workspace_revision = int(body.get("expected_revision"))
+            expected_chapter_revision = int(
+                body.get("expected_chapter_revision")
+            )
+            write_request = ChapterWritingRequest(
+                unit_id=f"chapter-{normalized_chapter_id}",
+                node_ids=(normalized_chapter_id,),
+                operation_id=operation_id,
+                operation=(
+                    "rewrite"
+                    if int(chapter.get("head_content_revision") or 0) > 0
+                    else "create"
+                ),
+                user_instruction=str(body.get("instruction") or "").strip(),
+                overwrite_locked=bool(body.get("overwrite_locked")),
                 chapter_id=normalized_chapter_id,
-                operation_id=idempotency_key,
-                title=str(chapter.get("title") or normalized_chapter_id),
-                expected_revision=expected_workspace_revision,
+                expected_workspace_revision=expected_workspace_revision,
                 expected_chapter_revision=expected_chapter_revision,
+                actor=dict(principal),
+                run_research=not bool(body.get("allow_research_gap")),
+                commit_drafts=True,
+                require_outline_review=True,
             )
-            research_sources: list[dict[str, Any]] = []
-            project_context = _chapter_project_context(context)
-            _assert_requested_global_context(body, project_context)
-            tender_requirements, scoring_requirements = _chapter_semantic_requirements(
-                context, chapter
-            )
-            from document_pipeline.global_project_context import (
-                GlobalProjectContextService,
-            )
-
-            chapter_context_record = chapter.get("context")
-            chapter_context_record = (
-                chapter_context_record
-                if isinstance(chapter_context_record, dict)
-                else {}
-            )
-            chapter_grounding_context = GlobalProjectContextService(
-                context
-            ).build_chapter_context(
-                normalized_chapter_id,
-                requirement_excerpts=tender_requirements,
-                score_obligations=scoring_requirements,
-                chapter_context_items=list(
-                    chapter_context_record.get("items") or []
-                ),
-                chapter_context_revision=int(
-                    chapter_context_record.get("context_revision") or 0
-                ),
-                chapter_context_hash=str(
-                    chapter_context_record.get("context_hash") or ""
-                ),
-            )
-            _assert_requested_chapter_context(body, chapter_grounding_context)
-            prompt_project_context = GlobalProjectContextService.prompt_projection(
-                project_context,
-                chapter_grounding_context,
-            )
-            from document_pipeline.sibling_chapter_context import (
-                SiblingChapterContextService,
-            )
-
-            sibling_context = SiblingChapterContextService(
-                context
-            ).build_for_chapter(chapter, include_bodies=True)
-            from document_pipeline.document_outline_context import (
-                DocumentOutlineContextService,
-            )
-
-            outline_service = DocumentOutlineContextService(context)
-            outline_context = outline_service.build_for_chapter(chapter)
-            from document_pipeline.writing_orientation import (
-                WritingOrientationService,
-                public_orientation_view,
-            )
-
-            yield _ndjson_event(
-                "research",
-                chapter_id=normalized_chapter_id,
-                status="orienting",
-                message="先确认本章写作目的、在整份标书中的位置，以及与其他章节的关系…",
-            )
-            writing_orientation = WritingOrientationService(context).build_for_chapter(
-                chapter,
-                outline_context=outline_context,
-                sibling_context=sibling_context,
-                tender_requirements=tender_requirements,
-                scoring_requirements=scoring_requirements,
-            )
-            orientation_view = public_orientation_view(writing_orientation)
-            yield _ndjson_event(
-                "research",
-                chapter_id=normalized_chapter_id,
-                status="oriented",
-                message=str(orientation_view.get("summary_text") or "本章写作处境已确认。"),
-                orientation=orientation_view,
-            )
-            from document_pipeline.chapter_chat import ChapterChatService
-            from document_pipeline.chapter_writing_outline import (
-                compile_chapter_writing_outline,
-            )
-
-            writing_outline = compile_chapter_writing_outline(
-                chapter,
-                tender_requirements=tender_requirements,
-                scoring_requirements=scoring_requirements,
-                writing_orientation=writing_orientation,
-            )
-            write_gate = ChapterChatService(context).require_write_ready(
-                normalized_chapter_id,
-                outline=writing_outline,
-            )
-            if not write_gate.get("ready"):
-                yield _ndjson_event(
-                    "error",
-                    chapter_id=normalized_chapter_id,
-                    code="CHAPTER_OUTLINE_REVIEW_REQUIRED",
-                    message=(
-                        str(write_gate.get("reason") or "请先在右侧对话确认本章写作提纲。")
-                    ),
-                    authority=write_gate,
-                )
-                return
-            if (
-                sibling_context.get("chapter_role") == "visual"
-                and sibling_context.get("missing_upstream")
-            ):
-                missing = sibling_context["missing_upstream"]
-                titles = "、".join(
-                    str(item.get("title") or item.get("chapter_id") or "")
-                    for item in missing
-                )
-                yield _ndjson_event(
-                    "research",
-                    chapter_id=normalized_chapter_id,
-                    status="sibling_hint",
-                    message=(
-                        f"根据目录标题位置，本章可能依赖上游：{titles}。"
-                        "将先按需打开必要章节详情，再成图，不展开方法细则。"
-                    ),
-                    sources=[],
-                )
-
-            # Progressive outline: titles first, then inspect only selected peers.
-            yield _ndjson_event(
-                "research",
-                chapter_id=normalized_chapter_id,
-                status="inspect_planning",
-                message="写作处境已确认。再看目录标题，判断是否需要打开他章只读详情…",
-            )
-            inspection = outline_service.plan_and_load_inspections(
-                viewer_chapter_id=normalized_chapter_id,
-                outline_context=outline_context,
-                task=(
-                    f"撰写章节《{chapter.get('title') or normalized_chapter_id}》草稿。"
-                    f" 已确认写作处境：{orientation_view.get('summary_text') or ''}。"
-                    f" 用户补充：{instruction or '无'}"
-                ),
-            )
-            inspected_chapters = list(inspection.get("views") or [])
-            if inspection.get("inspect_ids"):
-                yield _ndjson_event(
-                    "research",
-                    chapter_id=normalized_chapter_id,
-                    status="inspecting",
-                    message=(
-                        "按需打开只读详情："
-                        + "、".join(
-                            str(item.get("title") or item.get("chapter_id") or "")
-                            for item in inspected_chapters
-                        )
-                    ),
-                    sources=[],
-                )
-            else:
-                yield _ndjson_event(
-                    "research",
-                    chapter_id=normalized_chapter_id,
-                    status="inspect_skipped",
-                    message=str(
-                        inspection.get("reason") or "仅依据目录标题与本章上下文写作。"
-                    ),
-                    sources=[],
-                )
-
-            writing_orientation = WritingOrientationService(context).build_for_chapter(
-                chapter,
-                outline_context=outline_context,
-                sibling_context=sibling_context,
-                tender_requirements=tender_requirements,
-                scoring_requirements=scoring_requirements,
-                inspected_chapters=inspected_chapters,
-            )
-
-            # After orientation is confirmed, decide search from existing materials.
-            yield _ndjson_event(
-                "research",
-                chapter_id=normalized_chapter_id,
-                status="planning",
-                message="写作处境已确认，正在根据已有资料判断是否需要公开检索…",
-            )
-            research_plan = _chapter_research_plan(
-                chapter,
-                instruction=instruction,
-                project_context=prompt_project_context,
-                sibling_context=sibling_context,
-                writing_orientation=writing_orientation,
-                inspected_chapters=inspected_chapters,
-                tender_requirements=tender_requirements,
-                scoring_requirements=scoring_requirements,
-            )
-            research_question = str(research_plan.get("search_query") or "").strip()
-            if not research_plan.get("need_research") or not research_question:
-                yield _ndjson_event(
-                    "research",
-                    chapter_id=normalized_chapter_id,
-                    status="skipped",
-                    message=(
-                        str(research_plan.get("reason") or "").strip()
-                        or "本章已有足够要点，跳过公开检索，直接写作。"
-                    ),
-                    sources=[],
-                    decision_source=str(
-                        research_plan.get("decision_source") or ""
-                    ),
-                )
-            else:
-                brief = research_plan.get("brief") if isinstance(research_plan.get("brief"), dict) else {}
-                yield _ndjson_event(
-                    "research",
-                    chapter_id=normalized_chapter_id,
-                    status="searching",
-                    message=(
-                        "已整理本章相关要点，开始检索："
-                        + str(research_plan.get("reason") or "补充公开依据")
-                    ),
-                    brief={
-                        "project_name": brief.get("project_name"),
-                        "related_tasks": list(brief.get("related_tasks") or [])[:4],
-                        "chapter_title": brief.get("chapter_title"),
-                        "focus_keywords": list(brief.get("focus_keywords") or [])[:8],
-                    },
-                    decision_source=str(
-                        research_plan.get("decision_source") or ""
-                    ),
-                )
-                project_anchors, task_anchors = _research_anchors(
-                    project_context
-                )
-                need = EvidenceNeed(
-                    need_id="EN-STREAM-" + hashlib.sha256(
-                        f"{normalized_chapter_id}:{research_question}".encode("utf-8")
-                    ).hexdigest()[:16],
-                    question=research_question,
-                    topic_id=f"chapter-stream:{normalized_chapter_id}",
-                    priority="high",
-                    blocking_scope="content_unit",
-                    deadline_stage="chapter_draft_stream",
-                    query_budget=3,
-                    project_anchors=project_anchors,
-                    task_anchors=task_anchors,
-                    max_adopted_items=3,
-                )
-                batch = ResearchService(context, create_research_adapter()).resolve(need)
-                research_sources = _research_source_rows(batch)
-                if batch.status == "failed":
-                    yield _ndjson_event(
-                        "error",
-                        chapter_id=normalized_chapter_id,
-                        code="CHAPTER_RESEARCH_UNAVAILABLE",
-                        message=(
-                            "公开资料检索未完成，已停止本章写作。"
-                            "请完成浏览器中的登录或验证后重试。"
-                        ),
-                        details={
-                            "batch_id": str(batch.batch_id or ""),
-                            "error": str(
-                                batch.error or "研究 Provider 未返回成功结果。"
-                            ),
-                        },
-                    )
-                    return
-                if batch.status == "gap" or not research_sources:
-                    yield _ndjson_event(
-                        "research",
-                        chapter_id=normalized_chapter_id,
-                        status="gap",
-                        message=(
-                            "未发现满足项目相关性要求的公开资料；"
-                            "将以已整理的项目要点与本章上下文继续写作。"
-                        ),
-                        sources=[],
-                    )
-                else:
-                    yield _ndjson_event(
-                        "research",
-                        chapter_id=normalized_chapter_id,
-                        status="ready",
-                        message=f"已找到 {len(research_sources)} 条与本章相关资料，开始核验并写作。",
-                        sources=[
-                            {
-                                key: row[key]
-                                for key in (
-                                    "evidence_id", "title", "publisher",
-                                    "source_url", "relevance_tier",
-                                )
-                            }
-                            for row in research_sources
-                        ],
-                    )
-
-            from document_pipeline.stream_think import StreamThinkSplitter, strip_think_tags
-
-            splitter = StreamThinkSplitter()
-            text_parts: list[str] = []
-            thinking_parts: list[str] = []
-            for kind, value in chat_stream_chunks(
-                _chapter_draft_messages(
-                    chapter,
-                    instruction=instruction,
-                    research_sources=research_sources,
-                    project_context=prompt_project_context,
-                    chapter_grounding_context=chapter_grounding_context,
-                    tender_requirements=tender_requirements,
-                    scoring_requirements=scoring_requirements,
-                    sibling_context=sibling_context,
-                    outline_context=outline_context,
-                    writing_orientation=writing_orientation,
-                    inspected_chapters=inspected_chapters,
-                ),
-                temperature=0.25,
-            ):
-                if not value:
-                    continue
-                if kind == "reasoning":
-                    thinking = str(value)
-                    thinking_parts.append(thinking)
-                    yield _ndjson_event(
-                        "thinking_delta",
-                        chapter_id=normalized_chapter_id,
-                        delta=thinking,
-                    )
-                    continue
-                if kind != "content":
-                    continue
-                think_delta, body_delta = splitter.feed(str(value))
-                if think_delta:
-                    thinking_parts.append(think_delta)
-                    yield _ndjson_event(
-                        "thinking_delta",
-                        chapter_id=normalized_chapter_id,
-                        delta=think_delta,
-                    )
-                if not body_delta:
-                    continue
-                text_parts.append(body_delta)
-                yield _ndjson_event(
-                    "delta",
-                    chapter_id=normalized_chapter_id,
-                    delta=body_delta,
-                )
-
-            complete_text = strip_think_tags("".join(text_parts))
-            thinking_text = "".join(thinking_parts).strip()
-            if thinking_text:
-                try:
-                    from document_pipeline.chapter_chat import ChapterChatService
-
-                    ChapterChatService(context).append_turn(
-                        normalized_chapter_id,
-                        role="assistant",
-                        content=(
-                            f"已撰写章节「{chapter.get('title') or normalized_chapter_id}」草稿。"
-                        ),
-                        thinking=thinking_text,
-                    )
-                except Exception:
-                    pass
-            if not complete_text:
-                raise ControlPlaneError(
-                    "CHAPTER_DRAFT_EMPTY",
-                    "写作模型未返回可保存的正文。",
-                    status_code=502,
-                )
-
-            from document_pipeline.content_grounding import ContentGroundingGate
-
-            requirement_texts = [
-                *(
-                    str(item.get("text") or "")
-                    for item in tender_requirements
-                ),
-                *(
-                    str(item.get("response_expectation") or "")
-                    for item in scoring_requirements
-                ),
-                *(
-                    str(condition.get("text") or "")
-                    for item in scoring_requirements
-                    for condition in item.get("conditions") or []
-                    if isinstance(condition, dict)
-                ),
-            ]
-
-            def evaluate_grounding(text: str) -> dict[str, Any]:
-                return ContentGroundingGate.evaluate(
-                    global_context=project_context,
-                    chapter=chapter,
-                    content=text,
-                    requirement_texts=requirement_texts,
-                    chapter_grounding_context=chapter_grounding_context,
-                    evidence_sources=research_sources,
-                    require_evidence_use=bool(research_sources),
-                )
-
-            try:
-                grounding_report = evaluate_grounding(complete_text)
-            except ControlPlaneError as first_error:
-                if first_error.code not in _GROUNDING_REPAIRABLE_CODES:
-                    raise
-                repair_details = first_error.details if isinstance(first_error.details, dict) else {}
-                yield _ndjson_event(
-                    "repair_started",
-                    chapter_id=normalized_chapter_id,
-                    message="初稿未充分体现本章项目事实，正在自动补充相关任务内容。",
-                    code=first_error.code,
-                    findings=repair_details.get("findings") or [],
-                )
-                yield _ndjson_event(
-                    "draft_reset",
-                    chapter_id=normalized_chapter_id,
-                    reason="grounding_repair",
-                )
-                try:
-                    repaired_text = strip_think_tags(str(
-                        chat(
-                            _chapter_repair_messages(
-                                chapter=chapter,
-                                content=complete_text,
-                                project_context=project_context,
-                                grounding_details=repair_details,
-                                tender_requirements=tender_requirements,
-                                scoring_requirements=scoring_requirements,
-                            ),
-                            temperature=0.1,
-                        )
-                        or ""
-                    )).strip()
-                except Exception as exc:
-                    raise ControlPlaneError(
-                        "CHAPTER_DRAFT_REPAIR_UNAVAILABLE",
-                        "正文自动修复暂不可用，请稍后重试。",
-                        status_code=503,
-                        details={"error": f"{type(exc).__name__}: {exc}"[:500]},
-                    ) from exc
-                if not repaired_text:
-                    raise ControlPlaneError(
-                        "CHAPTER_DRAFT_REPAIR_UNAVAILABLE",
-                        "正文自动修复未返回有效内容，请稍后重试。",
-                        status_code=503,
-                    )
-                complete_text = repaired_text
-                yield _ndjson_event(
-                    "delta",
-                    chapter_id=normalized_chapter_id,
-                    delta=complete_text,
-                    repair=True,
-                )
-                grounding_report = evaluate_grounding(complete_text)
-                grounding_report["repair_attempted"] = True
-                grounding_report["repair_succeeded"] = True
-                grounding_report["repair_initial_code"] = first_error.code
-
-            envelope = CommandEnvelope.from_mapping(
-                {
-                    "kind": "chapter.generate_draft",
-                    "payload": {
-                        "chapter_id": normalized_chapter_id,
-                        "expected_chapter_revision": expected_chapter_revision,
-                        "text": complete_text,
-                        "overwrite_locked": overwrite_locked,
-                        "global_context_id": project_context["global_context_id"],
-                        "global_context_revision": project_context[
-                            "global_context_revision"
-                        ],
-                        "global_context_hash": project_context["global_context_hash"],
-                        "chapter_context_id": chapter_grounding_context[
-                            "chapter_context_id"
-                        ],
-                        "chapter_context_revision": chapter_grounding_context[
-                            "chapter_context_revision"
-                        ],
-                        "chapter_context_hash": chapter_grounding_context[
-                            "chapter_context_hash"
-                        ],
-                        "evidence_batch_ids": sorted(
-                            {
-                                str(item.get("batch_id") or "")
-                                for item in research_sources
-                                if str(item.get("batch_id") or "")
-                            }
-                        ),
-                        "grounding_report": grounding_report,
-                    },
-                    "actor": {"type": "user", "id": principal_id},
-                    "expected_revision": expected_workspace_revision,
-                    "idempotency_key": idempotency_key,
-                },
-                workspace_id=workspace_id,
-            )
-            receipt = _gateway(context).submit(envelope)
-            if receipt.status == "rejected":
-                error = receipt.error if isinstance(receipt.error, dict) else {}
-                raise ControlPlaneError(
-                    str(error.get("code") or "CHAPTER_DRAFT_COMMIT_REJECTED"),
-                    str(error.get("message") or receipt.message or "章节草稿保存失败。"),
-                    status_code=409,
-                    details=(
-                        error.get("details")
-                        if isinstance(error.get("details"), dict)
-                        else {}
-                    ),
-                )
-            result = receipt.result if isinstance(receipt.result, dict) else {}
-            yield _ndjson_event(
-                "done",
-                chapter_id=normalized_chapter_id,
-                text=complete_text,
-                receipt=receipt.as_dict(),
-                chapter=result.get("chapter"),
-                content=result.get("content"),
-            )
+            for event in ChapterWritingService(context).iter_events(write_request):
+                payload = dict(event)
+                event_type = str(payload.pop("type", "message"))
+                yield _ndjson_event(event_type, **payload)
         except ControlPlaneError as exc:
             yield _ndjson_event(
                 "error",
@@ -2437,12 +1621,28 @@ async def stream_chapter_draft(
                 message=exc.message,
                 details=exc.details,
             )
+        except (TypeError, ValueError) as exc:
+            raw_reason = str(exc).strip()
+            if raw_reason == "G4_CONTENT_TOO_SHORT_OR_HOLLOW":
+                user_message = (
+                    "本次生成的正文过短或缺少实质内容，已停止写入草稿。"
+                    "请补充本章写作要点后重试。"
+                )
+            else:
+                user_message = "正文生成请求未通过校验，请检查本章提纲和上下文后重试。"
+            yield _ndjson_event(
+                "error",
+                chapter_id=normalized_chapter_id,
+                code="CHAPTER_WRITE_REQUEST_INVALID",
+                message=user_message,
+                details={"reason_code": raw_reason} if raw_reason else {},
+            )
         except Exception as exc:
             yield _ndjson_event(
                 "error",
                 chapter_id=normalized_chapter_id,
-                code="CHAPTER_DRAFT_STREAM_FAILED",
-                message=str(exc) or "章节正文流式生成失败。",
+                code="CHAPTER_WRITING_FAILED",
+                message=str(exc) or "章节写作失败。",
             )
 
     return StreamingResponse(
@@ -2453,7 +1653,6 @@ async def stream_chapter_draft(
             "X-Accel-Buffering": "no",
         },
     )
-
 
 @app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/context/revisions")
 def list_chapter_context_revisions(
@@ -2648,6 +1847,20 @@ def export(workspace_id: str):
     artifact = context.root / RENDER_OUTPUT_PATH
     if report.get("status") != "ready" or not artifact.is_file(): return JSONResponse({"ok": False, "message": "V3 交付门禁未通过：存在未解决校验错误。"}, status_code=409)
     return FileResponse(artifact, filename="final.docx")
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/exports/word")
+def export_current_word(workspace_id: str):
+    """Export the current workbench state; confirmation is not required."""
+    try:
+        from document_pipeline.current_word_export import build_current_word
+
+        artifact = build_current_word(_context(workspace_id))
+        return FileResponse(artifact, filename="标书当前稿.docx")
+    except ControlPlaneError as exc:
+        return _error(exc)
+    except RuntimeError as exc:
+        return JSONResponse({"ok": False, "message": str(exc)}, status_code=503)
 
 
 @app.get("/")

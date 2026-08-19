@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 import unittest
 from unittest import mock
@@ -11,10 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from control_plane import ControlPlaneError  # noqa: E402
-from document_pipeline.content_grounding import (  # noqa: E402
-    ContentGroundingGate,
-    chapter_opening_policy,
-)
+from document_pipeline.content_grounding import ContentGroundingGate  # noqa: E402
 
 
 PROJECT_NAME = "2026年度全国国土变更调查监测数据核实处理项目"
@@ -69,15 +65,53 @@ def _chapter_context() -> dict:
 
 
 class ContentGroundingGateTests(unittest.TestCase):
-    def test_only_project_overview_chapter_uses_project_summary_opening(self) -> None:
-        background = chapter_opening_policy({"title": "项目任务背景"})
-        necessity = chapter_opening_policy({"title": "工作必要性和可行性理由"})
-        goal = chapter_opening_policy({"title": "工作目标"})
+    def test_goal_gate_rejects_real_but_off_goal_procurement_process(self) -> None:
+        chapter = {
+            "chapter_id": "background",
+            "title": "项目任务背景",
+            "blueprint_node": {
+                "purpose": "交代项目任务所处背景、现实情境及任务由来，帮助评审理解项目实施基础。",
+                "writing_objectives": ["清楚说明项目任务背景及任务由来。"],
+            },
+        }
+        with (
+            mock.patch(
+                "document_pipeline.content_grounding._goal_alignment_review",
+                return_value={
+                    "verdict": "drifted",
+                    "confidence": 0.96,
+                    "off_goal_paragraphs": [0, 1],
+                    "reason": "正文主要写采购人安排、资料接收和任务分发。",
+                },
+            ),
+            self.assertRaises(ControlPlaneError) as caught,
+        ):
+            ContentGroundingGate.evaluate(
+                global_context=_global_context(),
+                chapter=chapter,
+                chapter_grounding_context=_chapter_context(),
+                content=(
+                    f"{PROJECT_NAME}面向年度全国国土变更调查监测数据开展国家级核实处理，"
+                    "并由采购人形成本次任务。\n\n"
+                    "项目组依据采购人安排接收资料并完成任务分发。"
+                ),
+            )
+        self.assertEqual(caught.exception.code, "CHAPTER_GOAL_MISALIGNED")
 
-        self.assertEqual(background["mode"], "project_overview")
-        self.assertEqual(necessity["mode"], "chapter_focus")
-        self.assertEqual(goal["mode"], "chapter_focus")
-        self.assertIn("直接切入", goal["instruction"])
+    def test_fact_binding_does_not_bind_many_facts_on_weak_bigram_overlap(self) -> None:
+        context = _global_context()
+        context["confirmed_facts"] = [
+            {"fact_id": f"PF-{index}", "statement": f"采购人安排第{index}批项目任务并组织人员流程。"}
+            for index in range(35)
+        ]
+        report = ContentGroundingGate.evaluate(
+            global_context=context,
+            chapter={"chapter_id": "quality", "title": "质量控制"},
+            chapter_grounding_context=_chapter_context(),
+            content="完成数据接收、任务分发、国家级内外业核查、质量控制及成果复核。",
+        )
+        self.assertLessEqual(len(report["paragraph_fact_bindings"]["0"]), 6)
+        self.assertLessEqual(len(report["used_fact_ids"]), 6)
 
     def test_project_background_must_use_actual_tender_facts(self) -> None:
         report = ContentGroundingGate.evaluate(
@@ -95,12 +129,7 @@ class ContentGroundingGateTests(unittest.TestCase):
         self.assertIn("PF-1", report["used_fact_ids"])
 
     def test_real_but_generic_policy_text_is_blocked(self) -> None:
-        with (
-            mock.patch.dict(
-                "os.environ", {"BID_AGENT_PROJECT_IDENTITY_GATE": "1"}
-            ),
-            self.assertRaises(ControlPlaneError) as caught,
-        ):
+        with self.assertRaises(ControlPlaneError) as caught:
             ContentGroundingGate.evaluate(
                 global_context=_global_context(),
                 chapter={"chapter_id": "background", "title": "项目任务背景"},
@@ -110,22 +139,19 @@ class ContentGroundingGateTests(unittest.TestCase):
                     "完善交易规则并强化全过程监管。"
                 ),
             )
-        self.assertEqual(caught.exception.code, "PROJECT_IDENTITY_MISSING")
+        self.assertEqual(caught.exception.code, "PROJECT_SPECIFICITY_MISSING")
 
-    def test_project_identity_gate_is_disabled_by_default(self) -> None:
-        with mock.patch.dict("os.environ", {}, clear=False):
-            os.environ.pop("BID_AGENT_PROJECT_IDENTITY_GATE", None)
-            report = ContentGroundingGate.evaluate(
-                global_context=_global_context(),
-                chapter={"chapter_id": "quality", "title": "质量控制"},
-                chapter_grounding_context=_chapter_context(),
-                content=(
-                    "完成数据接收、任务分发、国家级内外业核查、质量控制及成果复核。"
-                ),
-            )
+    def test_grounding_does_not_require_title_specific_project_identity(self) -> None:
+        report = ContentGroundingGate.evaluate(
+            global_context=_global_context(),
+            chapter={"chapter_id": "quality", "title": "质量控制"},
+            chapter_grounding_context=_chapter_context(),
+            content=(
+                "完成数据接收、任务分发、国家级内外业核查、质量控制及成果复核。"
+            ),
+        )
 
         self.assertEqual(report["verdict"], "pass")
-        self.assertTrue(report["project_identity_gate_enabled"])
 
     def test_semantic_relevance_accepts_synonymous_project_facts(self) -> None:
         with mock.patch(

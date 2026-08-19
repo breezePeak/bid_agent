@@ -24,6 +24,7 @@ LLM_ENV_KEYS: tuple[tuple[str, str], ...] = (
     ("OPENAI_BASE_URL", "base_url"),
     ("OPENAI_API_KEY", "api_key"),
     ("OPENAI_MODEL", "model"),
+    ("OPENAI_REASONING_EFFORT", "reasoning_effort"),
     ("OPENAI_TIMEOUT", "timeout"),
     ("OPENAI_MAX_RETRIES", "max_retries"),
     ("OPENAI_RETRY_INITIAL_DELAY", "retry_initial_delay"),
@@ -34,6 +35,7 @@ LLM_ENV_KEYS: tuple[tuple[str, str], ...] = (
 )
 _LLM_ALIAS_TO_KEY = {alias: key for key, alias in LLM_ENV_KEYS}
 _LLM_KEY_TO_ALIAS = {key: alias for key, alias in LLM_ENV_KEYS}
+_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 
 FLOW_SETTING_SPECS: dict[str, tuple[str, int, int, int]] = {
     "workers": ("BID_AGENT_WORKERS_DEFAULT", 4, 1, 10),
@@ -59,7 +61,7 @@ FLOW_CHOICE_SPECS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "research_provider": (
         "BID_AGENT_RESEARCH_PROVIDER",
         "doubao_web",
-        ("doubao_web", "deepseek_web", "disabled"),
+        ("doubao_web", "deepseek_web", "tavily", "disabled"),
     ),
 }
 RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
@@ -159,6 +161,9 @@ class SettingsService:
             provider = "anthropic"
         if provider not in {"openai", "anthropic"}:
             provider = "openai"
+        reasoning_effort = str(raw.get("reasoning_effort") or "").strip().lower()
+        if reasoning_effort not in _REASONING_EFFORTS:
+            reasoning_effort = ""
         return {
             "id": str(raw.get("id", "")).strip(),
             "name": str(raw.get("name", "")).strip(),
@@ -166,6 +171,7 @@ class SettingsService:
             "base_url": str(raw.get("base_url", "")).strip(),
             "api_key": str(raw.get("api_key", "")).strip(),
             "model": str(raw.get("model", "")).strip(),
+            "reasoning_effort": reasoning_effort,
             "timeout": max(5, min(_to_int(raw.get("timeout"), 300), 1800)),
             "max_retries": max(1, min(_to_int(raw.get("max_retries"), 3), 20)),
             "retry_initial_delay": max(0.1, _to_float(raw.get("retry_initial_delay"), 2)),
@@ -312,6 +318,7 @@ class SettingsService:
                 "base_url": model.get("base_url", ""),
                 "api_key": model.get("api_key", ""),
                 "model": model.get("model", ""),
+                "reasoning_effort": model.get("reasoning_effort", ""),
                 "provider": model.get("provider", "openai") or "openai",
                 "timeout": model.get("timeout", 300),
                 "max_retries": model.get("max_retries", 3),
@@ -496,6 +503,7 @@ class SettingsService:
                     "base_url": active.get("base_url", ""),
                     "api_key": active.get("api_key", ""),
                     "model": active.get("model", ""),
+                    "reasoning_effort": active.get("reasoning_effort", ""),
                     "provider": active.get("provider", "openai"),
                     "timeout": active.get("timeout", 300),
                     "max_retries": active.get("max_retries", 3),
@@ -717,6 +725,9 @@ class SettingsService:
                 "max_tokens": 64,
                 "messages": probe_messages,
             }
+            reasoning_effort = str(model.get("reasoning_effort") or "").strip()
+            if reasoning_effort:
+                payload["reasoning_effort"] = reasoning_effort
             headers = {
                 **common_headers,
                 "Authorization": f"Bearer {model['api_key']}",

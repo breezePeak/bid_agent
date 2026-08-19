@@ -14,6 +14,7 @@ from typing import Any
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
 from .contracts import ContentBlock
+from .canonicalization import chapter_context_hash
 
 
 def _now_iso() -> str:
@@ -275,55 +276,6 @@ class ChapterEditingService:
                 status_code=400,
             ) from exc
 
-    def _confirmation_required(self) -> bool:
-        try:
-            from api.settings_service import SettingsService
-            from pathlib import Path
-
-            root = Path(__file__).resolve().parents[2]
-            settings = SettingsService(root).flow_settings()
-            return bool(settings.get("confirmation_required", False))
-        except Exception as exc:
-            raise ControlPlaneError(
-                "CHAPTER_POLICY_READ_FAILED",
-                f"无法读取章节确认策略，已停止提交：{exc}",
-                status_code=500,
-            ) from exc
-
-    def _make_current_effective(self, result: dict[str, Any]) -> dict[str, Any]:
-        """Promote a newly written revision without requiring a second user action."""
-        if result.get("unchanged"):
-            return result
-        content = result.get("content") or {}
-        chapter_data = result.get("chapter") or {}
-        chapter_id = str(chapter_data.get("chapter_id") or "").strip()
-        content_revision = int(content.get("content_revision") or 0)
-        content_hash = str(content.get("content_hash") or "")
-        if not chapter_id or not content_revision or not content_hash:
-            raise ControlPlaneError(
-                "CHAPTER_EFFECTIVE_REVISION_INVALID",
-                "生成结果缺少 chapter_id、content_revision 或 content_hash，已停止提交。",
-                status_code=500,
-            )
-        receipt = self.store.record_chapter_approval_receipt(
-            chapter_id=chapter_id,
-            content_revision=content_revision,
-            content_hash=content_hash,
-            decision="auto_approved",
-            principal_id="system",
-            confirmation_required=False,
-            actor={"type": "system", "id": "system", "role": "auto"},
-        )
-        chapter = self.store.set_chapter_formal_pointer(
-            chapter_id=chapter_id,
-            expected_chapter_revision=int(chapter_data.get("chapter_revision") or 0),
-            content_revision=content_revision,
-            content_hash=content_hash,
-            approval_status="approved",
-            actor={"type": "system", "id": "system", "role": "auto"},
-        )
-        return {"chapter": chapter, "content": content, "approval": receipt, "unchanged": False}
-
     def _require_leaf_chapter(self, chapter_id: str) -> None:
         from .chapter_workspace import ChapterWorkspaceService
 
@@ -435,8 +387,10 @@ class ChapterEditingService:
             chapter_context_revision=int(
                 context_record.get("context_revision") or 0
             ),
-            chapter_context_hash=str(
-                context_record.get("context_hash") or ""
+            chapter_context_hash=chapter_context_hash(
+                chapter_id,
+                int(context_record.get("context_revision") or 0),
+                context_record.get("items") or [],
             ),
         )
         current_chapter_ref = (
@@ -493,7 +447,7 @@ class ChapterEditingService:
         )
         previous_policy = dict((head or {}).get("approval_policy") or {})
         policy = {
-            "confirmation_required": self._confirmation_required(),
+            "confirmation_required": True,
             "frozen_at": _now_iso(),
             "grounding_required": bool(
                 previous_policy.get("grounding")
@@ -512,8 +466,6 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        if not self._confirmation_required():
-            return self._make_current_effective(result)
         return result
 
     def restore_revision(
@@ -533,7 +485,7 @@ class ChapterEditingService:
                 status_code=404,
             )
         policy = {
-            "confirmation_required": self._confirmation_required(),
+            "confirmation_required": True,
             "frozen_at": _now_iso(),
             "restored_from": int(from_content_revision),
         }
@@ -551,8 +503,6 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        if not self._confirmation_required():
-            return self._make_current_effective(result)
         return result
 
     def generate_draft(
@@ -568,7 +518,7 @@ class ChapterEditingService:
         expected_chapter_ref: tuple[str, int, str] | None = None,
         evidence_batch_ids: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Create an AI revision and make it current when H2 is disabled."""
+        """Create an AI Draft Revision; never advance the formal pointer."""
         self._require_leaf_chapter(chapter_id)
         workspace = self.store.chapter_workspace(chapter_id)
         if workspace is None:
@@ -639,9 +589,8 @@ class ChapterEditingService:
                 block["fact_ids"] = list(
                     fact_bindings.get(str(index)) or []
                 )
-        confirmation_required = self._confirmation_required()
         policy = {
-            "confirmation_required": confirmation_required,
+            "confirmation_required": True,
             "frozen_at": _now_iso(),
             "overwrite_locked": bool(overwrite_locked),
             "grounding": report,
@@ -655,8 +604,6 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        if not confirmation_required:
-            return self._make_current_effective(result)
         return result
 
     def confirm_approval(
@@ -843,6 +790,63 @@ class ChapterEditingService:
             "document_hash": document_hash,
             "mode": "formal" if export_allowed else "draft_preview",
         }
+
+    def compose_current_document(self) -> dict[str, Any]:
+        """Assemble the current editable document without requiring approval."""
+        from .chapter_workspace import ChapterWorkspaceService
+
+        listing = ChapterWorkspaceService(self.context).list_chapters(include_archived=False)
+        items = [
+            dict(item) for item in listing.get("items") or []
+            if isinstance(item, dict) and str(item.get("status") or "") != "archived"
+        ]
+        by_id = {str(item.get("chapter_id") or ""): item for item in items}
+
+        def sort_key(item: dict[str, Any]) -> tuple[int, str]:
+            try:
+                order = int(item.get("order") or 0)
+            except (TypeError, ValueError):
+                order = 0
+            return order if order else 999999, str(item.get("title") or item.get("chapter_id") or "")
+
+        children: dict[str, list[dict[str, Any]]] = {}
+        roots: list[dict[str, Any]] = []
+        for item in items:
+            chapter_id = str(item.get("chapter_id") or "")
+            parent_id = str(item.get("parent_chapter_id") or "")
+            if parent_id and parent_id in by_id and parent_id != chapter_id:
+                children.setdefault(parent_id, []).append(item)
+            else:
+                roots.append(item)
+
+        chapters: list[dict[str, Any]] = []
+
+        def append_branch(item: dict[str, Any], depth: int) -> None:
+            chapter_id = str(item.get("chapter_id") or "")
+            try:
+                head_revision = int(item.get("head_content_revision") or 0)
+                formal_revision = int(item.get("formal_content_revision") or 0)
+            except (TypeError, ValueError):
+                head_revision = formal_revision = 0
+            revision = head_revision or formal_revision
+            content = self.store.chapter_content_revision(chapter_id, revision) if revision else None
+            blocks = [
+                dict(block) for block in (content or {}).get("blocks") or []
+                if isinstance(block, dict) and str(block.get("content") or "").strip()
+            ]
+            chapters.append({
+                "chapter_id": chapter_id,
+                "title": str(item.get("title") or chapter_id),
+                "depth": depth,
+                "blocks": blocks,
+                "content_revision": revision,
+            })
+            for child in sorted(children.get(chapter_id, []), key=sort_key):
+                append_branch(child, depth + 1)
+
+        for root in sorted(roots, key=sort_key):
+            append_branch(root, 0)
+        return {"chapters": chapters, "mode": "current_draft"}
 
     # --- Command handlers ---
 

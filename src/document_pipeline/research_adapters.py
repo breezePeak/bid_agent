@@ -6,6 +6,7 @@ import atexit
 import html
 import hashlib
 import importlib.util
+import json
 import os
 import queue
 import re
@@ -217,6 +218,132 @@ class DisabledResearchAdapter:
             "provider_id": self.provider_id,
             "reason": "WEB_AUTOMATION_DISABLED",
         }
+
+
+def _configured_env_value(*keys: str) -> str:
+    """Read an API secret from the authoritative config file without logging it."""
+    for key in keys:
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    configured_root = os.environ.get("BID_AGENT_CONFIG_ROOT", "").strip()
+    root = Path(configured_root).resolve() if configured_root else Path(__file__).resolve().parents[2]
+    env_path = root / ".env"
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            if key.strip() in keys:
+                value = value.strip().strip('"').strip("'")
+                if value:
+                    return value
+    except OSError:
+        pass
+    return ""
+
+
+class TavilySearchAdapter:
+    """Search public sources with Tavily's documented Search API."""
+
+    provider_id = "tavily"
+    search_url = "https://api.tavily.com/search"
+
+    def __init__(self) -> None:
+        self.api_key = _configured_env_value("BID_AGENT_TAVILY_API_KEY", "TAVILY_API_KEY")
+        configured_url = os.environ.get("BID_AGENT_TAVILY_SEARCH_URL", "").strip()
+        self.search_url = configured_url or self.search_url
+        self.timeout_seconds = max(
+            5,
+            min(int(os.environ.get("BID_AGENT_TAVILY_TIMEOUT_SECONDS", "30")), 120),
+        )
+        depth = os.environ.get("BID_AGENT_TAVILY_SEARCH_DEPTH", "basic").strip().lower()
+        self.search_depth = depth if depth in {"advanced", "basic", "fast", "ultra-fast"} else "basic"
+
+    def runtime_status(self) -> dict[str, object]:
+        return {
+            "ready": bool(self.api_key),
+            "provider_id": self.provider_id,
+            "reason": "TAVILY_API_KEY_MISSING" if not self.api_key else "",
+        }
+
+    def search(self, question: str, *, limit: int) -> list[ResearchCandidate]:
+        if limit <= 0:
+            return []
+        if not self.api_key:
+            raise RuntimeError(
+                "Tavily API Key 未配置。请在 .env 中设置 BID_AGENT_TAVILY_API_KEY（或 TAVILY_API_KEY）。"
+            )
+        payload = {
+            "query": question,
+            "topic": "general",
+            "search_depth": self.search_depth,
+            "chunks_per_source": 3,
+            "max_results": min(max(int(limit), 1), 20),
+            "include_answer": False,
+            # Tavily returns cleaned source-page content, not a generated answer.
+            "include_raw_content": "markdown",
+            "include_images": False,
+            "include_favicon": False,
+            "include_usage": False,
+        }
+        request = urllib.request.Request(
+            self.search_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout_seconds,
+                context=_ssl_context_for_public_fetch(),
+            ) as response:
+                status = int(getattr(response, "status", 200) or 200)
+                response_body = response.read(2_000_000).decode("utf-8", errors="replace")
+        except Exception as exc:
+            raise RuntimeError(
+                f"Tavily 搜索请求失败: {type(exc).__name__}: {exc}"
+            ) from exc
+        try:
+            parsed = json.loads(response_body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("Tavily 搜索返回了无法解析的响应。") from exc
+        if status >= 400:
+            detail = parsed.get("detail", parsed) if isinstance(parsed, dict) else parsed
+            raise RuntimeError(f"Tavily 搜索失败（HTTP {status}）：{detail}")
+        if not isinstance(parsed, dict):
+            raise RuntimeError("Tavily 搜索返回格式无效。")
+
+        candidates: list[ResearchCandidate] = []
+        for result in parsed.get("results", [])[:limit]:
+            if not isinstance(result, dict):
+                continue
+            source_url = _normalize_public_url(str(result.get("url") or ""))
+            if not source_url:
+                continue
+            content = str(result.get("raw_content") or result.get("content") or "").strip()
+            if len(content) < 80:
+                continue
+            host = urllib.parse.urlparse(source_url).hostname or "公开网页"
+            candidates.append(
+                ResearchCandidate(
+                    title=str(result.get("title") or host).strip()[:200] or host,
+                    publisher=host,
+                    content=content[:60_000],
+                    source_url=source_url,
+                    source_type=_source_type(source_url),
+                    claim_types=("project_context", "method"),
+                )
+            )
+        if not candidates:
+            raise RuntimeError("Tavily 未返回可核验、正文足够的公开来源。")
+        return candidates
 
 
 class DeepSeekWebAdapter:
@@ -1239,6 +1366,10 @@ def create_research_adapter(
     attachment_paths: list[Path] | tuple[Path, ...] | None = None,
 ) -> ResearchProviderAdapter:
     selected = str(provider_id or os.environ.get("BID_AGENT_RESEARCH_PROVIDER", "doubao_web")).strip().lower()
+    if selected == "tavily":
+        if attachment_paths:
+            raise ValueError("V3_RESEARCH_ATTACHMENTS_PROVIDER_UNSUPPORTED")
+        return TavilySearchAdapter()
     if selected == "deepseek_web":
         # Driving a personal chat account by Playwright can violate a provider's
         # usage rules. It is therefore never an implicit product behavior.

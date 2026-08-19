@@ -9,6 +9,7 @@ from utils import read_json
 from ..contracts import DOCUMENT_CONTRACT_ADAPTER, IntegratedDocument, OutlineContract
 from ..document_contract import DOCUMENT_CONTRACT_PATH
 from ..integrator import INTEGRATED_DOCUMENT_PATH
+from .word_styles import add_markdown_content, add_styled_heading, apply_preview_styles
 
 
 STANDARD_OUTPUT_PATH = Path("outputs/v3/final.docx")
@@ -31,14 +32,15 @@ class StandardRenderer:
         for block in integrated.blocks:
             blocks_by_node.setdefault(block.target_node_id, []).append(block.content)
         doc = Document()
+        apply_preview_styles(doc)
         markdown: list[str] = []
         depth = {node.node_id: self._depth(node.node_id, contract.nodes) for node in contract.nodes}
         for node in contract.nodes:
             level = min(depth[node.node_id] + 1, 9)
-            doc.add_heading(node.title, level=level)
+            add_styled_heading(doc, node.title, min(level, 6))
             markdown.append(f"{'#' * level} {node.title}")
             for content in blocks_by_node.get(node.node_id, []):
-                doc.add_paragraph(content)
+                add_markdown_content(doc, content)
                 markdown.append(content)
         output = self.root / STANDARD_OUTPUT_PATH; output.parent.mkdir(parents=True, exist_ok=True)
         markdown_path = self.root / STANDARD_MARKDOWN_PATH

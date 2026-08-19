@@ -37,8 +37,8 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
                     chunk_id="C-1",
                     location="paragraph:1",
                 ),
-                original_text="完成数据处理",
-                normalized_requirement="完成数据处理",
+                original_text="项目范围包括完成数据处理",
+                normalized_requirement="项目范围包括完成数据处理",
                 response_type="mandatory_response",
                 evidence_policy="tender_traceable",
                 status="open",
@@ -55,7 +55,7 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
                 input_role=InputRole.TENDER,
                 block_kind="paragraph",
                 ordinal=0,
-                content="项目背景与数据处理要求",
+                content="项目名称：数据治理项目；项目范围包括数据处理。",
                 source_anchor=SourceAnchor(
                     source_input_id="tender",
                     chunk_id="C-1",
@@ -68,20 +68,14 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
 
     request = build_project_understanding_input(
         ledger,
-        ScoreModel(model_id="S-1", total_points=0),
         source,
     )
 
-    assert set(request.requirement_ledger) == {"requirements"}
-    assert request.requirement_ledger["requirements"] == [
-        {
-            "requirement_id": "R-1",
-            "kind": "mandatory",
-            "normalized_requirement": "完成数据处理",
-            "status": "open",
-            "severity": "normal",
-        }
-    ]
+    assert request.requirement_ledger == {
+        "projection_version": "v3.project_input.v3",
+        "revision": 1,
+    }
+    assert request.scanned_source_block_count == 1
     assert request.source_context == [
         {
             "block_id": "B-1",
@@ -89,7 +83,7 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
             "input_role": "tender",
             "block_kind": "paragraph",
             "ordinal": 0,
-            "content": "项目背景与数据处理要求",
+            "content": "项目名称：数据治理项目；项目范围包括数据处理。",
             "heading_path": [],
             "source_anchor": {
                 "source_input_id": "tender",
@@ -99,6 +93,8 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
             },
         }
     ]
+    assert "score_model" not in request.model_dump(mode="json")
+    assert len(request.model_dump_json()) <= 16_000
 
 
 def test_score_semantic_input_contains_only_directionally_linked_context() -> None:

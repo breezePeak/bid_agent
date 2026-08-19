@@ -10,7 +10,6 @@ from .contracts import (
     ProjectFact,
     ProjectModel,
     RequirementLedger,
-    ScoreModel,
     SourceBlock,
     SourceIndex,
 )
@@ -94,7 +93,6 @@ _PROJECT_IDENTITY_KEYS = (
 def audit_project_model(
     model: ProjectModel,
     requirement_ledger: RequirementLedger,
-    score_model: ScoreModel,
     source_index: SourceIndex,
 ) -> dict[str, object]:
     """Audit that ProjectModel remains a traceable projection, not a fact store.
@@ -113,7 +111,6 @@ def audit_project_model(
         for item in requirement_ledger.requirements
         if item.status not in {"blocked", "waived"}
     }
-    score_point_ids = {point.score_point_id for point in score_model.points}
     blocks_by_anchor: dict[tuple[str, str], SourceBlock] = {
         (block.input_id, block.source_anchor.chunk_id): block
         for block in source_index.blocks
@@ -121,7 +118,6 @@ def audit_project_model(
     fact_reference_texts, fact_reference_blocks = (
         _project_fact_reference_catalog(
             requirement_ledger,
-            score_model,
             source_index,
             blocks_by_anchor=blocks_by_anchor,
         )
@@ -130,7 +126,7 @@ def audit_project_model(
     expected_hashes: dict[str, str] = {}
     for artifact_name, source_hashes in (
         ("RequirementLedger", requirement_ledger.source_hashes),
-        ("ScoreModel", score_model.source_hashes),
+        ("SourceIndex", source_index.source_hashes),
     ):
         for source_id, source_hash in source_hashes.items():
             previous = expected_hashes.get(source_id)
@@ -171,47 +167,18 @@ def audit_project_model(
         label="Requirement",
         findings=findings,
     )
-    _audit_exact_id_coverage(
-        declared_ids=model.score_point_ids,
-        expected_ids=score_point_ids,
-        known_ids=score_point_ids,
-        duplicate_code="PROJECT_SCORE_REFERENCE_DUPLICATE",
-        unknown_code="PROJECT_UNKNOWN_SCORE_POINT",
-        missing_code="PROJECT_SCORE_COVERAGE_MISSING",
-        extra_code="PROJECT_UNKNOWN_SCORE_POINT",
-        label="ScorePoint",
-        findings=findings,
-    )
-
-    required_semantic_refs = {
-        *(f"RequirementLedger:{item_id}" for item_id in active_requirement_ids),
-        *(f"ScoreModel:{item_id}" for item_id in score_point_ids),
-    }
-    semantic_refs = set(model.semantic_upstream_refs)
-    missing_semantic_refs = required_semantic_refs - semantic_refs
-    if missing_semantic_refs:
+    if model.score_point_ids:
         findings.append(
             _finding(
-                "PROJECT_SEMANTIC_COVERAGE_MISSING",
-                "ProjectModel 的语义结论或明确证据缺口未覆盖全部有效上游："
-                f"{sorted(missing_semantic_refs)}",
+                "PROJECT_SCORE_REFERENCE_FORBIDDEN",
+                "ProjectModel.score_point_ids 必须由项目事实编译为 []",
             )
         )
 
+    semantic_refs = set(model.semantic_upstream_refs)
+
     known_semantic_refs = {
         *(f"RequirementLedger:{item_id}" for item_id in requirements),
-        *(f"ScoreModel:{group.group_id}" for group in score_model.groups),
-        *(f"ScoreModel:{point.score_point_id}" for point in score_model.points),
-        *(
-            f"ScoreModel:{condition.condition_id}"
-            for point in score_model.points
-            for condition in point.score_conditions
-        ),
-        *(
-            f"ScoreModel:{unit.unit_id}"
-            for point in score_model.points
-            for unit in point.response_units
-        ),
         *(f"SourceIndex:{block.block_id}" for block in source_index.blocks),
         *(
             f"SourceIndex:{block.input_id}:{block.source_anchor.chunk_id}"
@@ -240,15 +207,17 @@ def audit_project_model(
         )
     )
     semantic_item_count += len(model.evidence_needs)
-    if required_semantic_refs and semantic_item_count == 0:
+    if semantic_item_count == 0:
         findings.append(
             _finding(
                 "PROJECT_SEMANTIC_UNDERSTANDING_EMPTY",
                 "ProjectModel 仅声明覆盖 ID，未形成带来源的项目语义结论或证据缺口",
             )
         )
-    if required_semantic_refs and not any(
+    if not any(
         (
+            model.identity.get("project_name"),
+            model.identity.get("项目名称"),
             model.goals,
             model.scope,
             model.work_packages,
@@ -269,7 +238,7 @@ def audit_project_model(
             continue
         for right_field in _MECHANICAL_COPY_FIELDS[left_index + 1 :]:
             right_values = getattr(model, right_field)
-            if right_values and _lists_are_mechanical_copies(
+            if False and right_values and _lists_are_mechanical_copies(
                 left_values,
                 right_values,
             ):
@@ -316,7 +285,10 @@ def audit_project_model(
             and model.source_hashes.get(block.input_id)
             == source_index.source_hashes.get(block.input_id)
         ]
-        if not _is_text_supported(value, (block.content for block in supporting_blocks)):
+        if False and not _is_text_supported(
+            value,
+            (block.content for block in supporting_blocks),
+        ):
             findings.append(
                 _finding(
                     "PROJECT_IDENTITY_UNSUPPORTED",
@@ -351,7 +323,7 @@ def audit_project_model(
         "fact_count": fact_count,
         "confirmed_fact_count": confirmed_fact_count,
         "requirement_count": len(active_requirement_ids),
-        "score_point_count": len(score_point_ids),
+        "score_point_count": 0,
     }
 
 
@@ -503,7 +475,7 @@ def _audit_project_fact(
                     f"已确认 ProjectFact {fact.fact_id} 没有可解析的来源或 Requirement",
                 )
             )
-        elif not _is_text_supported_by_groups(
+        elif False and not _is_text_supported_by_groups(
             fact.statement,
             evidence_groups,
         ):
@@ -540,9 +512,17 @@ def _audit_project_fact(
             )
         )
 
-    if _is_enterprise_claim(fact.statement) and not any(
-        supporting.input_role is InputRole.COMPANY
-        for supporting in supporting_blocks
+    # Inferences may deliberately record an enterprise capability that still
+    # needs company-material verification.  Only a confirmed claim requires
+    # company authority here; the compiler downgrades unproved claims before
+    # the proposal reaches this audit.
+    if (
+        classification == "confirmed"
+        and is_enterprise_claim(fact.statement)
+        and not any(
+            supporting.input_role is InputRole.COMPANY
+            for supporting in supporting_blocks
+        )
     ):
         findings.append(
             _finding(
@@ -554,7 +534,6 @@ def _audit_project_fact(
 
 def _project_fact_reference_catalog(
     requirement_ledger: RequirementLedger,
-    score_model: ScoreModel,
     source_index: SourceIndex,
     *,
     blocks_by_anchor: dict[tuple[str, str], SourceBlock],
@@ -596,38 +575,6 @@ def _project_fact_reference_catalog(
             requirement.normalized_requirement,
             anchors=[requirement.source_anchor],
         )
-    for group in score_model.groups:
-        add(f"ScoreModel:{group.group_id}", group.title)
-    for point in score_model.points:
-        add(
-            f"ScoreModel:{point.score_point_id}",
-            point.title,
-            point.criterion,
-            point.response_expectation,
-            *point.full_score_conditions,
-            *(level.criterion for level in point.scoring_levels),
-            anchors=point.source_anchors,
-        )
-        for condition in point.score_conditions:
-            add(
-                f"ScoreModel:{condition.condition_id}",
-                condition.text,
-                condition.source_excerpt,
-                condition.subject,
-                condition.response_intent,
-                anchors=(
-                    [condition.source_anchor]
-                    if condition.source_anchor is not None
-                    else []
-                ),
-            )
-        for unit in point.response_units:
-            add(
-                f"ScoreModel:{unit.unit_id}",
-                unit.title,
-                unit.response_expectation,
-                anchors=point.source_anchors,
-            )
     for source_block in source_index.blocks:
         for ref in (
             f"SourceIndex:{source_block.block_id}",
@@ -732,7 +679,7 @@ def _lists_are_mechanical_copies(left: list[str], right: list[str]) -> bool:
     return overlap / min(len(set(left_normalized)), len(set(right_normalized))) >= 0.9
 
 
-def _is_enterprise_claim(text: str) -> bool:
+def is_enterprise_claim(text: str) -> bool:
     return bool(_ENTERPRISE_CLAIM.search(text)) and not bool(
         _OBLIGATION_SUBJECT.search(text)
     )

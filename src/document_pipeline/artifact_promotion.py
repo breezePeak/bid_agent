@@ -649,7 +649,6 @@ class ProposalValidator:
                 from .contracts import (
                     ProjectModel,
                     RequirementLedger,
-                    ScoreModel,
                     SourceIndex,
                 )
                 from .project_model import audit_project_model
@@ -657,11 +656,9 @@ class ProposalValidator:
                 ledger_artifact = self.store.v3_active_artifact(
                     "RequirementLedger"
                 )
-                score_artifact = self.store.v3_active_artifact("ScoreModel")
                 source_artifact = self.store.v3_active_artifact("SourceIndex")
                 if (
                     ledger_artifact is None
-                    or score_artifact is None
                     or source_artifact is None
                 ):
                     raise ValueError(
@@ -673,7 +670,6 @@ class ProposalValidator:
                     RequirementLedger.model_validate(
                         ledger_artifact["payload"]
                     ),
-                    ScoreModel.model_validate(score_artifact["payload"]),
                     SourceIndex.model_validate(source_artifact["payload"]),
                 )
             elif proposal.artifact_kind == "ResponseTopicGraph":
@@ -1039,6 +1035,7 @@ class HumanGateService:
         "SourceIndex",
         "RequirementLedger",
         "ScoreModel",
+        "ProjectModel",
         "ChapterBlueprint",
     )
     _LEGACY_PLANNING_DEPENDENCIES = (
@@ -1071,13 +1068,23 @@ class HumanGateService:
         # Older score-direct blueprints did not persist planning_model.  They
         # must remain confirmable: requiring the legacy topic graph dependencies
         # hides the confirmation CTA and leaves the workspace in a dead end.
-        planning_model = str(blueprint_payload.get("planning_model") or "")
+        planning_model = str(blueprint_payload.get("planning_model") or "").strip()
         if not planning_model:
-            planning_model = (
-                "score_direct"
-                if self.store.v3_active_artifact("ProjectModel") is None
-                else "topic_graph"
-            )
+            # Do not use historical ProjectModel/ResponseTopicGraph existence
+            # as a mode detector.  Only explicit dependency markers are safe.
+            if blueprint_payload.get("topic_graph_revision") is not None:
+                planning_model = "topic_graph"
+            elif (
+                blueprint_payload.get("requirement_ledger_revision") is not None
+                and blueprint_payload.get("score_model_revision") is not None
+            ):
+                planning_model = "score_direct"
+            else:
+                raise ControlPlaneError(
+                    "PLANNING_CONFIRM_BLOCKED",
+                    "无法确认旧目录的规划模式，请重新生成目录",
+                    status_code=409,
+                )
         dependency_kinds = (
             self._SCORE_DIRECT_PLANNING_DEPENDENCIES
             if planning_model == "score_direct"
@@ -1165,28 +1172,14 @@ class HumanGateService:
                     status_code=409,
                 )
             expected = expected_runtime.get(artifact_kind)
-            if expected is not None and any(
-                str(
-                    receipt.get(field)
-                    if receipt.get(field) is not None
-                    else ""
-                )
-                != str(expected[field])
-                for field in (
-                    "capability_id",
-                    "capability_version",
-                    "prompt_version",
-                    "prompt_hash",
-                    "provider_fingerprint",
-                    "model_fingerprint",
-                    "output_schema_version",
-                    "temperature",
-                )
+            if (
+                expected is not None
+                and str(receipt.get("output_schema_version") or "")
+                != str(expected.get("output_schema_version") or "")
             ):
                 raise ControlPlaneError(
-                    "PLANNING_CONFIRM_STALE",
-                    f"{artifact_kind} 的推理凭证不再匹配当前 "
-                    "Capability/Prompt/模型/Schema，请重新规划。",
+                    "migration_required",
+                    f"{artifact_kind} 的输出 Schema 与当前运行时不兼容，需要先执行迁移。",
                     status_code=409,
                 )
             trace.append(
@@ -1213,6 +1206,32 @@ class HumanGateService:
                 }
             )
         return trace
+
+    def runtime_change_warnings(self, planning_model: str = "score_direct") -> list[dict[str, Any]]:
+        """Report deployment drift without invalidating an already confirmed H1."""
+        expected_runtime = self._current_inference_metadata(planning_model)
+        warnings: list[dict[str, Any]] = []
+        for item in self._generation_trace(planning_model):
+            expected = expected_runtime.get(str(item.get("artifact_kind") or ""))
+            if expected is None:
+                continue
+            changed_fields = [
+                field
+                for field in (
+                    "capability_id", "capability_version", "prompt_version", "prompt_hash",
+                    "provider_fingerprint", "model_fingerprint", "temperature",
+                )
+                if str(item.get(field, "")) != str(expected.get(field, ""))
+            ]
+            if changed_fields:
+                warnings.append({
+                    "code": "runtime_changed",
+                    "artifact_kind": str(item.get("artifact_kind") or ""),
+                    "changed_fields": changed_fields,
+                    "blocking": False,
+                    "message": "运行时版本已变化；原人工确认仍然有效。",
+                })
+        return warnings
 
     def _current_inference_metadata(
         self,
@@ -1386,7 +1405,25 @@ class HumanGateService:
             item for item in (scores.get("payload") or {}).get("points", [])
             if item.get("disqualifying") or item.get("review_status") == "blocked"
         ]
-        if str(blueprint.get("planning_model") or "topic_graph") == "score_direct":
+        planning_model = str(blueprint.get("planning_model") or "").strip()
+        if not planning_model:
+            # Never infer the planning mode from the mere presence of a stale
+            # ProjectModel/ResponseTopicGraph.  Older payloads can be
+            # identified only when they carry an explicit revision marker.
+            if blueprint.get("topic_graph_revision") is not None:
+                planning_model = "topic_graph"
+            elif (
+                blueprint.get("requirement_ledger_revision") is not None
+                and blueprint.get("score_model_revision") is not None
+            ):
+                planning_model = "score_direct"
+            else:
+                raise ControlPlaneError(
+                    "PLANNING_CONFIRM_BLOCKED",
+                    "无法确认旧目录的规划模式，请重新生成目录",
+                    status_code=409,
+                )
+        if planning_model == "score_direct":
             nodes = [
                 item
                 for item in blueprint.get("nodes", [])

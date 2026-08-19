@@ -70,7 +70,7 @@ class ChapterWritingOutlineTests(unittest.TestCase):
         kinds = [item["kind"] for item in outline["blocks"]]
         self.assertEqual(kinds, ["response", "evidence"])
         self.assertEqual(outline["blocks"][0]["heading"], "内业核查方法")
-        self.assertIn("可执行做法", outline["blocks"][0]["write_as"])
+        self.assertIn("Blueprint 原始章节目的", outline["blocks"][0]["write_as"])
         self.assertEqual(outline["blocks"][0]["outcome_kind"], "")
         self.assertNotIn("本章交付物", outline["blocks"][0]["write_as"])
         self.assertIn("证明类型", outline["blocks"][1]["write_as"])
@@ -88,6 +88,64 @@ class ChapterWritingOutlineTests(unittest.TestCase):
         self.assertEqual(outline["block_count"], 1)
         self.assertIn("本项目对象", outline["blocks"][0]["must_answer"])
         self.assertNotIn("交付物", outline["blocks"][0]["must_answer"])
+        self.assertNotIn("采购任务由来", outline["blocks"][0]["write_as"])
+        self.assertIn("不自动补写步骤", outline["blocks"][0]["write_as"])
+        self.assertNotIn("可执行做法", outline["blocks"][0]["write_as"])
+        self.assertIn("材料只是证据池", outline["writing_rule"])
+
+    def test_splits_explicit_parallel_purpose_into_readable_outline_blocks(self) -> None:
+        outline = compile_chapter_writing_outline(
+            {
+                "chapter_id": "ch-necessity-feasibility",
+                "title": "工作必要性与可行性依据",
+                "blueprint_node": {
+                    "purpose": "分别论证开展相关工作的必要性和实施可行性"
+                },
+            }
+        )
+
+        self.assertEqual(outline["block_count"], 2)
+        self.assertEqual(
+            [item["must_answer"] for item in outline["blocks"]],
+            ["论证开展相关工作的必要性", "论证实施可行性"],
+        )
+
+    def test_background_score_condition_keeps_background_chapter_boundary(self) -> None:
+        outline = compile_chapter_writing_outline(
+            {
+                "chapter_id": "ch-bg",
+                "title": "项目任务背景",
+                "blueprint_node": {"score_condition_ids": ["SC-BG"]},
+            },
+            scoring_requirements=[
+                {
+                    "score_point_id": "SP-1",
+                    "conditions": [
+                        {
+                            "condition_id": "SC-BG",
+                            "condition_role": "content",
+                            "response_intent": "清楚说明项目任务背景及任务由来",
+                        }
+                    ],
+                }
+            ],
+        )
+        self.assertEqual(outline["block_count"], 1)
+        self.assertNotIn("采购任务由来", outline["blocks"][0]["write_as"])
+        self.assertNotIn("任务分发", outline["blocks"][0]["write_as"])
+        self.assertNotIn("chapter_intent", outline)
+
+    def test_method_and_objective_use_same_neutral_writer_rule(self) -> None:
+        method = compile_chapter_writing_outline(
+            {"chapter_id": "method", "title": "关键技术方法", "blueprint_node": {"purpose": "说明处理方法"}}
+        )
+        objective = compile_chapter_writing_outline(
+            {"chapter_id": "goal", "title": "工作目标", "blueprint_node": {"purpose": "明确工作目标"}}
+        )
+        self.assertNotIn("chapter_intent", method)
+        self.assertNotIn("chapter_intent", objective)
+        self.assertEqual(method["blocks"][0]["write_as"], objective["blocks"][0]["write_as"])
+        self.assertIn("不自动补写步骤、分工、输入输出", method["blocks"][0]["write_as"])
 
     def test_marks_outcome_only_when_the_block_has_an_explicit_requirement(self) -> None:
         outline = compile_chapter_writing_outline(

@@ -63,6 +63,17 @@ def sha256_hex(value: str | bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def chapter_context_hash(chapter_id: str, revision: int, items: Any) -> str:
+    """Build the stable public concurrency token for a chapter context."""
+    return canonical_hash(
+        {
+            "chapter_id": str(chapter_id or ""),
+            "chapter_context_revision": int(revision or 0),
+            "items": list(items or []),
+        }
+    )
+
+
 def canonical_hash(value: Any) -> str:
     """Hash of the canonical JSON encoding of an arbitrary value."""
     return sha256_hex(canonical_json(value))
