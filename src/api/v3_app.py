@@ -1157,12 +1157,14 @@ def chapter_chat_history(
         chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
         service = ChapterChatService(context)
         turns = service.load_history(chapter_id, limit=limit)
+        batch_turns = service.load_batch_history(chapter_id)
         return JSONResponse(
             {
                 "ok": True,
                 "chapter_id": str(chapter.get("chapter_id") or chapter_id),
                 "title": str(chapter.get("title") or ""),
                 "turns": turns,
+                "batch_turns": batch_turns,
                 "authority": service.load_authority(chapter_id),
             }
         )
@@ -1266,6 +1268,44 @@ async def chapter_chat_history_update(
                 "ok": True,
                 "chapter_id": str(chapter.get("chapter_id") or chapter_id),
                 "turn": updated,
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.post("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/history")
+async def chapter_chat_history_append(
+    workspace_id: str,
+    chapter_id: str,
+    request: Request,
+) -> JSONResponse:
+    """Persist an Agent execution record so it survives page or service restarts."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    try:
+        from document_pipeline.chapter_chat import ChapterChatService
+        from document_pipeline.chapter_workspace import ChapterWorkspaceService
+
+        context = _context(workspace_id)
+        chapter = ChapterWorkspaceService(context).get_chapter(chapter_id)
+        record = ChapterChatService(context).append_turn(
+            chapter_id,
+            role="assistant",
+            content=str((body or {}).get("content") or ""),
+            thinking=str((body or {}).get("thinking") or ""),
+            research_steps=list((body or {}).get("research_steps") or []),
+            elapsed_seconds=(body or {}).get("elapsed_seconds"),
+            operation_id=str((body or {}).get("operation_id") or ""),
+            status=str((body or {}).get("status") or ""),
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "chapter_id": str(chapter.get("chapter_id") or chapter_id),
+                "turn": record,
             }
         )
     except ControlPlaneError as exc:
@@ -1421,6 +1461,9 @@ async def chapter_chat_turn(
                 "turns": result.get("history_tail") or [],
                 "document_write_requested": bool(
                     result.get("document_write_requested")
+                ),
+                "document_approval_requested": bool(
+                    result.get("document_approval_requested")
                 ),
                 "workspace_revision": snapshot_data.get("workspace_revision", 0),
             }
@@ -1579,11 +1622,20 @@ async def stream_chapter_draft(
                 details=exc.details,
             )
         except (TypeError, ValueError) as exc:
+            raw_reason = str(exc).strip()
+            if raw_reason == "G4_CONTENT_TOO_SHORT_OR_HOLLOW":
+                user_message = (
+                    "本次生成的正文过短或缺少实质内容，已停止写入草稿。"
+                    "请补充本章写作要点后重试。"
+                )
+            else:
+                user_message = "正文生成请求未通过校验，请检查本章提纲和上下文后重试。"
             yield _ndjson_event(
                 "error",
                 chapter_id=normalized_chapter_id,
                 code="CHAPTER_WRITE_REQUEST_INVALID",
-                message=str(exc),
+                message=user_message,
+                details={"reason_code": raw_reason} if raw_reason else {},
             )
         except Exception as exc:
             yield _ndjson_event(

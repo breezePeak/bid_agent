@@ -6585,6 +6585,16 @@ class ControlStore:
             rows = connection.execute("SELECT * FROM chapter_batch_events WHERE job_id = ? AND sequence > ? ORDER BY sequence LIMIT ?", (str(job_id), max(0, int(after_sequence)), max(1, min(int(limit), 2000)))).fetchall()
         return [self._batch_decode(row) for row in rows]
 
+    def chapter_batch_events(self, chapter_id: str, *, limit: int = 2000) -> list[dict[str, Any]]:
+        """Return durable batch-writing events for one chapter across all jobs."""
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM chapter_batch_events WHERE chapter_id = ? "
+                "ORDER BY created_at, sequence LIMIT ?",
+                (str(chapter_id), max(1, min(int(limit), 5000))),
+            ).fetchall()
+        return [self._batch_decode(row) for row in rows]
+
     def save_batch_checkpoint(self, job_id: str, item_id: str, *, stage: str, input_hash: str = "", artifact_refs: dict[str, Any] | None = None, event_sequence: int = 0) -> dict[str, Any]:
         checkpoint_id = str(uuid.uuid4())
         with self._connection() as connection:

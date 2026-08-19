@@ -210,6 +210,7 @@ class ChapterWritingService:
 
         decision: dict[str, Any] = {}
         evidence: list[dict[str, Any]] = []
+        research_queries: list[str] = []
         if request.run_research:
             yield {
                 "type": "thinking_step",
@@ -237,7 +238,7 @@ class ChapterWritingService:
                     "sources": [],
                 }
                 if needs_research:
-                    queries = [
+                    research_queries = [
                         str(item.get("question") or "").strip()
                         for item in planned.get("queries") or []
                         if isinstance(item, dict) and str(item.get("question") or "").strip()
@@ -247,7 +248,8 @@ class ChapterWritingService:
                         "unit_id": bundle.unit_id,
                         "chapter_id": request.chapter_id,
                         "status": "searching",
-                        "message": "已开始搜索公开资料" + (f"：{queries[0]}" if queries else "。"),
+                        "message": "已开始搜索公开资料" + (f"：{research_queries[0]}" if research_queries else "。"),
+                        "queries": research_queries,
                         "sources": [],
                     }
                 decision, evidence = execute_research(bundle, research_plan)
@@ -285,6 +287,7 @@ class ChapterWritingService:
                 "chapter_id": request.chapter_id,
                 "status": decision_status,
                 "message": result_message,
+                "queries": research_queries,
                 "sources": source_rows,
             }
         yield {

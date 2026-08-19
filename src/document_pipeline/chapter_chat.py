@@ -461,10 +461,62 @@ class ChapterChatService:
                     "content": content,
                     "thinking": thinking,
                     "created_at": created_at,
+                    "research_steps": list(item.get("research_steps") or []),
+                    "elapsed_seconds": item.get("elapsed_seconds"),
+                    "operation_id": str(item.get("operation_id") or ""),
+                    "status": str(item.get("status") or ""),
                 }
             )
         if limit > 0:
             return turns[-limit:]
+        return turns
+
+    def load_batch_history(self, chapter_id: str) -> list[dict[str, Any]]:
+        """Project durable batch-writing events into readable chapter chat turns."""
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for event in self.store.chapter_batch_events(chapter_id):
+            grouped.setdefault(str(event.get("job_id") or ""), []).append(event)
+
+        turns: list[dict[str, Any]] = []
+        for job_id, events in grouped.items():
+            if not job_id or not events:
+                continue
+            notes: list[str] = []
+            draft_parts: list[str] = []
+            status = ""
+            for event in events:
+                event_type = str(event.get("type") or "")
+                status = str(event.get("status") or status)
+                data = event.get("data") if isinstance(event.get("data"), dict) else {}
+                if event_type == "draft_delta":
+                    delta = str(data.get("text") or "")
+                    if delta:
+                        draft_parts.append(delta)
+                    continue
+                message = str(event.get("message") or "").strip()
+                stage = str(event.get("stage") or "").strip()
+                if message:
+                    notes.append(f"{stage}：{message}" if stage else message)
+            title = str(events[-1].get("chapter_title") or chapter_id)
+            committed = any(str(event.get("type") or "") == "chapter_committed" for event in events)
+            failed = any(str(event.get("type") or "") == "chapter_failed" for event in events)
+            content = "".join(draft_parts).strip()
+            if committed:
+                content = content or f"《{title}》正文已生成并写入中间文档。"
+            elif failed:
+                content = content or f"《{title}》本次编写未完成。"
+            else:
+                content = content or f"《{title}》的批量编写记录。"
+            turns.append({
+                "turn_id": f"batch:{job_id}:{chapter_id}",
+                "role": "assistant",
+                "content": content,
+                "thinking": "\n".join(notes),
+                "created_at": str(events[0].get("created_at") or ""),
+                "status": "succeeded" if committed else ("failed" if failed else status),
+                "operation_id": f"chapter-batch:{job_id}",
+                "source": "batch_writing",
+            })
         return turns
 
     def append_turn(
@@ -475,6 +527,10 @@ class ChapterChatService:
         content: str,
         thinking: str = "",
         created_at: str | None = None,
+        research_steps: list[dict[str, Any]] | None = None,
+        elapsed_seconds: int | float | None = None,
+        operation_id: str = "",
+        status: str = "",
     ) -> dict[str, Any]:
         path = self.history_path(chapter_id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -485,6 +541,10 @@ class ChapterChatService:
             "thinking": str(thinking or ""),
             "created_at": created_at or _utc_now(),
             "chapter_id": _safe_chapter_id(chapter_id),
+            "research_steps": list(research_steps or []),
+            "elapsed_seconds": elapsed_seconds,
+            "operation_id": str(operation_id or ""),
+            "status": str(status or ""),
         }
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(record, ensure_ascii=False) + "\n")
@@ -632,6 +692,10 @@ class ChapterChatService:
                 "thinking": str(item.get("thinking") or ""),
                 "created_at": str(item.get("created_at") or _utc_now()),
                 "chapter_id": safe_id,
+                "research_steps": list(item.get("research_steps") or []),
+                "elapsed_seconds": item.get("elapsed_seconds"),
+                "operation_id": str(item.get("operation_id") or ""),
+                "status": str(item.get("status") or ""),
             }
             lines.append(json.dumps(record, ensure_ascii=False))
         path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
@@ -852,6 +916,9 @@ class ChapterChatService:
                 chapter_id, limit=HISTORY_TAIL
             ),
             "document_write_requested": bool(done.get("document_write_requested")),
+            "document_approval_requested": bool(
+                done.get("document_approval_requested")
+            ),
         }
 
     def iter_answer_events(
@@ -904,11 +971,26 @@ class ChapterChatService:
         content_parts: list[str] = []
 
         agent_action = _decide_chapter_action(chat_context, history, text)
-        phase = self.resolve_write_phase(
-            chapter_id,
-            outline=chat_context.get("writing_outline"),
-            agent_action=agent_action["action"],
+        document_approval_action = agent_action["action"] == "approve_document"
+        head_revision = int(chat_context.get("head_content_revision") or 0)
+        formal_revision = int(chat_context.get("formal_content_revision") or 0)
+        document_approval_requested = (
+            document_approval_action
+            and head_revision > 0
+            and head_revision != formal_revision
         )
+        if document_approval_action:
+            phase = {
+                **self.load_authority(chapter_id),
+                "write_phase": "document_approval",
+                "reason": "正在处理当前正文的确认请求。",
+            }
+        else:
+            phase = self.resolve_write_phase(
+                chapter_id,
+                outline=chat_context.get("writing_outline"),
+                agent_action=agent_action["action"],
+            )
         phase["agent_action"] = agent_action
         chat_context["authority"] = phase
         document_write_requested = (
@@ -954,7 +1036,7 @@ class ChapterChatService:
             "inspect_ids": [],
             "reason": "正文写作阶段不重复执行提纲分析。",
             "views": [],
-        } if document_write_requested else self._resolve_inspections(
+        } if (document_write_requested or document_approval_action) else self._resolve_inspections(
             chapter_id=chapter_id,
             outline_context=outline_context or chat_context.get("document_outline_context"),
             task=text,
@@ -1036,6 +1118,7 @@ class ChapterChatService:
             "message": str(phase.get("reason") or ""),
             "agent_action": agent_action,
             "document_write_requested": document_write_requested,
+            "document_approval_requested": document_approval_requested,
         }
         # delegate review: LLM 深度审核 + 定向修改循环
         if phase.get("review_status") == "pending_delegate":
@@ -1151,7 +1234,22 @@ class ChapterChatService:
             agent_action["action"] in {"write_document", "confirm_outline"}
             and str(phase.get("write_phase") or "") == "write_body"
         )
-        if document_write_requested:
+        if document_approval_action:
+            if document_approval_requested:
+                answer = "正在确认当前正文，完成后会自动更新章节状态。"
+            elif head_revision <= 0:
+                answer = "当前没有可确认的正文草稿，请先在对话中生成正文。"
+            else:
+                answer = "当前正文已经确认，无需重复确认。"
+            content_parts.append(answer)
+            yield {
+                "type": "content_delta",
+                "chapter_id": safe_id,
+                "delta": answer,
+                "content_kind": "status",
+            }
+            messages = None
+        elif document_write_requested:
             answer = _DOCUMENT_WRITE_NOTICE
             content_parts.append(answer)
             yield {
@@ -1246,6 +1344,7 @@ class ChapterChatService:
             "assistant_turn": assistant_record,
             "turns": self.load_history(chapter_id, limit=HISTORY_TAIL),
             "document_write_requested": document_write_requested,
+            "document_approval_requested": document_approval_requested,
             "agent_action": agent_action,
         }
 
@@ -1689,6 +1788,7 @@ def _normalize_chapter_action(value: Any) -> str:
         "write_document",
         "prepare_outline",
         "confirm_outline",
+        "approve_document",
         "respond_only",
         "reject_outline",
     }:
@@ -1728,11 +1828,13 @@ def _decide_chapter_action(
                 "Choose confirm_outline only when the user is explicitly approving the outline that was "
                 "shown in the immediately preceding dialogue; a request to start writing is not itself "
                 "outline approval when no outline has been shown. "
+                "Choose approve_document only when the user explicitly approves, confirms, finalizes, "
+                "or accepts the current body draft as the formal chapter. Distinguish this from outline approval. "
                 "Choose respond_only only for an explicit question, explanation, status check, "
                 "assessment, or outline discussion that requests no document change. "
                 "Choose reject_outline only when the user rejects the proposed outline and wants it reconsidered. "
                 "The action may not expand chapter_scope. Return one JSON object only: "
-                '{"action":"write_document|prepare_outline|confirm_outline|respond_only|reject_outline","reason":"brief semantic reason",'
+                '{"action":"write_document|prepare_outline|confirm_outline|approve_document|respond_only|reject_outline","reason":"brief semantic reason",'
                 '"writing_instruction":"the user request preserved for the writer"}.'
             ),
         },
@@ -1743,6 +1845,12 @@ def _decide_chapter_action(
                     "chapter_scope": scope,
                     "authority": chat_context.get("authority") or {},
                     "has_current_draft": bool(chat_context.get("draft_preview")),
+                    "head_content_revision": int(
+                        chat_context.get("head_content_revision") or 0
+                    ),
+                    "formal_content_revision": int(
+                        chat_context.get("formal_content_revision") or 0
+                    ),
                     "recent_dialogue": recent,
                     "user_message": user_message,
                 },

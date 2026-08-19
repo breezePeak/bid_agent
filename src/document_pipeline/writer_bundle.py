@@ -513,7 +513,7 @@ class WriterInputBundleAssembler:
                         context_head.get("context_revision") or 0
                     ),
                     chapter_context_hash=chapter_context_hash(
-                        unit_id,
+                        target_chapter_id,
                         int(context_head.get("context_revision") or 0),
                         context_head.get("items") or [],
                     ),

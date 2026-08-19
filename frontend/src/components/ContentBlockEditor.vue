@@ -35,8 +35,22 @@
       </div>
     </div>
 
+    <section v-if="streaming" class="streaming-document" role="status" aria-live="polite">
+      <div class="streaming-document-header">
+        <span class="streaming-document-mark" aria-hidden="true" />
+        <strong>正在写入正文</strong>
+        <span>已生成 {{ streamText.length }} 字</span>
+      </div>
+      <p v-if="!streamParagraphs.length" class="streaming-document-placeholder">
+        正在根据已确认提纲组织正文，内容生成后会实时显示在这里。
+      </p>
+      <div v-else class="streaming-document-body">
+        <p v-for="(paragraph, index) in streamParagraphs" :key="index">{{ paragraph }}</p>
+      </div>
+    </section>
+
     <!-- 正文空状态 -->
-    <div v-if="!localBlocks.length" class="word-empty-state">
+    <div v-if="!localBlocks.length && !streaming" class="word-empty-state">
       <p>当前章节暂无正文内容</p>
       <button type="button" class="word-btn word-btn-secondary" :disabled="readonly || busy" @click="addParagraph">
         + 手动新增第一段
@@ -136,6 +150,8 @@ const props = defineProps({
   blocks: { type: Array, default: () => [] },
   readonly: { type: Boolean, default: false },
   busy: { type: Boolean, default: false },
+  streaming: { type: Boolean, default: false },
+  streamText: { type: String, default: '' },
   remoteHint: { type: String, default: '' },
 })
 const emit = defineEmits(['save'])
@@ -150,6 +166,10 @@ const textareaRefs = new Map()
 const totalChars = computed(() => {
   return localBlocks.value.reduce((acc, block) => acc + (block.content ? block.content.length : 0), 0)
 })
+const streamParagraphs = computed(() => String(props.streamText || '')
+  .split(/\n{2,}/)
+  .map(item => item.trim())
+  .filter(Boolean))
 
 function setBlockRef(id, el) {
   if (el) {
@@ -386,6 +406,46 @@ defineExpose({
   margin-left: 4px;
 }
 
+.streaming-document {
+  margin-bottom: 18px;
+  padding: 16px 18px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #1e293b;
+}
+.streaming-document-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  color: #1d4ed8;
+  font-family: "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+}
+.streaming-document-header span:last-child { margin-left: auto; color: #64748b; font-weight: 400; }
+.streaming-document-mark {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #2563eb;
+  animation: streaming-document-pulse 1.2s ease-in-out infinite;
+}
+.streaming-document-placeholder { margin: 0; color: #64748b; font-size: 14px; }
+.streaming-document-body p {
+  margin: 0 0 10px;
+  font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", "STSong", serif;
+  font-size: 16px;
+  line-height: 1.85;
+  text-indent: 2em;
+  text-align: justify;
+}
+.streaming-document-body p:last-child { margin-bottom: 0; }
+@keyframes streaming-document-pulse {
+  50% { opacity: 0.35; transform: scale(0.8); }
+}
+
 /* 正文空状态 */
 .word-empty-state {
   text-align: center;
@@ -564,4 +624,3 @@ defineExpose({
   background: #eff6ff;
 }
 </style>
-

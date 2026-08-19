@@ -16,5 +16,9 @@ test('ChapterWorkbenchView script and template parse without a frontend build', 
   assert.ok(parsed.descriptor.template)
   assert.ok(parsed.descriptor.scriptSetup)
   assert.doesNotThrow(() => compileScript(parsed.descriptor, { id: 'chapter-workbench' }))
+  assert.doesNotMatch(source, />生成草稿</)
+  assert.doesNotMatch(source, />H2 确认</)
+  assert.doesNotMatch(source, />确认提纲，开始写</)
+  assert.doesNotMatch(source, />退回重列</)
+  assert.match(source, /document_approval_requested/)
 })
-

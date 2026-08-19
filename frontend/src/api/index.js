@@ -251,6 +251,13 @@ export function saveChapterChatTurn(runId, chapterId, payload) {
   return api.put(v3WorkspacePath(runId, `chapters/${id}/chat/history`), payload || {})
 }
 
+/** Persist a new Agent execution record in the chapter conversation. */
+export function appendChapterChatTurn(runId, chapterId, payload) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.post(v3WorkspacePath(runId, `chapters/${id}/chat/history`), payload || {})
+}
+
 /** Permanently delete one persisted chapter-chat turn. */
 export function deleteChapterChatTurn(runId, chapterId, payload) {
   const id = encodeURIComponent(String(chapterId || '').trim())

@@ -192,23 +192,6 @@
           </div>
         </div>
         <div class="doc-actions">
-          <button
-            type="button"
-            class="btn btn-primary"
-            :disabled="busy || !selectedId || !selectedIsLeaf"
-            :title="selectedIsLeaf ? '生成当前叶子章节正文' : '目录父节点只保留标题，不生成正文'"
-            @click="generateDraft"
-          >
-            {{ busyAction === 'draft' ? '生成中…' : (selectedIsLeaf ? '生成草稿' : '目录节点') }}
-          </button>
-          <button
-            type="button"
-            class="btn"
-            :disabled="busy || !canApprove"
-            @click="approveHead"
-          >
-            H2 确认
-          </button>
           <button type="button" class="btn btn-sm" :disabled="busy || !selectedId" @click="showRevisions = true">
             版本
           </button>
@@ -583,7 +566,7 @@
                 </div>
                 <div class="chat-divider" />
                 <details
-                  v-if="turn.thinking || (turn.streaming && !turn.content)"
+                  v-if="turn.thinking || turn.researchSteps?.length || (turn.streaming && !turn.content)"
                   class="chat-thinking-details"
                   :open="Boolean(turn.thinking)"
                 >
@@ -607,6 +590,26 @@
                     @focus="onChatTurnFocus(turn)"
                     @blur="onChatTurnBlur(turn, 'thinking', $event)"
                   >{{ turn.thinking }}</div>
+                  <section v-if="turn.researchSteps?.length" class="research-process" aria-label="公开资料搜索过程">
+                    <h4>公开资料搜索过程</h4>
+                    <ol>
+                      <li v-for="(step, stepIndex) in turn.researchSteps" :key="`${step.status}-${stepIndex}`">
+                        <strong>{{ researchStepLabel(step.status) }}</strong>
+                        <span>{{ step.message }}</span>
+                        <div v-if="step.queries?.length" class="research-queries">
+                          <span v-for="query in step.queries" :key="query">搜索词：{{ query }}</span>
+                        </div>
+                        <ul v-if="step.sources?.length" class="research-source-list">
+                          <li v-for="(source, sourceIndex) in step.sources" :key="source.source_url || source.url || sourceIndex">
+                            <a v-if="source.source_url || source.url" :href="source.source_url || source.url" target="_blank" rel="noopener noreferrer">
+                              {{ source.title || source.name || `来源 ${sourceIndex + 1}` }}
+                            </a>
+                            <span v-else>{{ source.title || source.name || `来源 ${sourceIndex + 1}` }}</span>
+                          </li>
+                        </ul>
+                      </li>
+                    </ol>
+                  </section>
                 </details>
 
                 <div
@@ -621,10 +624,6 @@
               </div>
             </template>
           </article>
-          <div v-if="chatAuthority.review_status === 'pending' && chatAuthority.mode === 'human_review'" class="chat-review-actions">
-            <button type="button" class="btn btn-primary" :disabled="asking" @click="confirmChapterOutline">确认提纲，开始写</button>
-            <button type="button" class="btn" :disabled="asking" @click="rejectChapterOutline">退回重列</button>
-          </div>
         </div>
         <div class="chat-compose">
           <textarea
@@ -709,6 +708,7 @@ import {
   streamChapterDraft,
   streamChapterChat,
   saveChapterChatTurn,
+  appendChapterChatTurn,
   deleteChapterChatTurn,
   saveChapterChatAuthority,
   subscribeV3Workspace,
@@ -1111,15 +1111,6 @@ const materializedCount = computed(() =>
 const formalCount = computed(() =>
   items.value.filter(item => Number(item.formal_content_revision || 0) > 0).length,
 )
-const canApprove = computed(() => {
-  const head = Number(chapterDetail.value?.head_content_revision || 0)
-  const formal = Number(chapterDetail.value?.formal_content_revision || 0)
-  return selectedIsLeaf.value
-    && Boolean(chapterDetail.value)
-    && head > 0
-    && head !== formal
-})
-
 const treeItems = computed(() => {
   const byId = new Map(items.value.map(item => [item.chapter_id, item]))
   const childrenByParent = new Map()
@@ -1441,12 +1432,18 @@ function shortStatus(item) {
 function statusClass(item) {
   if (!item) return ''
   if (item.status === 'archived') return 'archived'
+  if (item.approval_status === 'approved' || Number(item.formal_content_revision || 0) > 0) return 'ok'
+  if (Number(item.head_content_revision || 0) > 0) return 'draft'
   // 工作台初始化会自动物化章节；“已开”不是批量编写状态，不能显示为蓝色。
   // 只有当前批量任务的状态才覆盖默认灰色圆点。
+  if (item.materialized || item.status === 'active') return 'ready'
   return 'projected'
 }
 
 function batchChapterStatusClass(item) {
+  if (item?.approval_status === 'approved' || Number(item?.formal_content_revision || 0) > 0) {
+    return ''
+  }
   const status = String(batchJobItems.value.find(candidate => (
     candidate.chapter_id === item?.chapter_id
   ))?.status || '')
@@ -1677,11 +1674,13 @@ async function runCommand(kind, payload, successText = '', action = '') {
       if (rev.data?.ok) revisions.value = rev.data.revisions || []
     }
     actionMessage.value = successText || data.message || data.receipt?.message || '已完成'
+    return true
   } catch (e) {
     actionError.value = e?.response?.data?.message
       || e?.response?.data?.error?.message
       || e.message
       || String(e)
+    return false
   } finally {
     busy.value = false
     busyAction.value = ''
@@ -1749,20 +1748,24 @@ async function generateDraft(options = {}) {
     streaming: true,
     editing: false,
     started_at: draftStartedAt,
+    researchSteps: [],
   }
   startStreamingTimer()
   chatTurns.value = [...chatTurns.value, draftTurn]
   rememberChapterChat(chapterId, chatTurns.value)
   await scrollChatToBottom()
   const patchDraftTurn = (mutator) => {
-    if (selectedId.value !== chapterId) return
-    chatTurns.value = chatTurns.value.map((turn) => {
+    const source = selectedId.value === chapterId
+      ? chatTurns.value
+      : (chatByChapter.get(chapterId) || [])
+    const next = source.map((turn) => {
       if (turn.id !== draftTurnId) return turn
       const copy = { ...turn }
       mutator(copy)
       return copy
     })
-    rememberChapterChat(chapterId, chatTurns.value)
+    rememberChapterChat(chapterId, next)
+    if (selectedId.value === chapterId) chatTurns.value = next
   }
   let streamCompleted = false
   let completedChapter = null
@@ -1798,7 +1801,7 @@ async function generateDraft(options = {}) {
         if (type === 'meta') {
           streamOperationId.value = String(event.operation_id || event?.data?.operation_id || operationId)
         } else if (type === 'thinking_step') {
-          const note = String(event.message || event?.data?.message || '').trim()
+          const note = normalizeAgentMessage(event.message || event?.data?.message || '')
           if (!note) return
           patchDraftTurn((turn) => {
             turn.thinking = turn.thinking ? `${turn.thinking}\n${note}` : note
@@ -1808,12 +1811,21 @@ async function generateDraft(options = {}) {
           scrollChatToBottom()
         } else if (type === 'research') {
           const payload = event?.data && typeof event.data === 'object' ? event.data : event
-          const note = String(payload.message || '正在检索公开资料…').trim()
+          const note = normalizeAgentMessage(payload.message || '正在检索公开资料…')
           researchStatus.value = note
           researchSources.value = Array.isArray(payload.sources) ? payload.sources : []
           if (note) {
             patchDraftTurn((turn) => {
               turn.thinking = turn.thinking ? `${turn.thinking}\n${note}` : note
+              turn.researchSteps = [
+                ...(turn.researchSteps || []),
+                {
+                  status: String(payload.status || 'processing'),
+                  message: note,
+                  queries: Array.isArray(payload.queries) ? payload.queries.filter(Boolean) : [],
+                  sources: Array.isArray(payload.sources) ? payload.sources : [],
+                },
+              ]
               turn.thinkingOpen = true
               turn.streaming = true
             })
@@ -1852,8 +1864,8 @@ async function generateDraft(options = {}) {
             applyChatAuthority(payload.authority || { mode: 'human_review', review_status: 'pending' })
             chatInput.value = chatInput.value || '先列出本章要写的内容'
           }
-            const detail = reason ? `${message}（${reason}）` : message
-            const error = new Error(code ? `${detail} [${code}]` : detail)
+            const detail = draftUserErrorMessage(code, message, reason)
+            const error = new Error(detail)
             error.code = code
             error.details = payload?.details || {}
             throw error
@@ -1904,20 +1916,26 @@ async function generateDraft(options = {}) {
       streamingDraft.value = false
       busy.value = false
       busyAction.value = ''
-      patchDraftTurn((turn) => {
-        turn.streaming = false
-        turn.elapsed_seconds = Math.max(1, Math.round((Date.now() - draftStartedAt) / 1000))
-        if (turn.content) return
-        if (controller.signal.aborted) {
-          turn.content = '草稿生成已中断。思考过程保留在本条对话中。'
-        } else if (actionError.value) {
-          turn.content = `草稿未完成：${actionError.value}`
-        } else if (turn.thinking) {
-          turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
-        }
-      })
-      stopStreamingTimer()
     }
+    patchDraftTurn((turn) => {
+      turn.streaming = false
+      turn.elapsed_seconds = Math.max(1, Math.round((Date.now() - draftStartedAt) / 1000))
+      if (turn.content) return
+      if (controller.signal.aborted) {
+        turn.content = '草稿生成已中断。思考过程保留在本条对话中。'
+      } else if (actionError.value) {
+        turn.content = `草稿未完成：${actionError.value}`
+      } else if (turn.thinking) {
+        turn.content = '已生成本章草稿。思考过程见上方，正文已写入中间文档。'
+      }
+    })
+    await persistDraftTurn(
+      chapterId,
+      draftTurnId,
+      streamOperationId.value || operationId,
+      streamCompleted ? 'succeeded' : (controller.signal.aborted ? 'interrupted' : 'failed'),
+    )
+    stopStreamingTimer()
   }
 }
 
@@ -1948,14 +1966,14 @@ function onApproveRevision(item) {
     expected_chapter_revision: Number(chapterDetail.value?.chapter_revision || 0),
     content_revision: Number(item.content_revision),
     content_hash: item.content_hash,
-  }, `H2 已确认 r${item.content_revision}`)
+  }, `正文已确认 r${item.content_revision}`)
 }
 
 function approveHead() {
   const content = chapterDetail.value?.content
   if (!content) {
-    actionError.value = '没有 head 正文可确认'
-    return
+    actionError.value = '当前没有可确认的正文草稿'
+    return false
   }
   return onApproveRevision(content)
 }
@@ -2012,15 +2030,66 @@ function mapChatTurns(turns) {
     id: String(turn.turn_id || `${turn.role || 'turn'}-${turn.created_at || index}-${index}`),
     turn_id: String(turn.turn_id || ''),
     role: turn.role === 'user' ? 'user' : 'assistant',
-    content: String(turn.content || ''),
-    thinking: String(turn.thinking || ''),
+    content: normalizeDisplayedText(turn.content),
+    thinking: normalizeDisplayedText(turn.thinking),
     thinkingOpen: true,
     streaming: false,
     editing: false,
     created_at: turn.created_at || '',
     duration: turn.duration || '',
     elapsed_seconds: turn.elapsed_seconds != null ? Number(turn.elapsed_seconds) : null,
+    researchSteps: Array.isArray(turn.researchSteps)
+      ? turn.researchSteps
+      : (Array.isArray(turn.research_steps) ? turn.research_steps : []),
+    operation_id: String(turn.operation_id || ''),
+    status: String(turn.status || ''),
   }))
+}
+
+function normalizeAgentMessage(message) {
+  const text = String(message || '').trim()
+  if (/^queued\s*:/i.test(text)) return text.replace(/^queued\s*:/i, '已进入编写队列：')
+  return text
+}
+
+function normalizeDisplayedText(value) {
+  const text = normalizeAgentMessage(value)
+  if (text.includes('G4_CONTENT_TOO_SHORT_OR_HOLLOW')) {
+    return '草稿未完成：本次生成的正文过短或缺少实质内容，已停止写入。请补充本章写作要点后重试。'
+  }
+  if (text.includes('CHAPTER_WRITE_REQUEST_INVALID')) {
+    return '草稿未完成：正文生成请求未通过校验，请检查本章提纲和上下文后重试。'
+  }
+  const sanitized = text
+    .replace(/\[[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\]/g, '')
+    .replace(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g, '')
+    .replace(/^\s*[:：-]\s*/, '')
+    .trim()
+  return sanitized || (text ? '操作未完成，请重试。' : '')
+}
+
+function researchStepLabel(status) {
+  return ({
+    required: '需要搜索',
+    not_required: '无需搜索',
+    searching: '正在搜索',
+    published: '搜索完成',
+    skipped: '已跳过搜索',
+    failed: '搜索失败',
+    processing: '正在处理',
+  })[String(status || '')] || '搜索进度'
+}
+
+function draftUserErrorMessage(code, message, reason) {
+  const raw = `${message || ''} ${reason || ''}`
+  if (raw.includes('G4_CONTENT_TOO_SHORT_OR_HOLLOW')) {
+    return '本次生成的正文过短或缺少实质内容，已停止写入草稿。请补充本章写作要点后重试。'
+  }
+  if (code === 'CHAPTER_WRITE_REQUEST_INVALID') {
+    return normalizeAgentMessage(message) || '正文生成请求未通过校验，请检查本章提纲和上下文后重试。'
+  }
+  const detail = reason ? `${message}（${reason}）` : message
+  return normalizeAgentMessage(detail || '正文生成失败，请重试。')
 }
 
 function formatTurnDuration(turn) {
@@ -2155,6 +2224,74 @@ function rememberChapterChat(chapterId, turns) {
   chatByChapter.set(chapterId, turns)
 }
 
+async function persistDraftTurn(chapterId, draftTurnId, operationId, status) {
+  const source = selectedId.value === chapterId
+    ? chatTurns.value
+    : (chatByChapter.get(chapterId) || [])
+  const turn = source.find(item => item.id === draftTurnId)
+  if (!turn || turn.turn_id) return
+  try {
+    const { data } = await appendChapterChatTurn(props.workspaceId, chapterId, {
+      role: 'assistant',
+      content: turn.content || '本次正文生成未留下结果。',
+      thinking: turn.thinking || '',
+      research_steps: Array.isArray(turn.researchSteps) ? turn.researchSteps : [],
+      elapsed_seconds: turn.elapsed_seconds ?? null,
+      operation_id: operationId,
+      status,
+    })
+    if (!data?.ok || !data.turn) return
+    const persisted = mapChatTurns([data.turn])[0]
+    const next = source.map(item => (
+      item.id === draftTurnId
+        ? { ...item, ...persisted, researchSteps: turn.researchSteps || [] }
+        : item
+    ))
+    rememberChapterChat(chapterId, next)
+    if (selectedId.value === chapterId) chatTurns.value = next
+  } catch (_) {
+    remoteHint.value = '本次执行现场未能保存；请勿刷新页面，并检查服务连接。'
+  }
+}
+
+async function appendChatOperationResult(chapterId, message) {
+  const source = selectedId.value === chapterId
+    ? chatTurns.value
+    : (chatByChapter.get(chapterId) || [])
+  let targetIndex = -1
+  for (let index = source.length - 1; index >= 0; index -= 1) {
+    if (source[index]?.role === 'assistant') {
+      targetIndex = index
+      break
+    }
+  }
+  if (targetIndex < 0) return
+  const target = source[targetIndex]
+  const content = [String(target.content || '').trim(), String(message || '').trim()]
+    .filter(Boolean)
+    .join('\n\n')
+  const next = source.map((turn, index) => (
+    index === targetIndex ? { ...turn, content, streaming: false } : turn
+  ))
+  rememberChapterChat(chapterId, next)
+  if (selectedId.value === chapterId) {
+    chatTurns.value = next
+    await scrollChatToBottom()
+  }
+  if (!target.turn_id) return
+  try {
+    await saveChapterChatTurn(props.workspaceId, chapterId, {
+      turn_id: target.turn_id,
+      created_at: target.created_at || '',
+      role: 'assistant',
+      content,
+      thinking: target.thinking || '',
+    })
+  } catch (_) {
+    // The operation result remains visible locally even if history persistence fails.
+  }
+}
+
 async function loadChapterChat(chapterId, { force = false } = {}) {
   const id = String(chapterId || '').trim()
   if (!id) {
@@ -2175,7 +2312,10 @@ async function loadChapterChat(chapterId, { force = false } = {}) {
     if (token !== chatLoadToken || selectedId.value !== id) return
     if (!data?.ok) throw new Error(data?.message || '加载本章对话失败')
     applyChatAuthority(data.authority)
-    const turns = mapChatTurns(data.turns)
+    const turns = mapChatTurns([
+      ...(Array.isArray(data.batch_turns) ? data.batch_turns : []),
+      ...(Array.isArray(data.turns) ? data.turns : []),
+    ])
     rememberChapterChat(id, turns)
     chatTurns.value = turns
     await nextTick()
@@ -2205,16 +2345,6 @@ async function setChatAuthority(mode) {
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
   }
-}
-
-async function confirmChapterOutline() {
-  chatInput.value = '确认以上提纲，立即开始写正文'
-  await sendChat()
-}
-
-async function rejectChapterOutline() {
-  chatInput.value = '不通过，请重列提纲'
-  await sendChat()
 }
 
 async function sendChat() {
@@ -2272,6 +2402,7 @@ async function sendChat() {
   try {
     let completedTurns = null
     let documentWriteRequested = false
+    let documentApprovalRequested = false
     await streamChapterChat(props.workspaceId, chapterId, text, {
       onEvent: async (event) => {
         const type = String(event?.type || '').toLowerCase()
@@ -2297,6 +2428,7 @@ async function sendChat() {
         } else if (type === 'authority') {
           applyChatAuthority(event)
           documentWriteRequested = documentWriteRequested || event.document_write_requested === true
+          documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
         } else if (type === 'thinking_delta') {
           const delta = String(event.delta || '')
           if (!delta) return
@@ -2316,6 +2448,7 @@ async function sendChat() {
           if (selectedId.value === chapterId) await scrollChatToBottom()
         } else if (type === 'done') {
           documentWriteRequested = documentWriteRequested || event.document_write_requested === true
+          documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
           const elapsedSec = Math.max(1, Math.round((Date.now() - startTime) / 1000))
           if (Array.isArray(event.turns) && event.turns.length) {
             completedTurns = mapChatTurns(event.turns)
@@ -2359,6 +2492,14 @@ async function sendChat() {
     }
     if (documentWriteRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
       await generateDraft({ instruction: text })
+    } else if (documentApprovalRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
+      const approved = await approveHead()
+      await appendChatOperationResult(
+        chapterId,
+        approved
+          ? '当前正文已确认，并已更新为正式版本。'
+          : `正文确认失败：${normalizeDisplayedText(actionError.value || '请刷新章节后重试。')}`,
+      )
     }
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
@@ -2877,11 +3018,6 @@ onUnmounted(() => {
   color: #1d4ed8;
   font-weight: 700;
 }
-.chat-review-actions {
-  display: flex;
-  gap: 8px;
-  padding: 4px 2px 8px;
-}
 .context-panel,
 .chat-panel {
   flex: 1;
@@ -3180,6 +3316,24 @@ onUnmounted(() => {
   border-radius: 8px;
   padding: 10px 14px;
 }
+.research-process {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid #dbeafe;
+  border-radius: 8px;
+  background: #f8fbff;
+  color: #334155;
+}
+.research-process h4 { margin: 0 0 8px; color: #1e3a8a; font-size: 12.5px; }
+.research-process ol { margin: 0; padding-left: 20px; }
+.research-process ol > li { margin: 0 0 8px; padding-left: 2px; }
+.research-process ol > li:last-child { margin-bottom: 0; }
+.research-process strong { display: block; margin-bottom: 2px; color: #1d4ed8; font-size: 12px; }
+.research-process span { display: block; font-size: 12px; line-height: 1.55; }
+.research-queries { margin-top: 4px; color: #475569; }
+.research-source-list { margin: 5px 0 0; padding-left: 16px; }
+.research-source-list li { margin: 2px 0; }
+.research-source-list a { color: #1d4ed8; overflow-wrap: anywhere; }
 .chat-content.agent-content {
   color: #1e293b;
   font-size: 14px;
