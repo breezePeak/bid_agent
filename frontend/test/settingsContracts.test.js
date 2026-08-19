@@ -5,6 +5,8 @@ import {
   llmModelFormFromApi,
   llmModelKeyIsReady,
   llmModelPayload,
+  researchSettingsFormFromApi,
+  researchSettingsPayload,
 } from '../src/api/settingsContracts.js'
 
 test('HTTP model data never hydrates a persisted API key into browser state', () => {
@@ -23,6 +25,22 @@ test('HTTP model data never hydrates a persisted API key into browser state', ()
   assert.equal(form.has_stored_api_key, true)
   assert.equal(llmModelKeyIsReady(form, { isNew: false }), true)
   assert.equal(llmModelKeyIsReady(form, { isNew: true }), false)
+})
+
+test('Tavily secret is never hydrated and runtime metadata is not submitted', () => {
+  const form = researchSettingsFormFromApi({
+    research_provider: 'tavily',
+    tavily_api_key: 'must-not-enter-browser-state',
+    has_tavily_api_key: true,
+    tavily_runtime_status: { ready: true },
+  })
+  assert.equal(form.tavily_api_key, '')
+  assert.equal(form.has_tavily_api_key, true)
+  form.tavily_api_key = 'new-secret'
+  const payload = researchSettingsPayload(form)
+  assert.equal(payload.tavily_api_key, 'new-secret')
+  assert.equal(Object.hasOwn(payload, 'has_tavily_api_key'), false)
+  assert.equal(Object.hasOwn(payload, 'tavily_runtime_status'), false)
 })
 
 test('blank key preserves an existing credential but is invalid for a new model', () => {

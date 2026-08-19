@@ -333,6 +333,72 @@ class ChapterChatServiceTests(unittest.TestCase):
             self.assertIn("本章写作提纲", third["reply"])
             self.assertEqual(chat.load_authority("ch-a")["review_status"], "pending")
 
+    def test_human_review_accepts_body_write_request_after_outline_is_shown(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat = ChapterChatService(context)
+            chat.set_authority(mode="human_review", chapter_id="ch-a")
+            with mock.patch(
+                "document_pipeline.chapter_chat._decide_chapter_action",
+                side_effect=[
+                    {"action": "prepare_outline", "reason": "review", "writing_instruction": ""},
+                    {"action": "write_document", "reason": "proceed", "writing_instruction": "写正文"},
+                ],
+            ):
+                first = chat.answer("ch-a", "先列提纲", chapter=chapter)
+                second = chat.answer("ch-a", "写正文", chapter=chapter)
+
+            self.assertIn("本章写作提纲", first["reply"])
+            self.assertTrue(second["document_write_requested"])
+            self.assertIn("中间文档", second["reply"])
+
+    def test_human_review_accepts_explicit_body_write_request_on_first_turn(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            chapter = ChapterWorkspaceService(context).get_chapter("ch-a")
+            chat = ChapterChatService(context)
+            chat.set_authority(mode="human_review", chapter_id="ch-a")
+            with mock.patch(
+                "document_pipeline.chapter_chat._decide_chapter_action",
+                return_value={
+                    "action": "write_document",
+                    "reason": "用户明确要求开始正文",
+                    "writing_instruction": "开始写正文",
+                },
+            ):
+                result = chat.answer("ch-a", "开始写正文", chapter=chapter)
+
+            self.assertTrue(result["document_write_requested"])
+            self.assertIn("中间文档", result["reply"])
+            self.assertEqual(chat.load_authority("ch-a")["review_status"], "approved")
+
+    def test_outline_review_displays_blueprint_writing_objectives_verbatim(self) -> None:
+        chat_context = {
+            "title": "工作目标",
+            "purpose": "明确项目拟实现的工作目标及其实施边界。",
+            "authority": {"mode": "human_review"},
+            "writing_outline": {
+                "writing_objectives": ["明确提出可实施、可检验的工作目标。"],
+                "blocks": [
+                    {
+                        "kind": "response",
+                        "heading": "工作目标",
+                        "must_answer": "明确界定拟实现的工作目标，并说明其可行性",
+                    }
+                ],
+            },
+        }
+
+        rendered = ChapterChatService.__new__(ChapterChatService).render_outline_review(chat_context)
+
+        self.assertIn("写作目标：\n1. 明确提出可实施、可检验的工作目标。", rendered)
+        self.assertIn("评分与内容覆盖要点", rendered)
+        self.assertIn("覆盖要求：明确界定拟实现的工作目标，并说明其可行性", rendered)
+        self.assertNotIn("核心问题：明确界定拟实现的工作目标，并说明其可行性", rendered)
+
     def test_legacy_phrase_router_is_deleted(self) -> None:
         source = (ROOT / "src/document_pipeline/chapter_chat.py").read_text(encoding="utf-8")
         self.assertNotIn("_DOCUMENT_WRITE_RE", source)

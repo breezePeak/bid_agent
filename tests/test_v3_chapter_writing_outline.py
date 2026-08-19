@@ -77,6 +77,36 @@ class ChapterWritingOutlineTests(unittest.TestCase):
         self.assertNotIn("满分条件", outline["blocks"][0]["must_answer"])
         self.assertEqual(outline["blocks"][0]["ownership"], "primary")
 
+    def test_keeps_blueprint_objectives_when_score_conditions_create_blocks(self) -> None:
+        objective = "明确提出可实施、可检验的工作目标。"
+        outline = compile_chapter_writing_outline(
+            {
+                "chapter_id": "goal",
+                "title": "工作目标",
+                "blueprint_node": {
+                    "purpose": "明确项目拟实现的工作目标及其实施边界。",
+                    "writing_objectives": [objective],
+                    "score_condition_ids": ["SC-GOAL"],
+                },
+            },
+            scoring_requirements=[
+                {
+                    "score_point_id": "SP-GOAL",
+                    "conditions": [
+                        {
+                            "condition_id": "SC-GOAL",
+                            "condition_role": "content",
+                            "subject": "工作目标",
+                            "response_intent": "明确界定拟实现的工作目标，并说明其可行性",
+                        }
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(outline["writing_objectives"], [objective])
+        self.assertEqual(outline["block_count"], 1)
+
     def test_falls_back_to_purpose_when_no_score_conditions(self) -> None:
         outline = compile_chapter_writing_outline(
             {

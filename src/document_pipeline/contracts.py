@@ -717,6 +717,9 @@ class EvidenceBatch(ContractModel):
     items: list[EvidenceItem] = Field(default_factory=list)
     status: Literal["published", "gap", "failed"]
     error: str | None = None
+    # Non-authoritative summary of the append-only Deep Research audit run.
+    # Optional so batches created before the policy remain readable.
+    research_run: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProjectModel(ContractModel):

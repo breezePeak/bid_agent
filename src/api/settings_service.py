@@ -42,8 +42,18 @@ FLOW_SETTING_SPECS: dict[str, tuple[str, int, int, int]] = {
     "llm_concurrency": ("BID_AGENT_LLM_CONCURRENCY", 8, 1, 32),
     "write_batch_retries": ("BID_AGENT_WRITE_BATCH_RETRIES", 5, 0, 20),
     "max_repair_rounds": ("AGENT_MAX_REPAIR_ROUNDS", 2, 0, 10),
+    "deep_research_max_supervisor_iterations": ("BID_AGENT_DEEP_RESEARCH_MAX_SUPERVISOR_ITERATIONS", 4, 1, 10),
+    "deep_research_max_research_units": ("BID_AGENT_DEEP_RESEARCH_MAX_RESEARCH_UNITS", 3, 1, 3),
+    "deep_research_max_search_calls": ("BID_AGENT_DEEP_RESEARCH_MAX_SEARCH_CALLS", 4, 1, 20),
+    "deep_research_max_tool_calls_per_unit": ("BID_AGENT_DEEP_RESEARCH_MAX_TOOL_CALLS_PER_UNIT", 6, 2, 20),
+    "deep_research_max_search_results": ("BID_AGENT_DEEP_RESEARCH_MAX_SEARCH_RESULTS", 8, 1, 20),
+    "deep_research_max_extract_urls_per_round": ("BID_AGENT_DEEP_RESEARCH_MAX_EXTRACT_URLS_PER_ROUND", 4, 1, 10),
+    "deep_research_max_total_extract_urls": ("BID_AGENT_DEEP_RESEARCH_MAX_TOTAL_EXTRACT_URLS", 12, 1, 30),
+    "deep_research_max_source_chars": ("BID_AGENT_DEEP_RESEARCH_MAX_SOURCE_CHARS", 60000, 1000, 200000),
+    "tavily_extract_timeout_seconds": ("BID_AGENT_TAVILY_EXTRACT_TIMEOUT_SECONDS", 30, 5, 120),
 }
 FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
+    "deep_research_enabled": ("BID_AGENT_DEEP_RESEARCH_ENABLED", True),
     "chapter_review_enabled": ("BID_AGENT_CHAPTER_REVIEW_ENABLED", True),
     "chapter_review_gate": ("CHAPTER_REVIEW_GATE", True),
     "global_review_gate": ("GLOBAL_REVIEW_GATE", True),
@@ -63,6 +73,11 @@ FLOW_CHOICE_SPECS: dict[str, tuple[str, str, tuple[str, ...]]] = {
         "doubao_web",
         ("doubao_web", "deepseek_web", "tavily", "disabled"),
     ),
+    "tavily_extract_depth": (
+        "BID_AGENT_TAVILY_EXTRACT_DEPTH",
+        "basic",
+        ("basic", "advanced"),
+    ),
 }
 RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
     dict.fromkeys(
@@ -71,6 +86,7 @@ RUNTIME_ENV_KEYS: tuple[str, ...] = tuple(
             *(key for key, _default, _low, _high in FLOW_SETTING_SPECS.values()),
             *(key for key, _default in FLOW_REVIEW_SPECS.values()),
             *(key for key, _default, _choices in FLOW_CHOICE_SPECS.values()),
+            "BID_AGENT_TAVILY_API_KEY",
         ]
     )
 )
@@ -576,6 +592,13 @@ class SettingsService:
         for alias, (key, default, choices) in FLOW_CHOICE_SPECS.items():
             raw = str(file_values[key] if key in file_values else os.environ.get(key, default)).strip().lower()
             result[alias] = raw if raw in choices else default
+        tavily_key = str(file_values.get("BID_AGENT_TAVILY_API_KEY") or os.environ.get("BID_AGENT_TAVILY_API_KEY", "")).strip()
+        result["has_tavily_api_key"] = bool(tavily_key)
+        result["tavily_runtime_status"] = {
+            "ready": bool(tavily_key),
+            "provider_id": "tavily",
+            "reason": "" if tavily_key else "TAVILY_API_KEY_MISSING",
+        }
         if not result["chapter_review_enabled"]:
             result["chapter_review_gate"] = False
             result["global_review_gate"] = False
@@ -626,6 +649,9 @@ class SettingsService:
                     for alias, (key, _default) in FLOW_REVIEW_SPECS.items()
                 }
             )
+            tavily_api_key = str(updates.get("tavily_api_key") or "").strip()
+            if tavily_api_key:
+                env_updates["BID_AGENT_TAVILY_API_KEY"] = tavily_api_key
             env_updates.update(
                 {
                     key: str(current[alias])
@@ -653,7 +679,8 @@ class SettingsService:
             )
             self._replace_env_locked(rendered)
             os.environ.update(env_updates)
-            return current
+            # Never return the persisted secret. Re-read only the public status.
+            return self.flow_settings()
 
     # Keep in sync with llm_client so mid-tier proxies behind Cloudflare do not
     # reject the settings probe with browser-signature bans (e.g. CF 1010).
