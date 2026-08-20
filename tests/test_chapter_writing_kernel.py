@@ -31,6 +31,7 @@ def _request(*, title: str, operation: str = "create") -> ChapterWritingRequest:
                 "title": title,
                 "purpose": "说明现状约束及开展工作的客观依据",
                 "writing_objectives": ["论证实际需求与实施条件"],
+                "target_size": 500,
             },
         },
         project_context={
@@ -62,6 +63,16 @@ def test_create_rewrite_and_repair_share_one_system_contract() -> None:
 
     assert len({item[0]["content"] for item in messages}) == 1
     assert [item[1]["content"] for item in messages]
+
+
+def test_writer_receives_target_size_and_substantive_body_rules() -> None:
+    spec = compile_chapter_writing_spec(_request(title="章节"))
+    messages = compile_chapter_writing_messages(spec)
+
+    assert spec.target_size == 500
+    assert '"target_size":500' in messages[1]["content"]
+    assert "submission-ready body text" in messages[0]["content"]
+    assert 'assert that an objective is "clear"' in messages[0]["content"]
 
 
 def test_scope_contract_is_the_same_boundary_without_runtime_chat_state() -> None:

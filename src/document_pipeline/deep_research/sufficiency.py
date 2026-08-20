@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import urllib.parse
-from collections import defaultdict
 
 from ..contracts import EvidenceNeed
+from .authority import classify_source_type, source_type_is_authoritative
 from .contracts import (
     ClaimAssessment,
     EvidenceSufficiencyReport,
@@ -13,22 +13,13 @@ from .contracts import (
 
 
 def _official(source: ExtractedWebSource) -> bool:
-    host = (urllib.parse.urlsplit(source.final_url).hostname or "").lower()
-    text = f"{source.title} {source.publisher}".lower()
-    return (
-        host.endswith(".gov.cn")
-        or host.endswith(".gov")
-        or host.endswith(".org.cn") and any(word in text for word in ("标准", "协会", "学会"))
-        or any(word in text for word in ("人民政府", "政府部门", "国家标准", "标准化管理委员会"))
-    )
+    from ..contracts import EvidenceSourceType
+
+    return classify_source_type(source.final_url) is EvidenceSourceType.OFFICIAL
 
 
 def _standard_or_academic(source: ExtractedWebSource) -> bool:
-    host = (urllib.parse.urlsplit(source.final_url).hostname or "").lower()
-    text = f"{source.title} {source.publisher}".lower()
-    return _official(source) or host.endswith(".edu.cn") or any(
-        word in text for word in ("标准", "规范", "规程", "学报", "大学", "研究院")
-    )
+    return source_type_is_authoritative(classify_source_type(source.final_url))
 
 
 class EvidenceSufficiencyGate:
@@ -48,6 +39,8 @@ class EvidenceSufficiencyGate:
         budget_exhausted: bool = False,
         provider_failed: bool = False,
         model_output_invalid: bool = False,
+        search_result_count: int | None = None,
+        extract_attempted: bool = False,
     ) -> EvidenceSufficiencyReport:
         support_by_claim = support_by_claim or {}
         conflict_claim_ids = conflict_claim_ids or set()
@@ -84,6 +77,7 @@ class EvidenceSufficiencyGate:
         missing = [item.claim_id for item in assessments if item.status == "missing"]
         weak = [item.claim_id for item in assessments if item.status == "weak"]
         conflict = [item.claim_id for item in assessments if item.status == "conflict"]
+        required_statuses = [item.status for item in required]
         if sufficient:
             reason = "sufficient"
         elif prohibited_claim_ids:
@@ -92,8 +86,14 @@ class EvidenceSufficiencyGate:
             reason = "model_output_invalid"
         elif provider_failed:
             reason = "provider_failed"
+        elif not sources and search_result_count == 0:
+            reason = "no_search_results"
+        elif not sources and extract_attempted:
+            reason = "extract_failed"
         elif not sources:
-            reason = "extract_failed" if support_by_claim else "no_relevant_sources"
+            reason = "no_relevant_sources"
+        elif required_statuses and not any(status == "satisfied" for status in required_statuses):
+            reason = "no_relevant_sources"
         elif budget_exhausted:
             reason = "budget_exhausted"
         else:

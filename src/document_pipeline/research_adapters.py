@@ -1206,14 +1206,9 @@ def _extract_sources(answer: str, links: list[tuple[str, str]]) -> list[tuple[st
 
 
 def _source_type(url: str) -> EvidenceSourceType:
-    host = (urllib.parse.urlparse(url).hostname or "").lower()
-    if host.endswith(".gov.cn") or host == "gov.cn":
-        return EvidenceSourceType.OFFICIAL
-    if host.endswith(".edu.cn") or host.endswith(".edu"):
-        return EvidenceSourceType.ACADEMIC
-    if "std.samr.gov.cn" in host or "standard" in host:
-        return EvidenceSourceType.STANDARD
-    return EvidenceSourceType.WEB
+    from .deep_research.authority import classify_source_type
+
+    return classify_source_type(url)
 
 
 def _find_visible_composer(page: object, *, provider_id: str):

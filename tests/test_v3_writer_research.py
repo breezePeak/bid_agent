@@ -51,9 +51,12 @@ def _bundle() -> WriterInputBundle:
         h1_receipt_id="receipt-1",
         blueprint_slice=[{"chapter_id": "CH-1", "title": "实施方案"}],
         requirement_excerpts=[
-            {"requirement_id": "REQ-1", "normalized_requirement": "系统实施、验收和质量控制"}
+            {"requirement_id": "REQ-1", "text": "系统实施、验收和质量控制", "normalized_requirement": "系统实施、验收和质量控制"}
         ],
-        document_target_constraints=[{"node_id": "CH-1", "title": "实施方案", "primary_requirement_ids": ["REQ-1"]}],
+        score_obligations=[{"score_point_id": "SP-1", "title": "实施方案完整性"}],
+        document_target_constraints=[{"node_id": "CH-1", "title": "实施方案", "purpose": "说明项目实施路径", "writing_objectives": ["形成可验收的实施计划"], "primary_requirement_ids": ["REQ-1"]}],
+        global_project_context={"project_scope": "建设、部署和验收范围"},
+        chapter_grounding_context={"writing_purpose": {"title": "实施方案", "purpose": "说明项目实施路径", "writing_objectives": ["形成可验收的实施计划"]}},
         prompt_version="test",
         model_config_hash="test",
     )
@@ -83,6 +86,15 @@ class WriterResearchTests(TestCase):
                 "published",
             )
 
+    def test_evidence_need_relevance_context_contains_frozen_chapter_inputs(self) -> None:
+        context = WriterResearchCoordinator._relevance_context(_bundle())
+        self.assertEqual(context["chapter_title"], "实施方案")
+        self.assertEqual(context["chapter_purpose"], "说明项目实施路径")
+        self.assertEqual(context["writing_objectives"], ["形成可验收的实施计划"])
+        self.assertEqual(context["tender_requirements"], ["系统实施、验收和质量控制"])
+        self.assertEqual(context["scoring_requirements"], ["实施方案完整性"])
+        self.assertEqual(context["project_scope"], "建设、部署和验收范围")
+
     def test_enterprise_only_chapter_skips_provider(self):
         with tempfile.TemporaryDirectory() as temporary:
             context = self._context(Path(temporary))
@@ -95,6 +107,7 @@ class WriterResearchTests(TestCase):
                         "requirement_excerpts": [
                             {
                                 "requirement_id": "REQ-1",
+                                "text": "企业资质和业绩",
                                 "normalized_requirement": "企业资质和业绩",
                             }
                         ],

@@ -377,6 +377,10 @@ class WriterInputBundleAssembler:
                     "target": item.writable_target,
                     "output_target": output_target,
                     "title": item.title,
+                    "purpose": blueprint_by_node[item.node_id].purpose,
+                    "writing_objectives": blueprint_by_node[
+                        item.node_id
+                    ].writing_objectives,
                     "primary_requirement_ids": blueprint_by_node[
                         item.node_id
                     ].requirement_ids,

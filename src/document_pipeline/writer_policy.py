@@ -14,8 +14,8 @@ from .document_planner import CONTENT_UNITS_PATH
 from .input_manifest import V3_ROOT
 
 
-WRITER_IMPLEMENTATION_VERSION = "v3.writer.leaf-chapters-only.v7"
-WRITER_PROMPT_VERSION = "v3.writer.leaf-chapters-only.prompt.v7"
+WRITER_IMPLEMENTATION_VERSION = "v3.chapter-agent.leaf-chapters.v9"
+WRITER_PROMPT_VERSION = "v3.chapter-agent.shared-dialogue.prompt.v9"
 RESEARCH_DECISION_POLICY_VERSION = "v3.writer.research.project-relevance.v5"
 CONTENT_QUALITY_POLICY_VERSION = "v3.writer.quality.no-rubric.v3"
 GLOBAL_GROUNDING_POLICY_VERSION = "v3.global-project-context.v1"

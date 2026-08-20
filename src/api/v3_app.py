@@ -1332,6 +1332,7 @@ async def chapter_chat_history_delete(
         service = ChapterChatService(context)
         if bool((body or {}).get("clear_all")):
             deleted_count = service.clear_history(chapter_id)
+            authority = service.load_authority(chapter_id)
         else:
             service.delete_turn(
                 chapter_id,
@@ -1340,11 +1341,13 @@ async def chapter_chat_history_delete(
                 role=str((body or {}).get("role") or ""),
             )
             deleted_count = 1
+            authority = None
         return JSONResponse(
             {
                 "ok": True,
                 "chapter_id": str(chapter.get("chapter_id") or chapter_id),
                 "deleted_count": deleted_count,
+                **({"authority": authority} if authority is not None else {}),
             }
         )
     except ControlPlaneError as exc:
@@ -1353,7 +1356,7 @@ async def chapter_chat_history_delete(
 
 def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
     """Load chapter-scoped chat inputs shared by turn and stream endpoints."""
-    from document_pipeline.chapter_chat import ChapterChatService
+    from document_pipeline.chapter_chat import ChapterAgentService
     from document_pipeline.chapter_workspace import ChapterWorkspaceService
 
     context = _context(workspace_id)
@@ -1411,7 +1414,7 @@ def _chapter_chat_runtime(workspace_id: str, chapter_id: str) -> dict[str, Any]:
     return {
         "context": context,
         "chapter": chapter,
-        "service": ChapterChatService(context),
+        "service": ChapterAgentService(context),
         "requirements": requirements,
         "scoring": scoring,
         "global_project_context": global_project_context,
@@ -1450,6 +1453,7 @@ async def chapter_chat_turn(
             sibling_context=runtime["sibling_context"],
             outline_context=runtime["outline_context"],
             writing_orientation=runtime["writing_orientation"],
+            actor=dict(_principal(request)),
         )
         snapshot_data = V3WorkspaceSnapshotBuilder(runtime["context"]).build()
         return JSONResponse(
@@ -1465,6 +1469,11 @@ async def chapter_chat_turn(
                 "document_approval_requested": bool(
                     result.get("document_approval_requested")
                 ),
+                "document_write_completed": bool(
+                    result.get("document_write_completed")
+                ),
+                "chapter": result.get("chapter"),
+                "content": result.get("content"),
                 "workspace_revision": snapshot_data.get("workspace_revision", 0),
             }
         )
@@ -1503,6 +1512,7 @@ async def chapter_chat_stream(
                 sibling_context=runtime["sibling_context"],
                 outline_context=runtime["outline_context"],
                 writing_orientation=runtime["writing_orientation"],
+                actor=dict(_principal(request)),
             ):
                 event_type = str(event.get("type") or "delta")
                 payload = {key: value for key, value in event.items() if key != "type"}
@@ -1518,12 +1528,36 @@ async def chapter_chat_stream(
                         payload["workspace_revision"] = 0
                 yield _ndjson_event(event_type, **payload)
         except ControlPlaneError as exc:
+            code = str(exc.code or "CHAPTER_CHAT_FAILED")
+            error_message = str(exc.message or "章节对话失败")
+            details = dict(exc.details or {})
+            if code == "WRITER_RESEARCH_ACTION_REQUIRED":
+                research = details.get("research") if isinstance(details.get("research"), dict) else {}
+                queries = research.get("queries") if isinstance(research.get("queries"), list) else []
+                candidate_count = sum(
+                    int(item.get("evidence_count") or 0)
+                    for item in queries
+                    if isinstance(item, dict)
+                )
+                errors = [
+                    str(item.get("error") or "").strip()
+                    for item in queries
+                    if isinstance(item, dict) and str(item.get("error") or "").strip()
+                ]
+                code = "CHAPTER_RESEARCH_CONFIRMATION_REQUIRED"
+                error_message = "公开资料检索未取得可用于写作的核验来源，请确认是否仅使用现有项目资料继续写作。"
+                details = {
+                    **details,
+                    "error": errors[0] if errors else str(research.get("decision_status") or exc.message),
+                    "candidate_count": candidate_count,
+                    "original_code": exc.code,
+                }
             yield _ndjson_event(
                 "error",
                 chapter_id=str(chapter_id or ""),
-                code=str(exc.code or "CHAPTER_CHAT_FAILED"),
-                message=str(exc.message or "章节对话失败"),
-                details=dict(exc.details or {}),
+                code=code,
+                message=error_message,
+                details=details,
             )
         except Exception as exc:
             yield _ndjson_event(
@@ -1614,12 +1648,36 @@ async def stream_chapter_draft(
                 event_type = str(payload.pop("type", "message"))
                 yield _ndjson_event(event_type, **payload)
         except ControlPlaneError as exc:
+            code = str(exc.code or "CHAPTER_WRITING_FAILED")
+            message = str(exc.message or "章节写作失败。")
+            details = dict(exc.details or {})
+            if code == "WRITER_RESEARCH_ACTION_REQUIRED":
+                research = details.get("research") if isinstance(details.get("research"), dict) else {}
+                queries = research.get("queries") if isinstance(research.get("queries"), list) else []
+                candidate_count = sum(
+                    int(item.get("evidence_count") or 0)
+                    for item in queries
+                    if isinstance(item, dict)
+                )
+                errors = [
+                    str(item.get("error") or "").strip()
+                    for item in queries
+                    if isinstance(item, dict) and str(item.get("error") or "").strip()
+                ]
+                code = "CHAPTER_RESEARCH_CONFIRMATION_REQUIRED"
+                message = "公开资料检索未取得可用于写作的核验来源，请确认是否仅使用现有项目资料继续写作。"
+                details = {
+                    **details,
+                    "error": errors[0] if errors else str(research.get("decision_status") or exc.message),
+                    "candidate_count": candidate_count,
+                    "original_code": exc.code,
+                }
             yield _ndjson_event(
                 "error",
                 chapter_id=normalized_chapter_id,
-                code=exc.code,
-                message=exc.message,
-                details=exc.details,
+                code=code,
+                message=message,
+                details=details,
             )
         except (TypeError, ValueError) as exc:
             raw_reason = str(exc).strip()

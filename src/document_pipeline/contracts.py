@@ -1409,6 +1409,10 @@ class WriterInputBundle(ContractModel):
     operation: Literal["create", "rewrite", "repair"] = "create"
     user_instruction: str = ""
     existing_content: str = ""
+    # Chapter Agent memory carried into its internal writing tool.  Assistant
+    # turns remain non-authoritative in the writing kernel; user turns preserve
+    # the chapter-local feedback that led to this write/rewrite action.
+    chapter_dialogue: list[dict[str, Any]] = Field(default_factory=list)
     overwrite_locked: bool = False
 
 

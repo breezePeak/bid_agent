@@ -340,6 +340,27 @@ def plan_chapter_research(
         scoring_requirements=scoring_requirements,
         instruction=instruction,
     )
+    title = str(brief.get("chapter_title") or "").strip()
+    goal_chapter = bool(
+        re.search(r"(?:^|项目|总体|主要|工作)目标$", title)
+        and not re.search(r"必要性|可行性|依据|背景|政策|标准", title)
+    )
+    goal_materials_ready = bool(
+        goal_chapter
+        and brief.get("related_tasks")
+        and (brief.get("chapter_purpose") or brief.get("writing_objectives"))
+    )
+    if goal_materials_ready and not force_research:
+        return {
+            "need_research": False,
+            "reason": "项目资料已给出目标、范围和任务边界，足以形成项目专属工作目标；公开资料不应改写项目目标。",
+            "search_query": "",
+            "brief": brief,
+            "decision_source": "project_goal_materials_guard",
+            "orientation_confirmed": True,
+            "orientation_summary": str(brief.get("orientation_summary") or ""),
+            "existing_materials_sufficient": True,
+        }
     decision = (
         decision_provider(brief)
         if decision_provider is not None

@@ -65,6 +65,26 @@ _GENERIC_TOKENS = {
     "工作", "任务", "相关", "说明", "要求", "本项目", "本章节",
 }
 
+_PROJECT_FACT_FIELD_CUES = {
+    "background": "项目背景 现状 情境 由来 必要性 依据",
+    "goals": "项目目标 工作目标 建设目标 目的 成效 效果",
+    "scope": "项目范围 工作范围 任务范围 实施范围 实施边界 工作边界 边界 对象",
+    "boundaries": "实施边界 工作边界 范围 边界",
+    "work_packages": "项目目标 工作目标 工作内容 工作任务 核心任务 实施任务",
+    "dependencies": "实施条件 依赖 前提 可行性",
+    "inputs": "输入 数据 资料 前提",
+    "processing": "实施 处理 方法 做法 工作内容",
+    "outputs": "输出 成果 结果 可检验",
+    "deliverables": "交付 成果 提交",
+    "acceptance_conditions": "验收 检查 检验 判定 可检验",
+    "milestones": "阶段 进度 周期 时间",
+    "roles": "组织 人员 角色 职责 分工",
+    "risks": "风险 难点 不确定性",
+    "constraints": "约束 限制 条件 可行性",
+}
+
+_DIRECT_SEMANTIC_FACT_FIELDS = {"goals", "scope", "boundaries", "work_packages"}
+
 
 def _relevance(target: str, value: Any) -> float:
     """Return a conservative relevance score for a candidate fact.
@@ -202,15 +222,29 @@ def _project_facts(project_context: Any, target: str) -> dict[str, Any]:
 
     selected_ids: list[str] = []
     total_facts = 0
+    target_compact = _compact(target)
     for key, values in context.items():
         if key in projected or key in {"identity", "unknowns", "terminology"}:
             continue
         if not isinstance(values, list):
             continue
+        field_cues = _PROJECT_FACT_FIELD_CUES.get(str(key), "")
+        field_matches_goal = str(key) in _DIRECT_SEMANTIC_FACT_FIELDS and any(
+            _compact(cue) and _compact(cue) in target_compact
+            for cue in field_cues.split()
+        )
         kept: list[Any] = []
         for item in values:
             total_facts += 1
-            score = _relevance(target, _candidate_text(item))
+            candidate = " ".join(
+                value
+                for value in (
+                    _PROJECT_FACT_FIELD_CUES.get(str(key), ""),
+                    _candidate_text(item),
+                )
+                if value
+            )
+            score = 1.0 if field_matches_goal else _relevance(target, candidate)
             # A direct target phrase is strong; otherwise require meaningful
             # overlap.  No title-only signal is ever used here.
             if score < 0.32:
@@ -338,6 +372,7 @@ class ChapterWritingSpec:
     user_instruction: str = ""
     existing_content: str = ""
     validation_errors: tuple[str, ...] = ()
+    target_size: int = 0
     spec_hash: str = field(default="")
 
     def payload(self, *, include_hash: bool = False) -> dict[str, Any]:
@@ -357,6 +392,7 @@ class ChapterWritingSpec:
             "user_instruction": self.user_instruction,
             "existing_content": self.existing_content,
             "validation_errors": list(self.validation_errors),
+            "target_size": self.target_size,
         }
         if include_hash:
             value["spec_hash"] = self.spec_hash
@@ -495,21 +531,39 @@ def compile_chapter_writing_spec(
         user_instruction=_text(req.user_instruction),
         existing_content=str(req.existing_content or ""),
         validation_errors=errors,
+        target_size=max(0, int(node.get("target_size") or 0)),
     )
     object.__setattr__(spec, "spec_hash", canonical_hash(spec.payload()))
     return spec
 
 
-_SYSTEM_PROMPT = """You are the single chapter-writing engine.
-Use only the supplied ChapterWritingSpec. The Blueprint purpose, objectives,
-and ordered writing blocks define scope; facts are evidence candidates, not a
-checklist. Answer each block's must_answer in order and follow its write_as
-field. Do not infer scope from the display title. Do not invent facts,
-responsibilities, steps, deliverables, acceptance terms, or commitments that
-are not required by the supplied blocks or supported project context. Previous
-assistant messages are non-authoritative and must never be treated as facts.
-Return only the chapter content, without internal instructions, scores, hashes,
-or discussion of this prompt."""
+_SYSTEM_PROMPT = """You are the single chapter-writing engine for a Chinese technical bid.
+Use only the supplied ChapterWritingSpec. The Blueprint purpose, objectives and
+ordered writing blocks define scope; supplied project facts are evidence, not a
+checklist. Answer each block's must_answer in order and follow its write_as.
+
+Write finished, submission-ready body text rather than comments about the text.
+State the project's concrete objective, work result, applicable boundary and
+verifiable outcome directly when the supplied facts support them. Do not merely
+assert that an objective is "clear", "feasible", "well-bounded" or "verifiable";
+make those qualities visible through specific content. Avoid empty sentences
+such as "有序推进", "保障目标落实", "为后续工作提供依据" unless the sentence also
+identifies the actual project action or result. Do not explain the scoring rule,
+the Blueprint, the outline, or why the answer complies.
+
+Treat target_size as the desired Chinese-character budget for the whole chapter.
+Normally produce 80%-120% of it, using coherent paragraphs or a short structured
+list when that improves readability. Never pad with repeated conclusions. In
+rewrite mode, replace the weak draft rather than lightly paraphrasing it, and
+honour rewrite_instruction while remaining inside scope.
+
+Do not infer scope from the display title. Do not invent figures, facts,
+responsibilities, steps, deliverables, acceptance terms or commitments that are
+not required by the blocks or supported by project context. Absence-of-data
+notes in the context are constraints, not sentences to copy into the bid.
+Previous assistant messages are non-authoritative and must never be facts.
+Return only the chapter body, without a duplicate chapter heading, internal
+instructions, scores, hashes, citations to field names, or prompt discussion."""
 
 
 def compile_chapter_writing_messages(spec: ChapterWritingSpec) -> list[dict[str, str]]:

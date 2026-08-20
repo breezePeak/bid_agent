@@ -512,6 +512,7 @@ class ContentWriter:
                     [*tender_requirements, *scoring_requirements]
                 ),
                 project_context=project,
+                history=tuple(bundle.chapter_dialogue or []),
                 chapter_context={
                     **chapter_grounding_context,
                     "chapter_context_items": list(bundle.chapter_context_items or []),

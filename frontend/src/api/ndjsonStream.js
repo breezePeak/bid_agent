@@ -7,7 +7,7 @@ export async function readNdjsonStream(response, onEvent = () => {}) {
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
 
-  const consume = (line) => {
+  const consume = async (line) => {
     let text = String(line || '').trim()
     if (!text || text.startsWith(':')) return
     if (text.startsWith('data:')) text = text.slice(5).trim()
@@ -21,7 +21,7 @@ export async function readNdjsonStream(response, onEvent = () => {}) {
       error.line = text
       throw error
     }
-    onEvent(event)
+    await onEvent(event)
   }
 
   try {
@@ -30,10 +30,10 @@ export async function readNdjsonStream(response, onEvent = () => {}) {
       buffer += decoder.decode(value || new Uint8Array(), { stream: !done })
       const lines = buffer.split(/\r?\n/)
       buffer = lines.pop() || ''
-      for (const line of lines) consume(line)
+      for (const line of lines) await consume(line)
       if (done) break
     }
-    if (buffer.trim()) consume(buffer)
+    if (buffer.trim()) await consume(buffer)
   } catch (cause) {
     await reader.cancel(cause).catch(() => {})
     throw cause

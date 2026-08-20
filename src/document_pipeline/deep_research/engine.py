@@ -11,6 +11,7 @@ from typing import Any, Protocol
 
 from ..contracts import EvidenceNeed, EvidenceSourceType
 from ..research_service import ResearchCandidate
+from .authority import classify_source_type
 from .config import DeepResearchConfig
 from .contracts import (
     DeepResearchRunResult,
@@ -228,9 +229,9 @@ class DeepResearchEngine:
             completion_reason=reason,
         )
         if _PROHIBITED_RE.search(f"{need.question}\n{json.dumps(need.relevance_context, ensure_ascii=False)}"):
-            return self._result(run_id, need, started, "prohibited", [], empty_report("prohibited_scope"), [], [], [], [], [], 0, 0, 0)
+            return self._result(run_id, need, started, "prohibited", [], empty_report("prohibited_scope"), [], [], [], [], [], 0, 0, 0, [], {}, set())
         if not self.config.enabled:
-            return self._result(run_id, need, started, "failed", [], empty_report("provider_failed"), [], [], [], [], [], 0, 0, 0)
+            return self._run_single_round(need, limit=limit, run_id=run_id, started=started)
         try:
             plan = self.actions.plan(
                 need,
@@ -238,8 +239,15 @@ class DeepResearchEngine:
                 max_units=self.config.max_research_units,
             )
         except (Exception,) as exc:
-            reason = "model_output_invalid" if isinstance(exc, (ModelOutputInvalid, ValueError)) else "provider_failed"
-            return self._result(run_id, need, started, "failed", [], empty_report(reason), [], [], [], [], [], 0, 0, 0)
+            # A planning-model/schema failure is not a research result.  Keep
+            # the user's explicit search request alive with one bounded
+            # search/extract round based on the already scoped EvidenceNeed.
+            return self._run_single_round(
+                need,
+                limit=limit,
+                run_id=run_id,
+                started=started,
+            )
         claims = plan.claims[:4]
         search_budget = min(need.query_budget, self.config.max_search_calls)
         tool_budget = self.config.max_tool_calls_per_unit * max(1, len(plan.research_units))
@@ -256,6 +264,8 @@ class DeepResearchEngine:
         conflicts: set[str] = set()
         provider_failed = False
         model_invalid = False
+        search_result_count = 0
+        extract_attempted = False
         while (
             iterations < self.config.max_supervisor_iterations
             and search_calls < search_budget
@@ -266,6 +276,8 @@ class DeepResearchEngine:
                 search_budget - search_calls,
                 tool_budget - search_calls - extract_calls,
             )
+            if iterations == 1 and remaining_search_calls > 1:
+                remaining_search_calls -= 1
             active_units = plan.research_units[:remaining_search_calls]
             search_tasks: list[tuple[str, list[ResearchClaim]]] = []
             try:
@@ -319,6 +331,7 @@ class DeepResearchEngine:
                     seen_hit_urls.add(hit.url)
                 if hit.url not in discovered_urls:
                     discovered_urls.append(hit.url)
+            search_result_count += len(unique_hits)
             remaining = self.config.max_total_extract_urls - len(extracted_urls)
             selectable = [hit for hit in unique_hits if hit.url not in extracted_urls]
             selected = self.actions.select_urls(
@@ -328,9 +341,10 @@ class DeepResearchEngine:
                 limit=min(remaining, self.config.max_extract_urls_per_round),
             )
             if selected and search_calls + extract_calls < tool_budget:
+                extract_calls += 1
+                extract_attempted = True
                 try:
                     extracted = self.tools.web_extract(selected)
-                    extract_calls += 1
                     rejected_urls.extend(extracted.rejected_urls)
                     for source in extracted.sources:
                         if source.final_url not in extracted_urls:
@@ -341,14 +355,15 @@ class DeepResearchEngine:
                         {"url": url, "reason": f"EXTRACT_FAILED:{type(exc).__name__}"}
                         for url in selected
                     )
-            try:
-                support_by_claim, conflicts = self.actions.assess_support(need, claims, sources)
-            except ModelOutputInvalid:
-                model_invalid = True
-                break
-            except Exception:
-                model_invalid = True
-                break
+            if sources:
+                try:
+                    support_by_claim, conflicts = self.actions.assess_support(need, claims, sources)
+                except ModelOutputInvalid:
+                    model_invalid = True
+                    break
+                except Exception:
+                    model_invalid = True
+                    break
             budget_exhausted = search_calls >= search_budget or iterations >= self.config.max_supervisor_iterations
             report = self.gate.assess(
                 need=need,
@@ -357,6 +372,8 @@ class DeepResearchEngine:
                 support_by_claim=support_by_claim,
                 conflict_claim_ids=conflicts,
                 budget_exhausted=budget_exhausted,
+                search_result_count=search_result_count,
+                extract_attempted=extract_attempted,
             )
             if report.sufficient:
                 break
@@ -370,6 +387,8 @@ class DeepResearchEngine:
                 budget_exhausted=True,
                 provider_failed=provider_failed,
                 model_output_invalid=model_invalid,
+                search_result_count=search_result_count,
+                extract_attempted=extract_attempted,
             )
         candidates = self._candidates(claims, sources, support_by_claim)
         status = "completed" if report.sufficient else ("partial" if candidates else "failed")
@@ -377,6 +396,83 @@ class DeepResearchEngine:
             run_id, need, started, status, candidates, report, claims,
             searched_queries, discovered_urls, extracted_urls, rejected_urls,
             search_calls, extract_calls, iterations,
+            sources, support_by_claim, conflicts,
+        )
+
+    def _run_single_round(
+        self,
+        need: EvidenceNeed,
+        *,
+        limit: int,
+        run_id: str,
+        started: datetime,
+    ) -> DeepResearchRunResult:
+        claim = ResearchClaim(
+            claim_id="C-SINGLE",
+            statement=need.question,
+            required=True,
+            claim_kind="method",
+            expected_source_types=["official", "standard", "academic", "web"],
+            minimum_support_rule="one_primary_source",
+        )
+        query = need.question
+        search_calls = 1
+        try:
+            hits = self.tools.web_search(query, limit=min(limit, self.config.max_search_results))
+        except Exception as exc:
+            report = self.gate.assess(
+                need=need,
+                claims=[claim],
+                sources=[],
+                provider_failed=True,
+                search_result_count=None,
+            )
+            return self._result(
+                run_id, need, started, "failed", [], report, [claim], [query], [], [],
+                [{"url": "", "reason": f"SEARCH_FAILED:{type(exc).__name__}"}],
+                search_calls, 0, 1, [], {}, set(),
+            )
+        discovered = list(dict.fromkeys(hit.url for hit in hits))
+        if not discovered:
+            report = self.gate.assess(
+                need=need,
+                claims=[claim],
+                sources=[],
+                budget_exhausted=True,
+                search_result_count=0,
+            )
+            return self._result(
+                run_id, need, started, "failed", [], report, [claim], [query], [], [], [],
+                search_calls, 0, 1, [], {}, set(),
+            )
+        selected = discovered[: min(self.config.max_extract_urls_per_round, self.config.max_total_extract_urls)]
+        extract_calls = 1
+        try:
+            extracted = self.tools.web_extract(selected)
+            sources = extracted.sources
+            rejected = extracted.rejected_urls
+        except Exception as exc:
+            sources = []
+            rejected = [
+                {"url": url, "reason": f"EXTRACT_FAILED:{type(exc).__name__}"}
+                for url in selected
+            ]
+        support = {claim.claim_id: [source.source_id for source in sources]} if sources else {}
+        report = self.gate.assess(
+            need=need,
+            claims=[claim],
+            sources=sources,
+            support_by_claim=support,
+            budget_exhausted=True,
+            search_result_count=len(hits),
+            extract_attempted=True,
+        )
+        candidates = self._candidates([claim], sources, support)
+        status = "completed" if report.sufficient else ("partial" if candidates else "failed")
+        return self._result(
+            run_id, need, started, status, candidates, report, [claim], [query], discovered,
+            [source.final_url for source in sources], rejected, search_calls, extract_calls, 1,
+            sources, support, set(),
         )
 
     @staticmethod
@@ -398,12 +494,7 @@ class DeepResearchEngine:
             if not supported:
                 continue
             kinds = {item.claim_kind for item in supported}
-            source_type = EvidenceSourceType.WEB
-            host = source.publisher.lower()
-            if host.endswith((".gov.cn", ".gov")):
-                source_type = EvidenceSourceType.OFFICIAL
-            elif any(kind in {"standard", "policy"} for kind in kinds):
-                source_type = EvidenceSourceType.STANDARD
+            source_type = classify_source_type(source.final_url)
             claim_types = ["method"]
             if kinds & {"policy", "standard"}:
                 claim_types.append("standard")
@@ -418,6 +509,8 @@ class DeepResearchEngine:
                     source_type=source_type,
                     claim_types=tuple(dict.fromkeys(claim_types)),
                     supporting_excerpt=source.raw_content[:800],
+                    source_id=source.source_id,
+                    supporting_claim_ids=tuple(item.claim_id for item in supported),
                 )
             )
         return candidates
@@ -438,6 +531,9 @@ class DeepResearchEngine:
         search_calls: int,
         extract_calls: int,
         iterations: int,
+        extracted_sources: list[ExtractedWebSource],
+        support_by_claim: dict[str, list[str]],
+        conflict_claim_ids: set[str],
     ) -> DeepResearchRunResult:
         return DeepResearchRunResult(
             run_id=run_id,
@@ -446,6 +542,9 @@ class DeepResearchEngine:
             candidates=candidates,
             sufficiency=report,
             claims=claims,
+            extracted_sources=extracted_sources,
+            support_by_claim=support_by_claim,
+            conflict_claim_ids=sorted(conflict_claim_ids),
             search_call_count=search_calls,
             extract_call_count=extract_calls,
             searched_queries=searched_queries,

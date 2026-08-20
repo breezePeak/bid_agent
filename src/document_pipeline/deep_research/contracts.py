@@ -78,6 +78,7 @@ class EvidenceSufficiencyReport(StrictModel):
         "sufficient",
         "budget_exhausted",
         "no_relevant_sources",
+        "no_search_results",
         "extract_failed",
         "prohibited_scope",
         "model_output_invalid",
@@ -123,6 +124,9 @@ class DeepResearchRunResult(StrictModel):
     candidates: list[ResearchCandidate] = Field(default_factory=list)
     sufficiency: EvidenceSufficiencyReport
     claims: list[ResearchClaim] = Field(default_factory=list, max_length=4)
+    extracted_sources: list[ExtractedWebSource] = Field(default_factory=list)
+    support_by_claim: dict[str, list[str]] = Field(default_factory=dict)
+    conflict_claim_ids: list[str] = Field(default_factory=list)
     search_call_count: int = Field(ge=0)
     extract_call_count: int = Field(ge=0)
     searched_queries: list[str] = Field(default_factory=list)

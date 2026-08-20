@@ -37,6 +37,24 @@ _SHARED_FACT_LABELS = {
     "服务期限": ("milestones", "constraints"),
 }
 
+_PROMPT_FIELD_CUES = {
+    "background": ("背景", "现状", "情境", "由来", "必要性", "依据"),
+    "goals": ("目标", "目的", "成效", "效果"),
+    "scope": ("范围", "边界", "对象"),
+    "boundaries": ("边界", "范围"),
+    "work_packages": ("工作内容", "工作任务", "核心任务", "实施任务"),
+    "dependencies": ("依赖", "前提", "实施条件", "可行性"),
+    "inputs": ("输入", "数据", "资料"),
+    "processing": ("实施", "处理", "方法", "做法"),
+    "outputs": ("输出", "成果", "结果", "可检验"),
+    "deliverables": ("交付", "成果", "提交"),
+    "acceptance_conditions": ("验收", "检查", "检验", "判定", "可检验"),
+    "milestones": ("阶段", "进度", "周期", "时间"),
+    "roles": ("组织", "人员", "职责", "分工"),
+    "risks": ("风险", "难点", "不确定"),
+    "constraints": ("约束", "限制", "条件", "可行性"),
+}
+
 
 def _identity_lookup(identity: dict[str, str], aliases: Iterable[str]) -> str:
     lowered = {str(key).casefold(): str(value) for key, value in identity.items()}
@@ -352,6 +370,17 @@ class GlobalProjectContextService:
             if key in global_context
         }
         projected["identity"] = projected_identity
+        # Keep the structured project facts whose declared semantic role is
+        # requested by the exact Blueprint goal.  The previous implementation
+        # projected only lexically matching confirmed_facts; an abstract goal
+        # such as “明确工作目标” therefore received little beyond the project
+        # name even when canonical goals and work scope were available.
+        for field, cues in _PROMPT_FIELD_CUES.items():
+            if not any(_compact(cue) in focus_compact for cue in cues):
+                continue
+            values = global_context.get(field)
+            if isinstance(values, list) and values:
+                projected[field] = list(values)
         focus_grams = _bigrams(focus_text)
         facts = global_context.get("confirmed_facts")
         facts = facts if isinstance(facts, list) else []

@@ -168,6 +168,28 @@ class GlobalProjectContextTests(unittest.TestCase):
         self.assertNotIn("constraints", projected)
         self.assertNotIn("purchaser", projected["identity"])
 
+    def test_prompt_projection_keeps_canonical_goal_facts_for_goal_writing(self) -> None:
+        projected = GlobalProjectContextService.prompt_projection(
+            {
+                "identity": {"project_name": "测试项目"},
+                "goals": ["完成成果核查与复核，保障成果符合统一技术标准。"],
+                "scope": ["覆盖全国县级调查区域。"],
+                "work_packages": ["开展内外业核查质量控制。"],
+                "confirmed_facts": [],
+            },
+            {},
+            purpose="明确项目工作目标及实施边界。",
+            writing_objectives=["提出可实施、可检验的工作目标。"],
+            scoring_requirements=[],
+        )
+
+        self.assertEqual(
+            projected["goals"],
+            ["完成成果核查与复核，保障成果符合统一技术标准。"],
+        )
+        self.assertEqual(projected["scope"], ["覆盖全国县级调查区域。"])
+        self.assertNotIn("work_packages", projected)
+
     def test_all_chapters_share_one_global_version_without_fact_copies(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             context = _workspace(Path(tmp))
