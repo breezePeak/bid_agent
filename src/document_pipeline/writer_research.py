@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import time
 import urllib.parse
 from datetime import UTC, datetime
@@ -27,6 +28,11 @@ _PROHIBITED_SCOPES = [
     "人员身份、履历、证书与社保",
     "报价、财务、承诺与投标函事实",
 ]
+_EXPLICIT_RESEARCH_RE = re.compile(
+    r"(?:查(?:资料|一下|一查)?|检索|搜索|联网|网上查|帮我找|查找|再搜|重搜|重新搜).{0,24}"
+    r"|(?:资料|政策|规范|标准|文件).{0,12}(?:查|检索|搜索|找)",
+    re.I,
+)
 
 
 def writer_research_enabled() -> bool:
@@ -109,6 +115,7 @@ class WriterResearchCoordinator:
         project_anchors, task_anchors = GlobalProjectContextService.research_anchors(
             bundle.global_project_context or bundle.project_context or {}
         )
+        relevance_context = self._relevance_context(bundle)
         for query in decision.queries:
             query.status = "researching"
             self._upsert(decision.model_dump(mode="json"))
@@ -127,6 +134,7 @@ class WriterResearchCoordinator:
                 query_budget=3,
                 project_anchors=project_anchors,
                 task_anchors=task_anchors,
+                relevance_context=relevance_context,
                 max_adopted_items=3,
             )
             started = time.perf_counter()
@@ -213,6 +221,10 @@ class WriterResearchCoordinator:
             writing_orientation=orientation,
             tender_requirements=requirements,
             scoring_requirements=list(bundle.score_obligations or []),
+            instruction=str(bundle.user_instruction or ""),
+            force_research=bool(
+                _EXPLICIT_RESEARCH_RE.search(str(bundle.user_instruction or ""))
+            ),
             decision_provider=provider,
         )
         search_query = str(planned.get("search_query") or "").strip()
@@ -242,6 +254,77 @@ class WriterResearchCoordinator:
             decision_status="planned" if needs_research else "skipped",
             created_at=datetime.now(UTC).isoformat(),
         )
+
+    @staticmethod
+    def _relevance_context(bundle: WriterInputBundle) -> dict[str, Any]:
+        targets = [
+            item
+            for item in bundle.document_target_constraints
+            if isinstance(item, dict) and str(item.get("content_policy") or "full") == "full"
+        ]
+        target = targets[0] if targets else {}
+        grounding = dict(bundle.chapter_grounding_context or {})
+        purpose = grounding.get("writing_purpose")
+        purpose = purpose if isinstance(purpose, dict) else {}
+        project = dict(bundle.global_project_context or bundle.project_context or {})
+
+        def statements(rows: list[dict[str, Any]], keys: tuple[str, ...]) -> list[str]:
+            values: list[str] = []
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                value = next(
+                    (str(row.get(key) or "").strip() for key in keys if row.get(key)),
+                    "",
+                )
+                if value and value not in values:
+                    values.append(value[:1000])
+            return values[:20]
+
+        objectives = list(
+            target.get("writing_objectives")
+            or purpose.get("writing_objectives")
+            or grounding.get("writing_objectives")
+            or []
+        )
+        project_scope = (
+            project.get("project_scope")
+            or project.get("scope")
+            or project.get("service_scope")
+            or project.get("summary")
+            or project.get("background")
+            or ""
+        )
+        return {
+            "chapter_title": str(target.get("title") or purpose.get("title") or "").strip(),
+            "chapter_purpose": str(target.get("purpose") or purpose.get("purpose") or "").strip(),
+            "writing_objectives": [
+                str(item).strip()[:500]
+                for item in objectives
+                if str(item).strip()
+            ][:20],
+            "tender_requirements": statements(
+                list(bundle.requirement_excerpts or []),
+                (
+                    "text",
+                    "normalized_requirement",
+                    "requirement_text",
+                    "title",
+                    "summary",
+                ),
+            ),
+            "scoring_requirements": statements(
+                list(bundle.score_obligations or []),
+                (
+                    "text",
+                    "response_expectation",
+                    "description",
+                    "title",
+                    "scoring_rule",
+                ),
+            ),
+            "project_scope": project_scope,
+        }
 
     @staticmethod
     def _deterministic_review(_need: EvidenceNeed, candidate: Any) -> dict[str, Any]:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -51,3 +52,13 @@ def test_project_fact_requires_current_project_anchor_and_conflict_blocks() -> N
     conflict = gate.assess(need=_need(), claims=[claim], sources=[similar], support_by_claim={"C1": ["S1"]}, conflict_claim_ids={"C1"}, budget_exhausted=True)
     assert conflict.sufficient is False
     assert conflict.conflict_claim_ids == ["C1"]
+
+
+def test_authority_uses_only_trusted_domains_not_page_titles() -> None:
+    claim = ResearchClaim(claim_id="C1", statement="政策要求", required=True, claim_kind="policy", expected_source_types=["official"], minimum_support_rule="one_authoritative_source")
+    spoofed = _source("S1", "https://ordinary-blog.example/a", "人民政府 国家标准 研究院", "政策正文" * 20)
+    report = EvidenceSufficiencyGate().assess(need=_need(), claims=[claim], sources=[spoofed], support_by_claim={"C1": ["S1"]})
+    assert report.claim_assessments[0].status == "weak"
+    with mock.patch.dict("os.environ", {"BID_AGENT_DEEP_RESEARCH_OFFICIAL_DOMAINS": "ordinary-blog.example"}, clear=False):
+        trusted = EvidenceSufficiencyGate().assess(need=_need(), claims=[claim], sources=[spoofed], support_by_claim={"C1": ["S1"]})
+    assert trusted.sufficient is True

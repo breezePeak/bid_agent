@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -15,8 +16,11 @@ from control_plane import WorkspaceContext  # noqa: E402
 from document_pipeline.contracts import EvidenceNeed, EvidenceSourceType  # noqa: E402
 from document_pipeline.research_service import ResearchCandidate, ResearchService  # noqa: E402
 from document_pipeline.deep_research.contracts import (  # noqa: E402
+    ClaimAssessment,
     DeepResearchRunResult,
     EvidenceSufficiencyReport,
+    ExtractedWebSource,
+    ResearchClaim,
 )
 
 
@@ -398,6 +402,77 @@ class V3ResearchServiceTests(unittest.TestCase):
             self.assertEqual(gap.status, "gap")
             self.assertTrue(gap.items)
             self.assertEqual(gap.research_run["completion_reason"], "budget_exhausted")
+
+    def test_candidate_gate_recomputes_required_claim_coverage(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            content_one = "官方政策一要求建立质量检查记录。"
+            content_two = "官方政策二要求完成验收复核。"
+
+            def source(source_id: str, url: str, title: str, content: str) -> ExtractedWebSource:
+                return ExtractedWebSource(
+                    source_id=source_id,
+                    requested_url=url,
+                    final_url=url,
+                    title=title,
+                    publisher="政府部门",
+                    raw_content=content,
+                    content_hash=hashlib.sha256(content.encode()).hexdigest(),
+                    content_type="text/markdown",
+                    extraction_provider="fake",
+                    extracted_at="2026-08-19T00:00:00+00:00",
+                )
+
+            sources = [
+                source("S1", "https://one.gov.cn/policy", "政策一", content_one),
+                source("S2", "https://two.gov.cn/policy", "政策二", content_two),
+            ]
+            claims = [
+                ResearchClaim(claim_id="C1", statement="质量检查", required=True, claim_kind="policy", expected_source_types=["official"], minimum_support_rule="one_authoritative_source"),
+                ResearchClaim(claim_id="C2", statement="验收复核", required=True, claim_kind="policy", expected_source_types=["official"], minimum_support_rule="one_authoritative_source"),
+            ]
+            candidates = [
+                ResearchCandidate(title="政策一", publisher="one.gov.cn", content=content_one, source_url="https://one.gov.cn/policy", source_id="S1", supporting_claim_ids=("C1",)),
+                ResearchCandidate(title="政策二", publisher="two.gov.cn", content=content_two, source_url="https://two.gov.cn/policy", source_id="S2", supporting_claim_ids=("C2",)),
+            ]
+
+            class Provider:
+                provider_id = "deep-test"
+                cache_fingerprint = "deep-filter-v1"
+
+                def research_need(self, need, *, limit):
+                    return DeepResearchRunResult(
+                        run_id=f"DR-{'b' * 32}", need_id=need.need_id, status="completed",
+                        candidates=candidates,
+                        sufficiency=EvidenceSufficiencyReport(
+                            sufficient=True,
+                            claim_assessments=[
+                                ClaimAssessment(claim_id="C1", status="satisfied", supporting_source_ids=["S1"], explanation="ok"),
+                                ClaimAssessment(claim_id="C2", status="satisfied", supporting_source_ids=["S2"], explanation="ok"),
+                            ],
+                            missing_claim_ids=[], weak_claim_ids=[], conflict_claim_ids=[], completion_reason="sufficient",
+                        ),
+                        claims=claims, extracted_sources=sources,
+                        support_by_claim={"C1": ["S1"], "C2": ["S2"]},
+                        search_call_count=1, extract_call_count=1,
+                        searched_queries=[need.question],
+                        discovered_urls=[source.final_url for source in sources],
+                        extracted_urls=[source.final_url for source in sources],
+                        rejected_urls=[], iterations=1,
+                        started_at="2026-08-19T00:00:00+00:00",
+                        completed_at="2026-08-19T00:01:00+00:00",
+                    )
+
+            def reviewer(_need, candidate):
+                if candidate.source_id == "S2":
+                    return {"verdict": "irrelevant", "confidence": 0.95, "reason": "与章节不相关", "supporting_excerpts": [], "extracted_points": [], "usage_category": "policy_basis"}
+                return {"verdict": "relevant", "confidence": 0.9, "reason": "相关", "supporting_excerpts": [candidate.content], "extracted_points": [candidate.content], "usage_category": "policy_basis"}
+
+            need = EvidenceNeed(need_id="EN-FILTER", question="核实两项政策要求", topic_id="policy", deadline_stage="draft", query_budget=2, task_anchors=["质量检查", "验收复核"], max_adopted_items=2)
+            batch = ResearchService(self._context(Path(tmp)), Provider(), semantic_reviewer=reviewer).resolve(need)
+            self.assertEqual(batch.status, "gap")
+            self.assertEqual(len(batch.items), 1)
+            self.assertIn("C2", batch.research_run["missing_claim_ids"])
+            self.assertEqual(batch.research_run["completion_reason"], "no_relevant_sources")
 
 
 if __name__ == "__main__":

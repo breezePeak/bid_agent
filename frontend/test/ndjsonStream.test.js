@@ -61,6 +61,23 @@ test('NDJSON reader delivers terminal error events without treating them as tran
   })
 })
 
+test('NDJSON reader awaits async event handlers and propagates their failures', async () => {
+  const encoder = new TextEncoder()
+  const response = responseFromByteChunks([
+    encoder.encode('{"type":"error","code":"RESEARCH_FAILED"}\n'),
+  ])
+
+  await assert.rejects(
+    readNdjsonStream(response, async event => {
+      await Promise.resolve()
+      const error = new Error('研究流程失败')
+      error.code = event.code
+      throw error
+    }),
+    error => error.message === '研究流程失败' && error.code === 'RESEARCH_FAILED',
+  )
+})
+
 test('NDJSON reader rejects malformed non-empty lines', async () => {
   const encoder = new TextEncoder()
   const response = responseFromByteChunks([

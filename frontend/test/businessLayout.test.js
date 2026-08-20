@@ -416,3 +416,15 @@ test('every workspace view has a scroll owner while the chat keeps its own scrol
   assert.match(workspaceView, /\.chat-msg\s*\{\s*width:\s*100%;\s*max-width:\s*100%;/)
   assert.match(workspaceView, /distanceFromBottom\s*<\s*96/)
 })
+
+test('multi-chapter queued state is shown beside the chapter title, not in chat', async () => {
+  const chapterWorkbench = await readFile(
+    new URL('../src/components/ChapterWorkbenchView.vue', import.meta.url),
+    'utf8',
+  )
+
+  assert.match(chapterWorkbench, /v-if="isMultiChapterQueued\(item\)" class="tree-queue-label">队列中</)
+  assert.match(chapterWorkbench, /batchJobItems\.value\.length <= 1/)
+  assert.match(chapterWorkbench, /event\?\.type === 'chapter_queued'/)
+  assert.doesNotMatch(chapterWorkbench, /已进入批量编写队列，正在准备/)
+})

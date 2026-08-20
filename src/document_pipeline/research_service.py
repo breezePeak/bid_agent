@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any, Callable, Protocol
 
@@ -63,6 +63,8 @@ class ResearchCandidate:
     claim_types: tuple[str, ...] = ("project_context",)
     relevance_tier: EvidenceRelevanceTier | None = None
     supporting_excerpt: str = ""
+    source_id: str = ""
+    supporting_claim_ids: tuple[str, ...] = ()
 
 
 class ResearchProvider(Protocol):
@@ -155,7 +157,6 @@ class ResearchService:
             if callable(research_need):
                 run_result = research_need(need, limit=max(12, need.query_budget))
                 candidates = list(run_result.candidates)
-                self._persist_research_run(run_result)
                 report(
                     "research_completed",
                     "深度研究循环已完成，正在执行 Evidence Gate。",
@@ -180,6 +181,7 @@ class ResearchService:
             )
         run_summary = self._run_summary(run_result)
         if run_result is not None and run_result.status in {"failed", "prohibited"} and not candidates:
+            self._persist_research_run(run_result)
             status = "gap" if run_result.status == "prohibited" else "failed"
             return self._publish(
                 need,
@@ -191,9 +193,11 @@ class ResearchService:
             )
         report("candidates_found", f"搜索返回 {len(candidates)} 个候选链接，正在逐个查看和核验。", candidate_count=len(candidates))
         items: list[EvidenceItem] = []
+        candidate_by_evidence_id: dict[str, ResearchCandidate] = {}
         completed_reviews = 0
         review_failures: list[str] = []
         for index, candidate in enumerate(candidates):
+            candidate = self._normalize_candidate_authority(candidate)
             report(
                 "inspecting",
                 f"正在查看第 {index + 1} 个候选资料：{candidate.title or '未命名链接'}",
@@ -243,6 +247,7 @@ class ResearchService:
                 )
                 continue
             items.append(item)
+            candidate_by_evidence_id[item.evidence_id] = candidate
             report(
                 "accepted",
                 f"已提取 {len(item.extracted_points)} 个可用于本章的要点。",
@@ -258,8 +263,15 @@ class ResearchService:
         if candidates and completed_reviews == 0 and review_failures:
             error = "；".join(dict.fromkeys(review_failures))[:2000]
             report("failed", "候选资料的语义审查未完成。", error=error)
+            if run_result is not None:
+                self._persist_research_run(run_result)
             return self._publish(
-                need, [], query_count=1, status="failed", error=error
+                need,
+                [],
+                query_count=(run_result.search_call_count if run_result is not None else 1),
+                status="failed",
+                error=error,
+                research_run=self._run_summary(run_result),
             )
         rank = {
             EvidenceRelevanceTier.PROJECT_DIRECT: 0,
@@ -278,6 +290,20 @@ class ResearchService:
         )
         adopted_limit = min(need.query_budget, need.max_adopted_items)
         items = items[:adopted_limit]
+        if run_result is not None and run_result.claims:
+            retained_candidates = [
+                candidate_by_evidence_id[item.evidence_id]
+                for item in items
+                if item.evidence_id in candidate_by_evidence_id
+            ]
+            run_result = self._reassess_after_candidate_gate(
+                need,
+                run_result,
+                retained_candidates,
+            )
+            run_summary = self._run_summary(run_result)
+        if run_result is not None:
+            self._persist_research_run(run_result)
         report(
             "aggregating",
             f"已完成资料核验，正在整合 {len(items)} 条可采用资料供 Agent 写作。",
@@ -314,6 +340,72 @@ class ResearchService:
         if "enterprise_capability" in candidate.claim_types:
             return "资料包含企业能力主张，不能作为外部公开证据采用。"
         return ""
+
+    @staticmethod
+    def _normalize_candidate_authority(candidate: ResearchCandidate) -> ResearchCandidate:
+        if candidate.source_type is EvidenceSourceType.COMPANY:
+            return candidate
+        from .deep_research.authority import classify_source_type
+
+        return replace(
+            candidate,
+            source_type=classify_source_type(str(candidate.source_url or "")),
+        )
+
+    @staticmethod
+    def _reassess_after_candidate_gate(
+        need: EvidenceNeed,
+        run_result: Any,
+        retained_candidates: list[ResearchCandidate],
+    ) -> Any:
+        from .deep_research.sufficiency import EvidenceSufficiencyGate
+
+        retained_source_ids = {
+            candidate.source_id
+            for candidate in retained_candidates
+            if candidate.source_id
+        }
+        retained_urls = {
+            str(candidate.source_url or "").split("#", 1)[0]
+            for candidate in retained_candidates
+            if candidate.source_url
+        }
+        sources = [
+            source
+            for source in run_result.extracted_sources
+            if source.source_id in retained_source_ids
+            or source.final_url.split("#", 1)[0] in retained_urls
+        ]
+        source_ids = {source.source_id for source in sources}
+        support_by_claim = {
+            claim_id: [source_id for source_id in source_ids_for_claim if source_id in source_ids]
+            for claim_id, source_ids_for_claim in run_result.support_by_claim.items()
+        }
+        report = EvidenceSufficiencyGate().assess(
+            need=need,
+            claims=list(run_result.claims),
+            sources=sources,
+            support_by_claim=support_by_claim,
+            conflict_claim_ids=set(run_result.conflict_claim_ids),
+            budget_exhausted=(run_result.sufficiency.completion_reason == "budget_exhausted"),
+            provider_failed=(run_result.sufficiency.completion_reason == "provider_failed"),
+            model_output_invalid=(run_result.sufficiency.completion_reason == "model_output_invalid"),
+            search_result_count=len(run_result.discovered_urls),
+            extract_attempted=(
+                run_result.extract_call_count > 0
+                and not run_result.extracted_sources
+            ),
+        )
+        status = "completed" if report.sufficient else ("partial" if retained_candidates else "failed")
+        return run_result.model_copy(
+            update={
+                "status": status,
+                "candidates": retained_candidates,
+                "extracted_sources": sources,
+                "support_by_claim": support_by_claim,
+                "sufficiency": report,
+            }
+        )
 
     def _adopt_candidate(
         self,
@@ -674,6 +766,20 @@ class ResearchService:
                 "content_hash": hashlib.sha256(candidate.content.encode("utf-8")).hexdigest(),
             }
             for candidate in run_result.candidates
+        ]
+        payload["extracted_sources"] = [
+            {
+                "source_id": source.source_id,
+                "requested_url": source.requested_url,
+                "final_url": source.final_url,
+                "title": source.title,
+                "publisher": source.publisher,
+                "content_hash": source.content_hash,
+                "content_type": source.content_type,
+                "extraction_provider": source.extraction_provider,
+                "extracted_at": source.extracted_at,
+            }
+            for source in run_result.extracted_sources
         ]
         if path.exists():
             if read_json(path) != payload:

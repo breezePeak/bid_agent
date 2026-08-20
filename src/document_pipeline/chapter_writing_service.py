@@ -59,6 +59,7 @@ class ChapterWritingRequest:
     operation_id: str = ""
     operation: str = "create"
     user_instruction: str = ""
+    chapter_dialogue: tuple[dict[str, Any], ...] = ()
     overwrite_locked: bool = False
     chapter_id: str = ""
     expected_workspace_revision: int | None = None
@@ -664,6 +665,7 @@ class ChapterWritingService:
             {
                 "operation": request.operation,
                 "user_instruction": request.user_instruction,
+                "chapter_dialogue": [dict(item) for item in request.chapter_dialogue],
                 "overwrite_locked": bool(request.overwrite_locked),
             }
         )

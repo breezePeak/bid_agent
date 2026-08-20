@@ -117,8 +117,11 @@
             />
           </template>
           <template v-else>
-            <span class="tree-title" :title="item.title || item.chapter_id" @dblclick="startRenameChapter(item, $event)">
-              {{ item.title || item.chapter_id }}
+            <span class="tree-title-row">
+              <span class="tree-title" :title="item.title || item.chapter_id" @dblclick="startRenameChapter(item, $event)">
+                {{ item.title || item.chapter_id }}
+              </span>
+              <small v-if="isMultiChapterQueued(item)" class="tree-queue-label">队列中</small>
             </span>
             <span v-if="isLeafChapter(item)" class="tree-meta">{{ shortStatus(item) }}</span>
             <div class="tree-item-actions" @click.stop>
@@ -1249,29 +1252,16 @@ function openActiveBatchChapter(job) {
   rightTab.value = 'chat'
   if (selectedId.value !== chapterId) selectChapter(chapterId)
 
-  const cached = chatByChapter.get(chapterId) || []
-  const placeholderId = `batch-${jobId}-${chapterId}-queued`
-  if (!cached.some(turn => turn.id === placeholderId)) {
-    const item = jobItems.find(candidate => candidate?.chapter_id === chapterId) || {}
-    const next = [...cached, {
-      id: placeholderId,
-      turn_id: '',
-      role: 'assistant',
-      content: '',
-      thinking: `已进入批量编写队列，正在准备《${item.chapter_title || chapterId}》的执行上下文。`,
-      thinkingOpen: true,
-      streaming: true,
-      editing: false,
-      batchEvent: true,
-    }]
-    chatByChapter.set(chapterId, next)
-    if (selectedId.value === chapterId) chatTurns.value = next
-  }
 }
 
 function appendBatchEventToChapterChat(event) {
   const chapterId = String(event?.chapter_id || '')
   if (!chapterId) return
+  if (
+    event?.type === 'chapter_queued'
+    || String(event?.status || '') === 'queued'
+    || String(event?.stage || '') === 'queued'
+  ) return
   const eventId = String(event?.event_id || `${event.sequence || 0}:${event.type || 'event'}`)
   const turnId = `batch-${eventId}`
   const cached = chatByChapter.get(chapterId) || []
@@ -1414,9 +1404,9 @@ async function writeCurrentChapter() {
     actionError.value = '请先在目录中选择一个叶子章节，或使用“选择章节编写”勾选多个章节。'
     return
   }
-  // 单章“一键编写”必须与“生成草稿”共用同一条可见的流式 Agent 流程；
-  // 只有多章节选择才创建后台批量任务。
-  await generateDraft()
+  // 单章正文始终由本章 Agent 在当前对话中完成，不能绕开它另起 Writer 会话。
+  chatInput.value = chatInput.value.trim() || '开始编写本章正文'
+  await sendChat()
 }
 
 function shortStatus(item) {
@@ -1448,6 +1438,14 @@ function batchChapterStatusClass(item) {
     candidate.chapter_id === item?.chapter_id
   ))?.status || '')
   return status ? `batch-${status}` : ''
+}
+
+function isMultiChapterQueued(item) {
+  if (batchJobItems.value.length <= 1) return false
+  const batchItem = batchJobItems.value.find(candidate => (
+    (candidate.chapter_id || candidate.chapterId) === item?.chapter_id
+  ))
+  return String(batchItem?.status || '') === 'queued'
 }
 
 function relevanceTierLabel(tier) {
@@ -1856,7 +1854,7 @@ async function generateDraft(options = {}) {
             const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
             const message = String(payload?.message || '流式生成失败')
             const code = String(payload?.code || '').trim()
-          if (String(payload?.code || '') === 'CHAPTER_RESEARCH_UNAVAILABLE') {
+          if (['CHAPTER_RESEARCH_UNAVAILABLE', 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED'].includes(code)) {
             researchStatus.value = reason ? `公开资料检索失败：${reason}` : message
           }
           if (String(payload?.code || '') === 'CHAPTER_OUTLINE_REVIEW_REQUIRED') {
@@ -1941,7 +1939,9 @@ async function generateDraft(options = {}) {
 
 async function confirmResearchGapAndGenerate() {
   if (!researchGapConfirmation.value) return
-  await generateDraft({ allowResearchGap: true })
+  researchGapConfirmation.value = null
+  chatInput.value = '确认仅使用现有项目资料继续写正文'
+  await sendChat()
 }
 
 function onSaveBlocks(operations) {
@@ -2088,6 +2088,9 @@ function draftUserErrorMessage(code, message, reason) {
   if (code === 'CHAPTER_WRITE_REQUEST_INVALID') {
     return normalizeAgentMessage(message) || '正文生成请求未通过校验，请检查本章提纲和上下文后重试。'
   }
+  if (code === 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED') {
+    return normalizeAgentMessage(message) || '公开资料检索未完成，请确认是否使用现有项目资料继续写作。'
+  }
   const detail = reason ? `${message}（${reason}）` : message
   return normalizeAgentMessage(detail || '正文生成失败，请重试。')
 }
@@ -2153,6 +2156,14 @@ async function clearChatHistory() {
   try {
     const { data } = await clearChapterChatHistory(props.workspaceId, chapterId)
     if (!data?.ok) throw new Error(data?.message || '清空对话失败')
+    applyChatAuthority(data.authority || {
+      mode: chatAuthority.mode,
+      review_status: 'idle',
+      outline_hash: '',
+    })
+    researchGapConfirmation.value = null
+    researchStatus.value = ''
+    researchSources.value = []
     const emptyTurns = []
     rememberChapterChat(chapterId, emptyTurns)
     if (selectedId.value === chapterId) chatTurns.value = emptyTurns
@@ -2401,8 +2412,10 @@ async function sendChat() {
 
   try {
     let completedTurns = null
-    let documentWriteRequested = false
+    let documentWriteCompleted = false
     let documentApprovalRequested = false
+    let completedChapter = null
+    let completedContent = null
     await streamChapterChat(props.workspaceId, chapterId, text, {
       onEvent: async (event) => {
         const type = String(event?.type || '').toLowerCase()
@@ -2427,8 +2440,14 @@ async function sendChat() {
           if (selectedId.value === chapterId) await scrollChatToBottom()
         } else if (type === 'authority') {
           applyChatAuthority(event)
-          documentWriteRequested = documentWriteRequested || event.document_write_requested === true
           documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
+        } else if (type === 'writing_meta') {
+          streamText.value = ''
+          streamingDraft.value = true
+          streamOperationId.value = String(event.operation_id || '')
+        } else if (type === 'draft_delta') {
+          streamingDraft.value = true
+          await appendDraftDelta(String(event.delta || ''))
         } else if (type === 'thinking_delta') {
           const delta = String(event.delta || '')
           if (!delta) return
@@ -2447,8 +2466,10 @@ async function sendChat() {
           })
           if (selectedId.value === chapterId) await scrollChatToBottom()
         } else if (type === 'done') {
-          documentWriteRequested = documentWriteRequested || event.document_write_requested === true
+          documentWriteCompleted = documentWriteCompleted || event.document_write_completed === true
           documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
+          completedChapter = event?.chapter && typeof event.chapter === 'object' ? event.chapter : null
+          completedContent = event?.content && typeof event.content === 'object' ? event.content : null
           const elapsedSec = Math.max(1, Math.round((Date.now() - startTime) / 1000))
           if (Array.isArray(event.turns) && event.turns.length) {
             completedTurns = mapChatTurns(event.turns)
@@ -2471,7 +2492,10 @@ async function sendChat() {
             workspaceRevision.value = Number(event.workspace_revision)
           }
         } else if (type === 'error') {
-          throw new Error(event.message || '章节对话失败')
+          const error = new Error(event.message || '章节对话失败')
+          error.code = String(event.code || '')
+          error.details = event.details || {}
+          throw error
         }
       },
     })
@@ -2490,8 +2514,17 @@ async function sendChat() {
         if (!turn.content) turn.content = '（无回复）'
       })
     }
-    if (documentWriteRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
-      await generateDraft({ instruction: text })
+    if (documentWriteCompleted && selectedId.value === chapterId && selectedIsLeaf.value) {
+      const current = chapterDetail.value || {}
+      chapterDetail.value = {
+        ...current,
+        ...(completedChapter || {}),
+        content: completedContent || completedChapter?.content || current.content,
+      }
+      streamText.value = ''
+      streamingDraft.value = false
+      await loadChapterList()
+      await loadChapterDetail({ force: true, background: true })
     } else if (documentApprovalRequested && selectedId.value === chapterId && selectedIsLeaf.value) {
       const approved = await approveHead()
       await appendChatOperationResult(
@@ -2503,6 +2536,15 @@ async function sendChat() {
     }
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
+    if (e?.code === 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED') {
+      researchGapConfirmation.value = {
+        message: Number(e?.details?.candidate_count || 0) > 0
+          ? `检索返回了 ${e.details.candidate_count} 条候选资料，但均未通过本章筛选。确认后由本章 Agent 仅使用现有项目资料继续写作。`
+          : '未得到可用于本章的公开资料。确认后由本章 Agent 仅使用现有项目资料继续写作。',
+        details: e.details || {},
+        candidates: Array.isArray(e?.details?.candidates) ? e.details.candidates : [],
+      }
+    }
     const errElapsed = Math.max(1, Math.round((Date.now() - startTime) / 1000))
     if (selectedId.value !== chapterId) {
       const cached = chatByChapter.get(chapterId) || []
@@ -2782,14 +2824,31 @@ onUnmounted(() => {
 .tree-dot.batch-paused { background: #ef4444; }
 .tree-dot.batch-skipped,
 .tree-dot.batch-cancelled { background: #94a3b8; }
-.tree-title {
+.tree-title-row {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tree-title {
   min-width: 0;
   font-size: 13px;
   color: #0f172a;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.tree-queue-label {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+  background: #fffbeb;
+  color: #92400e;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 16px;
 }
 .tree-meta {
   font-size: 11px;

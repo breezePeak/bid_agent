@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from api import v3_app
-from control_plane import WorkspaceContext
+from control_plane import ControlPlaneError, WorkspaceContext
 from starlette.requests import Request
 
 
@@ -635,6 +635,58 @@ class V3ChapterDraftStreamTests(TestCase):
             self.assertIn("gap_confirmed", [item.get("status") for item in confirmed_research_events])
             stream.assert_called_once()
             gateway.submit.assert_called_once()
+
+    def test_writer_research_failure_is_exposed_as_confirmation_required(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            context = self._context(Path(temporary))
+            chapter = self._chapter()
+            research = {
+                "decision_status": "blocked_human",
+                "queries": [
+                    {
+                        "question": "2026年度技术规程",
+                        "evidence_count": 0,
+                        "error": "model_output_invalid",
+                    }
+                ],
+            }
+            failure = ControlPlaneError(
+                "WRITER_RESEARCH_ACTION_REQUIRED",
+                "当前网页检索 Provider 未取得可用于写作的可核验来源。",
+                details={"research": research},
+            )
+
+            with (
+                mock.patch.object(v3_app, "_context", return_value=context),
+                mock.patch(
+                    "document_pipeline.chapter_workspace.ChapterWorkspaceService.get_chapter",
+                    return_value=chapter,
+                ),
+                mock.patch(
+                    "document_pipeline.chapter_writing_service.ChapterWritingService.iter_events",
+                    side_effect=failure,
+                ),
+            ):
+                response = asyncio.run(
+                    v3_app.stream_chapter_draft(
+                        "alpha",
+                        "chapter-1",
+                        _request({"expected_revision": 3, "expected_chapter_revision": 7}),
+                    )
+                )
+                events = asyncio.run(_events(response))
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["type"], "error")
+            self.assertEqual(
+                events[0]["code"], "CHAPTER_RESEARCH_CONFIRMATION_REQUIRED"
+            )
+            self.assertEqual(events[0]["details"]["error"], "model_output_invalid")
+            self.assertEqual(events[0]["details"]["candidate_count"], 0)
+            self.assertEqual(
+                events[0]["details"]["original_code"],
+                "WRITER_RESEARCH_ACTION_REQUIRED",
+            )
 
 
 if __name__ == "__main__":
