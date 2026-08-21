@@ -784,6 +784,7 @@ class ChapterAgentService:
         # turn with `turns` from the done event, so omitting these notes here
         # made the just-displayed reasoning disappear at completion.
         reasoning_parts: list[str] = []
+        research_steps: list[dict[str, Any]] = []
         content_parts: list[str] = []
         document_write_completed = False
         written_chapter: dict[str, Any] | None = None
@@ -1062,6 +1063,35 @@ class ChapterAgentService:
                     write_request
                 ):
                     event_type = str(write_event.get("type") or "")
+                    if event_type in {
+                        "thinking_step",
+                        "inspect_planning",
+                        "inspecting",
+                        "inspect_skipped",
+                        "research",
+                    }:
+                        note = str(
+                            write_event.get("message")
+                            or write_event.get("reason")
+                            or ""
+                        ).strip()
+                        if note:
+                            reasoning_parts.append(f"{note}\n")
+                        if event_type == "research":
+                            research_steps.append(
+                                {
+                                    "status": str(
+                                        write_event.get("status") or "processing"
+                                    ),
+                                    "message": note,
+                                    "queries": list(write_event.get("queries") or []),
+                                    "sources": list(write_event.get("sources") or []),
+                                }
+                            )
+                    elif event_type == "thinking_delta":
+                        delta = str(write_event.get("delta") or "")
+                        if delta:
+                            reasoning_parts.append(delta)
                     if event_type == "content_delta":
                         yield {
                             **write_event,
@@ -1158,6 +1188,7 @@ class ChapterAgentService:
             role="assistant",
             content=answer,
             thinking=thinking,
+            research_steps=research_steps,
         )
         yield {
             "type": "done",
