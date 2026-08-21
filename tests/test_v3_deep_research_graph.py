@@ -17,7 +17,7 @@ from document_pipeline.deep_research.contracts import (
     WebExtractResult,
     WebSearchHit,
 )
-from document_pipeline.deep_research.engine import DeepResearchEngine
+from document_pipeline.deep_research.engine import DeepResearchEngine, ModelOutputInvalid
 
 
 def _config(search_calls: int = 4) -> DeepResearchConfig:
@@ -146,6 +146,42 @@ def test_invalid_supervisor_plan_falls_back_to_real_search() -> None:
     assert result.search_call_count == 1
     assert result.extract_call_count == 1
     assert result.discovered_urls == ["https://agency.gov.cn/a"]
+    assert result.sufficiency.completion_reason != "model_output_invalid"
+
+
+class _InvalidQueryActions(_Actions):
+    def next_query(self, need, claims, report, *, iteration, searched_queries):
+        raise ModelOutputInvalid("invalid query JSON")
+
+
+def test_invalid_query_json_falls_back_to_real_search() -> None:
+    tools = _Tools()
+    tools.round = 1  # the deterministic fallback receives the official source
+    result = DeepResearchEngine(
+        tools, actions=_InvalidQueryActions(), config=_config(1)
+    ).run(_need("年度调查技术规程"), limit=8)
+
+    assert result.search_call_count == 1
+    assert result.extract_call_count == 1
+    assert result.searched_queries
+    assert "年度调查技术规程" in result.searched_queries[0]
+    assert result.sufficiency.completion_reason != "model_output_invalid"
+
+
+class _InvalidSupportActions(_Actions):
+    def assess_support(self, need, claims, sources):
+        raise ModelOutputInvalid("invalid support JSON")
+
+
+def test_invalid_support_json_uses_conservative_text_mapping() -> None:
+    tools = _Tools()
+    tools.round = 1  # return the official source containing the policy keyword
+    result = DeepResearchEngine(
+        tools, actions=_InvalidSupportActions(), config=_config(1)
+    ).run(_need("年度调查政策要求"), limit=8)
+
+    assert result.search_call_count == 1
+    assert result.support_by_claim == {"C1": ["S2"]}
     assert result.sufficiency.completion_reason != "model_output_invalid"
 
 

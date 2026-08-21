@@ -199,12 +199,10 @@
           <div class="form-group">
             <label for="flow-research-provider">联网搜索 Provider</label>
             <select id="flow-research-provider" v-model="flowForm.research_provider">
-              <option value="doubao_web">豆包网页</option>
-              <option value="deepseek_web">DeepSeek 网页</option>
               <option value="tavily">Tavily API</option>
               <option value="disabled">不联网搜索</option>
             </select>
-            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时会自动调用该 Provider；不会静默切换到其他 Provider。</p>
+            <p class="field-hint">保存后，后续启动的章节写作在缺公开依据时只会调用 Tavily API。</p>
           </div>
           <div v-if="flowForm.research_provider === 'tavily'" class="form-group">
             <label for="flow-tavily-key">Tavily API Key</label>
@@ -312,7 +310,7 @@ const flowForm = reactive({
   llm_concurrency: 8,
   write_batch_retries: 5,
   max_repair_rounds: 2,
-  research_provider: 'doubao_web',
+  research_provider: 'tavily',
   tavily_api_key: '',
   has_tavily_api_key: false,
   tavily_runtime_status: { ready: false, reason: 'TAVILY_API_KEY_MISSING' },

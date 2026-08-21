@@ -17,7 +17,7 @@ from document_pipeline.canonicalization import (  # noqa: E402
 )
 from document_pipeline.contracts import EvidenceSourceType, InputRole  # noqa: E402
 from document_pipeline.execution_controller import V3ExecutionController  # noqa: E402
-from document_pipeline.input_manifest import InputManifestService, V3_ROOT  # noqa: E402
+from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.planning_inference import (  # noqa: E402
     PROJECT_CAPABILITY_VERSION,
     PROJECT_SCHEMA_VERSION,
@@ -34,7 +34,15 @@ class _Provider:
     provider_id = "test"
 
     def search(self, question: str, *, limit: int):
-        return [ResearchCandidate(title="公开资料", publisher="测试来源", content="可核验项目背景", source_type=EvidenceSourceType.WEB)]
+        return [
+            ResearchCandidate(
+                title="适用标准",
+                publisher="example.gov.cn",
+                content="适用标准要求应形成全过程记录和可核验成果。",
+                source_url="https://example.gov.cn/standard",
+                source_type=EvidenceSourceType.OFFICIAL,
+            )
+        ]
 
 
 class _FailingProvider:
@@ -58,10 +66,12 @@ class _ResearchProjectProvider:
         self.needs = needs
 
     def understand(self, request):
+        score_model = getattr(request, "score_model", {}) or {}
+        score_points = score_model.get("points", [])
         requirements = [
             item
-            for item in request.requirement_ledger["requirements"]
-            if item["status"] not in {"blocked", "waived"}
+            for item in request.requirement_ledger.get("requirements", [])
+            if item.get("status") not in {"blocked", "waived"}
         ]
         semantic_refs = [
             *(
@@ -70,9 +80,13 @@ class _ResearchProjectProvider:
             ),
             *(
                 f"ScoreModel:{item['score_point_id']}"
-                for item in request.score_model["points"]
+                for item in score_points
             ),
         ]
+        if not semantic_refs and request.source_context:
+            semantic_refs = [
+                f"SourceIndex:{request.source_context[0]['block_id']}"
+            ]
         candidate = ProjectUnderstandingCandidate(
             evidence_needs=[
                 ProjectEvidenceNeedCandidate(
@@ -89,13 +103,6 @@ class _ResearchProjectProvider:
                     confidence=1.0,
                 )
                 for item in self.needs
-            ],
-            covered_requirement_ids=[
-                str(item["requirement_id"]) for item in requirements
-            ],
-            covered_score_point_ids=[
-                str(item["score_point_id"])
-                for item in request.score_model["points"]
             ],
         )
         raw = canonical_json(candidate.model_dump(mode="json"))
@@ -201,7 +208,7 @@ class V3ResearchToolTests(unittest.TestCase):
             self.assertEqual(receipt.error["code"], "V3_RESEARCH_FAILED")
             self.assertIn("browser unavailable", receipt.message)
 
-    def test_resolves_explicit_active_manifest_inputs_as_deepseek_attachments(self) -> None:
+    def test_rejects_attachments_for_tavily(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             root = Path(tmp)
             runs = root / "runs"
@@ -214,32 +221,25 @@ class V3ResearchToolTests(unittest.TestCase):
             )
             registration = InputManifestService(context).register_local_file(tender, InputRole.TENDER)
             need_ids = self._promote_project_model(context, [{"need_id": "EN-ATTACH", "question": "查询适用政策", "topic_id": "policy", "deadline_stage": "plan_document", "query_budget": 1}])
-            expected_path = (
-                context.root
-                / V3_ROOT
-                / "sources"
-                / registration.item.input_id
-                / registration.item.filename
-            ).resolve()
-            provider = _Provider()
-            with mock.patch(
-                "document_pipeline.research_tool.create_research_adapter",
-                return_value=provider,
-            ) as factory:
-                result = V3ResearchTool(context).invoke(
+            with self.assertRaisesRegex(
+                ValueError,
+                "V3_RESEARCH_ATTACHMENTS_PROVIDER_UNSUPPORTED",
+            ):
+                V3ResearchTool(context).invoke(
                     need_ids["EN-ATTACH"],
                     attachment_input_ids=[registration.item.input_id],
                 )
-            factory.assert_called_once_with(None, attachment_paths=[expected_path])
-            self.assertEqual(result["attachment_input_ids"], [registration.item.input_id])
 
-    def test_rejects_unknown_or_inactive_attachment_input(self) -> None:
+    def test_rejects_any_attachment_before_manifest_lookup(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
             runs = Path(tmp) / "runs"
             (runs / "alpha").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
             need_ids = self._promote_project_model(context, [{"need_id": "EN-1", "question": "适用标准", "topic_id": "standard", "deadline_stage": "plan_document", "query_budget": 1}])
-            with self.assertRaisesRegex(ValueError, "V3_RESEARCH_ATTACHMENT_NOT_ACTIVE"):
+            with self.assertRaisesRegex(
+                ValueError,
+                "V3_RESEARCH_ATTACHMENTS_PROVIDER_UNSUPPORTED",
+            ):
                 V3ResearchTool(context).invoke(
                     need_ids["EN-1"],
                     attachment_input_ids=["missing"],

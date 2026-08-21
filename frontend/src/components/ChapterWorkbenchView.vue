@@ -202,25 +202,6 @@
       </header>
 
       <div v-if="actionError" class="banner error">{{ actionError }}</div>
-      <div v-if="researchGapConfirmation" class="banner warning">
-        {{ researchGapConfirmation.message }}
-        <details v-if="researchGapConfirmation.candidates?.length" class="research-gap-candidates">
-          <summary>查看本次检索到但未采用的资料（{{ researchGapConfirmation.candidates.length }} 条）</summary>
-          <ol>
-            <li v-for="item in researchGapConfirmation.candidates" :key="`${item.index}-${item.source_url}-${item.title}`">
-              <a v-if="item.source_url" :href="item.source_url" target="_blank" rel="noopener noreferrer">{{ item.title }}</a>
-              <span v-else>{{ item.title }}</span>
-              <small>（{{ item.reason || '与本章无可用信息' }}）</small>
-            </li>
-          </ol>
-        </details>
-        <button type="button" class="btn btn-sm" :disabled="busy" @click="confirmResearchGapAndGenerate">
-          确认使用现有资料继续写作
-        </button>
-        <button type="button" class="btn btn-sm" :disabled="busy" @click="researchGapConfirmation = null">
-          取消
-        </button>
-      </div>
       <div v-if="actionMessage" class="banner ok">{{ actionMessage }}</div>
       <div v-if="batchWritingProgress" class="banner ok">
         批量编写：正在处理《{{ batchWritingProgress.current_title || '准备选中章节' }}》
@@ -314,21 +295,6 @@
         <button type="button" class="tab" :class="{ active: rightTab === 'chat' }" @click="rightTab = 'chat'">本章对话</button>
         <button type="button" class="tab" :class="{ active: rightTab === 'context' }" @click="rightTab = 'context'">上下文</button>
       </div>
-      <div v-show="rightTab === 'chat'" class="chat-authority">
-        <span>权限</span>
-        <button
-          v-for="item in authorityModes"
-          :key="item.id"
-          type="button"
-          class="authority-chip"
-          :class="{ active: chatAuthority.mode === item.id }"
-          :disabled="!selectedId || asking"
-          @click="setChatAuthority(item.id)"
-        >
-          {{ item.label }}
-        </button>
-      </div>
-
       <div v-show="rightTab === 'context'" class="context-panel">
         <section class="context-section shared-context">
           <header class="context-section-header">
@@ -397,23 +363,6 @@
           <p v-if="orientationMaterials" class="context-note">
             已有资料：{{ orientationMaterials }}
           </p>
-        </section>
-
-        <section v-if="writingOutlineBlocks.length" class="context-section writing-outline-section">
-          <header class="context-section-header">
-            <div>
-              <strong>本章写作提纲</strong>
-              <small>按满分条件展开，不写评分术语</small>
-            </div>
-            <span class="context-version">{{ writingOutlineBlocks.length }} 块</span>
-          </header>
-          <ol class="writing-outline">
-            <li v-for="block in writingOutlineBlocks" :key="block.block_id">
-              <em>{{ outlineKindLabel(block.kind) }}</em>
-              {{ block.heading }}
-              <span>{{ block.must_answer }}</span>
-            </li>
-          </ol>
         </section>
 
         <section class="context-section outline-context">
@@ -713,7 +662,6 @@ import {
   saveChapterChatTurn,
   appendChapterChatTurn,
   deleteChapterChatTurn,
-  saveChapterChatAuthority,
   subscribeV3Workspace,
   createChapterBatchJob,
   fetchCurrentChapterBatchJob,
@@ -814,7 +762,6 @@ const detailError = ref('')
 const listError = ref('')
 const actionError = ref('')
 const actionMessage = ref('')
-const researchGapConfirmation = ref(null)
 const remoteHint = ref('')
 const showRevisions = ref(false)
 const streamingDraft = ref(false)
@@ -987,25 +934,6 @@ const chatInput = ref('')
 const chatTurns = ref([])
 const chatLoading = ref(false)
 const asking = ref(false)
-const authorityModes = [
-  { id: 'human_review', label: '用户审核' },
-  { id: 'delegate_review', label: '替我审核' },
-  { id: 'full_authority', label: '完全权限' },
-]
-const chatAuthority = ref({
-  mode: 'human_review',
-  review_status: 'idle',
-  mode_label: '用户审核',
-})
-function applyChatAuthority(payload) {
-  const next = payload && typeof payload === 'object' ? payload : {}
-  chatAuthority.value = {
-    mode: String(next.mode || 'human_review'),
-    review_status: String(next.review_status || 'idle'),
-    mode_label: String(next.mode_label || '用户审核'),
-    outline_hash: String(next.outline_hash || ''),
-  }
-}
 const chatHistoryEl = ref(null)
 const editorRef = ref(null)
 /** In-session cache of chapter dialogue; server history remains source of truth. */
@@ -1030,18 +958,6 @@ const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_s
 const chapterContextRef = computed(() => chapterDetail.value?.chapter_context_ref || {})
 const documentOutlineContext = computed(() => chapterDetail.value?.document_outline_context || null)
 const writingOrientation = computed(() => chapterDetail.value?.writing_orientation || null)
-const writingOutlineBlocks = computed(() => {
-  const rows = chapterDetail.value?.writing_outline?.blocks
-  return Array.isArray(rows) ? rows : []
-})
-function outlineKindLabel(kind) {
-  return {
-    response: '做法',
-    evidence: '证据',
-    constraint: '约束',
-    quality: '质控',
-  }[String(kind || '')] || '要点'
-}
 const orientationPathLabel = computed(() => String(
   writingOrientation.value?.document_position?.path_label || outlinePathLabel.value || '',
 ).trim())
@@ -1718,7 +1634,6 @@ async function generateDraft(options = {}) {
     return
   }
   const chapterId = selectedId.value
-  const allowResearchGap = Boolean(options.allowResearchGap)
   draftAbortController?.abort()
   draftAbortController = new AbortController()
   const controller = draftAbortController
@@ -1732,7 +1647,6 @@ async function generateDraft(options = {}) {
   busyAction.value = 'draft'
   actionError.value = ''
   actionMessage.value = ''
-  researchGapConfirmation.value = null
   rightTab.value = 'chat'
   const draftStartedAt = Date.now()
   const draftTurnId = `draft-${operationId}`
@@ -1789,7 +1703,6 @@ async function generateDraft(options = {}) {
       chapter_context_id: chapterRef.chapter_context_id,
       chapter_context_revision: Number(chapterRef.chapter_context_revision || 0),
       chapter_context_hash: chapterRef.chapter_context_hash,
-      allow_research_gap: allowResearchGap,
       instruction: String(options.instruction || '').trim(),
     }, {
       signal: controller.signal,
@@ -1854,13 +1767,8 @@ async function generateDraft(options = {}) {
             const reason = String(payload?.details?.error || payload?.details?.reason || '').trim()
             const message = String(payload?.message || '流式生成失败')
             const code = String(payload?.code || '').trim()
-          if (['CHAPTER_RESEARCH_UNAVAILABLE', 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED'].includes(code)) {
+          if (code === 'CHAPTER_RESEARCH_UNAVAILABLE') {
             researchStatus.value = reason ? `公开资料检索失败：${reason}` : message
-          }
-          if (String(payload?.code || '') === 'CHAPTER_OUTLINE_REVIEW_REQUIRED') {
-            rightTab.value = 'chat'
-            applyChatAuthority(payload.authority || { mode: 'human_review', review_status: 'pending' })
-            chatInput.value = chatInput.value || '先列出本章要写的内容'
           }
             const detail = draftUserErrorMessage(code, message, reason)
             const error = new Error(detail)
@@ -1897,15 +1805,6 @@ async function generateDraft(options = {}) {
   } catch (e) {
     if (e?.name !== 'AbortError') {
       actionError.value = e?.message || String(e)
-      if (e?.code === 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED') {
-        researchGapConfirmation.value = {
-        message: Number(e?.details?.candidate_count || 0) > 0
-          ? `检索返回了 ${e.details.candidate_count} 条候选资料，但均未通过本章的关联性和可核验筛选。确认后将只使用现有项目资料继续写作。`
-          : '未得到可用于本章的公开资料。确认后将只使用现有项目资料继续写作。',
-          details: e.details || {},
-          candidates: Array.isArray(e?.details?.candidates) ? e.details.candidates : [],
-        }
-      }
       remoteHint.value = '流式连接已中断，已保留当前预览；可刷新检查后端是否已完成。'
     }
   } finally {
@@ -1935,13 +1834,6 @@ async function generateDraft(options = {}) {
     )
     stopStreamingTimer()
   }
-}
-
-async function confirmResearchGapAndGenerate() {
-  if (!researchGapConfirmation.value) return
-  researchGapConfirmation.value = null
-  chatInput.value = '确认仅使用现有项目资料继续写正文'
-  await sendChat()
 }
 
 function onSaveBlocks(operations) {
@@ -2088,9 +1980,6 @@ function draftUserErrorMessage(code, message, reason) {
   if (code === 'CHAPTER_WRITE_REQUEST_INVALID') {
     return normalizeAgentMessage(message) || '正文生成请求未通过校验，请检查本章提纲和上下文后重试。'
   }
-  if (code === 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED') {
-    return normalizeAgentMessage(message) || '公开资料检索未完成，请确认是否使用现有项目资料继续写作。'
-  }
   const detail = reason ? `${message}（${reason}）` : message
   return normalizeAgentMessage(detail || '正文生成失败，请重试。')
 }
@@ -2156,12 +2045,6 @@ async function clearChatHistory() {
   try {
     const { data } = await clearChapterChatHistory(props.workspaceId, chapterId)
     if (!data?.ok) throw new Error(data?.message || '清空对话失败')
-    applyChatAuthority(data.authority || {
-      mode: chatAuthority.mode,
-      review_status: 'idle',
-      outline_hash: '',
-    })
-    researchGapConfirmation.value = null
     researchStatus.value = ''
     researchSources.value = []
     const emptyTurns = []
@@ -2322,7 +2205,6 @@ async function loadChapterChat(chapterId, { force = false } = {}) {
     const { data } = await fetchChapterChatHistory(props.workspaceId, id)
     if (token !== chatLoadToken || selectedId.value !== id) return
     if (!data?.ok) throw new Error(data?.message || '加载本章对话失败')
-    applyChatAuthority(data.authority)
     const turns = mapChatTurns([
       ...(Array.isArray(data.batch_turns) ? data.batch_turns : []),
       ...(Array.isArray(data.turns) ? data.turns : []),
@@ -2340,21 +2222,6 @@ async function loadChapterChat(chapterId, { force = false } = {}) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
   } finally {
     if (token === chatLoadToken) chatLoading.value = false
-  }
-}
-
-async function setChatAuthority(mode) {
-  const chapterId = String(selectedId.value || '').trim()
-  if (!chapterId || asking.value) return
-  try {
-    const { data } = await saveChapterChatAuthority(props.workspaceId, chapterId, {
-      mode,
-      scope: 'chapter',
-    })
-    if (!data?.ok) throw new Error(data?.message || '设置权限失败')
-    applyChatAuthority(data.authority)
-  } catch (e) {
-    actionError.value = e?.response?.data?.message || e.message || String(e)
   }
 }
 
@@ -2425,8 +2292,6 @@ async function sendChat() {
           'inspecting',
           'inspect_skipped',
           'research',
-          'delegate_reviewing',
-          'delegate_fixing',
         ].includes(type)) {
           const note = String(event.message || event.reason || '').trim()
           if (!note) return
@@ -2438,8 +2303,7 @@ async function sendChat() {
             turn.streaming = true
           })
           if (selectedId.value === chapterId) await scrollChatToBottom()
-        } else if (type === 'authority') {
-          applyChatAuthority(event)
+        } else if (type === 'writing_phase') {
           documentApprovalRequested = documentApprovalRequested || event.document_approval_requested === true
         } else if (type === 'writing_meta') {
           streamText.value = ''
@@ -2536,15 +2400,6 @@ async function sendChat() {
     }
   } catch (e) {
     actionError.value = e?.response?.data?.message || e.message || String(e)
-    if (e?.code === 'CHAPTER_RESEARCH_CONFIRMATION_REQUIRED') {
-      researchGapConfirmation.value = {
-        message: Number(e?.details?.candidate_count || 0) > 0
-          ? `检索返回了 ${e.details.candidate_count} 条候选资料，但均未通过本章筛选。确认后由本章 Agent 仅使用现有项目资料继续写作。`
-          : '未得到可用于本章的公开资料。确认后由本章 Agent 仅使用现有项目资料继续写作。',
-        details: e.details || {},
-        candidates: Array.isArray(e?.details?.candidates) ? e.details.candidates : [],
-      }
-    }
     const errElapsed = Math.max(1, Math.round((Date.now() - startTime) / 1000))
     if (selectedId.value !== chapterId) {
       const cached = chatByChapter.get(chapterId) || []
@@ -2946,24 +2801,6 @@ onUnmounted(() => {
   color: #0f766e;
   font-weight: 700;
 }
-.writing-outline {
-  margin: 8px 0 0;
-  padding-left: 18px;
-  color: #334155;
-  font-size: 12px;
-  line-height: 1.55;
-}
-.writing-outline em {
-  font-style: normal;
-  color: #7c3aed;
-  font-weight: 700;
-  margin-right: 4px;
-}
-.writing-outline span {
-  display: block;
-  color: #64748b;
-  font-size: 11px;
-}
 .research-status a { color: #0f766e; text-decoration: underline; }
 .source-tier {
   display: inline-flex;
@@ -3052,30 +2889,6 @@ onUnmounted(() => {
   color: #1d4ed8;
   border-color: rgba(37, 99, 235, 0.2);
   font-weight: 600;
-}
-.chat-authority {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 10px 0;
-  color: #64748b;
-  font-size: 11px;
-}
-.authority-chip {
-  border: 1px solid #cbd5e1;
-  background: #fff;
-  border-radius: 999px;
-  padding: 3px 8px;
-  font-size: 11px;
-  color: #334155;
-  cursor: pointer;
-}
-.authority-chip.active {
-  border-color: #2563eb;
-  background: #eff6ff;
-  color: #1d4ed8;
-  font-weight: 700;
 }
 .context-panel,
 .chat-panel {

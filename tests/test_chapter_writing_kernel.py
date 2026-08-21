@@ -131,7 +131,7 @@ def test_active_writing_callers_use_the_shared_kernel() -> None:
         encoding="utf-8"
     )
 
-    assert "compile_chapter_writing_messages" in api_source
+    assert "ChapterWritingService" in api_source
     assert "compile_chapter_writing_messages" in batch_source
     assert chat_source.count("    def answer(") == 1
     assert "你是技术标书正文写作器" not in api_source

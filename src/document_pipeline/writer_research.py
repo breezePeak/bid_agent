@@ -35,14 +35,55 @@ _EXPLICIT_RESEARCH_RE = re.compile(
 )
 
 
+def _research_max_attempts() -> int:
+    """Return the bounded number of full retrieval attempts for one query."""
+
+    raw = str(os.environ.get("BID_AGENT_WRITER_RESEARCH_MAX_ATTEMPTS", "3")).strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 3
+    return max(1, min(value, 5))
+
+
+def _need_for_attempt(need: EvidenceNeed, attempt: int) -> tuple[EvidenceNeed, str]:
+    """Give each outer retry a materially different retrieval strategy."""
+
+    strategies = {
+        1: (
+            "current_official_exact",
+            "优先检索本年度自然资源主管部门公开的正式通知、实施方案、技术规程及附件原文。",
+        ),
+        2: (
+            "latest_effective_official",
+            "如果本年度正式文件尚未公开，改查自然资源主管部门最新可公开取得的相邻年度正式文件和现行国家或行业标准，核实仍适用的技术依据。",
+        ),
+        3: (
+            "workflow_components_official",
+            "拆分检索内业核查、外业质量控制、成果复核、问题反馈和再次提交复核等流程节点；优先政府官网、标准发布机构和正式附件原文，不使用聚合转载替代原始来源。",
+        ),
+    }
+    strategy_id, instruction = strategies.get(
+        attempt,
+        (
+            f"official_variant_{attempt}",
+            "更换关键词组合，按具体流程节点检索政府官网或标准发布机构的公开原文。",
+        ),
+    )
+    return (
+        need.model_copy(update={"question": f"{need.question}\n检索策略：{instruction}"}),
+        strategy_id,
+    )
+
+
 def writer_research_enabled() -> bool:
     """Whether ChapterWritingService may auto-search public sources."""
 
     flag = str(os.environ.get("BID_AGENT_WRITER_RESEARCH_ENABLED", "1")).strip().lower()
     if flag in {"0", "false", "no", "off"}:
         return False
-    provider = str(os.environ.get("BID_AGENT_RESEARCH_PROVIDER", "doubao_web")).strip().lower()
-    return provider not in {"", "disabled", "manual"}
+    provider = str(os.environ.get("BID_AGENT_RESEARCH_PROVIDER", "tavily")).strip().lower()
+    return provider == "tavily"
 
 
 class WriterResearchCoordinator:
@@ -99,6 +140,12 @@ class WriterResearchCoordinator:
             return payload, []
         if not decision.runtime.get("ready", True):
             decision.decision_status = "blocked_human"
+            runtime_reason = str(
+                decision.runtime.get("reason") or "TAVILY_RUNTIME_NOT_READY"
+            )
+            for query in decision.queries:
+                query.status = "blocked_human"
+                query.error = runtime_reason
             payload = decision.model_dump(mode="json")
             self._upsert(payload)
             raise ControlPlaneError(
@@ -137,32 +184,79 @@ class WriterResearchCoordinator:
                 relevance_context=relevance_context,
                 max_adopted_items=3,
             )
-            started = time.perf_counter()
             reviewer = self._deterministic_review if self.deterministic_test else None
-            batch = ResearchService(
+            service = ResearchService(
                 self.context,
                 adapter,
                 semantic_reviewer=reviewer,
-            ).resolve(need)
-            valid_sources = self._valid_sources(batch)
-            success = batch.status == "published" and bool(batch.items) and bool(valid_sources)
-            query.attempts.append(
-                {
-                    "attempt": len(query.attempts) + 1,
-                    "status": "published" if success else batch.status,
-                    "batch_id": batch.batch_id,
-                    "evidence_count": len(batch.items),
-                    "source_count": len(valid_sources),
-                    "error": batch.error or ("" if success else "回答未形成可核验公开来源"),
-                    "duration_ms": int((time.perf_counter() - started) * 1000),
-                    "at": datetime.now(UTC).isoformat(),
-                    "research_run": dict(batch.research_run),
-                }
             )
+            batch = None
+            valid_sources: list[dict[str, Any]] = []
+            success = False
+            max_attempts = _research_max_attempts()
+            for attempt in range(1, max_attempts + 1):
+                started = time.perf_counter()
+                attempt_need, query_strategy = _need_for_attempt(need, attempt)
+                batch = service.resolve(attempt_need, force_refresh=attempt > 1)
+                valid_sources = self._valid_sources(batch)
+                accepted_partial = self._accept_verified_partial_batch(batch, valid_sources)
+                if accepted_partial:
+                    batch = service.publish_verified_subset(attempt_need, batch)
+                    valid_sources = self._valid_sources(batch)
+                success = bool(
+                    batch.items
+                    and valid_sources
+                    and batch.status == "published"
+                )
+                provider_errors = [
+                    str(item or "").strip()
+                    for item in batch.research_run.get("provider_errors") or []
+                    if str(item or "").strip()
+                ]
+                attempt_error = (
+                    ""
+                    if success
+                    else provider_errors[0]
+                    if provider_errors
+                    else batch.error or ("" if success else "回答未形成可核验公开来源")
+                )
+                query.attempts.append(
+                    {
+                        "attempt": attempt,
+                        "query_strategy": query_strategy,
+                        "submitted_question": attempt_need.question,
+                        "status": (
+                            "published_partial" if accepted_partial else "published"
+                        )
+                        if success
+                        else batch.status,
+                        "accepted_partial_evidence": accepted_partial,
+                        "batch_id": batch.batch_id,
+                        "evidence_count": len(batch.items),
+                        "source_count": len(valid_sources),
+                        "error": attempt_error,
+                        "duration_ms": int((time.perf_counter() - started) * 1000),
+                        "at": datetime.now(UTC).isoformat(),
+                        "provider_id": str(getattr(service.provider, "provider_id", "") or ""),
+                        "research_run": dict(batch.research_run),
+                    }
+                )
+                self._upsert(decision.model_dump(mode="json"))
+                if success or batch.error == "PROHIBITED_SCOPE":
+                    break
+
+            assert batch is not None
             query.batch_id = batch.batch_id
             query.evidence_count = len(batch.items)
             query.sources = valid_sources
-            query.error = str(batch.error or ("" if success else "回答未形成可核验公开来源"))
+            query.error = str(
+                query.attempts[-1].get("error")
+                or (
+                    ""
+                    if success
+                    else f"连续检索 {len(query.attempts)} 次仍未形成可核验公开来源"
+                )
+            )
             query.status = "published" if success else "blocked_human"
             if not success:
                 decision.decision_status = "blocked_human"
@@ -205,6 +299,7 @@ class WriterResearchCoordinator:
             and (not requirement_ids or str(item.get("requirement_id") or "") in requirement_ids)
         ]
         orientation = dict(bundle.chapter_grounding_context or {})
+        orientation["chapter_writing_plan"] = dict(bundle.chapter_writing_plan or {})
         orientation.setdefault(
             "writing_purpose",
             {
@@ -229,6 +324,12 @@ class WriterResearchCoordinator:
         )
         search_query = str(planned.get("search_query") or "").strip()
         needs_research = bool(planned.get("need_research") and search_query and target_ids)
+        fallback_to_existing_materials = bool(
+            needs_research
+            and planned.get("existing_materials_sufficient")
+            and not planned.get("research_required_by_writing_plan")
+            and not _EXPLICIT_RESEARCH_RE.search(str(bundle.user_instruction or ""))
+        )
         queries: list[ResearchQuery] = []
         if needs_research:
             query_seed = f"{bundle.unit_id}:{RESEARCH_DECISION_POLICY_VERSION}:{search_query}:{','.join(target_ids)}"
@@ -248,6 +349,7 @@ class WriterResearchCoordinator:
             applicable_chapter_ids=target_ids,
             applicable_chapter_titles=[str(item.get("title") or "") for item in targets],
             needs_research=needs_research,
+            fallback_to_existing_materials=fallback_to_existing_materials,
             reason=str(planned.get("reason") or "").strip(),
             queries=queries,
             prohibited_research_scopes=list(_PROHIBITED_SCOPES),
@@ -390,6 +492,36 @@ class WriterResearchCoordinator:
             }
 
         return deterministic
+
+    @staticmethod
+    def _accept_verified_partial_batch(
+        batch: Any,
+        valid_sources: list[dict[str, Any]],
+    ) -> bool:
+        """Accept a verified authoritative subset without weakening Deep Research.
+
+        Deep Research may split one chapter supplement into several ambitious
+        claims.  A missing optional method detail must not discard authoritative
+        original sources that already fill the WritingPlan's public-basis gap.
+        The immutable source batch remains ``gap`` and keeps every missing
+        claim for audit.  Accepted items are copied into a derived published
+        batch before its id is exposed to downstream chapter editing.
+        """
+
+        if str(getattr(batch, "status", "") or "") != "gap":
+            return False
+        if str(getattr(batch, "error", "") or "") != "budget_exhausted":
+            return False
+        run = getattr(batch, "research_run", {})
+        run = run if isinstance(run, dict) else {}
+        if not list(run.get("satisfied_claim_ids") or []):
+            return False
+        authoritative = {"official", "standard", "academic"}
+        return any(
+            str(item.get("source_type") or "") in authoritative
+            for item in valid_sources
+            if isinstance(item, dict)
+        )
 
     @staticmethod
     def _valid_sources(batch: Any) -> list[dict[str, Any]]:

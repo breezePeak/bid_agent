@@ -70,7 +70,7 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                 self.assertTrue(
                     saved["validation_failure_blocks_pipeline"]
                 )
-                self.assertEqual(settings.flow_settings()["research_provider"], "doubao_web")
+                self.assertEqual(settings.flow_settings()["research_provider"], "tavily")
                 self.assertEqual(
                     settings.write_flow_settings({"research_provider": "disabled"})[
                         "research_provider"

@@ -247,18 +247,31 @@ def _goal_alignment_review(
     ]
     if not purpose and not objectives:
         return {}
+    writing_plan = chapter.get("chapter_writing_plan")
+    writing_plan = writing_plan if isinstance(writing_plan, dict) else {}
+    plan_blocks = [
+        {
+            "block_id": str(item.get("block_id") or f"block-{index}"),
+            "heading": str(item.get("heading") or ""),
+            "must_answer": str(item.get("must_answer") or ""),
+        }
+        for index, item in enumerate(writing_plan.get("blocks") or [], start=1)
+        if isinstance(item, dict)
+    ]
     payload = {
         "chapter_title": str(chapter.get("title") or node.get("title") or ""),
         "blueprint_goal": {
             "purpose": purpose,
             "writing_objectives": objectives,
         },
+        "chapter_writing_plan": plan_blocks,
         "bound_requirements": list(bound_requirements),
         "content": str(content),
         "output_schema": {
             "verdict": "aligned|drifted",
             "confidence": "number between 0 and 1",
             "off_goal_paragraphs": "array of zero-based paragraph indexes",
+            "missing_writing_plan_blocks": "array of block_id values not substantively answered",
             "reason": "short Chinese explanation",
         },
     }
@@ -271,7 +284,8 @@ def _goal_alignment_review(
                 "完成该目标，以及是否用较大篇幅写了目标没有要求的内容。事实真实不等于切题；"
                 "bound_requirements 只能补充必须回答内容，不能改变章节目的。采购人安排、人员、"
                 "流程、任务分发、输入输出、交付或验收等内容，只有原始 GOAL 或明确评分条件要求时"
-                "才可展开。必须只返回 JSON，不得输出 Markdown。"
+                "才可展开。逐项检查 chapter_writing_plan 的 must_answer 是否得到实质回答。"
+                "必须只返回 JSON，不得输出 Markdown。"
             ),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
@@ -305,10 +319,19 @@ def _goal_alignment_review(
             if isinstance(item, int) and 0 <= item < paragraph_count
         }
     )
+    valid_plan_ids = {item["block_id"] for item in plan_blocks}
+    missing_plan_ids = sorted(
+        {
+            str(item)
+            for item in (parsed.get("missing_writing_plan_blocks") or [])
+            if str(item) in valid_plan_ids
+        }
+    )
     return {
         "verdict": str(parsed.get("verdict")).lower(),
         "confidence": confidence,
         "off_goal_paragraphs": indexes,
+        "missing_writing_plan_blocks": missing_plan_ids,
         "reason": str(parsed.get("reason") or "").strip()[:500],
         "blueprint_goal": {"purpose": purpose, "writing_objectives": objectives},
     }
@@ -581,6 +604,14 @@ class ContentGroundingGate:
                 GroundingFinding(
                     "CHAPTER_GOAL_MISALIGNED",
                     "正文未直接完成 Blueprint 原始章节目的，或大篇幅写入了目标未要求内容，已拒绝保存。",
+                    {"goal_alignment": goal_alignment},
+                )
+            )
+        if goal_alignment.get("missing_writing_plan_blocks"):
+            findings.append(
+                GroundingFinding(
+                    "WRITING_PLAN_COVERAGE_INCOMPLETE",
+                    "正文未完整回答内部 WritingPlan 的写作块。",
                     {"goal_alignment": goal_alignment},
                 )
             )

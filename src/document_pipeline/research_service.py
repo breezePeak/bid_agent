@@ -684,6 +684,42 @@ class ResearchService:
                 return paragraph[:800]
         return str(content or "").strip()[:800]
 
+    def publish_verified_subset(
+        self,
+        need: EvidenceNeed,
+        source_batch: EvidenceBatch,
+    ) -> EvidenceBatch:
+        """Promote individually verified items from an audited partial run.
+
+        The source batch remains immutable and keeps its unsatisfied Claims.
+        The derived published batch is the only batch exposed downstream, so
+        chapter editing never receives a reference to a ``gap`` batch.
+        """
+
+        if source_batch.status != "gap" or not source_batch.items:
+            raise ValueError("VERIFIED_SUBSET_SOURCE_BATCH_INVALID")
+        research_run = dict(source_batch.research_run or {})
+        research_run["verified_subset_promotion"] = {
+            "accepted": True,
+            "source_batch_id": source_batch.batch_id,
+            "original_completion_reason": str(
+                research_run.get("completion_reason") or source_batch.error or ""
+            ),
+            "satisfied_claim_ids": list(
+                research_run.get("satisfied_claim_ids") or []
+            ),
+            "missing_claim_ids": list(research_run.get("missing_claim_ids") or []),
+            "weak_claim_ids": list(research_run.get("weak_claim_ids") or []),
+        }
+        return self._publish(
+            need,
+            list(source_batch.items),
+            query_count=source_batch.query_count,
+            status="published",
+            error=None,
+            research_run=research_run,
+        )
+
     def _publish(
         self,
         need: EvidenceNeed,
@@ -791,6 +827,19 @@ class ResearchService:
     def _run_summary(run_result: Any) -> dict[str, Any]:
         if run_result is None:
             return {}
+        provider_errors = list(
+            dict.fromkeys(
+                str(item.get("reason") or "").strip()
+                for item in run_result.rejected_urls
+                if isinstance(item, dict)
+                and str(item.get("reason") or "").startswith("SEARCH_FAILED:")
+            )
+        )
+        satisfied_claim_ids = [
+            item.claim_id
+            for item in run_result.sufficiency.claim_assessments
+            if item.status == "satisfied"
+        ]
         return {
             "run_id": run_result.run_id,
             "status": run_result.status,
@@ -802,6 +851,8 @@ class ResearchService:
             "missing_claim_ids": list(run_result.sufficiency.missing_claim_ids),
             "weak_claim_ids": list(run_result.sufficiency.weak_claim_ids),
             "conflict_claim_ids": list(run_result.sufficiency.conflict_claim_ids),
+            "satisfied_claim_ids": satisfied_claim_ids,
+            "provider_errors": provider_errors,
         }
 
     def _base_batch_id(self, need: EvidenceNeed) -> str:

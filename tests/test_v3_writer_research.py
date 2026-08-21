@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import TestCase, mock
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,7 +21,7 @@ from utils import read_json
 
 
 class _Provider:
-    provider_id = "deepseek-test"
+    provider_id = "tavily-test"
 
     @staticmethod
     def runtime_status():
@@ -36,6 +37,25 @@ class _Provider:
                 source_url="https://example.gov.cn/guide",
             )
         ]
+
+
+class _ThirdAttemptProvider:
+    provider_id = "retry-test"
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.questions: list[str] = []
+
+    @staticmethod
+    def runtime_status():
+        return {"ready": True, "python_executable": "test-python"}
+
+    def search(self, question: str, *, limit: int):
+        self.calls += 1
+        self.questions.append(question)
+        if self.calls < 3:
+            return []
+        return _Provider.search(question, limit=limit)
 
 
 def _bundle() -> WriterInputBundle:
@@ -162,13 +182,13 @@ class WriterResearchTests(TestCase):
             self.assertEqual(decision["decision_status"], "skipped")
             self.assertEqual(snapshots, [])
 
-    def test_unready_runtime_blocks_current_chapter(self):
+    def test_missing_tavily_key_blocks_with_actionable_reason(self):
         class _Unavailable:
-            provider_id = "deepseek-test"
+            provider_id = "tavily-test"
 
             @staticmethod
             def runtime_status():
-                return {"ready": False, "reason": "PLAYWRIGHT_PACKAGE_MISSING"}
+                return {"ready": False, "reason": "TAVILY_API_KEY_MISSING"}
 
         with tempfile.TemporaryDirectory() as temporary:
             context = self._context(Path(temporary))
@@ -179,13 +199,90 @@ class WriterResearchTests(TestCase):
                         deterministic_test=True,
                     ).resolve_for_bundle(_bundle())
             self.assertEqual(raised.exception.code, "WRITER_RESEARCH_ACTION_REQUIRED")
+            research = raised.exception.details["research"]
+            self.assertEqual(
+                research["queries"][0]["error"],
+                "TAVILY_API_KEY_MISSING",
+            )
+
+    def test_failed_retrieval_is_retried_before_blocking(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            context = self._context(Path(temporary))
+            provider = _ThirdAttemptProvider()
+            coordinator = WriterResearchCoordinator(
+                context,
+                deterministic_test=True,
+                decision_provider=lambda _request: {
+                    "need_research": True,
+                    "reason": "需要公开实施指南。",
+                    "search_query": "公开实施指南",
+                    "existing_materials_sufficient": False,
+                },
+            )
+            with (
+                mock.patch(
+                    "document_pipeline.writer_research.create_research_adapter",
+                    return_value=provider,
+                ),
+                mock.patch.dict(
+                    "os.environ",
+                    {"BID_AGENT_WRITER_RESEARCH_MAX_ATTEMPTS": "3"},
+                    clear=False,
+                ),
+            ):
+                decision, snapshots = coordinator.resolve_for_bundle(_bundle())
+
+            self.assertEqual(provider.calls, 3)
+            self.assertEqual(len(set(provider.questions)), 3)
+            self.assertIn("本年度", provider.questions[0])
+            self.assertIn("相邻年度", provider.questions[1])
+            self.assertIn("拆分检索", provider.questions[2])
+            self.assertEqual(decision["decision_status"], "published")
+            attempts = decision["queries"][0]["attempts"]
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(
+                [item["query_strategy"] for item in attempts],
+                [
+                    "current_official_exact",
+                    "latest_effective_official",
+                    "workflow_components_official",
+                ],
+            )
+            self.assertTrue(snapshots)
+
+    def test_verified_authoritative_partial_batch_fills_writer_public_gap(self):
+        batch = SimpleNamespace(
+            status="gap",
+            error="budget_exhausted",
+            research_run={
+                "satisfied_claim_ids": ["C1"],
+                "missing_claim_ids": ["C2"],
+            },
+        )
+        self.assertTrue(
+            WriterResearchCoordinator._accept_verified_partial_batch(
+                batch,
+                [
+                    {
+                        "source_type": "official",
+                        "source_url": "https://example.gov.cn/policy",
+                    }
+                ],
+            )
+        )
+        self.assertFalse(
+            WriterResearchCoordinator._accept_verified_partial_batch(
+                batch,
+                [{"source_type": "web", "source_url": "https://example.com/a"}],
+            )
+        )
 
 class WriterResearchEnabledTests(TestCase):
     def test_respects_provider_and_kill_switch(self) -> None:
         with mock.patch.dict(
             "os.environ",
             {
-                "BID_AGENT_RESEARCH_PROVIDER": "doubao_web",
+                "BID_AGENT_RESEARCH_PROVIDER": "tavily",
                 "BID_AGENT_WRITER_RESEARCH_ENABLED": "1",
             },
             clear=False,
@@ -203,7 +300,7 @@ class WriterResearchEnabledTests(TestCase):
         with mock.patch.dict(
             "os.environ",
             {
-                "BID_AGENT_RESEARCH_PROVIDER": "doubao_web",
+                "BID_AGENT_RESEARCH_PROVIDER": "tavily",
                 "BID_AGENT_WRITER_RESEARCH_ENABLED": "0",
             },
             clear=False,

@@ -9,12 +9,12 @@ if "%BID_AGENT_PYTHON%"=="" if exist ".runtime\backend_python.txt" set /p BID_AG
 if "%BID_AGENT_PYTHON%"=="" (
   for /f "delims=" %%P in ('where python 2^>nul') do (
     if not defined BID_AGENT_PYTHON (
-      "%%P" -c "import playwright, uvicorn" >nul 2>&1 && set "BID_AGENT_PYTHON=%%P"
+      "%%P" -c "import uvicorn" >nul 2>&1 && set "BID_AGENT_PYTHON=%%P"
     )
   )
 )
 if "%BID_AGENT_PYTHON%"=="" (
-  echo No Python runtime with Playwright and Uvicorn was found.
+  echo No Python runtime with Uvicorn was found.
   echo Set BID_AGENT_PYTHON to the backend Python executable, then restart.
   exit /b 1
 )

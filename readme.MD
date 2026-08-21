@@ -15,7 +15,6 @@
 conda create -n bid_agent python=3.11 -y
 conda activate bid_agent
 pip install -r requirements.txt
-python -m playwright install chromium
 ```
 
 参与开发时安装测试和静态检查依赖：
@@ -52,21 +51,13 @@ python -m uvicorn api.v3_app:app --app-dir src --host 127.0.0.1 --port 7860
 
 Web API 使用服务端会话认证；未配置 `BID_AGENT_AUTH_PASSWORD` 时会拒绝登录。工作区首次由管理员访问时写入所有者 ACL，之后所有 V3 API 请求都会校验会话及工作区权限；V1/V2 API 已物理移除，旧路径返回 404。
 
-### DeepSeek 联网研究
+### Tavily 联网研究
 
-V3 的写作 Agent 会在编写当前章节时自行判断是否需要调用 `deepseek_web`。首次使用运行 `scripts\deepseek_login.bat`，它会使用与后端一致的 Python 打开 Playwright 自带的可见 Chromium；请在其中登录 DeepSeek。登录会话只保存在本机 `.runtime/deepseek-playwright`，不会保存账号或密码。检索必须启用“联网搜索”并取得可核验的公开来源 URL，否则不会写入证据库。配置项见 `.env.example`。
+V3 公开资料检索只允许使用 Tavily。请配置 `TAVILY_API_KEY`，并保持 `BID_AGENT_RESEARCH_PROVIDER=tavily`；`disabled` 仅用于显式关闭研究能力，其他 Provider 配置会被直接拒绝。
 
-DeepSeek 不是独立的前置阶段。每个章节开始写作时，Agent 会记录“是否调用、原因和查询内容”；需要时才执行检索，并在页面展示请求、重试、来源校验、证据批次和正文使用情况。结果只能用于方案方法、公开标准和风险控制，不能证明企业资质、业绩、人员或产品实绩。自动调用绝不会上传附件；附件仍只能由用户逐次显式勾选。若 Agent 已判断检索必需但 DeepSeek 环境、登录或来源校验失败，任务将暂停在当前章节，处理后重新生成即可继续。
+每个章节开始写作时，系统会记录是否需要检索、原因和查询内容；需要时最多执行多轮 Tavily 检索，并校验公开来源 URL。模型返回的查询计划或证据映射即使格式异常，也会进入确定性的保守降级流程，不会因为单次解析失败直接制造“零检索”终止。若达到重试上限后仍无法补齐 WritingPlan 的强制资料缺口，章节仍会在正文生成前停止，且错误详情会保留实际尝试轮数、查询和 Tavily 运行时原因。
 
-研究命令可通过 `attachment_input_ids` 显式选择已经上传到 V3 输入清单的招标文件、评分文件、参考资料等。只有列出的活动输入会发送给 DeepSeek；服务会在上传前校验清单状态、文件路径与 SHA-256，不会默认把工作区文件上传到外部服务。示例 payload：
-
-```json
-{
-  "need_id": "EN-1",
-  "provider_id": "deepseek_web",
-  "attachment_input_ids": ["已上传文件的 input_id"]
-}
-```
+研究结果只能用于方案方法、公开标准和风险控制，不能证明企业资质、业绩、人员或产品实绩。Tavily 研究不接受附件；任何携带附件的研究请求都会被拒绝。
 
 建议顺序：
 

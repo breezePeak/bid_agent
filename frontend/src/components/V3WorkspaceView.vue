@@ -1056,10 +1056,8 @@
                 </strong>
                 <small>{{ call.reason }}</small>
                 <small>{{ researchStatusLabel(call.decision_status) }}</small>
-                <small v-if="call.runtime?.python_executable">
-                  运行时：{{ call.runtime.python_executable }} ·
-                  Playwright {{ call.runtime.playwright_installed ? '已安装' : '缺失' }} ·
-                  Chromium {{ call.runtime.chromium_installed ? '可用' : '不可用' }}
+                <small v-if="call.runtime?.provider_id">
+                  运行时：Tavily API · {{ call.runtime.ready ? '已就绪' : (call.runtime.reason || '不可用') }}
                 </small>
                 <ol v-if="call.queries?.length">
                   <li v-for="query in call.queries" :key="query.query_id">
@@ -1876,10 +1874,8 @@ import {
 } from '../api'
 import {
   formatV3ApiError,
-  isDeepSeekEligibleInput,
   normalizeV3WorkspaceSnapshot,
   projectV3Planning,
-  selectDeepSeekAttachmentIds,
   v3ErrorDetails,
 } from '../api/v3Contracts.js'
 
@@ -1942,7 +1938,6 @@ const writerChatTurns = ref([])
 const selectedScoreId = ref('')
 const selectedPipelineProductKind = ref('')
 const expandedChapterIds = ref(new Set())
-const deepSeekAttachmentIds = ref([])
 const pendingUploads = reactive({ tender: [], score: [], company: [] })
 const waitingForOutlineCompletion = ref(false)
 const activeTab = ref('upload')
@@ -3598,22 +3593,16 @@ function assertCommandAccepted(data, fallback) {
   }
 }
 
-function deepSeekEligible(item) {
-  return isDeepSeekEligibleInput(item)
-}
-
 async function research(need) {
   researchingNeedId.value = need.need_id
   clearError()
   try {
-    const attachments = selectDeepSeekAttachmentIds(activeInputs.value, deepSeekAttachmentIds.value)
-    const { data } = await resolveV3Research(props.runId, need.need_id, attachments)
-    assertCommandAccepted(data, 'DeepSeek 检索失败。')
-    message.value = data.message || data.receipt?.message || 'DeepSeek 检索完成。'
-    deepSeekAttachmentIds.value = []
+    const { data } = await resolveV3Research(props.runId, need.need_id)
+    assertCommandAccepted(data, 'Tavily 检索失败。')
+    message.value = data.message || data.receipt?.message || 'Tavily 检索完成。'
     await refresh()
   } catch (cause) {
-    reportError(cause, 'DeepSeek 检索失败。')
+    reportError(cause, 'Tavily 检索失败。')
   } finally {
     researchingNeedId.value = ''
   }
@@ -3799,7 +3788,7 @@ function researchStatusLabel(status) {
   return {
     open: '等待检索',
     planned: 'Agent 已决定调用',
-    researching: '正在调用 DeepSeek',
+    researching: '正在调用 Tavily',
     satisfied: '已找到公开来源',
     published: '已发布可核验证据',
     skipped: 'Agent 决定不调用',
@@ -4244,7 +4233,6 @@ watch(
     selectedScoreId.value = ''
     selectedPipelineProductKind.value = ''
     expandedChapterIds.value = new Set()
-    deepSeekAttachmentIds.value = []
     activeTab.value = 'upload'
     closeContentUnit()
     closeStageDrawer()

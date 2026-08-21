@@ -70,8 +70,8 @@ FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
 FLOW_CHOICE_SPECS: dict[str, tuple[str, str, tuple[str, ...]]] = {
     "research_provider": (
         "BID_AGENT_RESEARCH_PROVIDER",
-        "doubao_web",
-        ("doubao_web", "deepseek_web", "tavily", "disabled"),
+        "tavily",
+        ("tavily", "disabled"),
     ),
     "tavily_extract_depth": (
         "BID_AGENT_TAVILY_EXTRACT_DEPTH",

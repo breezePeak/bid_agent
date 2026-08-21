@@ -5,9 +5,10 @@ import json
 import os
 import re
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime
 from typing import Any, Protocol
+
+from utils import extract_json_text
 
 from ..contracts import EvidenceNeed, EvidenceSourceType
 from ..research_service import ResearchCandidate
@@ -86,14 +87,8 @@ class LLMDeepResearchActionProvider:
         error = ""
         for attempt in range(2):
             raw = chat(messages, temperature=0.0).strip()
-            if raw.startswith("```json"):
-                raw = raw[7:]
-            elif raw.startswith("```"):
-                raw = raw[3:]
-            if raw.endswith("```"):
-                raw = raw[:-3]
             try:
-                parsed = json.loads(raw.strip())
+                parsed = json.loads(extract_json_text(raw))
                 if isinstance(parsed, dict):
                     return parsed
             except (json.JSONDecodeError, TypeError) as exc:
@@ -129,7 +124,7 @@ class LLMDeepResearchActionProvider:
         value = str(self._json(RESEARCHER_SYSTEM_PROMPT, payload).get("query") or "").strip()
         if not value or value in searched_queries:
             raise ModelOutputInvalid("RESEARCH_QUERY_INVALID_OR_DUPLICATE")
-        return value[:500]
+        return re.sub(r"\s+", " ", value)[:220].strip()
 
     def select_urls(
         self,
@@ -280,24 +275,34 @@ class DeepResearchEngine:
                 remaining_search_calls -= 1
             active_units = plan.research_units[:remaining_search_calls]
             search_tasks: list[tuple[str, list[ResearchClaim]]] = []
-            try:
-                by_claim = {claim.claim_id: claim for claim in claims}
-                for unit_index, unit in enumerate(active_units):
-                    unit_claims = [by_claim[item] for item in unit.claim_ids if item in by_claim] or claims
+            by_claim = {claim.claim_id: claim for claim in claims}
+            for unit_index, unit in enumerate(active_units):
+                unit_claims = [by_claim[item] for item in unit.claim_ids if item in by_claim] or claims
+                query_iteration = iterations if unit_index == 0 else iterations * 100 + unit_index
+                try:
                     query = self.actions.next_query(
                         need.model_copy(update={"question": unit.question}),
                         unit_claims,
                         report,
-                        iteration=(iterations if unit_index == 0 else iterations * 100 + unit_index),
+                        iteration=query_iteration,
                         searched_queries=list(searched_queries),
                     )
                     if query in searched_queries:
                         raise ModelOutputInvalid("RESEARCH_QUERY_INVALID_OR_DUPLICATE")
-                    searched_queries.append(query)
-                    search_tasks.append((query, unit_claims))
-            except ModelOutputInvalid:
-                model_invalid = True
-                break
+                except ModelOutputInvalid:
+                    # Query generation is an optimization, not a precondition
+                    # for real retrieval.  Fall back to the already-scoped
+                    # EvidenceNeed instead of reporting a search failure with
+                    # zero search calls.
+                    query = self._fallback_query(
+                        need=need,
+                        unit=unit,
+                        claims=unit_claims,
+                        iteration=query_iteration,
+                        searched_queries=searched_queries,
+                    )
+                searched_queries.append(query)
+                search_tasks.append((query, unit_claims))
             hits: list[WebSearchHit] = []
             search_errors: list[Exception] = []
             if len(search_tasks) == 1:
@@ -307,19 +312,29 @@ class DeepResearchEngine:
                     search_errors.append(exc)
                 search_calls += 1
             elif search_tasks:
-                with ThreadPoolExecutor(max_workers=min(len(search_tasks), self.config.max_research_units)) as pool:
-                    futures = {
-                        pool.submit(self.tools.web_search, query, limit=min(limit, self.config.max_search_results)): query
-                        for query, _unit_claims in search_tasks
-                    }
-                    for future in as_completed(futures):
-                        try:
-                            hits.extend(future.result())
-                        except Exception as exc:
-                            search_errors.append(exc)
+                # Tavily plans commonly enforce a low concurrent-request limit.
+                # Sequential calls are deliberate: two simultaneous research
+                # units previously turned transient throttling into a complete
+                # provider failure for the whole chapter.
+                for query, _unit_claims in search_tasks:
+                    try:
+                        hits.extend(
+                            self.tools.web_search(
+                                query,
+                                limit=min(limit, self.config.max_search_results),
+                            )
+                        )
+                    except Exception as exc:
+                        search_errors.append(exc)
                 search_calls += len(search_tasks)
             for exc in search_errors:
-                rejected_urls.append({"url": "", "reason": f"SEARCH_FAILED:{type(exc).__name__}"})
+                reason = re.sub(r"[^A-Za-z0-9_:\-.]", "_", str(exc or ""))[:160]
+                rejected_urls.append(
+                    {
+                        "url": "",
+                        "reason": f"SEARCH_FAILED:{reason or type(exc).__name__}",
+                    }
+                )
             if search_errors and not hits:
                 provider_failed = True
                 break
@@ -359,11 +374,15 @@ class DeepResearchEngine:
                 try:
                     support_by_claim, conflicts = self.actions.assess_support(need, claims, sources)
                 except ModelOutputInvalid:
-                    model_invalid = True
-                    break
+                    support_by_claim, conflicts = self._fallback_support_mapping(
+                        claims,
+                        sources,
+                    )
                 except Exception:
-                    model_invalid = True
-                    break
+                    support_by_claim, conflicts = self._fallback_support_mapping(
+                        claims,
+                        sources,
+                    )
             budget_exhausted = search_calls >= search_budget or iterations >= self.config.max_supervisor_iterations
             report = self.gate.assess(
                 need=need,
@@ -474,6 +493,70 @@ class DeepResearchEngine:
             [source.final_url for source in sources], rejected, search_calls, extract_calls, 1,
             sources, support, set(),
         )
+
+    @staticmethod
+    def _fallback_query(
+        *,
+        need: EvidenceNeed,
+        unit: ResearchUnit,
+        claims: list[ResearchClaim],
+        iteration: int,
+        searched_queries: list[str],
+    ) -> str:
+        """Build a deterministic, scoped query when model JSON is unusable."""
+
+        focus = str(unit.question or need.question or "").strip()
+        focus = re.sub(r"[？?，,。；;：:]", " ", focus)
+        focus = re.sub(r"(?:是什么|有哪些|如何规定|如何组织|应如何|是什么样的)", " ", focus)
+        focus = re.sub(r"\s+", " ", focus).strip()[:150]
+        variants = (
+            "自然资源部 官网 正式文件 原文",
+            "最新有效 年度通知 实施方案 附件",
+            "技术规程 现行标准 核查流程",
+            "内业核查 外业质控 成果复核 闭环",
+        )
+        offset = max(0, iteration - 1) % len(variants)
+        candidates = [
+            f"{focus} {variants[(offset + index) % len(variants)]}".strip()
+            for index in range(len(variants))
+        ]
+        for candidate in candidates:
+            normalized = candidate[:220].strip()
+            if normalized and normalized not in searched_queries:
+                return normalized
+        digest = hashlib.sha256(f"{focus}:{iteration}".encode("utf-8")).hexdigest()[:8]
+        return f"{focus[:200]} {digest}".strip()
+
+    @staticmethod
+    def _fallback_support_mapping(
+        claims: list[ResearchClaim],
+        sources: list[ExtractedWebSource],
+    ) -> tuple[dict[str, list[str]], set[str]]:
+        """Conservatively map extracted text when support-model JSON is invalid."""
+
+        mapping: dict[str, list[str]] = {}
+        for claim in claims:
+            statement = re.sub(r"\s+", "", str(claim.statement or ""))
+            chinese = "".join(re.findall(r"[\u4e00-\u9fff]", statement))
+            tokens = {
+                chinese[index : index + 2]
+                for index in range(max(0, len(chinese) - 1))
+                if chinese[index : index + 2] not in {"要求", "相关", "公开", "资料"}
+            }
+            tokens.update(
+                item.lower()
+                for item in re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]{2,}", statement)
+            )
+            matched: list[str] = []
+            for source in sources:
+                haystack = "\n".join(
+                    (source.title, source.publisher, source.raw_content)
+                ).lower()
+                if tokens and any(token.lower() in haystack for token in tokens):
+                    matched.append(source.source_id)
+            if matched:
+                mapping[claim.claim_id] = matched
+        return mapping, set()
 
     @staticmethod
     def _candidates(

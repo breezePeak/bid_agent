@@ -174,7 +174,6 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             def fake_stream(messages, temperature=0.2):
                 payload = json.loads(messages[1]["content"])
@@ -260,21 +259,20 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="human_review", chapter_id="ch-a")
             list(service.iter_answer_events("ch-a", "先列提纲", chapter=chapter))
 
             with mock.patch("llm_client.chat_stream_chunks") as writer:
                 events = list(
                     service.iter_answer_events(
                         "ch-a",
-                        "确认",
+                        "按这个写",
                         chapter=chapter,
                     )
                 )
 
             writer.assert_not_called()
-            authority = next(item for item in events if item["type"] == "authority")
-            self.assertTrue(authority["document_write_requested"])
+            phase = next(item for item in events if item["type"] == "writing_phase")
+            self.assertTrue(phase["document_write_requested"])
             content = "".join(
                 item["delta"] for item in events if item["type"] == "content_delta"
             )
@@ -300,12 +298,12 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             class FakeBatch:
                 status = "published"
                 error = None
                 items = []
+                query_count = 1
 
             with (
                 mock.patch(
@@ -375,8 +373,8 @@ class ChapterChatStreamTests(unittest.TestCase):
                 )
 
             writer.assert_not_called()
-            authority = next(item for item in events if item["type"] == "authority")
-            self.assertTrue(authority["document_approval_requested"])
+            phase = next(item for item in events if item["type"] == "writing_phase")
+            self.assertTrue(phase["document_approval_requested"])
             self.assertTrue(events[-1]["document_approval_requested"])
             self.assertFalse(events[-1]["document_write_requested"])
             self.assertIn("正在确认当前正文", events[-1]["reply"])
@@ -449,7 +447,6 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             with mock.patch("llm_client.chat_stream_chunks") as writer:
                 events = list(

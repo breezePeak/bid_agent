@@ -255,6 +255,65 @@ class ChapterResearchPlannerTests(unittest.TestCase):
         self.assertEqual(plan["decision_source"], "agent_unavailable")
         self.assertEqual(plan["search_query"], "")
 
+    def test_writing_plan_required_research_survives_agent_unavailable(self) -> None:
+        chapter = {
+            "chapter_id": "ch-policy",
+            "title": "政策依据",
+            "blueprint_node": {"purpose": "说明现行政策依据"},
+        }
+        with mock.patch("llm_client.chat", side_effect=RuntimeError("offline")):
+            plan = plan_chapter_research(
+                chapter,
+                project_context={"identity": {"project_name": "真实项目"}},
+                writing_orientation={
+                    "chapter_writing_plan": {
+                        "blocks": [
+                            {
+                                "must_answer": "现行政策依据",
+                                "needs_public_research": True,
+                            }
+                        ]
+                    }
+                },
+            )
+        self.assertTrue(plan["need_research"])
+        self.assertTrue(plan["research_required_by_writing_plan"])
+        self.assertEqual(plan["decision_source"], "writing_plan_required_fallback")
+        self.assertTrue(plan["search_query"])
+
+    def test_writing_plan_required_research_overrides_model_sufficiency(self) -> None:
+        chapter = {
+            "chapter_id": "ch-standard",
+            "title": "执行标准",
+            "blueprint_node": {"purpose": "列明现行公开标准"},
+        }
+        decision = {
+            "orientation_confirmed": True,
+            "existing_materials_sufficient": True,
+            "need_research": False,
+            "reason": "已有资料足够",
+            "search_query": "",
+        }
+        plan = plan_chapter_research(
+            chapter,
+            project_context={"identity": {"project_name": "真实项目"}},
+            writing_orientation={
+                "chapter_writing_plan": {
+                    "blocks": [
+                        {
+                            "must_answer": "现行标准名称与适用范围",
+                            "needs_public_research": True,
+                        }
+                    ]
+                }
+            },
+            decision_provider=lambda _brief: decision,
+        )
+        self.assertTrue(plan["need_research"])
+        self.assertFalse(plan["existing_materials_sufficient"])
+        self.assertTrue(plan["research_required_by_writing_plan"])
+        self.assertTrue(plan["search_query"])
+
     def test_model_dump_like_query_is_sanitized(self) -> None:
         chapter = {
             "chapter_id": "ch-m",

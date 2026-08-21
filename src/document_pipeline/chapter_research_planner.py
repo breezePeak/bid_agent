@@ -340,6 +340,34 @@ def plan_chapter_research(
         scoring_requirements=scoring_requirements,
         instruction=instruction,
     )
+    orientation = writing_orientation if isinstance(writing_orientation, dict) else {}
+    writing_plan = orientation.get("chapter_writing_plan")
+    writing_plan = writing_plan if isinstance(writing_plan, dict) else {}
+    plan_blocks = [
+        item for item in writing_plan.get("blocks") or [] if isinstance(item, dict)
+    ]
+    writing_plan_requires_research = any(
+        bool(item.get("needs_public_research")) for item in plan_blocks
+    )
+    research_is_mandatory = bool(force_research or writing_plan_requires_research)
+    project = project_context if isinstance(project_context, dict) else {}
+    project_bound_work_content = bool(
+        project.get("work_packages")
+        and plan_blocks
+        and all(item.get("project_fact_refs") for item in plan_blocks)
+        and not any(item.get("needs_public_research") for item in plan_blocks)
+    )
+    if project_bound_work_content and not research_is_mandatory:
+        return {
+            "need_research": False,
+            "reason": "本章 WritingPlan 已逐项绑定项目资料中的工作任务；公开资料不能替代或改写招标项目事实，无需公开检索。",
+            "search_query": "",
+            "brief": brief,
+            "decision_source": "writing_plan_project_facts_guard",
+            "orientation_confirmed": True,
+            "orientation_summary": str(brief.get("orientation_summary") or ""),
+            "existing_materials_sufficient": True,
+        }
     title = str(brief.get("chapter_title") or "").strip()
     goal_chapter = bool(
         re.search(r"(?:^|项目|总体|主要|工作)目标$", title)
@@ -350,7 +378,7 @@ def plan_chapter_research(
         and brief.get("related_tasks")
         and (brief.get("chapter_purpose") or brief.get("writing_objectives"))
     )
-    if goal_materials_ready and not force_research:
+    if goal_materials_ready and not research_is_mandatory:
         return {
             "need_research": False,
             "reason": "项目资料已给出目标、范围和任务边界，足以形成项目专属工作目标；公开资料不应改写项目目标。",
@@ -367,17 +395,26 @@ def plan_chapter_research(
         else _model_decide(brief)
     )
     if decision is None:
-        if force_research:
+        if research_is_mandatory:
             query = _fallback_search_query(brief)
             return {
                 "need_research": bool(query),
-                "reason": "用户明确要求联网搜索，已按章节上下文执行。",
+                "reason": (
+                    "本章 WritingPlan 已声明必须补充可核验公开资料，检索决策模型不可用时仍按章节上下文执行。"
+                    if writing_plan_requires_research
+                    else "用户明确要求联网搜索，已按章节上下文执行。"
+                ),
                 "search_query": query,
                 "brief": brief,
-                "decision_source": "explicit_request_fallback",
+                "decision_source": (
+                    "writing_plan_required_fallback"
+                    if writing_plan_requires_research
+                    else "explicit_request_fallback"
+                ),
                 "orientation_confirmed": True,
                 "orientation_summary": str(brief.get("orientation_summary") or ""),
                 "existing_materials_sufficient": False,
+                "research_required_by_writing_plan": writing_plan_requires_research,
             }
         return {
             "need_research": False,
@@ -394,11 +431,16 @@ def plan_chapter_research(
     materials_enough = bool(decision.get("existing_materials_sufficient"))
     need = bool(decision.get("need_research"))
     # An explicit user request has priority over the model's sufficiency judgment.
-    if not force_research and (not confirmed or materials_enough):
+    if not research_is_mandatory and (not confirmed or materials_enough):
         need = False
+    if writing_plan_requires_research:
+        # A mandatory WritingPlan gap is authoritative.  A later model answer
+        # must never reclassify it as optional or already sufficiently covered.
+        need = True
+        materials_enough = False
     reason = str(decision.get("reason") or "").strip()
     query = _sanitize_search_query(str(decision.get("search_query") or ""), brief)
-    if (need or force_research) and not query:
+    if (need or research_is_mandatory) and not query:
         # Model asked for research but forgot query — ask not invented need.
         query = _sanitize_search_query(
             " ".join(
@@ -412,14 +454,18 @@ def plan_chapter_research(
             ),
             brief,
         )
-    if not need and not force_research:
+    if not need and not research_is_mandatory:
         query = ""
 
-    need = bool(need or force_research)
+    need = bool(need or research_is_mandatory)
 
     return {
         "need_research": bool(need and query),
-        "reason": reason
+        "reason": (
+            "本章 WritingPlan 已声明必须补充可核验公开资料。"
+            if writing_plan_requires_research
+            else reason
+        )
         or (
             "已有资料足够，无需公开检索"
             if materials_enough or not need
@@ -433,6 +479,7 @@ def plan_chapter_research(
             decision.get("orientation_summary") or brief.get("orientation_summary") or ""
         ).strip(),
         "existing_materials_sufficient": materials_enough,
+        "research_required_by_writing_plan": writing_plan_requires_research,
     }
 
 
