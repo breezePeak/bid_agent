@@ -158,7 +158,7 @@ Bid Master
 - Writer 的唯一调用参数是冻结、最小充分并带 hash 的 `WriterInputBundle`。
 - `WriterInputBundleAssembler` 是 Service；它从已确认 Blueprint、Topic/Duty、Requirement、Score、EvidenceSnapshot、术语和全局约束编译 Bundle。
 - Writer 不得读取整份招标文件、SourceIndex、整个 ProjectModel、整个 EvidenceRepository、任意工作区文件或其他 Agent 的自由文本。
-- Writer 不得自行联网、搜索、调用 DeepSeek、上传文件、创建标题、移动主责、增加 Topic 或扩大响应范围。
+- Writer 不得绕过受控研究服务自行联网、搜索、调用外部 Provider、上传文件、创建标题、移动主责、增加 Topic 或扩大响应范围。
 - Writer 只能引用 Bundle 中存在的 target、Requirement、Score、Topic、Duty、Fact 和 Evidence ID。
 - 缺证据时只能输出 `EvidenceNeedProposal`；发现规划问题时只能输出 `PlanIssueProposal`。
 - Writer 只输出 `ContentProposal`，通过内容 Gate 后才能晋级为 `ContentBlock`。
@@ -169,12 +169,12 @@ Bid Master
 - `EvidenceRepository` 是统一证据治理层，必须保存证据版本、来源、authority class、claim scope、有效期、访问策略、Binding 和验证状态。
 - 企业资质、企业案例、产品资料、招标原文、官方标准、公开网页和历史标书必须使用不同 authority class。
 - 企业能力只能由允许的 company/product Evidence 支持。
-- 官方标准、网页研究、DeepSeek 结果和历史优秀标书不得证明本企业资质、案例、人员、产品实绩或关键承诺。
+- 官方标准、Tavily 网页研究结果和历史优秀标书不得证明本企业资质、案例、人员、产品实绩或关键承诺。
 - 历史优秀标书默认只能作为结构、表达和方法参考。
 - Vector Store 只索引 promoted EvidenceRecord 和 Artifact 引用，可随时重建，不能作为事实源。
 - Writer 不得自行查询 EvidenceRepository；只能读取 Bundle 内冻结的最小 EvidenceSnapshot。
-- DeepSeek 只是显式 EvidenceNeed 的 Research Provider，不是 Agent 或招标权威解析器。
-- DeepSeek 附件上传必须逐次显式选择 `attachment_input_ids`、校验文件 hash 并取得用户授权；禁止自动上传真实标书或企业材料。
+- Tavily 是唯一允许的公开资料 Research Provider，只能由显式 EvidenceNeed 或章节 WritingPlan 触发，不是 Agent 或招标权威解析器。
+- Tavily 研究不支持附件；任何 `attachment_input_ids` 或外部文件上传请求必须拒绝。
 - Evidence 变化应只使受影响的 Snapshot、Bundle 和 ContentUnit stale；除非改变规划责任，不得无条件要求重审 Blueprint。
 
 ### 7. Integration 与 Quality Audit

@@ -5,11 +5,14 @@ import ipaddress
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import UTC, datetime
 from typing import Any, Callable
+
+import certifi
 
 from .config import DeepResearchConfig
 from .contracts import ExtractedWebSource, WebExtractResult, WebSearchHit
@@ -86,6 +89,32 @@ class TavilyWebTools:
             raise ValueError("BID_AGENT_TAVILY_SEARCH_DEPTH 配置无效")
         self._transport = transport or self._post_json
 
+    @staticmethod
+    def _request_attempts() -> int:
+        raw = str(os.environ.get("BID_AGENT_TAVILY_REQUEST_MAX_ATTEMPTS", "3")).strip()
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 3
+        return max(1, min(value, 5))
+
+    def _request(self, url: str, payload: dict[str, Any], timeout: int) -> dict[str, Any]:
+        attempts = self._request_attempts()
+        for attempt in range(1, attempts + 1):
+            try:
+                return self._transport(url, payload, timeout, self.api_key)
+            except RuntimeError as exc:
+                reason = str(exc or "")
+                transient = (
+                    reason == "TAVILY_HTTP_429"
+                    or reason.startswith("TAVILY_HTTP_5")
+                    or reason.startswith("TAVILY_REQUEST_FAILED:")
+                )
+                if not transient or attempt >= attempts:
+                    raise
+                time.sleep(0.4 * attempt)
+        raise RuntimeError("TAVILY_REQUEST_RETRY_EXHAUSTED")
+
     def runtime_status(self) -> dict[str, object]:
         return {
             "ready": bool(self.api_key),
@@ -111,7 +140,11 @@ class TavilyWebTools:
             "include_favicon": False,
             "include_usage": True,
         }
-        parsed = self._transport(self.search_url, payload, self.config.extract_timeout_seconds, self.api_key)
+        parsed = self._request(
+            self.search_url,
+            payload,
+            self.config.extract_timeout_seconds,
+        )
         hits: list[WebSearchHit] = []
         seen: set[str] = set()
         for index, result in enumerate(parsed.get("results") or []):
@@ -168,7 +201,11 @@ class TavilyWebTools:
             "timeout": self.config.extract_timeout_seconds,
             "include_usage": True,
         }
-        parsed = self._transport(self.extract_url, payload, self.config.extract_timeout_seconds + 5, self.api_key)
+        parsed = self._request(
+            self.extract_url,
+            payload,
+            self.config.extract_timeout_seconds + 5,
+        )
         sources: list[ExtractedWebSource] = []
         returned: set[str] = set()
         for result in parsed.get("results") or []:
@@ -224,7 +261,11 @@ class TavilyWebTools:
             method="POST",
         )
         try:
-            context = ssl.create_default_context()
+            # The backend Conda runtime can encounter malformed entries in the
+            # Windows certificate store (ASN1 NOT_ENOUGH_DATA) before a request
+            # is even sent.  Use the maintained certifi CA bundle so Tavily TLS
+            # verification is deterministic across Python runtimes.
+            context = ssl.create_default_context(cafile=certifi.where())
             with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
                 status = int(getattr(response, "status", 200) or 200)
                 body = response.read(4_000_000).decode("utf-8", errors="replace")

@@ -482,7 +482,7 @@ class AutonomousResearchCoordinator:
                     "provider_id": str(
                         os.environ.get(
                             "BID_AGENT_RESEARCH_PROVIDER",
-                            "deepseek_web",
+                            "tavily",
                         )
                     ),
                     "planned_count": 0,
@@ -569,7 +569,7 @@ class AutonomousResearchCoordinator:
                 {
                     "code": "AUTO_RESEARCH_EXHAUSTED",
                     "message": (
-                        "DeepSeek 公开资料检索重试耗尽，"
+                        "Tavily 公开资料检索重试耗尽，"
                         "没有取得可核验来源。"
                     ),
                     "details": {

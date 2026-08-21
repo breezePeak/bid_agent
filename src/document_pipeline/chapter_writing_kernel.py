@@ -16,7 +16,7 @@ import re
 from typing import Any, Literal, Mapping
 
 from .canonicalization import canonical_hash, canonical_json
-from .chapter_writing_outline import compile_chapter_writing_outline
+from .chapter_writing_outline import compile_chapter_writing_plan
 
 
 Operation = Literal["create", "rewrite", "repair"]
@@ -353,6 +353,7 @@ class ChapterWritingRequest:
     chapter_context: Any = None
     history: tuple[dict[str, Any], ...] = ()
     writing_orientation: Any = None
+    writing_plan: Any = None
 
 
 @dataclass(frozen=True)
@@ -497,14 +498,22 @@ def compile_chapter_writing_spec(
         chapter_context = {"items": chapter_context}
     context_items = chapter_context.get("chapter_context_items") or chapter_context.get("items") or []
     outline = _dump(
-        compile_chapter_writing_outline(
+        compile_chapter_writing_plan(
             chapter,
             tender_requirements=tender,
             scoring_requirements=scoring,
             writing_orientation=_dump(req.writing_orientation),
             chapter_context_items=context_items if isinstance(context_items, list) else [],
+            project_context=_dump(req.project_context),
         )
     )
+    supplied_plan = _dump(req.writing_plan)
+    if isinstance(supplied_plan, dict) and supplied_plan.get("blocks"):
+        outline = {
+            **outline,
+            "blocks": deepcopy(list(supplied_plan.get("blocks") or [])),
+            "block_count": len(list(supplied_plan.get("blocks") or [])),
+        }
     bound = _bound_requirements(
         node, tender, scoring, _dump(req.binding_requirements), outline
     )

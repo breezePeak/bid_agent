@@ -56,15 +56,15 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 ## PR-6：按需研究服务
 
-- 状态：已完成（真实 DeepSeek 搜索与附件上传已人工冒烟）
+- 状态：已完成；2026-08-21 起收敛为 Tavily 唯一公开资料检索 Provider
 - 已完成：新增 `ResearchService` 与 Provider 接口；研究仅由 `EvidenceNeed` 触发，发布到不可变的 `workspace/v3/evidence/batches` 快照，不会修改 `inputs/reference.md` 或触发全量切分。
 - 工具注册：`research.resolve` 已接入 `V3ExecutionController`，只允许解析 `ProjectModel` 中已声明的 EvidenceNeed。
-- 实现路线：网页研究采用 Provider Adapter，而非绑定 DeepSeek；`deepseek_web` 是首个适配器，使用 Playwright 持久化浏览器会话。首次由用户在本机可见浏览器中登录，系统不保存账号或密码。每次问答均由明确的 EvidenceNeed 触发，回答作为外部二级证据并保留网页 URL、提问、回答和检索时间；不允许证明企业能力，也不绕过 V3 质量门。
-- Agent 工具：新增 `V3ResearchTool`，只允许按 `need_id` 解析 `ProjectModel` 中已声明的 EvidenceNeed，并调用 Provider Adapter 发布证据批次；前端按钮只能触发已声明的 EvidenceNeed，发送文件还必须显式选择活动 `attachment_input_ids`，不允许任意网页问答直接写入标书。
-- 默认 Provider：未设置 `BID_AGENT_RESEARCH_PROVIDER` 时使用 `deepseek_web`；适配器会强制启用“联网搜索”，提取并去重公开来源 URL，无法取得来源时拒绝发布。
+- 实现路线：网页研究统一通过 Tavily API；生产工厂只接受 `tavily`，另保留 `disabled` 作为显式停用开关，其他 Provider 标识直接拒绝。每次研究均由明确的 EvidenceNeed 或章节 WritingPlan 触发，结果作为外部二级证据并保留网页 URL、查询和检索时间；不允许证明企业能力，也不绕过 V3 质量门。
+- Agent 工具：`V3ResearchTool` 只允许按 `need_id` 解析 `ProjectModel` 中已声明的 EvidenceNeed，并调用 Tavily 发布证据批次；前端按钮只能触发已声明的 EvidenceNeed。Tavily 路径不接受 `attachment_input_ids`，不允许任意网页问答直接写入标书。
+- 默认 Provider：未设置 `BID_AGENT_RESEARCH_PROVIDER` 时使用 `tavily`；缺少 `TAVILY_API_KEY`、无法取得可核验来源或达到重试上限时拒绝发布，并保留可操作的失败原因。
 - 控制状态：`control.db.evidence_needs` 记录预算、状态与活动证据批次；失败批次保留错误信息且不可覆盖，后续调用以新 revision 重试。
 - 安全边界：外部 Provider 不能发布企业能力 Claim；企业事实仍必须来自 `company` 输入角色。
-- 已验证：Provider 契约、来源 URL 解析、预算限制、失败重试和证据批次均有自动化测试；已使用 Playwright 持久化登录态完成真实联网搜索及无敏感测试附件上传，公开来源 URL 可正常进入候选证据。
+- 已验证：Tavily Provider 契约、来源 URL 解析、预算限制、失败重试、非法 Provider 拒绝、附件拒绝和证据批次均有自动化测试。
 
 ## PR-7：ContentUnit Scheduler 与 Writer
 
@@ -237,7 +237,7 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 - Gate U 当前未开始：尚无独立 Usability Holdout、supported profile 覆盖矩阵、最终 Word 逐页验收、专家盲审和人工改写量证据，因此任何现有版本均不得宣称能生成正式可投标书。
 - 核心分工保持不变：Agent 只产生 Proposal，Artifact 承载版本化事实，Service 执行确定性动作，Gate/Promotion 决定权威晋级。
 - 历史设计链记录（不再是当前自动目录主链）：`InputManifest / SourceIndex / 可选 TemplateStructureContract → RequirementLedger → ScoreModel → ProjectModel → ResponseTopicGraph/ResponseDuty → ChapterBlueprint → H1 PlanningGateReceipt → EvidenceSnapshot → Blueprint 派生的 DocumentContract/DocumentPlan → WriterInputBundle → ContentBlock`；当前替代关系见 2026-07-29 记录，H1 仍是授权 Receipt，DocumentContract/DocumentPlan 不是独立可编辑规划。
-- DeepSeek 仍只是显式 EvidenceNeed 的 Research Provider，不获得招标解析或 Artifact 写权限。
+- Tavily 是唯一允许的公开资料 Research Provider，不获得招标解析或 Artifact 写权限。
 
 ## Gate U：Real-Bid Usability
 

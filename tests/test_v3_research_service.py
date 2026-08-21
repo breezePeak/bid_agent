@@ -14,7 +14,11 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from control_plane import WorkspaceContext  # noqa: E402
 from document_pipeline.contracts import EvidenceNeed, EvidenceSourceType  # noqa: E402
-from document_pipeline.research_service import ResearchCandidate, ResearchService  # noqa: E402
+from document_pipeline.research_service import (  # noqa: E402
+    ResearchCandidate,
+    ResearchService,
+    load_published_batch,
+)
 from document_pipeline.deep_research.contracts import (  # noqa: E402
     ClaimAssessment,
     DeepResearchRunResult,
@@ -126,6 +130,47 @@ class V3ResearchServiceTests(unittest.TestCase):
             self.assertEqual(refreshed.status, "published")
             self.assertEqual(refreshed.revision, 2)
             self.assertNotEqual(first.batch_id, refreshed.batch_id)
+
+    def test_verified_subset_is_derived_as_a_real_published_batch(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            candidate = ResearchCandidate(
+                title="自然资源主管部门正式文件",
+                publisher="政府网站",
+                content="正式文件明确年度调查部署、质量控制和成果复核要求。",
+                source_url="https://example.gov.cn/policy",
+                source_type=EvidenceSourceType.OFFICIAL,
+            )
+            context = self._context(Path(tmp))
+            service = _service(context, _Provider([candidate]))
+            need = EvidenceNeed(
+                need_id="EN-SUBSET",
+                question="年度调查公开依据",
+                topic_id="chapter:route",
+                deadline_stage="chapter_writing",
+                query_budget=1,
+            )
+            original = service.resolve(need)
+            partial = original.model_copy(
+                update={
+                    "status": "gap",
+                    "error": "budget_exhausted",
+                    "research_run": {
+                        "completion_reason": "budget_exhausted",
+                        "satisfied_claim_ids": ["C1"],
+                        "missing_claim_ids": ["C2"],
+                    },
+                }
+            )
+            promoted = service.publish_verified_subset(need, partial)
+            self.assertEqual(promoted.status, "published")
+            self.assertEqual(promoted.revision, 2)
+            self.assertIsNone(promoted.error)
+            self.assertEqual(len(promoted.items), 1)
+            self.assertEqual(
+                promoted.research_run["verified_subset_promotion"]["source_batch_id"],
+                partial.batch_id,
+            )
+            self.assertIsNotNone(load_published_batch(context, promoted.batch_id))
 
     def test_external_research_cannot_publish_enterprise_capability(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

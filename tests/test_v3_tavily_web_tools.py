@@ -36,6 +36,34 @@ def test_search_is_metadata_only_and_answer_is_ignored() -> None:
     assert "chunks_per_source" not in requests[0][1]
 
 
+def test_transient_tavily_failure_is_retried(monkeypatch) -> None:
+    calls = 0
+
+    def transport(_url, _payload, _timeout, _key):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise RuntimeError("TAVILY_HTTP_429")
+        return {
+            "results": [
+                {
+                    "title": "官方文件",
+                    "url": "https://example.gov.cn/policy",
+                    "content": "公开摘要",
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "document_pipeline.deep_research.tavily_tools.time.sleep",
+        lambda _value: None,
+    )
+    tools = TavilyWebTools(api_key="secret", config=_config(), transport=transport)
+    hits = tools.web_search("测试查询")
+    assert calls == 3
+    assert hits[0].url == "https://example.gov.cn/policy"
+
+
 def test_extract_uses_only_raw_content_and_records_failures() -> None:
     def transport(url, payload, timeout, api_key):
         assert "query" not in payload

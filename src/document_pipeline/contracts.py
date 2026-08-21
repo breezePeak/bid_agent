@@ -640,6 +640,11 @@ class ResearchDecision(BaseModel):
     applicable_chapter_ids: list[str] = Field(default_factory=list)
     applicable_chapter_titles: list[str] = Field(default_factory=list)
     needs_research: bool
+    # True only when the planner has explicitly established that the public
+    # search is optional and the already-authorized project material can still
+    # satisfy every WritingPlan block.  Presence of unrelated project facts is
+    # never enough to infer this after a failed search.
+    fallback_to_existing_materials: bool = False
     reason: str = Field(min_length=1)
     queries: list[ResearchQuery] = Field(default_factory=list, max_length=3)
     prohibited_research_scopes: list[str] = Field(default_factory=list)
@@ -1413,6 +1418,7 @@ class WriterInputBundle(ContractModel):
     # turns remain non-authoritative in the writing kernel; user turns preserve
     # the chapter-local feedback that led to this write/rewrite action.
     chapter_dialogue: list[dict[str, Any]] = Field(default_factory=list)
+    chapter_writing_plan: dict[str, Any] = Field(default_factory=dict)
     overwrite_locked: bool = False
 
 

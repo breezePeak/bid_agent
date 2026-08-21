@@ -1,4 +1,4 @@
-"""Compile a chapter writing outline from score conditions.
+"""Compile the internal ChapterWritingPlan used by the one writing chain.
 
 This is a Service projection of promoted Blueprint + ScoreModel +
 RequirementLedger. It is not a canonical Artifact and does not add a
@@ -30,6 +30,7 @@ _WRITE_AS = {
 
 _DELIVERABLE_CUE = re.compile(r"交付|交(\s*)?成果|成果(文件|资料|清单)|提交|移交")
 _ACCEPTANCE_CUE = re.compile(r"验收|终验|初验|竣工验收")
+_WORK_CONTENT_CUE = re.compile(r"工作内容|具体任务|实施内容|任务说明")
 
 _RUBRIC_LEAK = re.compile(
     r"满分条件|得分任务|得分点|评分要求|评分标准|本节用于|"
@@ -87,13 +88,14 @@ def _explicit_purpose_objectives(purpose: str) -> list[str]:
     return [left, right]
 
 
-def compile_chapter_writing_outline(
+def compile_chapter_writing_plan(
     chapter: dict[str, Any],
     *,
     tender_requirements: list[dict[str, Any]] | None = None,
     scoring_requirements: list[dict[str, Any]] | None = None,
     writing_orientation: dict[str, Any] | None = None,
     chapter_context_items: list[dict[str, Any]] | None = None,
+    project_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build ordered writing blocks the chapter body must cover."""
     node = chapter.get("blueprint_node") if isinstance(chapter.get("blueprint_node"), dict) else {}
@@ -135,6 +137,7 @@ def compile_chapter_writing_outline(
         requirement_ids: list[str] | None = None,
         ownership: str = "primary",
         outcome_kind: str = "",
+        project_fact_refs: list[str] | None = None,
     ) -> None:
         if len(blocks) >= MAX_BLOCKS:
             return
@@ -158,6 +161,7 @@ def compile_chapter_writing_outline(
                     item for item in (requirement_ids or []) if item
                 ][:4],
                 "ownership": ownership,
+                "project_fact_refs": list(project_fact_refs or [])[:4],
             }
         )
 
@@ -230,6 +234,41 @@ def compile_chapter_writing_outline(
                 ),
             )
 
+    project = project_context if isinstance(project_context, dict) else {}
+    work_packages = list(project.get("work_packages") or [])
+    work_focus = " ".join([purpose, *objectives, *[
+        str(item.get("must_answer") or "") for item in blocks if isinstance(item, dict)
+    ]])
+    if work_packages and _WORK_CONTENT_CUE.search(work_focus):
+        inherited = blocks[0] if len(blocks) == 1 and blocks[0].get("kind") == "response" else {}
+        blocks = []
+        seen_keys.clear()
+        for index, item in enumerate(work_packages[:MAX_BLOCKS]):
+            if isinstance(item, dict):
+                fact = str(
+                    item.get("statement")
+                    or item.get("text")
+                    or item.get("description")
+                    or item.get("title")
+                    or ""
+                ).strip()
+            else:
+                fact = str(item or "").strip()
+            if not fact:
+                continue
+            heading = re.split(r"[：:；;。]", fact, maxsplit=1)[0].strip() or f"任务 {index + 1}"
+            add_block(
+                kind="response",
+                heading=heading,
+                must_answer=fact,
+                score_point_id=str(inherited.get("score_point_id") or ""),
+                condition_id=str(inherited.get("condition_id") or ""),
+                requirement_ids=list(inherited.get("requirement_ids") or []),
+                ownership=str(inherited.get("ownership") or "primary"),
+                outcome_kind=str(inherited.get("outcome_kind") or ""),
+                project_fact_refs=[f"work_packages[{index}]"],
+            )
+
     if not blocks:
         for objective in objectives:
             add_block(kind="response", heading=objective, must_answer=objective)
@@ -247,9 +286,19 @@ def compile_chapter_writing_outline(
         for item in (chapter_context_items or [])
         if isinstance(item, dict) and item.get("kind") in {"KEY_FACT", "GOAL"}
     ][:4]
+    usable_project_facts = [
+        _clean(
+            item.get("statement") or item.get("text") or item.get("description") or item.get("title") or "",
+            120,
+        )
+        if isinstance(item, dict)
+        else _clean(item, 120)
+        for item in work_packages[:MAX_BLOCKS]
+    ]
+    usable_project_facts = [item for item in usable_project_facts if item]
 
     return {
-        "schema_version": "v3.chapter-writing-outline.v1",
+        "schema_version": "v3.chapter-writing-plan.v1",
         "chapter_id": str(chapter.get("chapter_id") or node.get("chapter_id") or ""),
         "chapter_title": title,
         "purpose": purpose,
@@ -257,6 +306,7 @@ def compile_chapter_writing_outline(
         "block_count": len(blocks),
         "blocks": blocks,
         "usable_local_facts": local_facts,
+        "usable_project_facts": usable_project_facts,
         "writing_rule": (
             "Blueprint 的 purpose 与 writing_objectives 是唯一章节目标，必须按原文执行，不得分类、改写或扩展。"
             "按 blocks 顺序回答评分条件明确要求的 must_answer；write_as 只是中性表达规则，不能另造章节写法。"
@@ -265,3 +315,8 @@ def compile_chapter_writing_outline(
             "其他块不得机械补写“本章交付物”。不要输出提纲标题本身，不要出现评分术语。"
         ),
     }
+
+
+# Historical import alias. This is the same internal plan compiler, not an
+# approval artifact or an alternate writing route.
+compile_chapter_writing_outline = compile_chapter_writing_plan

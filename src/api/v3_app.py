@@ -135,12 +135,7 @@ async def _runtime_settings_lifespan(_app: FastAPI):
     try:
         yield
     finally:
-        try:
-            from document_pipeline.research_adapters import close_web_sessions
-
-            close_web_sessions()
-        finally:
-            SETTINGS.restore_runtime_environment(previous)
+        SETTINGS.restore_runtime_environment(previous)
 
 
 app = FastAPI(
@@ -1091,24 +1086,6 @@ def get_chapter(workspace_id: str, chapter_id: str) -> JSONResponse:
             )
         except Exception:
             chapter["writing_orientation"] = None
-        try:
-            from document_pipeline.chapter_writing_outline import (
-                compile_chapter_writing_outline,
-            )
-
-            context_items = []
-            if isinstance(chapter.get("context"), dict):
-                context_items = list(chapter["context"].get("items") or [])
-            chapter["writing_outline"] = compile_chapter_writing_outline(
-                chapter,
-                tender_requirements=chapter.get("chapter_requirements") or [],
-                scoring_requirements=chapter.get("chapter_scoring_requirements")
-                or [],
-                writing_orientation=chapter.get("writing_orientation"),
-                chapter_context_items=context_items,
-            )
-        except Exception:
-            chapter["writing_outline"] = None
         return JSONResponse({"ok": True, "chapter": chapter})
     except ControlPlaneError as exc:
         return _error(exc)
@@ -1165,67 +1142,8 @@ def chapter_chat_history(
                 "title": str(chapter.get("title") or ""),
                 "turns": turns,
                 "batch_turns": batch_turns,
-                "authority": service.load_authority(chapter_id),
             }
         )
-    except ControlPlaneError as exc:
-        return _error(exc)
-
-
-@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/authority")
-def chapter_chat_authority_get(workspace_id: str, chapter_id: str) -> JSONResponse:
-    try:
-        from document_pipeline.chapter_chat import ChapterChatService
-        from document_pipeline.chapter_workspace import ChapterWorkspaceService
-
-        context = _context(workspace_id)
-        ChapterWorkspaceService(context).get_chapter(chapter_id)
-        authority = ChapterChatService(context).load_authority(chapter_id)
-        return JSONResponse({"ok": True, "authority": authority})
-    except ControlPlaneError as exc:
-        return _error(exc)
-
-
-@app.put("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/chat/authority")
-async def chapter_chat_authority_put(
-    workspace_id: str,
-    chapter_id: str,
-    request: Request,
-) -> JSONResponse:
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-    try:
-        from document_pipeline.chapter_chat import AUTHORITY_MODES, ChapterChatService
-        from document_pipeline.chapter_workspace import ChapterWorkspaceService
-
-        context = _context(workspace_id)
-        ChapterWorkspaceService(context).get_chapter(chapter_id)
-        service = ChapterChatService(context)
-        mode = str((body or {}).get("mode") or "").strip()
-        if mode:
-            if mode not in AUTHORITY_MODES:
-                raise ControlPlaneError(
-                    "CHAT_AUTHORITY_INVALID",
-                    "权限模式只能是 用户审核、替我审核 或 完全权限。",
-                    status_code=400,
-                )
-            authority = service.set_authority(
-                mode=mode,
-                chapter_id=chapter_id,
-                scope=str((body or {}).get("scope") or "chapter"),
-            )
-        else:
-            authority = service.load_authority(chapter_id)
-        decision = str((body or {}).get("decision") or "").strip()
-        if decision:
-            authority = service.decide_outline_review(
-                chapter_id,
-                decision=decision,
-                outline_hash=str((body or {}).get("outline_hash") or ""),
-            )
-        return JSONResponse({"ok": True, "authority": authority})
     except ControlPlaneError as exc:
         return _error(exc)
 
@@ -1332,7 +1250,6 @@ async def chapter_chat_history_delete(
         service = ChapterChatService(context)
         if bool((body or {}).get("clear_all")):
             deleted_count = service.clear_history(chapter_id)
-            authority = service.load_authority(chapter_id)
         else:
             service.delete_turn(
                 chapter_id,
@@ -1341,13 +1258,11 @@ async def chapter_chat_history_delete(
                 role=str((body or {}).get("role") or ""),
             )
             deleted_count = 1
-            authority = None
         return JSONResponse(
             {
                 "ok": True,
                 "chapter_id": str(chapter.get("chapter_id") or chapter_id),
                 "deleted_count": deleted_count,
-                **({"authority": authority} if authority is not None else {}),
             }
         )
     except ControlPlaneError as exc:
@@ -1544,12 +1459,32 @@ async def chapter_chat_stream(
                     for item in queries
                     if isinstance(item, dict) and str(item.get("error") or "").strip()
                 ]
-                code = "CHAPTER_RESEARCH_CONFIRMATION_REQUIRED"
-                error_message = "公开资料检索未取得可用于写作的核验来源，请确认是否仅使用现有项目资料继续写作。"
+                attempt_count = sum(
+                    len(item.get("attempts") or [])
+                    for item in queries
+                    if isinstance(item, dict) and isinstance(item.get("attempts"), list)
+                ) or 1
+                code = "CHAPTER_RESEARCH_UNAVAILABLE"
+                provider_failed = any(
+                    value == "provider_failed" or value.startswith("SEARCH_FAILED:")
+                    for value in errors
+                )
+                error_message = (
+                    "本章 WritingPlan 存在必须由可核验公开原始来源补齐的资料缺口，"
+                    f"系统已执行 {attempt_count} 轮不同策略的 Tavily 检索，但 Tavily 请求连续失败，"
+                    "并非检索结果不合格；已在正文生成前停止。"
+                    if provider_failed
+                    else (
+                        "本章 WritingPlan 存在必须由可核验公开原始来源补齐的资料缺口，"
+                        f"系统已执行 {attempt_count} 轮不同策略的 Tavily 检索，仍未取得合格来源，"
+                        "已在正文生成前停止。"
+                    )
+                )
                 details = {
                     **details,
                     "error": errors[0] if errors else str(research.get("decision_status") or exc.message),
                     "candidate_count": candidate_count,
+                    "attempt_count": attempt_count,
                     "original_code": exc.code,
                 }
             yield _ndjson_event(
@@ -1639,9 +1574,8 @@ async def stream_chapter_draft(
                 expected_workspace_revision=expected_workspace_revision,
                 expected_chapter_revision=expected_chapter_revision,
                 actor=dict(principal),
-                run_research=not bool(body.get("allow_research_gap")),
+                run_research=True,
                 commit_drafts=True,
-                require_outline_review=True,
             )
             for event in ChapterWritingService(context).iter_events(write_request):
                 payload = dict(event)
@@ -1664,12 +1598,32 @@ async def stream_chapter_draft(
                     for item in queries
                     if isinstance(item, dict) and str(item.get("error") or "").strip()
                 ]
-                code = "CHAPTER_RESEARCH_CONFIRMATION_REQUIRED"
-                message = "公开资料检索未取得可用于写作的核验来源，请确认是否仅使用现有项目资料继续写作。"
+                attempt_count = sum(
+                    len(item.get("attempts") or [])
+                    for item in queries
+                    if isinstance(item, dict) and isinstance(item.get("attempts"), list)
+                ) or 1
+                code = "CHAPTER_RESEARCH_UNAVAILABLE"
+                provider_failed = any(
+                    value == "provider_failed" or value.startswith("SEARCH_FAILED:")
+                    for value in errors
+                )
+                message = (
+                    "本章 WritingPlan 存在必须由可核验公开原始来源补齐的资料缺口，"
+                    f"系统已执行 {attempt_count} 轮不同策略的 Tavily 检索，但 Tavily 请求连续失败，"
+                    "并非检索结果不合格；已在正文生成前停止。"
+                    if provider_failed
+                    else (
+                        "本章 WritingPlan 存在必须由可核验公开原始来源补齐的资料缺口，"
+                        f"系统已执行 {attempt_count} 轮不同策略的 Tavily 检索，仍未取得合格来源，"
+                        "已在正文生成前停止。"
+                    )
+                )
                 details = {
                     **details,
                     "error": errors[0] if errors else str(research.get("decision_status") or exc.message),
                     "candidate_count": candidate_count,
+                    "attempt_count": attempt_count,
                     "original_code": exc.code,
                 }
             yield _ndjson_event(

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+
 from control_plane import ControlPlaneError, WorkspaceContext
 
 from .contracts import ContentBlock, WriterInputBundle
@@ -222,23 +225,28 @@ class ContentWriter:
                     or {}
                 )
 
-                grounding_report = ContentGroundingGate.evaluate(
-                    global_context=dict(bundle.global_project_context or {}),
-                    chapter={
+                grounding_blueprint = dict(
+                    next(
+                        (
+                            item
+                            for item in bundle.blueprint_slice
+                            if isinstance(item, dict)
+                            and str(item.get("chapter_id") or "") == target_id
+                        ),
+                        {},
+                    )
+                )
+                grounding_args = {
+                    "global_context": dict(bundle.global_project_context or {}),
+                    "chapter": {
                         "chapter_id": target_id,
                         "title": title,
-                        "blueprint_node": next(
-                            (
-                                item
-                                for item in bundle.blueprint_slice
-                                if isinstance(item, dict)
-                                and str(item.get("chapter_id") or "") == target_id
-                            ),
-                            {},
+                        "blueprint_node": grounding_blueprint,
+                        "chapter_writing_plan": dict(
+                            bundle.chapter_writing_plan or {}
                         ),
                     },
-                    content=content,
-                    requirement_texts=[
+                    "requirement_texts": [
                         *(
                             str(
                                 item.get("normalized_requirement")
@@ -260,8 +268,8 @@ class ContentWriter:
                             )
                         ),
                     ],
-                    chapter_grounding_context=local_grounding_context,
-                    evidence_sources=[
+                    "chapter_grounding_context": local_grounding_context,
+                    "evidence_sources": [
                         {
                             **source,
                             "batch_id": str(item.get("batch_id") or ""),
@@ -274,23 +282,87 @@ class ContentWriter:
                         and str(source.get("evidence_id") or "")
                         in set(used_evidence_ids)
                     ],
-                    require_evidence_use=bool(used_evidence_ids),
-                )
+                    "require_evidence_use": bool(used_evidence_ids),
+                }
+                repair_attempted = False
+                try:
+                    grounding_report = ContentGroundingGate.evaluate(
+                        **grounding_args,
+                        content=content,
+                    )
+                except ControlPlaneError as exc:
+                    if not self._is_soft_grounding_error(content, exc):
+                        raise
+                    repaired = self._repair_soft_grounding_failure(
+                        content=content,
+                        bundle=bundle,
+                        target=target,
+                        error=exc,
+                    )
+                    repair_attempted = True
+                    grounding_report = ContentGroundingGate.evaluate(
+                        **grounding_args,
+                        content=repaired,
+                    )
+                    grounding_report = dict(grounding_report)
+                    grounding_report["repair_attempted"] = True
+                    grounding_report["repair_succeeded"] = True
+                    content = repaired
             if not self.deterministic_test:
-                self._validate_generated_chapter(
-                    content,
-                    target=target,
-                    requirements=[
-                        requirements[requirement_id]
-                        for requirement_id in all_requirement_ids
-                        if requirement_id in requirements
-                    ],
-                    conditions=[
-                        conditions[condition_id]
-                        for condition_id in target_condition_ids
-                        if condition_id in conditions
-                    ],
-                )
+                target_requirements = [
+                    requirements[requirement_id]
+                    for requirement_id in all_requirement_ids
+                    if requirement_id in requirements
+                ]
+                target_conditions = [
+                    conditions[condition_id]
+                    for condition_id in target_condition_ids
+                    if condition_id in conditions
+                ]
+                try:
+                    self._validate_generated_chapter(
+                        content,
+                        target=target,
+                        requirements=target_requirements,
+                        conditions=target_conditions,
+                    )
+                except ControlPlaneError as exc:
+                    findings = (
+                        exc.details.get("findings")
+                        if isinstance(exc.details, dict)
+                        else []
+                    )
+                    soft_too_short = (
+                        exc.code == "CONTENT_QUALITY_BLOCKED"
+                        and bool(findings)
+                        and all(
+                            str(item.get("code") or "") == "CONTENT_TOO_SHORT"
+                            for item in findings
+                            if isinstance(item, dict)
+                        )
+                    )
+                    if repair_attempted or not soft_too_short:
+                        raise
+                    content = self._repair_soft_grounding_failure(
+                        content=content,
+                        bundle=bundle,
+                        target=target,
+                        error=exc,
+                    )
+                    repair_attempted = True
+                    grounding_report = ContentGroundingGate.evaluate(
+                        **grounding_args,
+                        content=content,
+                    )
+                    grounding_report = dict(grounding_report)
+                    grounding_report["repair_attempted"] = True
+                    grounding_report["repair_succeeded"] = True
+                    self._validate_generated_chapter(
+                        content,
+                        target=target,
+                        requirements=target_requirements,
+                        conditions=target_conditions,
+                    )
             if not set(used_evidence_ids).issubset(
                 set(available_evidence_ids)
             ):
@@ -513,6 +585,7 @@ class ContentWriter:
                 ),
                 project_context=project,
                 history=tuple(bundle.chapter_dialogue or []),
+                writing_plan=dict(bundle.chapter_writing_plan or {}),
                 chapter_context={
                     **chapter_grounding_context,
                     "chapter_context_items": list(bundle.chapter_context_items or []),
@@ -567,6 +640,111 @@ class ContentWriter:
             "避免引入与本章目的无关的工作，并确保最终文字能够追溯到已提供的依据。"
         )
         return deterministic_content, available_evidence_ids
+
+    @staticmethod
+    def _is_soft_grounding_error(
+        content: str,
+        error: ControlPlaneError,
+    ) -> bool:
+        if error.code == "PROJECT_SPECIFICITY_MISSING":
+            return True
+        if error.code == "WRITING_PLAN_COVERAGE_INCOMPLETE":
+            return True
+        if error.code != "CHAPTER_GOAL_MISALIGNED":
+            return False
+        details = error.details if isinstance(error.details, dict) else {}
+        alignment = details.get("goal_alignment")
+        alignment = alignment if isinstance(alignment, dict) else {}
+        off_goal = {
+            int(item)
+            for item in alignment.get("off_goal_paragraphs") or []
+            if isinstance(item, int) and item >= 0
+        }
+        paragraph_count = len(
+            [item for item in re.split(r"\n\s*\n", content) if item.strip()]
+        )
+        # One isolated drifting paragraph is repairable. Predominant or
+        # multi-paragraph cross-chapter content remains a hard block.
+        return bool(off_goal) and len(off_goal) == 1 and paragraph_count >= 2
+
+    @staticmethod
+    def _repair_soft_grounding_failure(
+        *,
+        content: str,
+        bundle: WriterInputBundle,
+        target: dict,
+        error: ControlPlaneError,
+    ) -> str:
+        """Repair one soft coverage/specificity failure inside ContentWriter."""
+        from llm_client import chat
+
+        blueprint_node = next(
+            (
+                item
+                for item in bundle.blueprint_slice
+                if isinstance(item, dict)
+                and str(item.get("chapter_id") or "")
+                == str(target.get("node_id") or "")
+            ),
+            {},
+        )
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是同一 ContentWriter 内部的一次性正文修复步骤。只修复内容太空、"
+                    "目标不具体、WritingPlan 覆盖不完整或轻微偏题。删除超出章节目的的展开，"
+                    "补齐 WritingPlan 未回答内容；保持已授权项目事实，不得新增事实、企业能力、"
+                    "指标、任务或承诺。只输出修复后的正文。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "chapter_goal": {
+                            "purpose": blueprint_node.get("purpose"),
+                            "writing_objectives": blueprint_node.get("writing_objectives") or [],
+                        },
+                        "chapter_writing_plan": bundle.chapter_writing_plan,
+                        "gate_error": {
+                            "code": error.code,
+                            "message": error.message,
+                            "details": error.details,
+                        },
+                        "current_content": content,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        repaired = str(chat(messages, temperature=0.15) or "").strip()
+        if not repaired:
+            raise error
+        alignment = (
+            error.details.get("goal_alignment")
+            if isinstance(error.details, dict)
+            else {}
+        )
+        off_goal = {
+            int(index)
+            for index in (alignment or {}).get("off_goal_paragraphs") or []
+            if str(index).isdigit()
+        }
+        if off_goal:
+            paragraphs = [
+                item.strip()
+                for item in re.split(r"\n\s*\n", repaired)
+                if item.strip()
+            ]
+            retained = [
+                paragraph
+                for index, paragraph in enumerate(paragraphs)
+                if index not in off_goal
+            ]
+            if retained:
+                repaired = "\n\n".join(retained)
+        return repaired
 
     @staticmethod
     def _validate_generated_chapter(

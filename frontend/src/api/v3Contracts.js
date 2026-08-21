@@ -823,40 +823,17 @@ export function buildResearchResolveCommand(
   commandId,
   expectedRevision,
   needId,
-  attachmentInputIds = [],
 ) {
   return buildV3Command({
     commandId,
     kind: 'research.resolve',
     payload: {
       need_id: requireText(needId, 'needId'),
-      provider_id: 'deepseek_web',
-      attachment_input_ids: [...arrayOrEmpty(attachmentInputIds)],
+      provider_id: 'tavily',
+      attachment_input_ids: [],
     },
     expectedRevision,
   })
-}
-
-export function isDeepSeekEligibleInput(item) {
-  return Boolean(
-    item
-    && item.active
-    && /\.(pdf|docx?|txt|md|csv|xlsx?|pptx?|png|jpe?g|webp)$/i.test(String(item.filename || '')),
-  )
-}
-
-export function selectDeepSeekAttachmentIds(inputs, selectedInputIds) {
-  const eligibleIds = new Set(
-    arrayOrEmpty(inputs)
-      .filter(isDeepSeekEligibleInput)
-      .map(item => String(item.input_id || '').trim())
-      .filter(Boolean),
-  )
-  return [...new Set(
-    arrayOrEmpty(selectedInputIds)
-      .map(inputId => String(inputId || '').trim())
-      .filter(inputId => eligibleIds.has(inputId)),
-  )]
 }
 
 export function buildCreateChapterCommand(commandId, expectedRevision, chapterId, title = '', metadata = {}) {

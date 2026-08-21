@@ -7,10 +7,8 @@ import {
   buildResearchResolveCommand,
   buildRunPipelineCommand,
   formatV3ApiError,
-  isDeepSeekEligibleInput,
   normalizeV3WorkspaceSnapshot,
   projectV3Planning,
-  selectDeepSeekAttachmentIds,
   v3ErrorDetails,
   v3WorkspacePath,
   workspaceRevisionFromV3Payload,
@@ -309,13 +307,11 @@ test('outline command stops at the score-aware planning boundary', () => {
   })
 })
 
-test('research command carries explicit DeepSeek attachments and revision', () => {
-  const attachments = ['input-a', 'input-b']
+test('research command uses Tavily without browser-provider attachments', () => {
   const command = buildResearchResolveCommand(
     'cmd-research-1',
     23,
     'need-security-standard',
-    attachments,
   )
 
   assert.deepEqual(command, {
@@ -323,14 +319,13 @@ test('research command carries explicit DeepSeek attachments and revision', () =
     kind: 'research.resolve',
     payload: {
       need_id: 'need-security-standard',
-      provider_id: 'deepseek_web',
-      attachment_input_ids: ['input-a', 'input-b'],
+      provider_id: 'tavily',
+      attachment_input_ids: [],
     },
     expected_revision: 23,
     idempotency_key: 'cmd-research-1',
   })
-  attachments.push('late-mutation')
-  assert.deepEqual(command.payload.attachment_input_ids, ['input-a', 'input-b'])
+  assert.deepEqual(command.payload.attachment_input_ids, [])
   assert.throws(
     () => buildResearchResolveCommand('cmd', -1, 'need', []),
     /expectedRevision must be a non-negative integer/,
@@ -667,27 +662,4 @@ test('outdated analysis hides old score points, chapter outline, and confirmed p
     uncovered_response_unit_count: 0,
     chapter_count: 0,
   })
-})
-
-test('DeepSeek attachment selection permits only active supported inputs', () => {
-  const inputs = [
-    { input_id: 'active-pdf', active: true, filename: 'tender.PDF' },
-    { input_id: 'active-docx', active: true, filename: 'proof.docx' },
-    { input_id: 'inactive-pdf', active: false, filename: 'old.pdf' },
-    { input_id: 'active-exe', active: true, filename: 'unsafe.exe' },
-  ]
-
-  assert.equal(isDeepSeekEligibleInput(inputs[0]), true)
-  assert.equal(isDeepSeekEligibleInput(inputs[2]), false)
-  assert.equal(isDeepSeekEligibleInput(inputs[3]), false)
-  assert.deepEqual(
-    selectDeepSeekAttachmentIds(inputs, [
-      'active-pdf',
-      'inactive-pdf',
-      'active-docx',
-      'active-pdf',
-      'unknown',
-    ]),
-    ['active-pdf', 'active-docx'],
-  )
 })

@@ -165,7 +165,7 @@ export async function runV3Pipeline(runId, chapterIds = []) {
     workspaceRevisionFromV3Payload(snapshot?.data),
     chapterIds,
   )
-  // Full generation may include several bounded DeepSeek research turns before
+  // Full generation may include several bounded Tavily research turns before
   // Writer bundles are frozen.
   return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 900000 })
 }
@@ -196,14 +196,13 @@ export async function confirmV3Planning(runId, planningSnapshot) {
   return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 120000 })
 }
 
-export async function resolveV3Research(runId, needId, attachmentInputIds = []) {
+export async function resolveV3Research(runId, needId) {
   const snapshot = await fetchV3WorkspaceSnapshot(runId)
   const commandId = newCommandId()
   const command = buildResearchResolveCommand(
     commandId,
     workspaceRevisionFromV3Payload(snapshot?.data),
     needId,
-    attachmentInputIds,
   )
   return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 300000 })
 }
@@ -228,20 +227,6 @@ export function fetchChapterChatHistory(runId, chapterId, limit = 40) {
     params: { limit },
     headers: { 'Cache-Control': 'no-cache' },
   })
-}
-
-export function fetchChapterChatAuthority(runId, chapterId) {
-  const id = encodeURIComponent(String(chapterId || '').trim())
-  if (!id) throw new TypeError('chapterId is required')
-  return api.get(v3WorkspacePath(runId, `chapters/${id}/chat/authority`), {
-    headers: { 'Cache-Control': 'no-cache' },
-  })
-}
-
-export function saveChapterChatAuthority(runId, chapterId, payload) {
-  const id = encodeURIComponent(String(chapterId || '').trim())
-  if (!id) throw new TypeError('chapterId is required')
-  return api.put(v3WorkspacePath(runId, `chapters/${id}/chat/authority`), payload || {})
 }
 
 /** Persist an in-place edit of one chapter-chat turn. */

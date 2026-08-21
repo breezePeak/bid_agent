@@ -174,7 +174,6 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             def fake_stream(messages, temperature=0.2):
                 payload = json.loads(messages[1]["content"])
@@ -260,21 +259,20 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="human_review", chapter_id="ch-a")
             list(service.iter_answer_events("ch-a", "先列提纲", chapter=chapter))
 
             with mock.patch("llm_client.chat_stream_chunks") as writer:
                 events = list(
                     service.iter_answer_events(
                         "ch-a",
-                        "确认",
+                        "按这个写",
                         chapter=chapter,
                     )
                 )
 
             writer.assert_not_called()
-            authority = next(item for item in events if item["type"] == "authority")
-            self.assertTrue(authority["document_write_requested"])
+            phase = next(item for item in events if item["type"] == "writing_phase")
+            self.assertTrue(phase["document_write_requested"])
             content = "".join(
                 item["delta"] for item in events if item["type"] == "content_delta"
             )
@@ -286,6 +284,79 @@ class ChapterChatStreamTests(unittest.TestCase):
             self.assertEqual(
                 service.load_history("ch-a")[-1]["thinking"],
                 events[-1]["thinking"],
+            )
+
+    def test_document_writing_progress_is_preserved_after_done(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context)
+            chapter = {
+                "chapter_id": "ch-a",
+                "title": "技术方案",
+                "blueprint_node": {
+                    "chapter_id": "ch-a",
+                    "title": "技术方案",
+                    "purpose": "说明总体技术路线",
+                },
+                "context": {"items": []},
+                "is_leaf": True,
+            }
+            service = ChapterChatService(context)
+            list(service.iter_answer_events("ch-a", "先列提纲", chapter=chapter))
+
+            writing_events = iter(
+                [
+                    {"type": "meta", "operation_id": "write-1"},
+                    {
+                        "type": "thinking_step",
+                        "message": "资料查询判断：正在确认是否需要补充公开资料。",
+                    },
+                    {
+                        "type": "research",
+                        "status": "not_required",
+                        "message": "无需查询公开资料：现有资料足以支撑本章写作。",
+                        "queries": [],
+                        "sources": [],
+                    },
+                    {
+                        "type": "thinking_step",
+                        "message": "开始撰写：正在按内部 WritingPlan 生成正文。",
+                    },
+                    {"type": "content_delta", "delta": "正文内容"},
+                    {
+                        "type": "done",
+                        "chapter": {"chapter_id": "ch-a"},
+                        "content": {"blocks": []},
+                    },
+                ]
+            )
+            with mock.patch(
+                "document_pipeline.chapter_writing_service.ChapterWritingService.iter_events",
+                return_value=writing_events,
+            ):
+                events = list(
+                    service.iter_answer_events(
+                        "ch-a",
+                        "按这个写",
+                        chapter=chapter,
+                        actor={"user_id": "tester"},
+                    )
+                )
+
+            done = events[-1]
+            self.assertTrue(done["document_write_completed"])
+            self.assertIn("资料查询判断", done["thinking"])
+            self.assertIn("无需查询公开资料", done["thinking"])
+            self.assertIn("开始撰写：正在按内部 WritingPlan", done["thinking"])
+            self.assertEqual(
+                done["assistant_turn"]["research_steps"][0]["status"],
+                "not_required",
+            )
+            persisted = service.load_history("ch-a")[-1]
+            self.assertEqual(persisted["thinking"], done["thinking"])
+            self.assertEqual(
+                persisted["research_steps"],
+                done["assistant_turn"]["research_steps"],
             )
 
     def test_explicit_research_request_invokes_research_before_answering(self) -> None:
@@ -300,12 +371,12 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             class FakeBatch:
                 status = "published"
                 error = None
                 items = []
+                query_count = 1
 
             with (
                 mock.patch(
@@ -375,8 +446,8 @@ class ChapterChatStreamTests(unittest.TestCase):
                 )
 
             writer.assert_not_called()
-            authority = next(item for item in events if item["type"] == "authority")
-            self.assertTrue(authority["document_approval_requested"])
+            phase = next(item for item in events if item["type"] == "writing_phase")
+            self.assertTrue(phase["document_approval_requested"])
             self.assertTrue(events[-1]["document_approval_requested"])
             self.assertFalse(events[-1]["document_write_requested"])
             self.assertIn("正在确认当前正文", events[-1]["reply"])
@@ -449,7 +520,6 @@ class ChapterChatStreamTests(unittest.TestCase):
                 "is_leaf": True,
             }
             service = ChapterChatService(context)
-            service.set_authority(mode="full_authority", chapter_id="ch-a")
 
             with mock.patch("llm_client.chat_stream_chunks") as writer:
                 events = list(

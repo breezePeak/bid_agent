@@ -60,6 +60,7 @@ class ChapterWritingRequest:
     operation: str = "create"
     user_instruction: str = ""
     chapter_dialogue: tuple[dict[str, Any], ...] = ()
+    chapter_writing_plan: dict[str, Any] = field(default_factory=dict)
     overwrite_locked: bool = False
     chapter_id: str = ""
     expected_workspace_revision: int | None = None
@@ -68,7 +69,6 @@ class ChapterWritingRequest:
     actor: dict[str, Any] = field(default_factory=dict)
     run_research: bool = True
     commit_drafts: bool = True
-    require_outline_review: bool = False
 
     def validate(self) -> None:
         if not str(self.unit_id).strip():
@@ -160,11 +160,13 @@ class ChapterWritingService:
         node_ids = [str(item).strip() for item in request.node_ids if str(item).strip()]
         bundle = self.assembler.assemble(str(request.unit_id), node_ids)
         bundle = self._apply_request_metadata(bundle, request)
-        self._validate_outline_authority(request)
         decision: dict[str, Any] = {}
         evidence: list[dict[str, Any]] = []
         if request.run_research:
-            decision, evidence = self.research.resolve_for_bundle(bundle)
+            try:
+                decision, evidence = self.research.resolve_for_bundle(bundle)
+            except ControlPlaneError as exc:
+                decision, evidence = self._research_failure_fallback(bundle, exc)
             bundle = self._freeze_research_bundle(
                 bundle, evidence=evidence, decision=decision
             )
@@ -207,7 +209,6 @@ class ChapterWritingService:
         node_ids = [str(item).strip() for item in request.node_ids if str(item).strip()]
         bundle = self.assembler.assemble(str(request.unit_id), node_ids)
         bundle = self._apply_request_metadata(bundle, request)
-        self._validate_outline_authority(request)
 
         decision: dict[str, Any] = {}
         evidence: list[dict[str, Any]] = []
@@ -253,9 +254,15 @@ class ChapterWritingService:
                         "queries": research_queries,
                         "sources": [],
                     }
-                decision, evidence = execute_research(bundle, research_plan)
+                try:
+                    decision, evidence = execute_research(bundle, research_plan)
+                except ControlPlaneError as exc:
+                    decision, evidence = self._research_failure_fallback(bundle, exc)
             else:
-                decision, evidence = self.research.resolve_for_bundle(bundle)
+                try:
+                    decision, evidence = self.research.resolve_for_bundle(bundle)
+                except ControlPlaneError as exc:
+                    decision, evidence = self._research_failure_fallback(bundle, exc)
             bundle = self._freeze_research_bundle(
                 bundle, evidence=evidence, decision=decision
             )
@@ -280,6 +287,8 @@ class ChapterWritingService:
                 result_message = f"搜索完成：已获得 {len(source_rows)} 条可用公开来源，开始用于正文写作。"
             elif not decision.get("needs_research") or decision_status == "skipped":
                 result_message = "查询结论：无需搜索公开资料，使用现有项目资料继续写作。"
+            elif decision_status == "fallback_existing_materials":
+                result_message = "补充性公开资料搜索失败，现有项目资料足以支撑本章，已继续写作。"
             else:
                 result_message = str(decision.get("reason") or "资料查询处理完成。")
             yield {
@@ -295,7 +304,7 @@ class ChapterWritingService:
             "type": "thinking_step",
             "step": "drafting",
             "chapter_id": request.chapter_id,
-            "message": "开始撰写：正在按已确认提纲生成正文，并实时写入中间文档。",
+            "message": "开始撰写：正在按内部 WritingPlan 生成正文，并实时写入中间文档。",
         }
 
         streamed_blocks: list[ContentBlock] = []
@@ -430,43 +439,41 @@ class ChapterWritingService:
         )
         return frozen
 
-    def _validate_outline_authority(
-        self,
-        request: ChapterWritingRequest,
-    ) -> None:
-        if not request.require_outline_review or not request.chapter_id:
-            return
-        from .chapter_chat import ChapterChatService
-        from .chapter_semantics import (
-            load_chapter_project_context,
-            project_chapter_semantic_requirements,
+    @staticmethod
+    def _research_failure_fallback(
+        bundle: WriterInputBundle,
+        error: ControlPlaneError,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Continue only when failed public research was supplemental."""
+        if error.code != "WRITER_RESEARCH_ACTION_REQUIRED":
+            raise error
+        plan = (
+            bundle.chapter_writing_plan
+            if isinstance(bundle.chapter_writing_plan, dict)
+            else {}
         )
-
-        chapter = ChapterWorkspaceService(self.context).get_chapter(
-            request.chapter_id
+        if any(
+            isinstance(block, dict) and bool(block.get("needs_public_research"))
+            for block in plan.get("blocks") or []
+        ):
+            # Do not trust a stale or malformed failure payload to downgrade an
+            # authoritative WritingPlan research requirement after Tavily fails.
+            raise error
+        research = (
+            dict(error.details.get("research") or {})
+            if isinstance(error.details, dict)
+            else {}
         )
-        requirements, scoring = project_chapter_semantic_requirements(
-            self.context,
-            chapter,
+        if not bool(research.get("fallback_to_existing_materials")):
+            raise error
+        research.update(
+            {
+                "decision_status": "fallback_existing_materials",
+                "supplemental_search_failed": True,
+                "fallback_reason": str(error.message or ""),
+            }
         )
-        chat_service = ChapterChatService(self.context)
-        chat_context = chat_service.build_chapter_chat_context(
-            chapter,
-            global_project_context=load_chapter_project_context(self.context),
-            tender_requirements=requirements,
-            scoring_requirements=scoring,
-        )
-        authority = chat_service.require_write_ready(
-            request.chapter_id,
-            outline=chat_context.get("writing_outline"),
-        )
-        if not authority.get("ready"):
-            raise ControlPlaneError(
-                "CHAPTER_OUTLINE_REVIEW_REQUIRED",
-                str(authority.get("reason") or "请先确认本章写作提纲。"),
-                status_code=409,
-                details={"authority": authority},
-            )
+        return research, []
 
     def _quality_gate(
         self, bundle: WriterInputBundle, blocks: list[ContentBlock]
@@ -474,6 +481,14 @@ class ChapterWritingService:
         try:
             return self.quality_gate.validate(bundle, blocks), blocks, bundle
         except Exception as exc:
+            reason = str(exc)
+            repairable = (
+                "G4_CONTENT_PRIMARY_REQUIREMENT_MISSING",
+                "G4_CONTENT_SCORE_CONDITION_MISSING",
+                "G4_CONTENT_TOO_SHORT_OR_HOLLOW",
+            )
+            if not any(code in reason for code in repairable):
+                raise
             repair_result = self.repair_writer(bundle, blocks, exc)
             repair_bundle = bundle
             repaired_source: Sequence[ContentBlock]
@@ -666,6 +681,7 @@ class ChapterWritingService:
                 "operation": request.operation,
                 "user_instruction": request.user_instruction,
                 "chapter_dialogue": [dict(item) for item in request.chapter_dialogue],
+                "chapter_writing_plan": dict(request.chapter_writing_plan),
                 "overwrite_locked": bool(request.overwrite_locked),
             }
         )
