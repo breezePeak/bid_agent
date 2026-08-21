@@ -189,6 +189,8 @@ def is_evaluative_sentence_heading(value: str) -> bool:
         return False
     if normalized.startswith("对") and ("有具体实例" in normalized or "有实例" in normalized):
         return True
+    if re.search(r"(?:得|计)\d+(?:\.\d+)?分", normalized):
+        return True
     return bool(_HEADING_EVALUATIVE_SUFFIX.search(normalized))
 
 
@@ -1321,7 +1323,11 @@ def _audit_chapter_blueprint_direct(
                     continue
                 point = points[unit_owner[unit_id]]
                 unit = units[unit_id]
-                expected_path = list(unit.outline_path or point.outline_path)
+                expected_path = [
+                    title
+                    for title in (unit.outline_path or point.outline_path)
+                    if not is_evaluative_sentence_heading(str(title))
+                ]
                 if expected_path and group_subject(expected_path[0]) == group_subject(group.title):
                     expected_path.pop(0)
                 compact_path: list[str] = []

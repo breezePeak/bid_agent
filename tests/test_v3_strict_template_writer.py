@@ -36,6 +36,10 @@ from document_pipeline.planning_inference import (  # noqa: E402
 from document_pipeline.scoring_outline_policy import (  # noqa: E402
     audit_chapter_blueprint,
 )
+from document_pipeline.chapter_writing_service import (  # noqa: E402
+    ChapterWritingRequest,
+    ChapterWritingService,
+)
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 
 
@@ -247,6 +251,7 @@ def _assert_strict_template_g2_h1_document_contract_writer_path(
         "compile_template_structure",
         "build_requirement_ledger",
         "analyze_scores",
+        "plan_response",
         "compile_chapter_blueprint",
     ):
         runner.run(stage)
@@ -311,8 +316,19 @@ def _assert_strict_template_g2_h1_document_contract_writer_path(
     }
     assert units
 
-    content_by_unit = runner.run("execute_content_plan")
-    blocks = [block for unit_blocks in content_by_unit for block in unit_blocks]
+    writing = ChapterWritingService(context, deterministic_test=True)
+    blocks = [
+        block
+        for unit in units
+        for block in writing.write(
+            ChapterWritingRequest(
+                unit_id=unit.unit_id,
+                node_ids=tuple(unit.node_ids),
+                run_research=False,
+                commit_drafts=False,
+            )
+        ).blocks
+    ]
     assert blocks
     assert {block.target_node_id for block in blocks}.issubset(slot_ids)
 

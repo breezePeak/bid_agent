@@ -38,6 +38,14 @@ class V3ExecutionControllerTests(unittest.TestCase):
   self.assertEqual(response.status_code,200)
   self.assertIn('id=\"app\"',response.text)
 
+ def test_login_shell_does_not_depend_on_frontend_dist(self):
+  with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
+   with mock.patch.object(v3_app,'VUE_DIST_DIR',Path(t)):
+    with TestClient(v3_app.app) as client:
+     response=client.get('/login')
+  self.assertEqual(response.status_code,200)
+  self.assertIn('id=\"app\"',response.text)
+
   def test_legacy_api_namespaces_are_not_registered(self):
    with TestClient(v3_app.app) as client:
     for path in ('/api/v1/workspaces','/api/v2/workspaces/example/snapshot'):

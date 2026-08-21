@@ -26,7 +26,7 @@ from .pipeline_policy import validation_failure_blocks
 from .project_model import load_promoted_project_model
 from .requirement_ledger import load_promoted_requirement_ledger
 from .research_adapters import ResearchProviderAdapter, create_research_adapter
-from .research_service import ResearchService
+from .research_service import ResearchService, SemanticReviewer
 from .score_model import load_promoted_score_model
 
 
@@ -80,11 +80,13 @@ class AutonomousResearchCoordinator:
         context: WorkspaceContext,
         *,
         provider: ResearchProviderAdapter | None = None,
+        semantic_reviewer: SemanticReviewer | None = None,
         enabled: bool | None = None,
     ) -> None:
         self.context = context
         self.store = ControlStore(context)
         self.provider = provider
+        self.semantic_reviewer = semantic_reviewer
         self.enabled = (
             _env_flag("BID_AGENT_AUTO_RESEARCH_ENABLED", True)
             if enabled is None
@@ -510,7 +512,11 @@ class AutonomousResearchCoordinator:
             batch: EvidenceBatch | None = None
             for attempt in range(1, max_retries + 2):
                 started = time.perf_counter()
-                batch = ResearchService(self.context, provider).resolve(item.need)
+                batch = ResearchService(
+                    self.context,
+                    provider,
+                    semantic_reviewer=self.semantic_reviewer,
+                ).resolve(item.need)
                 duration_ms = int((time.perf_counter() - started) * 1000)
                 attempts.append(
                     {

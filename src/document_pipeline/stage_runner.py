@@ -1852,6 +1852,48 @@ class V3StageRunner:
             return detail
         return f"{detail[:limit]}…"
 
+    @staticmethod
+    def _outline_validation_error_code(error: Exception) -> str:
+        detail = str(error)
+        if any(
+            token in detail
+            for token in (
+                "引用未知",
+                "未知 ScoreResponseUnit",
+                "未知 condition_id",
+                "未知或非活动 Requirement",
+                "ScoreModel 引用未知 Requirement",
+            )
+        ):
+            return "V3_OUTLINE_SOURCE_REFERENCE_INVALID"
+        if any(
+            token in detail
+            for token in (
+                "严格模板",
+                "TemplateStructureContract",
+                "模板 Slot",
+            )
+        ):
+            return "V3_OUTLINE_TEMPLATE_INVALID"
+        return "V3_OUTLINE_INFERENCE_INVALID"
+
+    @staticmethod
+    def _blueprint_audit_error_code(audit: dict[str, Any]) -> str:
+        codes = {
+            str(item.get("code") or "")
+            for item in (audit.get("findings") or [])
+            if isinstance(item, dict)
+        }
+        if any("TEMPLATE" in code for code in codes):
+            return "V3_BLUEPRINT_TEMPLATE_BLOCKED"
+        if any(
+            token in code
+            for code in codes
+            for token in ("UNKNOWN", "SOURCE_REFERENCE", "SOURCE_MISMATCH")
+        ):
+            return "V3_BLUEPRINT_SOURCE_BLOCKED"
+        return "V3_BLUEPRINT_COVERAGE_BLOCKED"
+
     def _outline_fallback_runtime_metadata(
         self,
     ) -> tuple[str, str, str, str]:
@@ -2873,11 +2915,18 @@ class V3StageRunner:
                     # promote a rule-generated substitute after its candidate
                     # fails validation: that made a failed request appear as a
                     # completed planning step.
+                    root_cause = (
+                        exc.__cause__
+                        if isinstance(exc.__cause__, Exception)
+                        else exc
+                    )
                     raise ControlPlaneError(
-                        "V3_OUTLINE_INFERENCE_INVALID",
+                        self._outline_validation_error_code(root_cause),
                         "章节目录模型结果未通过校验，已停止等待修复后重试。",
                         status_code=409,
-                        details={"cause": self._outline_warning_detail(exc)},
+                        details={
+                            "cause": self._outline_warning_detail(root_cause)
+                        },
                     ) from exc
                 else:
                     if (
@@ -2936,7 +2985,7 @@ class V3StageRunner:
                         f"{self._outline_warning_detail(blueprint_audit.get('findings'))}"
                     )
                     raise ControlPlaneError(
-                        "V3_BLUEPRINT_COVERAGE_BLOCKED",
+                        self._blueprint_audit_error_code(blueprint_audit),
                         message,
                         status_code=409,
                         details={"blueprint_audit": blueprint_audit},

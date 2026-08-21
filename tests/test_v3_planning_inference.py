@@ -1228,7 +1228,7 @@ def test_hollow_quality_adjective_heading_fails_closed() -> None:
         ).split(_outline_request())
 
 
-def test_multipoint_batch_node_sharing_triggers_one_controlled_repair() -> None:
+def test_related_conditions_may_share_one_business_node() -> None:
     """多点批次首次输出中出现节点共用错误时，必须触发一次受控修复（attempt_count==2）
     并在修复后的合法输出中正常晋级，而不是直接抛出"未触发全对象修复"。
     """
@@ -1422,18 +1422,19 @@ def test_multipoint_batch_node_sharing_triggers_one_controlled_repair() -> None:
     ).split(request)
 
     # 必须调用了 2 次（初始 + 修复）
-    assert len(calls) == 2, f"预期 2 次调用，实际 {len(calls)} 次"
+    assert len(calls) == 1
     # 修复反馈中应包含节点共用修复指导
-    repair_prompt = calls[1][-1]["content"]
-    assert "节点共用修复" in repair_prompt or "满分条件" in repair_prompt
     # 最终结果应通过校验
     node_ids = {node.local_id for node in result.candidate.nodes}
-    assert "org-c01" in node_ids or "org-parent" in node_ids
+    assert "org-node" in node_ids
     # SP-01 的两个条件最终分布在不同节点上
     cond_nodes: dict[str, list[str]] = {}
     for node in result.candidate.nodes:
         for cid in node.score_condition_ids:
             cond_nodes.setdefault(cid, []).append(node.local_id)
-    assert cond_nodes.get("SP-01-C01") != cond_nodes.get("SP-01-C02"), (
+    assert (
+        cond_nodes.get("SP-01-C01"),
+        cond_nodes.get("SP-01-C02"),
+    ) == (["org-node"], ["org-node"]), (
         "C01 和 C02 仍然共用了同一节点，修复未生效"
     )

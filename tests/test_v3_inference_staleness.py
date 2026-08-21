@@ -18,6 +18,10 @@ from document_pipeline.inference_runtime import (  # noqa: E402
     INFERENCE_RUNTIME_REGISTRY,
     InferenceRuntimeMetadata,
 )
+from document_pipeline.chapter_writing_service import (  # noqa: E402
+    ChapterWritingRequest,
+    ChapterWritingService,
+)
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 
 
@@ -190,8 +194,19 @@ class V3InferenceStalenessTests(unittest.TestCase):
             assert g2 is not None
             self.assertEqual(g2["verdict"], "pass")
 
+            first_node_id = str(blueprint["payload"]["nodes"][0]["chapter_id"])
             with self.assertRaises(ControlPlaneError) as blocked:
-                runner.run("execute_content_plan")
+                ChapterWritingService(
+                    context,
+                    deterministic_test=True,
+                ).write(
+                    ChapterWritingRequest(
+                        unit_id="h1-blocked-unit",
+                        node_ids=(first_node_id,),
+                        run_research=False,
+                        commit_drafts=False,
+                    )
+                )
             self.assertEqual(
                 blocked.exception.code,
                 "PLANNING_CONFIRM_REQUIRED",

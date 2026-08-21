@@ -2509,6 +2509,7 @@ class LLMOutlineDecompositionProvider(
                     re.sub(r"\s+", " ", str(title)).strip()
                     for title in outline_path
                     if str(title).strip()
+                    and not is_evaluative_sentence_heading(str(title))
                 )
         statuses: list[str] = []
 
@@ -3227,9 +3228,15 @@ class LLMOutlineDecompositionProvider(
                         continue
                     point = catalog["points"][catalog["unit_owner"][unit_id]]
                     unit = catalog["units"][unit_id]
-                    expected_path = list(
-                        unit.get("outline_path") or point.get("outline_path") or []
-                    )
+                    expected_path = [
+                        title
+                        for title in (
+                            unit.get("outline_path")
+                            or point.get("outline_path")
+                            or []
+                        )
+                        if not is_evaluative_sentence_heading(str(title))
+                    ]
                     if expected_path and group_subject(expected_path[0]) == group_subject(
                         str(group.get("title") or "")
                     ):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 
@@ -42,10 +42,23 @@ def _error_payload(exc: Exception, *, stage: str, chapter_id: str = "") -> dict[
 class ChapterBatchService:
     """Create persistent jobs and execute them outside the HTTP request."""
 
-    def __init__(self, context: WorkspaceContext) -> None:
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        *,
+        writing_service_factory: Callable[[WorkspaceContext], Any] | None = None,
+    ) -> None:
         self.context = context
         self.store = ControlStore(context)
         self.chapters = ChapterWorkspaceService(context)
+        self._writing_service_factory = writing_service_factory
+
+    def _writing_service(self) -> Any:
+        if self._writing_service_factory is not None:
+            return self._writing_service_factory(self.context)
+        from .chapter_writing_service import ChapterWritingService
+
+        return ChapterWritingService(self.context)
 
     def _resolve_leaf_chapters(self, requested_ids: list[str]) -> list[dict[str, Any]]:
         listing = self.chapters.list_chapters(include_archived=False)
@@ -295,10 +308,7 @@ class ChapterBatchService:
                 self.store.update_batch_item(str(item["item_id"]), stage="drafting")
                 self._event(job_id, item, "draft_started", stage="drafting", status="running", message="章节 Agent 正在生成正文。")
 
-                from .chapter_writing_service import (
-                    ChapterWritingRequest,
-                    ChapterWritingService,
-                )
+                from .chapter_writing_service import ChapterWritingRequest
 
                 request = ChapterWritingRequest(
                     unit_id=f"chapter-{chapter_id}",
@@ -319,7 +329,7 @@ class ChapterBatchService:
                     run_research=True,
                     commit_drafts=True,
                 )
-                for service_event in ChapterWritingService(self.context).iter_events(request):
+                for service_event in self._writing_service().iter_events(request):
                     self.store.assert_batch_fence(job_id, fencing_token)
                     event_type = str(service_event.get("type") or "")
                     if event_type == "research":

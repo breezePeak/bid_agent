@@ -1880,7 +1880,11 @@ def index() -> HTMLResponse:
     path = VUE_DIST_DIR / "index.html"
     headers = {"Cache-Control": "no-cache, no-store, must-revalidate"}
     return HTMLResponse(
-        path.read_text(encoding="utf-8") if path.is_file() else "<h1>请先构建 frontend</h1>",
+        (
+            path.read_text(encoding="utf-8")
+            if path.is_file()
+            else '<div id="app"><h1>请先构建 frontend</h1></div>'
+        ),
         headers=headers,
     )
 

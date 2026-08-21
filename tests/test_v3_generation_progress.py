@@ -172,7 +172,7 @@ class V3GenerationProgressTests(TestCase):
                     return [
                         {
                             "request_id": "generation-request",
-                            "stage_id": "execute_content_plan",
+                            "stage_id": "chapter_writing",
                             "status": "running",
                             "parameters": {"candidate_attempt": 1},
                         }
@@ -190,7 +190,7 @@ class V3GenerationProgressTests(TestCase):
             writing = next(
                 stage
                 for stage in generation["stages"]
-                if stage["stage_id"] == "execute_content_plan"
+                if stage["stage_id"] == "chapter_writing"
             )
             self.assertEqual(writing["llm_request_count"], 1)
             self.assertEqual(
@@ -412,7 +412,7 @@ class V3GenerationProgressTests(TestCase):
                 "generation": {
                     "stages": [
                         {
-                            "stage_id": "execute_content_plan",
+                            "stage_id": "chapter_writing",
                             "label": "章节写作",
                             "status": "running",
                             "attempt": 1,
@@ -489,7 +489,7 @@ class V3GenerationProgressTests(TestCase):
                 "generation": {
                     "stages": [
                         {
-                            "stage_id": "execute_content_plan",
+                            "stage_id": "chapter_writing",
                             "label": "章节写作",
                             "status": "running",
                             "attempt": 1,

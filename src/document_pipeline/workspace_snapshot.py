@@ -58,12 +58,20 @@ class V3WorkspaceSnapshotBuilder:
         "sync_material_requirements": "检查材料与证据缺口",
         "compile_document_contract": "锁定确认后的文档结构",
         "plan_document": "生成逐章写作任务",
-    "chapter_writing": "章节写作",
+        "chapter_writing": "章节写作",
         "integrate_document": "全文整合",
         "verify_document": "质量审核",
         "render_document": "Word 渲染",
         "verify_delivery": "交付验证",
     }
+    _LEGACY_GENERATION_STAGE_ALIASES = {
+        "execute_content_plan": "chapter_writing",
+    }
+
+    @classmethod
+    def _canonical_generation_stage(cls, stage_id: Any) -> str:
+        normalized = str(stage_id or "").strip()
+        return cls._LEGACY_GENERATION_STAGE_ALIASES.get(normalized, normalized)
 
     def __init__(self, context: WorkspaceContext) -> None:
         self.context = context
@@ -520,7 +528,7 @@ class V3WorkspaceSnapshotBuilder:
         operation = operation if isinstance(operation, dict) else {}
         runs_by_stage: dict[str, dict[str, Any]] = {}
         for item in control.stage_runs(operation_id) if operation_id else []:
-            stage_id = str(item.get("stage_command") or "")
+            stage_id = self._canonical_generation_stage(item.get("stage_command"))
             previous = runs_by_stage.get(stage_id)
             if previous is None or int(item.get("attempt") or 0) >= int(
                 previous.get("attempt") or 0
@@ -529,7 +537,7 @@ class V3WorkspaceSnapshotBuilder:
         llm_requests_by_stage: dict[str, list[dict[str, Any]]] = {}
         for request in control.llm_requests(operation_id) if operation_id else []:
             llm_requests_by_stage.setdefault(
-                str(request.get("stage_id") or ""),
+                self._canonical_generation_stage(request.get("stage_id")),
                 [],
             ).append(request)
 
@@ -1171,7 +1179,7 @@ class V3WorkspaceSnapshotBuilder:
         }
 
     def generation_stage_detail(self, stage_id: str) -> dict[str, Any]:
-        normalized = str(stage_id or "").strip()
+        normalized = self._canonical_generation_stage(stage_id)
         if (
             normalized not in self._GENERATION_STAGE_LABELS
             and normalized not in self._PIPELINE_STAGE_LABELS

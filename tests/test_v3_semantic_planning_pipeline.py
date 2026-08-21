@@ -522,19 +522,23 @@ def test_stage_runner_uses_direct_score_and_outline_providers_only(
     assert blueprint.assignments == []
     assert blueprint.nodes[0].parent_chapter_id is None
     assert blueprint.nodes[0].title == "未分组评分项"
-    ControlStore(context).grant_workspace_access("owner")
-    planning_snapshot = HumanGateService(context).planning_snapshot()
-    trace_by_kind = {
-        item["artifact_kind"]: item
-        for item in planning_snapshot["generation_trace"]
-    }
-    assert trace_by_kind["ScoreModel"]["provider_fingerprint"] == (
-        _FakeScoreProvider.provider_fingerprint
-    )
-    assert trace_by_kind["ChapterBlueprint"]["provider_fingerprint"]
+    store = ControlStore(context)
+    for kind, expected_provider in (
+        ("ScoreModel", _FakeScoreProvider.provider_fingerprint),
+        ("ChapterBlueprint", _FakeOutlineProvider.provider_fingerprint),
+    ):
+        artifact = store.v3_active_artifact(kind)
+        assert artifact is not None
+        proposal = store.v3_proposal(str(artifact["proposal_id"]))
+        assert proposal is not None
+        receipt = store.v3_inference_receipt(
+            proposal["inference_receipt_refs"][0]["receipt_id"]
+        )
+        assert receipt is not None
+        assert receipt["provider_fingerprint"] == expected_provider
 
 
-def test_outline_semantic_validation_warning_uses_review_fallback_and_retries_llm(
+def test_outline_semantic_validation_fails_closed_without_rule_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -551,49 +555,17 @@ def test_outline_semantic_validation_warning_uses_review_fallback_and_retries_ll
         outline_provider=provider,
     )
 
-    blueprint = runner.run(
-        "compile_chapter_blueprint",
-        operation_id="outline-fallback-1",
-    )
-
+    with pytest.raises(ControlPlaneError) as raised:
+        runner.run(
+            "compile_chapter_blueprint",
+            operation_id="outline-fallback-1",
+        )
     assert calls == ["score", "outline"]
-    assert "program_audit_warning" not in blueprint.coverage_summary
-    assert blueprint.coverage_summary["recovery_mode"] == "deterministic_outline"
-    assert blueprint.coverage_summary["recovered_issue_codes"]
-    product = runner._blueprint_product(blueprint)
-    assert product["status"] == "ready"
-    assert product["summary"]["warning_count"] == 0
-
-    store = ControlStore(context)
-    active = store.v3_active_artifact("ChapterBlueprint")
-    assert active is not None
-    proposal = store.v3_proposal(str(active["proposal_id"]))
-    assert proposal is not None
-    receipt_ref = proposal["inference_receipt_refs"][0]
-    receipt = store.v3_inference_receipt(receipt_ref["receipt_id"])
-    assert receipt is not None
-    assert receipt["prompt_version"] == (
-        f"{OUTLINE_SKILL_ID}.program_audit_fallback.v3."
-        f"{OUTLINE_PROMPT_VERSION}"
-    )
-    assert receipt["model_fingerprint"] == (
-        f"deterministic_fallback:{OUTLINE_SKILL_ID}:v3"
-    )
-    assert receipt["provider_fingerprint"] != provider.provider_fingerprint
-    first_revision = blueprint.revision
-
-    retried = runner.run(
-        "compile_chapter_blueprint",
-        operation_id="outline-fallback-2",
-    )
-
-    assert calls == ["score", "outline"]
-    assert retried.revision == first_revision
-    assert "program_audit_warning" not in retried.coverage_summary
-    assert retried.coverage_summary["recovery_mode"] == "deterministic_outline"
+    assert raised.value.code == "V3_OUTLINE_INFERENCE_INVALID"
+    assert ControlStore(context).v3_active_artifact("ChapterBlueprint") is None
 
 
-def test_outline_final_semantic_audit_warning_uses_review_fallback(
+def test_outline_final_semantic_audit_fails_closed(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -632,18 +604,11 @@ def test_outline_final_semantic_audit_warning_uses_review_fallback(
         fail_semantic_audits,
     )
 
-    blueprint = runner.run("compile_chapter_blueprint")
-
+    with pytest.raises(ControlPlaneError) as raised:
+        runner.run("compile_chapter_blueprint")
     assert calls == ["score", "outline"]
-    assert audit_calls == 2
-    assert blueprint.coverage_summary["review_status"] == "needs_review"
-    assert blueprint.coverage_summary["program_audit_codes"] == [
-        "HOLLOW_QUALITY_HEADING"
-    ]
-    assert len(blueprint.coverage_summary["program_audit_warnings"]) == 2
-    assert "HOLLOW_QUALITY_HEADING" in blueprint.coverage_summary[
-        "program_audit_warnings"
-    ][0]
+    assert audit_calls == 1
+    assert raised.value.code == "V3_BLUEPRINT_COVERAGE_BLOCKED"
 
 
 def test_outline_fallback_audit_keeps_template_conflict_blocking(
@@ -667,16 +632,6 @@ def test_outline_fallback_audit_keeps_template_conflict_blocking(
         del args, kwargs
         nonlocal audit_calls
         audit_calls += 1
-        if audit_calls == 1:
-            return {
-                "passed": False,
-                "findings": [
-                    {
-                        "code": "HOLLOW_QUALITY_HEADING",
-                        "message": "最终目录包含空洞质量标题",
-                    }
-                ],
-            }
         return {
             "passed": False,
             "findings": [
@@ -693,23 +648,26 @@ def test_outline_fallback_audit_keeps_template_conflict_blocking(
         semantic_then_template_conflict,
     )
 
-    with pytest.raises(ControlPlaneError, match="保守目录仍未通过"):
+    with pytest.raises(ControlPlaneError) as raised:
         runner.run("compile_chapter_blueprint")
 
-    assert audit_calls == 2
+    assert raised.value.code == "V3_BLUEPRINT_TEMPLATE_BLOCKED"
+    assert audit_calls == 1
     assert ControlStore(context).v3_active_artifact("ChapterBlueprint") is None
 
 
 @pytest.mark.parametrize(
-    ("workspace_id", "cause_message"),
+    ("workspace_id", "cause_message", "expected_code"),
     [
         (
             "outline-hard-source-error",
             "章节 node-1 引用未知 ScoreResponseUnit: ['U-missing']",
+            "V3_OUTLINE_SOURCE_REFERENCE_INVALID",
         ),
         (
             "outline-hard-template-error",
             "严格模板标题或顺序发生变化",
+            "V3_OUTLINE_TEMPLATE_INVALID",
         ),
     ],
 )
@@ -718,6 +676,7 @@ def test_outline_source_and_template_validation_remain_blocking(
     monkeypatch: pytest.MonkeyPatch,
     workspace_id: str,
     cause_message: str,
+    expected_code: str,
 ) -> None:
     calls: list[str] = []
     provider = _ValidationFailureOutlineProvider(
@@ -732,9 +691,10 @@ def test_outline_source_and_template_validation_remain_blocking(
         outline_provider=provider,
     )
 
-    with pytest.raises(PlanningInferenceValidationError):
+    with pytest.raises(ControlPlaneError) as raised:
         runner.run("compile_chapter_blueprint")
 
+    assert raised.value.code == expected_code
     assert calls == ["score", "outline"]
     assert ControlStore(context).v3_active_artifact("ChapterBlueprint") is None
 
