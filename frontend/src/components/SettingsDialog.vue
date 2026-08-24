@@ -1,10 +1,13 @@
 <template>
   <Teleport to="body">
+    <Transition name="dialog">
     <div v-if="visible" class="dialog-overlay" @click.self="$emit('close')">
-      <div class="dialog settings-dialog">
+      <div class="dialog settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
         <div class="dialog-header">
-          <h2>模型与流程设置</h2>
-          <button class="btn btn-icon" @click="$emit('close')">&times;</button>
+          <h2 id="settings-dialog-title">模型与流程设置</h2>
+          <button type="button" class="dialog-close" aria-label="关闭" @click="$emit('close')">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
         </div>
         <div class="settings-dialog-body">
         <div class="settings-tabs" role="tablist" aria-label="设置分类">
@@ -247,11 +250,13 @@
       </div>
     </div>
   </div>
+    </Transition>
   </Teleport>
 </template>
 
 <script setup>
 import { ref, reactive, watch, computed } from 'vue'
+import { confirmDialog } from '../composables/appDialog.js'
 import { fetchLlmSettings, fetchFlowSettings, saveFlowSettings,
   saveLlmModel,
   activateLlmModel,
@@ -518,7 +523,14 @@ async function handleDelete(id) {
   success.value = ''
   const target = models.value.find((m) => m.id === id)
   if (!target) return
-  if (!confirm(`确定要删除「${target.name || '该模型'}」吗？`)) return
+  const confirmed = await confirmDialog({
+    title: '删除模型',
+    message: `确定删除「${target.name || '该模型'}」吗？删除后不可恢复。`,
+    confirmText: '删除',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
   try {
     const { data } = await deleteLlmModel(id)
     if (data.ok) {

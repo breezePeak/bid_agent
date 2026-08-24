@@ -195,6 +195,15 @@
           </div>
         </div>
         <div class="doc-actions">
+          <button
+            v-if="selectedIsLeaf && hasPendingDraft"
+            type="button"
+            class="btn btn-sm btn-primary"
+            :disabled="busy || !chapterDetail?.content"
+            @click="approveHead"
+          >
+            确认草稿为正式版
+          </button>
           <button type="button" class="btn btn-sm" :disabled="busy || !selectedId" @click="showRevisions = true">
             版本
           </button>
@@ -610,31 +619,37 @@
     />
 
     <!-- 新建章节 Modal -->
-    <div v-if="showCreateModal" class="modal-overlay" @click.self="showCreateModal = false">
-      <div class="modal-card">
-        <header class="modal-header">
-          <h3>新建章节</h3>
-          <button type="button" class="close-btn" @click="showCreateModal = false">&times;</button>
-        </header>
-        <div class="modal-body">
-          <div class="form-group">
-            <label>章节 ID</label>
-            <input v-model="newChapterId" type="text" class="form-control" placeholder="如 chapter_03" />
-            <small class="form-hint">英文字母、数字或下划线</small>
-          </div>
-          <div class="form-group">
-            <label>章节标题</label>
-            <input v-model="newChapterTitle" type="text" class="form-control" placeholder="如 3.1 项目管理方案" />
+    <Teleport to="body">
+      <Transition name="dialog">
+        <div v-if="showCreateModal" class="dialog-overlay" @click.self="showCreateModal = false">
+          <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="create-chapter-title">
+            <header class="dialog-header">
+              <h2 id="create-chapter-title">新建章节</h2>
+              <button type="button" class="dialog-close" aria-label="关闭" @click="showCreateModal = false">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+              </button>
+            </header>
+            <div class="dialog-body">
+              <div class="form-group">
+                <label for="new-chapter-id">章节 ID</label>
+                <input id="new-chapter-id" v-model="newChapterId" type="text" placeholder="如 chapter_03" />
+                <small class="form-hint">英文字母、数字或下划线</small>
+              </div>
+              <div class="form-group">
+                <label for="new-chapter-title">章节标题</label>
+                <input id="new-chapter-title" v-model="newChapterTitle" type="text" placeholder="如 3.1 项目管理方案" />
+              </div>
+              <footer class="dialog-footer">
+                <button type="button" class="btn" @click="showCreateModal = false">取消</button>
+                <button type="button" class="btn btn-primary" :disabled="busy || !newChapterId.trim()" @click="handleCreateChapter">
+                  确认新建
+                </button>
+              </footer>
+            </div>
           </div>
         </div>
-        <footer class="modal-footer">
-          <button type="button" class="btn" @click="showCreateModal = false">取消</button>
-          <button type="button" class="btn btn-primary" :disabled="busy || !newChapterId.trim()" @click="handleCreateChapter">
-            确认新建
-          </button>
-        </footer>
-      </div>
-    </div>
+      </Transition>
+    </Teleport>
 
   </div>
 </template>
@@ -675,6 +690,7 @@ import {
 } from '../batchChapterJobReducer.js'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
+import { confirmDialog } from '../composables/appDialog.js'
 
 const props = defineProps({
   workspaceId: { type: String, required: true },
@@ -865,7 +881,14 @@ function cancelRename() {
 async function handleArchiveChapter(item, e) {
   if (e) e.stopPropagation()
   const name = item.title || item.chapter_id
-  if (!confirm(`确定要归档/删除章节 "${name}" 吗？`)) return
+  const confirmed = await confirmDialog({
+    title: '归档章节',
+    message: `确定归档「${name}」吗？归档后该章节将从当前目录中移除。`,
+    confirmText: '归档',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
   busy.value = true
   try {
     const { data } = await archiveChapter(props.workspaceId, item.chapter_id)
@@ -945,6 +968,10 @@ let closeWorkspaceStream = null
 const selectedChapter = computed(() =>
   items.value.find(item => item.chapter_id === selectedId.value) || null,
 )
+const hasPendingDraft = computed(() => (
+  Number(chapterDetail.value?.head_content_revision || 0)
+  > Number(chapterDetail.value?.formal_content_revision || 0)
+))
 const selectedIsLeaf = computed(() => {
   if (!selectedId.value) return false
   if (typeof chapterDetail.value?.is_leaf === 'boolean') return chapterDetail.value.is_leaf
@@ -2020,7 +2047,14 @@ function canDeleteChatTurn(turn) {
 async function deleteChatTurn(turn) {
   const chapterId = String(selectedId.value || '').trim()
   if (!chapterId || !canDeleteChatTurn(turn)) return
-  if (!window.confirm('确定删除这条对话吗？删除后无法恢复。')) return
+  const confirmed = await confirmDialog({
+    title: '删除对话',
+    message: '确定删除这条对话吗？删除后无法恢复。',
+    confirmText: '删除',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
   const currentTurns = chatTurns.value
   try {
     const { data } = await deleteChapterChatTurn(props.workspaceId, chapterId, {
@@ -2041,7 +2075,14 @@ async function clearChatHistory() {
   const chapterId = String(selectedId.value || '').trim()
   if (!chapterId || asking.value || chatLoading.value || !chatTurns.value.length) return
   const chapterName = selectedChapter.value?.title || chapterId
-  if (!window.confirm(`确定清空「${chapterName}」的全部 Agent 对话吗？删除后无法恢复。`)) return
+  const confirmed = await confirmDialog({
+    title: '清空对话',
+    message: `确定清空「${chapterName}」的全部 Agent 对话吗？删除后无法恢复。`,
+    confirmText: '全部清空',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
   try {
     const { data } = await clearChapterChatHistory(props.workspaceId, chapterId)
     if (!data?.ok) throw new Error(data?.message || '清空对话失败')
@@ -3349,43 +3390,7 @@ onUnmounted(() => {
   background: #fee2e2;
 }
 
-/* Modal 弹窗样式 */
-.modal-overlay {
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(15, 23, 42, 0.45);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  backdrop-filter: blur(2px);
-}
-.modal-card {
-  background: #fff;
-  border-radius: 12px;
-  width: 420px;
-  max-width: 90vw;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-}
-.modal-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 18px;
-  border-bottom: 1px solid #e2e8f0;
-}
-.modal-header h3 { margin: 0; font-size: 16px; color: #0f172a; }
-.close-btn { background: none; border: none; font-size: 20px; color: #64748b; cursor: pointer; }
-.modal-body { padding: 18px; display: flex; flex-direction: column; gap: 14px; }
-.form-group { display: flex; flex-direction: column; gap: 6px; }
-.form-group label { font-size: 13px; font-weight: 600; color: #334155; }
-.form-control { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 14px; outline: none; }
-.form-control:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); }
-.form-hint { font-size: 11px; color: #94a3b8; }
-.modal-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; background: #f8fafc; border-top: 1px solid #e2e8f0; }
+.form-hint { font-size: 12px; color: #94a3b8; }
 
 @media (max-width: 1100px) {
   .workbench {
