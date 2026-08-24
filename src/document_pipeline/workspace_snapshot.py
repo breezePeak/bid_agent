@@ -498,7 +498,7 @@ class V3WorkspaceSnapshotBuilder:
         from .chapter_workspace import ChapterWorkspaceService
 
         try:
-            return ChapterWorkspaceService(self.context).list_chapters(
+            snapshot = ChapterWorkspaceService(self.context).list_chapters(
                 include_archived=True
             )
         except ControlPlaneError:
@@ -508,7 +508,7 @@ class V3WorkspaceSnapshotBuilder:
                 for item in (plan.get("nodes") or [])
                 if isinstance(item, dict) and str(item.get("chapter_id") or "").strip()
             ]
-            return {
+            snapshot = {
                 "blueprint_revision": int(plan.get("revision") or 0),
                 "blueprint_hash": "",
                 "total": len(nodes) or len(materializations),
@@ -521,6 +521,47 @@ class V3WorkspaceSnapshotBuilder:
                 ),
                 "items": materializations,
             }
+        status_counts: dict[str, int] = {}
+        for item in snapshot.get("items") or []:
+            if not isinstance(item, dict) or not item.get("materialized", True):
+                continue
+            chapter_id = str(item.get("chapter_id") or "")
+            try:
+                writing_plan = control.chapter_writing_plan(chapter_id)
+            except ControlPlaneError:
+                writing_plan = None
+            if writing_plan is None:
+                summary = {
+                    "head_plan_revision": int(item.get("head_plan_revision") or 0),
+                    "confirmed_plan_revision": int(
+                        item.get("confirmed_plan_revision") or 0
+                    ),
+                    "status": "not_started",
+                    "plan_hash": "",
+                    "dependency_fingerprint": "",
+                }
+            else:
+                summary = {
+                    "head_plan_revision": int(
+                        writing_plan.get("plan_revision") or 0
+                    ),
+                    "confirmed_plan_revision": int(
+                        item.get("confirmed_plan_revision") or 0
+                    ),
+                    "status": str(writing_plan.get("status") or "current"),
+                    "plan_hash": str(writing_plan.get("plan_hash") or ""),
+                    "dependency_fingerprint": str(
+                        writing_plan.get("dependency_fingerprint") or ""
+                    ),
+                }
+            item["writing_plan"] = summary
+            status = str(summary["status"])
+            status_counts[status] = status_counts.get(status, 0) + 1
+        snapshot["writing_plans"] = {
+            "count": sum(status_counts.values()),
+            "status_counts": status_counts,
+        }
+        return snapshot
 
     def _generation_snapshot(
         self,

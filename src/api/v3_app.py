@@ -1773,6 +1773,41 @@ def get_chapter_context_revision(
         return _error(exc)
 
 
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/plan")
+def get_chapter_writing_plan(workspace_id: str, chapter_id: str, revision: int | None = Query(None)) -> JSONResponse:
+    """Read-only plan projection; writes remain command/control-plane owned."""
+    try:
+        store = ControlStore(_context(workspace_id))
+        chapter = store.chapter_workspace(chapter_id)
+        if chapter is None:
+            raise ControlPlaneError("CHAPTER_NOT_FOUND", f"章节 Workspace 不存在: {chapter_id}", status_code=404)
+        plan = store.chapter_writing_plan(chapter_id, revision)
+        receipt = (
+            store.chapter_plan_approval_receipt(
+                chapter_id,
+                int(plan.get("plan_revision") or 0),
+            )
+            if isinstance(plan, dict)
+            else None
+        )
+        current_dependencies = (
+            store.chapter_plan_dependency_snapshot(chapter_id)
+            if isinstance(plan, dict)
+            else None
+        )
+        return JSONResponse(
+            {
+                "ok": True,
+                "chapter": chapter,
+                "plan": plan,
+                "receipt": receipt,
+                "current_dependencies": current_dependencies,
+            }
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 @app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/revisions")
 def list_chapter_content_revisions(
     workspace_id: str,

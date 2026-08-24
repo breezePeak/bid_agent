@@ -103,6 +103,13 @@ class ChapterAgentService:
         if chapter_id:
             raw_row = store["chapters"].get(chapter_id)
             chapter_row = dict(raw_row) if isinstance(raw_row, dict) else {}
+            writing_plan = chapter_row.get("writing_plan")
+            if isinstance(writing_plan, dict):
+                self._shadow_writing_plan(
+                    chapter_id,
+                    writing_plan,
+                    seed_only=True,
+                )
         return {
             **store,
             "chapter_id": chapter_id or None,
@@ -129,6 +136,7 @@ class ChapterAgentService:
             "updated_at": _utc_now(),
         }
         self._write_writing_plan_store(store)
+        self._shadow_writing_plan(chapter_id, writing_plan, seed_only=False)
         return self.load_writing_plan_state(chapter_id)
 
     def reset_writing_plan(self, chapter_id: str) -> None:
@@ -212,6 +220,28 @@ class ChapterAgentService:
             json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
+
+    def _shadow_writing_plan(
+        self,
+        chapter_id: str,
+        writing_plan: dict[str, Any],
+        *,
+        seed_only: bool,
+    ) -> None:
+        """Best-effort PR-02 shadow write; legacy_inline must never be blocked."""
+        try:
+            from .chapter_writing_plan import ChapterWritingPlanService
+
+            service = ChapterWritingPlanService(self.context)
+            if not service.enabled():
+                return
+            service.append_legacy_projection(
+                chapter_id=chapter_id,
+                writing_plan=writing_plan,
+                seed_only=seed_only,
+            )
+        except Exception:
+            return
 
     def load_history(
         self,
