@@ -383,13 +383,15 @@ test('chat workflow prevents duplicate uploads and avoids duplicating completed 
   assert.doesNotMatch(workspaceView, /<div v-if="hasOutline" class="plan-result-details">/)
 })
 
-test('first stage requires tender and company materials before asking to enter phase 2', () => {
+test('first stage applies mode-specific material readiness before phase 2', () => {
   assert.match(workspaceView, /v-if="!initialMaterialsReady && !loading"/)
   assert.match(workspaceView, /class="required-upload-zones"/)
   assert.match(workspaceView, /class="required-upload-zone"/)
   assert.match(workspaceView, /role: 'tender'/)
   assert.match(workspaceView, /role: 'company'/)
-  assert.match(workspaceView, /const initialMaterialsReady = computed\(\(\) => hasTender\.value && hasCompanyMaterials\.value\)/)
+  assert.match(workspaceView, /projectMode\.value === 'bid_rewrite' \? hasLegacyBid\.value : hasCompanyMaterials\.value/)
+  assert.match(workspaceView, /materialReadiness\.value\.ready === true/)
+  assert.match(workspaceView, /projectMode\.value === 'full_write' \? \[\{/)
   assert.match(workspaceView, /是否继续第二阶段？/)
   assert.match(workspaceView, /回复“继续第二阶段”/)
   assert.match(workspaceView, /const secondStageConfirmed = ref\(false\)/)

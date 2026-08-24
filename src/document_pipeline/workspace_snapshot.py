@@ -9,6 +9,7 @@ from utils import read_json
 from .contracts import ContentBlock, WriterInputBundle
 from .document_planner import CONTENT_UNITS_PATH
 from .input_manifest import V3_ROOT
+from .material_readiness import MaterialReadinessService
 from .research_service import load_published_batch
 from .writer_bundle import BUNDLE_DIR
 from .writer_policy import assess_content_unit, registered_content_path
@@ -277,6 +278,7 @@ class V3WorkspaceSnapshotBuilder:
             "workspace_id": self.context.workspace_id,
             "workspace_revision": control.revision(),
             "profile": control.workspace_profile(),
+            "material_readiness": MaterialReadinessService(self.context).snapshot(),
             "legacy_bid": {
                 "status": legacy_status,
                 "active_id": str((active_legacy_sources[0] if active_legacy_sources else {}).get("legacy_bid_id") or ""),

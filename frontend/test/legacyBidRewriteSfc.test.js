@@ -20,6 +20,10 @@ test('bid rewrite UI components parse and remain mode-gated', () => {
   }
   const workspace = fs.readFileSync(path.resolve('src/components/V3WorkspaceView.vue'), 'utf8')
   assert.match(workspace, /v-if="projectMode === 'bid_rewrite'"/)
+  for (const label of ['新招标文件解析', '评分与项目理解', '生成新目录', '等待目录确认']) {
+    assert.match(workspace, new RegExp(label))
+  }
+  assert.match(workspace, /const rawPipelineStages = computed/)
 })
 
 test('workspace normalization defaults old workspaces and preserves legacy status', () => {
@@ -33,8 +37,16 @@ test('workspace normalization defaults old workspaces and preserves legacy statu
       section_count: 3,
       block_count: 12,
     },
+    material_readiness: {
+      project_mode: 'bid_rewrite',
+      ready: true,
+      required: ['tender', 'legacy_bid'],
+      items: { tender: { ready: true }, legacy_bid: { ready: true } },
+    },
   })
   assert.equal(snapshot.profile.project_mode, 'bid_rewrite')
   assert.equal(snapshot.legacy_bid.status, 'ready')
   assert.equal(snapshot.legacy_bid.section_count, 3)
+  assert.equal(snapshot.material_readiness.ready, true)
+  assert.deepEqual(snapshot.material_readiness.required, ['tender', 'legacy_bid'])
 })

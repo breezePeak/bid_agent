@@ -227,6 +227,7 @@ export function normalizeV3WorkspaceSnapshot(payload) {
   const rawGlobalProjectContext = objectOrEmpty(raw.global_project_context)
   const rawProfile = objectOrEmpty(raw.profile)
   const rawLegacyBid = objectOrEmpty(raw.legacy_bid)
+  const rawMaterialReadiness = objectOrEmpty(raw.material_readiness)
   const globalProjectContext = {
     ...rawGlobalProjectContext,
     identity: objectOrEmpty(rawGlobalProjectContext.identity),
@@ -297,6 +298,12 @@ export function normalizeV3WorkspaceSnapshot(payload) {
       section_count: Number(rawLegacyBid.section_count) || 0,
       block_count: Number(rawLegacyBid.block_count) || 0,
       needs_review_count: Number(rawLegacyBid.needs_review_count) || 0,
+    },
+    material_readiness: {
+      ...rawMaterialReadiness,
+      ready: rawMaterialReadiness.ready === true,
+      required: arrayOrEmpty(rawMaterialReadiness.required),
+      items: objectOrEmpty(rawMaterialReadiness.items),
     },
     inputs: {
       ...inputs,

@@ -550,10 +550,11 @@
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5" /></svg>
               招标文件 {{ tenderInputs.length }} 份
             </span>
-            <span class="stat-tag">
+            <span v-if="projectMode === 'full_write'" class="stat-tag">
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
               公司资料 {{ companyInputs.length }} 份
             </span>
+            <span v-else class="stat-tag">旧投标书 {{ hasLegacyBid ? '已解析' : '待解析' }}</span>
           </div>
         </header>
 
@@ -568,14 +569,14 @@
                   <span class="step-tag">步骤 1 · 材料投递</span>
                   <div>
                     <h4>投递项目材料</h4>
-                    <p>先准备招标文件，再补充公司资质与参考资料。</p>
+                    <p>{{ projectMode === 'bid_rewrite' ? '准备新招标书与旧投标书' : '先准备招标文件，再补充公司资质与参考资料。' }}</p>
                   </div>
                 </div>
                 <span class="workflow-step-status" :class="initialMaterialsReady ? 'done' : 'pending'">
                   {{ initialMaterialsReady ? '已完成' : '待上传' }}
                 </span>
               </header>
-              <p class="workflow-step-intro">请上传<b>招标文件</b>和<b>公司资质/参考资料</b>。两类材料都登记完成后，我会先询问您是否进入第二阶段。</p>
+              <p class="workflow-step-intro">{{ materialReadinessDescription }}</p>
             </div>
           </div>
 
@@ -585,8 +586,8 @@
             </div>
             <div class="msg-bubble upload-start-bubble">
               <span class="workflow-result-kicker">开始投递</span>
-              <h4>请先补齐两类必传材料</h4>
-              <p>仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。</p>
+              <h4>请先补齐必传材料</h4>
+              <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书解析完成后才能生成新目录；公司资料为可选。' : '仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。' }}</p>
               <div class="required-upload-zones">
                 <div
                   v-for="zone in uploadZones"
@@ -605,7 +606,7 @@
                     />
                     <span class="required-upload-zone-icon" aria-hidden="true">{{ zone.role === 'tender' ? '▤' : '▦' }}</span>
                     <span>
-                      <strong>{{ zone.title }} <em>必传</em></strong>
+                      <strong>{{ zone.title }} <em v-if="zone.required">必传</em></strong>
                       <small>{{ zone.description }}</small>
                     </span>
                     <b>{{ inputsForRole(zone.role).length ? `已上传 ${inputsForRole(zone.role).length} 份` : '点击上传' }}</b>
@@ -640,7 +641,7 @@
                   <span class="step-tag">材料已就绪</span>
                   <div>
                     <h4>是否继续第二阶段？</h4>
-                    <p>招标文件和公司资质/参考资料均已上传。请在下方回复“继续第二阶段”后，再开始解析评分点并生成目录。</p>
+                    <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书均已就绪。确认后将仅依据新招标材料生成目录。' : '招标文件和公司资质/参考资料均已上传。请在下方回复“继续第二阶段”后，再开始解析评分点并生成目录。' }}</p>
                   </div>
                 </div>
                 <span class="workflow-step-status action">等待回复</span>
@@ -1896,20 +1897,20 @@ const props = defineProps({
 })
 const router = useRouter()
 
-const uploadZones = [
+const uploadZones = computed(() => [
   {
     role: 'tender',
     title: '招标文件',
     description: '招标正文、采购需求、评分办法和补充说明。',
     required: true,
   },
-  {
+  ...(projectMode.value === 'full_write' ? [{
     role: 'company',
     title: '公司资质/参考资料',
     description: '企业资质、案例、人员、产品说明和证明文件。',
     required: true,
-  },
-]
+  }] : []),
+])
 const pipelineSummaryLabels = {
   input_count: '输入文件',
   block_count: '来源块',
@@ -2073,6 +2074,11 @@ async function continueCurrentWorkflow() {
   }
 
   if (!initialMaterialsReady.value) {
+    if (projectMode.value === 'bid_rewrite') {
+      return hasTender.value
+        ? '还需要上传并完成解析旧投标书，之后才能进入第二阶段。'
+        : '请先上传新招标书和旧投标书，再继续执行。'
+    }
     return hasTender.value
       ? '还需要上传公司资质或参考资料；两类材料齐全后，我会询问是否进入第二阶段。'
       : '请先上传招标文件和公司资质/参考资料，再继续执行。'
@@ -2304,7 +2310,20 @@ const tenderInputs = computed(() => activeInputs.value.filter(item => item.role 
 const companyInputs = computed(() => activeInputs.value.filter(item => item.role === 'company'))
 const hasTender = computed(() => tenderInputs.value.length > 0)
 const hasCompanyMaterials = computed(() => companyInputs.value.length > 0)
-const initialMaterialsReady = computed(() => hasTender.value && hasCompanyMaterials.value)
+const hasLegacyBid = computed(() => legacyBidSummary.value.status === 'ready')
+const materialReadiness = computed(() => snapshot.value.material_readiness || {})
+const materialReadinessDescription = computed(() => (
+  projectMode.value === 'bid_rewrite'
+    ? '请上传新招标书，并在旧投标书区域上传待改写文档。旧投标书单独解析，不参与新目录生成；公司资料可选。'
+    : '请上传招标文件和公司资质/参考资料。两类材料都登记完成后，我会先询问您是否进入第二阶段。'
+))
+const initialMaterialsReady = computed(() => (
+  materialReadiness.value.project_mode === projectMode.value
+    ? materialReadiness.value.ready === true
+    : hasTender.value && (
+      projectMode.value === 'bid_rewrite' ? hasLegacyBid.value : hasCompanyMaterials.value
+    )
+))
 const secondStageConfirmationNeeded = computed(() => (
   initialMaterialsReady.value
   && !secondStageConfirmed.value
@@ -2506,11 +2525,47 @@ watch(
 )
 const sourceIndex = computed(() => snapshot.value.analysis?.source_index || {})
 const analysisPipeline = computed(() => snapshot.value.analysis?.pipeline || {})
-const pipelineStages = computed(() => (
+const rawPipelineStages = computed(() => (
   workflow.value.phase === 'planning' || workflow.value.phase === 'planning_review'
     ? (workflow.value.stages || analysisPipeline.value.stages || [])
     : (analysisPipeline.value.stages || [])
 ))
+const pipelineStages = computed(() => {
+  if (projectMode.value !== 'bid_rewrite') return rawPipelineStages.value
+  const byId = new Map(rawPipelineStages.value.map(stage => [stage.stage_id, stage]))
+  const groups = [
+    ['normalize_sources', '新招标文件解析', ['normalize_sources', 'build_requirement_ledger']],
+    ['score_semantic', '评分与项目理解', ['score_structure', 'score_semantic', 'plan_response']],
+    ['compile_chapter_blueprint', '生成新目录', ['compile_chapter_blueprint']],
+    ['confirm_planning', '等待目录确认', ['confirm_planning']],
+  ]
+  const groupStatus = (members) => {
+    const values = members.map(item => String(item.status || 'pending'))
+    for (const candidate of ['failed', 'paused', 'blocked', 'running', 'queued', 'blocked_human']) {
+      if (values.includes(candidate)) return candidate
+    }
+    if (values.length && values.every(value => ['succeeded', 'reused', 'completed'].includes(value))) {
+      return 'succeeded'
+    }
+    return 'pending'
+  }
+  return groups.map(([stageId, label, ids]) => {
+    const members = ids.map(id => byId.get(id)).filter(Boolean)
+    const representative = byId.get(stageId) || members.at(-1) || {}
+    return {
+      ...representative,
+      stage_id: stageId,
+      label,
+      status: groupStatus(members),
+      llm_requests: members.flatMap(item => item.llm_requests || []),
+      llm_request_count: members.reduce(
+        (total, item) => total + Number(item.llm_request_count || 0),
+        0,
+      ),
+      error: members.find(item => item.error)?.error || null,
+    }
+  })
+})
 const latestWorkspaceOperation = computed(() => (
   snapshot.value.analysis?.latest_operation || {}
 ))
