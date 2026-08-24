@@ -43,6 +43,9 @@ class InputRole(str, Enum):
     COMPANY = "company"
     REFERENCE = "reference"
     GUIDANCE = "guidance"
+    # Reserved for the isolated bid-rewrite parser.  The generic uploads API
+    # rejects this role so legacy content can never enter InputManifest.
+    LEGACY_BID = "legacy_bid"
 
 
 class InputItem(BaseModel):
@@ -217,6 +220,75 @@ class SourceIndex(ContractModel):
         ids = [block.block_id for block in self.blocks]
         if len(ids) != len(set(ids)):
             raise ValueError("SourceIndex 不允许重复 block_id")
+        return self
+
+
+class LegacyBidSource(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    legacy_bid_id: str = Field(min_length=1)
+    filename: str = Field(min_length=1)
+    mime_type: str = Field(min_length=1)
+    sha256: str = Field(min_length=1)
+    version: int = Field(ge=1)
+    active: bool = True
+    stored_path: str = Field(pattern=r"^workspace/v3/legacy_bid_sources/")
+
+
+class LegacyBidSourceManifest(ContractModel):
+    sources: list[LegacyBidSource] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def one_active_source(self) -> "LegacyBidSourceManifest":
+        ids = [item.legacy_bid_id for item in self.sources]
+        if len(ids) != len(set(ids)):
+            raise ValueError("LegacyBidSourceManifest 不允许重复 legacy_bid_id")
+        if sum(1 for item in self.sources if item.active) > 1:
+            raise ValueError("同一工作空间只允许一份活动旧投标书")
+        return self
+
+
+class LegacyBidSection(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    section_id: str = Field(min_length=1)
+    parent_section_id: str | None = None
+    level: int = Field(ge=1, le=9)
+    order: int = Field(ge=0)
+    title: str = Field(min_length=1)
+    heading_block_id: str = Field(min_length=1)
+    content_block_ids: list[str] = Field(default_factory=list)
+    start_ordinal: int = Field(ge=0)
+    end_ordinal: int = Field(ge=0)
+    needs_review: bool = False
+
+
+class LegacyBidIndex(ContractModel):
+    legacy_bid_id: str = Field(min_length=1)
+    filename: str = Field(min_length=1)
+    file_hash: str = Field(min_length=1)
+    parser_version: str = Field(default=SOURCE_PARSER_VERSION, min_length=1)
+    source_manifest_revision: int = Field(ge=1)
+    source_manifest_artifact_hash: str = Field(min_length=1)
+    sections: list[LegacyBidSection] = Field(default_factory=list)
+    blocks: list[SourceBlock] = Field(default_factory=list)
+    structure_gaps: list[SourceNormalizationCoverageItem] = Field(default_factory=list)
+    needs_review: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def identities_are_unique(self) -> "LegacyBidIndex":
+        block_ids = [item.block_id for item in self.blocks]
+        section_ids = [item.section_id for item in self.sections]
+        if len(block_ids) != len(set(block_ids)):
+            raise ValueError("LegacyBidIndex 不允许重复 block_id")
+        if len(section_ids) != len(set(section_ids)):
+            raise ValueError("LegacyBidIndex 不允许重复 section_id")
+        known_blocks = set(block_ids)
+        for section in self.sections:
+            if section.heading_block_id not in known_blocks:
+                raise ValueError("LegacyBidSection heading_block_id 不存在")
+            if set(section.content_block_ids) - known_blocks:
+                raise ValueError("LegacyBidSection 引用了未知 block_id")
         return self
 
 

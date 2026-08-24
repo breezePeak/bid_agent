@@ -14,6 +14,8 @@ from pydantic import BaseModel
 from .contracts import (
     ChapterBlueprint,
     InputManifest,
+    LegacyBidIndex,
+    LegacyBidSourceManifest,
     ProjectModel,
     RequirementLedger,
     ResponseTopicGraph,
@@ -22,7 +24,7 @@ from .contracts import (
     TemplateStructureContract,
 )
 
-ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-9"
+ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-10"
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,24 @@ class ArtifactKindRegistry:
                 enabled=True,
                 promotable=True,
                 notes="PR-16.1 structured recovery of frozen inputs.",
+            ),
+            "LegacyBidSourceManifest": ArtifactKindRegistration(
+                kind="LegacyBidSourceManifest",
+                payload_model=LegacyBidSourceManifest,
+                legal_producers=frozenset({"source_service"}),
+                dependency_kinds=(),
+                enabled=True,
+                promotable=True,
+                notes="Isolated source root for bid rewrite; never a main input dependency.",
+            ),
+            "LegacyBidIndex": ArtifactKindRegistration(
+                kind="LegacyBidIndex",
+                payload_model=LegacyBidIndex,
+                legal_producers=frozenset({"source_service"}),
+                dependency_kinds=("LegacyBidSourceManifest",),
+                enabled=True,
+                promotable=True,
+                notes="Structured old-bid index isolated from SourceIndex.",
             ),
             "TemplateStructureContract": ArtifactKindRegistration(
                 kind="TemplateStructureContract",

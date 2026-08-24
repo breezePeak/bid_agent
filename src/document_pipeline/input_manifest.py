@@ -74,6 +74,10 @@ class InputManifestService:
         supersedes_input_ids: list[str] | None = None,
     ) -> InputRegistration:
         """Copy a local input into immutable V3 storage and record its role/version."""
+        if role is InputRole.LEGACY_BID:
+            raise ValueError(
+                "LEGACY_BID_UPLOAD_ISOLATED: 旧投标书不得进入 InputManifest"
+            )
         source_path = source_path.resolve()
         if not source_path.is_file():
             raise FileNotFoundError(f"输入文件不存在: {source_path}")

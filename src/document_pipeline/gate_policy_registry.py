@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from .artifact_registry import ARTIFACT_REGISTRY_VERSION
 
-GATE_POLICY_REGISTRY_VERSION = "v3-gate-policy-3"
+GATE_POLICY_REGISTRY_VERSION = "v3-gate-policy-4"
 
 # Fixed service issuers. Agents and free-form reviewer strings are never issuers.
 ISSUER_GATE_SERVICE = "gate_service"
@@ -66,6 +66,22 @@ class GatePolicyRegistry:
                     GateRequirement(gate_id="G0_SOURCE_STRUCTURE", allowed_issuers=system),
                 ),
                 validator_id="v3.validator.source_index",
+            ),
+            "LegacyBidSourceManifest": ArtifactGatePolicy(
+                artifact_kind="LegacyBidSourceManifest",
+                policy_version=self.VERSION,
+                required_gates=(
+                    GateRequirement(gate_id="G0_LEGACY_BID_SOURCE_INTEGRITY", allowed_issuers=system),
+                ),
+                validator_id="v3.validator.legacy_bid_source_manifest",
+            ),
+            "LegacyBidIndex": ArtifactGatePolicy(
+                artifact_kind="LegacyBidIndex",
+                policy_version=self.VERSION,
+                required_gates=(
+                    GateRequirement(gate_id="G0_LEGACY_BID_STRUCTURE", allowed_issuers=system),
+                ),
+                validator_id="v3.validator.legacy_bid_index",
             ),
             "TemplateStructureContract": ArtifactGatePolicy(
                 artifact_kind="TemplateStructureContract",

@@ -21,6 +21,17 @@
               required
             />
           </div>
+          <fieldset class="mode-fieldset">
+            <legend>编写模式</legend>
+            <label class="mode-card" :class="{ selected: form.projectMode === 'full_write' }">
+              <input v-model="form.projectMode" type="radio" value="full_write" />
+              <span><strong>全量编写</strong><small>沿用当前完整生成流程</small></span>
+            </label>
+            <label class="mode-card" :class="{ selected: form.projectMode === 'bid_rewrite' }">
+              <input v-model="form.projectMode" type="radio" value="bid_rewrite" />
+              <span><strong>标书改写</strong><small>使用新招标书和旧投标书逐章改写</small></span>
+            </label>
+          </fieldset>
           <p v-if="error" class="form-error">{{ error }}</p>
           <div class="dialog-footer">
             <button type="button" class="btn" @click="$emit('close')">取消</button>
@@ -49,6 +60,7 @@ const form = reactive({
   name: '',
   projectType: '',
   expectedPages: null,
+  projectMode: 'full_write',
 })
 
 const submitting = ref(false)
@@ -62,7 +74,7 @@ async function handleSubmit() {
   }
   submitting.value = true
   try {
-    const { data } = await createRun(form.name.trim(), '', 0)
+    const { data } = await createRun(form.name.trim(), '', 0, form.projectMode)
     if (data.ok && data.workspace) {
       emit('created', data.workspace.id)
     } else {
@@ -75,3 +87,13 @@ async function handleSubmit() {
   }
 }
 </script>
+
+<style scoped>
+.mode-fieldset { display: grid; gap: 10px; margin: 18px 0 0; padding: 0; border: 0; }
+.mode-fieldset legend { margin-bottom: 8px; color: #334155; font-size: 13px; font-weight: 700; }
+.mode-card { display: grid; grid-template-columns: auto 1fr; gap: 11px; align-items: start; padding: 13px; border: 1px solid #cbd5e1; border-radius: 11px; cursor: pointer; }
+.mode-card.selected { border-color: #4f46e5; background: #eef2ff; }
+.mode-card input { margin-top: 3px; }
+.mode-card strong, .mode-card small { display: block; }
+.mode-card small { margin-top: 3px; color: #64748b; font-weight: 400; }
+</style>

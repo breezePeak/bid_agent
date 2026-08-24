@@ -28,6 +28,7 @@ from document_pipeline.contracts import InputRole
 from document_pipeline.execution_controller import V3ExecutionController
 from document_pipeline.document_preview import DocumentPreviewService
 from document_pipeline.input_manifest import InputManifestService, V3_ROOT
+from document_pipeline.legacy_bid_source import LegacyBidSourceService
 from document_pipeline.renderers.render_verifier import RENDER_OUTPUT_PATH, RENDER_QUALITY_PATH
 from document_pipeline.source_normalizer import NORMALIZABLE_EXTENSIONS
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder
@@ -631,10 +632,20 @@ def _delete_workspace_root(workspace_id: str) -> None:
 @app.post("/api/v3/workspaces")
 async def create_workspace(request: Request) -> JSONResponse:
     try:
-        workspace_id = _workspace_id(str((await request.json()).get("name") or "")); root = RUNS_DIR / workspace_id
+        body = await request.json()
+        mode = str((body if isinstance(body, dict) else {}).get("project_mode") or "full_write")
+        if mode not in {"full_write", "bid_rewrite"}:
+            raise ControlPlaneError(
+                "PROJECT_MODE_INVALID",
+                f"不支持的项目模式: {mode}",
+                status_code=400,
+            )
+        workspace_id = _workspace_id(str((body if isinstance(body, dict) else {}).get("name") or "")); root = RUNS_DIR / workspace_id
         (root / "workspace" / "v3").mkdir(parents=True); (root / "outputs" / "v3").mkdir(parents=True)
-        ControlStore(_context(workspace_id)).grant_workspace_access(str(_principal(request)["id"]), role="owner")
-        return JSONResponse({"ok": True, "workspace": {"id": workspace_id, "name": workspace_id}}, status_code=201)
+        store = ControlStore(_context(workspace_id))
+        store.grant_workspace_access(str(_principal(request)["id"]), role="owner")
+        profile = store.initialize_workspace_profile(mode)
+        return JSONResponse({"ok": True, "workspace": {"id": workspace_id, "name": workspace_id, **profile}}, status_code=201)
     except ControlPlaneError as exc: return _error(exc)
 
 
@@ -669,6 +680,7 @@ def list_workspaces(request: Request) -> JSONResponse:
             {
                 "id": root.name,
                 "name": root.name,
+                "project_mode": ControlStore(_context(root.name)).workspace_profile()["project_mode"],
                 "mode": document.get("mode"),
                 "delivery_status": (document.get("delivery") or {}).get("status", "new"),
                 "chapters": {
@@ -715,6 +727,12 @@ async def upload(workspace_id: str, role: str = Form(...), file: UploadFile = Fi
                 f"无效输入角色: {role}",
                 status_code=400,
             ) from exc
+        if input_role is InputRole.LEGACY_BID:
+            raise ControlPlaneError(
+                "LEGACY_BID_UPLOAD_ISOLATED",
+                "旧投标书必须使用专用上传入口，不能进入通用材料清单。",
+                status_code=400,
+            )
         context = _context(workspace_id)
         filename = Path(file.filename or "input").name
         _validate_upload_type(input_role, filename)
@@ -750,6 +768,81 @@ async def upload(workspace_id: str, role: str = Form(...), file: UploadFile = Fi
     finally:
         if temporary and temporary.exists(): temporary.unlink()
         await file.close()
+
+
+@app.post("/api/v3/workspaces/{workspace_id}/legacy-bids")
+async def upload_legacy_bid(workspace_id: str, file: UploadFile = File(...)) -> JSONResponse:
+    temporary = None
+    try:
+        context = _context(workspace_id)
+        filename = Path(file.filename or "legacy-bid").name
+        suffix = Path(filename).suffix.lower()
+        if suffix not in NORMALIZABLE_EXTENSIONS:
+            raise ControlPlaneError(
+                "LEGACY_BID_TYPE_UNSUPPORTED",
+                "旧投标书仅支持 .docx、.pdf、.md、.txt。",
+                status_code=400,
+            )
+        data = await file.read(SETTINGS.source_upload_max_bytes() + 1)
+        if not data or len(data) > SETTINGS.source_upload_max_bytes():
+            raise ControlPlaneError(
+                "LEGACY_BID_UPLOAD_INVALID",
+                "旧投标书为空或超过上传大小限制。",
+                status_code=400,
+            )
+        temporary = context.root / V3_ROOT / "legacy_bid_uploads" / f"{uuid.uuid4().hex}_{filename}"
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_bytes(data)
+        source = await run_in_threadpool(
+            LegacyBidSourceService(context).register_local_file,
+            temporary,
+            filename,
+        )
+        index = LegacyBidSourceService(context).index(source.legacy_bid_id)
+        return JSONResponse(
+            {
+                "ok": True,
+                "legacy_bid": source.model_dump(mode="json"),
+                "index": index.model_dump(mode="json"),
+            },
+            status_code=201,
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+    except ValueError as exc:
+        return _error(ControlPlaneError("LEGACY_BID_PARSE_FAILED", str(exc), status_code=400))
+    except Exception as exc:
+        return _error(
+            ControlPlaneError(
+                "LEGACY_BID_PARSE_FAILED",
+                f"旧投标书解析失败: {exc}",
+                status_code=400,
+            )
+        )
+    finally:
+        if temporary and temporary.exists():
+            temporary.unlink()
+        await file.close()
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/legacy-bids")
+def list_legacy_bids(workspace_id: str) -> JSONResponse:
+    try:
+        sources = LegacyBidSourceService(_context(workspace_id)).list_sources()
+        return JSONResponse(
+            {"ok": True, "legacy_bids": [item.model_dump(mode="json") for item in sources]}
+        )
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/legacy-bids/{legacy_bid_id}/index")
+def get_legacy_bid_index(workspace_id: str, legacy_bid_id: str) -> JSONResponse:
+    try:
+        index = LegacyBidSourceService(_context(workspace_id)).index(legacy_bid_id)
+        return JSONResponse({"ok": True, "index": index.model_dump(mode="json")})
+    except ControlPlaneError as exc:
+        return _error(exc)
 
 
 def _gateway(context: WorkspaceContext) -> CommandGateway: return CommandGateway(context, V3ExecutionController(context).handlers())

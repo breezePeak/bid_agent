@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 29
+    SCHEMA_VERSION = 31
     WORKFLOW_PHASES = ("materials", "planning", "writing")
     PHASE_STATUSES = {
         "not_started", "ready", "running", "waiting_confirmation",
@@ -556,6 +556,19 @@ class ControlStore:
                         principal_id TEXT PRIMARY KEY,
                         role TEXT NOT NULL,
                         created_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS workspace_profiles (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        project_mode TEXT NOT NULL CHECK (project_mode IN ('full_write', 'bid_rewrite')),
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS legacy_bid_states (
+                        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                        status TEXT NOT NULL CHECK (status IN ('not_uploaded', 'parsing', 'ready', 'failed')),
+                        active_id TEXT NOT NULL DEFAULT '',
+                        error TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
                     );
                     CREATE TABLE IF NOT EXISTS issue_states (
                         issue_id TEXT PRIMARY KEY,
@@ -5047,6 +5060,113 @@ class ControlStore:
     def revision(self) -> int:
         with self._connection() as connection:
             return self._revision(connection)
+
+    def workspace_profile(self) -> dict[str, Any]:
+        """Read old workspaces as full_write without silently changing them."""
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT project_mode, created_at, updated_at FROM workspace_profiles WHERE singleton = 1"
+            ).fetchone()
+        if row is None:
+            return {
+                "workspace_id": self.context.workspace_id,
+                "project_mode": "full_write",
+                "created_at": "",
+                "updated_at": "",
+            }
+        return {"workspace_id": self.context.workspace_id, **dict(row)}
+
+    def initialize_workspace_profile(self, project_mode: str = "full_write") -> dict[str, Any]:
+        mode = str(project_mode or "full_write").strip()
+        if mode not in {"full_write", "bid_rewrite"}:
+            raise ControlPlaneError(
+                "PROJECT_MODE_INVALID",
+                f"不支持的项目模式: {mode}",
+                status_code=400,
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                current = connection.execute(
+                    "SELECT project_mode FROM workspace_profiles WHERE singleton = 1"
+                ).fetchone()
+                if current is not None and str(current["project_mode"]) != mode:
+                    raise ControlPlaneError(
+                        "PROJECT_MODE_IMMUTABLE",
+                        "工作空间项目模式创建后不可切换。",
+                        status_code=409,
+                    )
+                if current is None:
+                    connection.execute(
+                        "INSERT INTO workspace_profiles(singleton, project_mode, created_at, updated_at) VALUES (1, ?, ?, ?)",
+                        (mode, now, now),
+                    )
+                    revision = self._bump_revision(connection)
+                    self._event(
+                        connection,
+                        revision,
+                        "WorkspaceProfileInitialized",
+                        "WorkspaceProfile",
+                        self.context.workspace_id,
+                        {"project_mode": mode},
+                    )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.workspace_profile()
+
+    def legacy_bid_state(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT status, active_id, error, updated_at FROM legacy_bid_states WHERE singleton = 1"
+            ).fetchone()
+        return dict(row) if row else {
+            "status": "not_uploaded",
+            "active_id": "",
+            "error": "",
+            "updated_at": "",
+        }
+
+    def update_legacy_bid_state(
+        self,
+        status: str,
+        *,
+        active_id: str = "",
+        error: str = "",
+    ) -> dict[str, Any]:
+        value = str(status or "").strip()
+        if value not in {"not_uploaded", "parsing", "ready", "failed"}:
+            raise ControlPlaneError(
+                "LEGACY_BID_STATE_INVALID",
+                f"旧标书状态无效: {value}",
+                status_code=400,
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                connection.execute(
+                    "INSERT INTO legacy_bid_states(singleton, status, active_id, error, updated_at) "
+                    "VALUES (1, ?, ?, ?, ?) ON CONFLICT(singleton) DO UPDATE SET "
+                    "status=excluded.status, active_id=excluded.active_id, error=excluded.error, updated_at=excluded.updated_at",
+                    (value, str(active_id or ""), str(error or "")[:1000], now),
+                )
+                revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    revision,
+                    "LegacyBidStateChanged",
+                    "LegacyBid",
+                    str(active_id or self.context.workspace_id),
+                    {"status": value, "active_id": str(active_id or "")},
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.legacy_bid_state()
 
     def record_stage_run(
         self,
