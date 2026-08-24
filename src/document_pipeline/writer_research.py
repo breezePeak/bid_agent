@@ -7,6 +7,7 @@ import os
 import re
 import time
 import urllib.parse
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Callable
 
@@ -86,6 +87,44 @@ def writer_research_enabled() -> bool:
     return provider == "tavily"
 
 
+@dataclass(slots=True)
+class ResearchExecutionSubject:
+    """Least data needed by the shared research execution kernel."""
+
+    unit_id: str
+    global_project_context: dict[str, Any] = field(default_factory=dict)
+    project_context: dict[str, Any] = field(default_factory=dict)
+    document_target_constraints: list[dict[str, Any]] = field(default_factory=list)
+    chapter_grounding_context: dict[str, Any] = field(default_factory=dict)
+    chapter_context_items: list[dict[str, Any]] = field(default_factory=list)
+    requirement_excerpts: list[dict[str, Any]] = field(default_factory=list)
+    score_obligations: list[dict[str, Any]] = field(default_factory=list)
+
+
+class ResearchExecutionKernel:
+    """One provider/retry/Evidence publishing path shared by plan and Writer."""
+
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        *,
+        operation_id: str = "",
+        deterministic_test: bool = False,
+    ) -> None:
+        self._delegate = WriterResearchCoordinator(
+            context,
+            operation_id=operation_id,
+            deterministic_test=deterministic_test,
+        )
+
+    def execute(
+        self,
+        subject: WriterInputBundle | ResearchExecutionSubject,
+        decision: ResearchDecision,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        return self._delegate._execute_plan_compat(subject, decision)
+
+
 class WriterResearchCoordinator:
     """Run the one research-planning path for a content unit.
 
@@ -120,6 +159,19 @@ class WriterResearchCoordinator:
     def execute_plan(
         self,
         bundle: WriterInputBundle,
+        decision: ResearchDecision,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Compatibility adapter over the shared execution kernel."""
+
+        return ResearchExecutionKernel(
+            self.context,
+            operation_id=self.operation_id,
+            deterministic_test=self.deterministic_test,
+        ).execute(bundle, decision)
+
+    def _execute_plan_compat(
+        self,
+        bundle: WriterInputBundle | ResearchExecutionSubject,
         decision: ResearchDecision,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Execute one already-disclosed research decision."""

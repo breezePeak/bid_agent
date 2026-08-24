@@ -2714,6 +2714,15 @@ class ControlStore:
             "content_units": list(payload.get("content_units") or [])
             if isinstance(payload, dict)
             else [],
+            "sources": list(payload.get("sources") or [])
+            if isinstance(payload, dict)
+            else [],
+            "source_bindings": list(payload.get("source_bindings") or [])
+            if isinstance(payload, dict)
+            else [],
+            "research_decisions": list(payload.get("research_decisions") or [])
+            if isinstance(payload, dict)
+            else [],
             "metadata": dict(payload.get("metadata") or {})
             if isinstance(payload, dict)
             else {},
@@ -2811,6 +2820,115 @@ class ControlStore:
             (str(uuid.uuid4()), chapter_id, event_type, _json(payload), _now()),
         )
 
+    def record_chapter_plan_shadow_failure(
+        self,
+        chapter_id: str,
+        *,
+        error_code: str,
+        error_message: str,
+        duration_ms: int = 0,
+    ) -> dict[str, Any]:
+        """Persist a compact shadow failure without changing chapter plan heads."""
+
+        normalized = self._normalize_chapter_id(chapter_id)
+        payload = {
+            "chapter_id": normalized,
+            "status": "failed",
+            "error_code": str(error_code or "SHADOW_PLAN_FAILED")[:120],
+            "error_message": str(error_message or "影子规划失败")[:500],
+            "duration_ms": max(0, int(duration_ms)),
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                exists = connection.execute(
+                    "SELECT 1 FROM chapter_workspaces WHERE chapter_id=?",
+                    (normalized,),
+                ).fetchone()
+                if exists is None:
+                    raise ControlPlaneError(
+                        "CHAPTER_NOT_FOUND",
+                        f"章节 Workspace 不存在: {normalized}",
+                        status_code=404,
+                    )
+                workspace_revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    workspace_revision,
+                    "ChapterWritingPlanShadowFailed",
+                    "ChapterWritingPlan",
+                    normalized,
+                    payload,
+                )
+                self._chapter_plan_event(
+                    connection,
+                    normalized,
+                    "shadow_failed",
+                    payload,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return payload
+
+    def record_chapter_plan_shadow_success(
+        self,
+        chapter_id: str,
+        *,
+        plan_revision: int,
+        metrics: dict[str, Any],
+    ) -> dict[str, Any]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        payload = {
+            "chapter_id": normalized,
+            "status": "ready",
+            "plan_revision": int(plan_revision),
+            "metrics": dict(metrics),
+        }
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                workspace_revision = self._bump_revision(connection)
+                self._event(
+                    connection,
+                    workspace_revision,
+                    "ChapterWritingPlanShadowSucceeded",
+                    "ChapterWritingPlan",
+                    f"{normalized}@{plan_revision}",
+                    payload,
+                )
+                self._chapter_plan_event(
+                    connection,
+                    normalized,
+                    "shadow_succeeded",
+                    payload,
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return payload
+
+    def latest_chapter_plan_shadow_failure(
+        self,
+        chapter_id: str,
+    ) -> dict[str, Any] | None:
+        normalized = self._normalize_chapter_id(chapter_id)
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT payload_json, created_at FROM chapter_plan_events "
+                "WHERE chapter_id=? AND event_type='shadow_failed' "
+                "ORDER BY created_at DESC, event_id DESC LIMIT 1",
+                (normalized,),
+            ).fetchone()
+        if row is None:
+            return None
+        payload = _decode(row["payload_json"], {})
+        result = dict(payload) if isinstance(payload, dict) else {}
+        result["created_at"] = str(row["created_at"] or "")
+        return result
+
     def append_chapter_writing_plan(
         self,
         *,
@@ -2824,7 +2942,7 @@ class ControlStore:
         from document_pipeline.contracts import ChapterWritingPlanPayload
 
         normalized = self._normalize_chapter_id(chapter_id)
-        if source not in {"agent_proposal", "legacy_projection"}:
+        if source not in {"agent_proposal", "legacy_projection", "shadow_builder"}:
             raise ControlPlaneError(
                 "PLAN_SOURCE_INVALID",
                 "不支持的 plan source。",
@@ -7726,6 +7844,7 @@ class CommandGateway:
                     "content",
                     "approval",
                     "unchanged",
+                    "shadow",
                     "batch_job",
                 )
                 if key in result

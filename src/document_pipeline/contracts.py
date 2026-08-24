@@ -1266,6 +1266,73 @@ class ChapterContextRevisionRecord(BaseModel):
 class ChapterPlanSource(str, Enum):
     AGENT_PROPOSAL = "agent_proposal"
     LEGACY_PROJECTION = "legacy_projection"
+    SHADOW_BUILDER = "shadow_builder"
+
+
+class ChapterPlanSourceType(str, Enum):
+    TENDER_REQUIREMENT = "TENDER_REQUIREMENT"
+    SCORE_OBLIGATION = "SCORE_OBLIGATION"
+    GLOBAL_PROJECT_FACT = "GLOBAL_PROJECT_FACT"
+    CHAPTER_CONTEXT_ITEM = "CHAPTER_CONTEXT_ITEM"
+    USER_MATERIAL_BLOCK = "USER_MATERIAL_BLOCK"
+    SIBLING_REFERENCE = "SIBLING_REFERENCE"
+    WEB_EVIDENCE = "WEB_EVIDENCE"
+
+
+class ChapterPlanUsageType(str, Enum):
+    CONSTRAINT = "constraint"
+    BASE_FACT = "base_fact"
+    SUPPORT = "support"
+    SUPPLEMENT = "supplement"
+    EVIDENCE = "evidence"
+    CROSS_REFERENCE = "cross_reference"
+
+
+class ChapterPlanMaterialSource(BaseModel):
+    """Stable plan-facing reference; full source content remains in its authority."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_id: str = Field(min_length=1)
+    source_type: ChapterPlanSourceType
+    reference_id: str = Field(min_length=1)
+    content_hash: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+    preview: str = ""
+    snapshot_ref: str = Field(min_length=1)
+
+
+class ChapterPlanSourceBinding(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    source_id: str = Field(min_length=1)
+    content_unit_id: str = Field(min_length=1)
+    usage_type: ChapterPlanUsageType
+    instruction: str = Field(min_length=1)
+    required: bool = False
+
+
+class ChapterPlanResearchDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    decision_id: str = Field(min_length=1)
+    content_unit_id: str = Field(min_length=1)
+    needs_research: bool
+    prohibited: bool = False
+    reason: str = Field(min_length=1)
+    query: str = ""
+    status: Literal["skipped", "planned", "published", "failed"]
+    evidence_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def decision_is_consistent(self) -> "ChapterPlanResearchDecision":
+        if self.prohibited and (self.needs_research or self.query):
+            raise ValueError("禁搜内容块不能声明搜索或查询词")
+        if self.needs_research and not self.query:
+            raise ValueError("需要搜索的内容块必须声明 query")
+        if len(self.evidence_ids) != len(set(self.evidence_ids)):
+            raise ValueError("ChapterPlanResearchDecision 不允许重复 evidence_ids")
+        return self
 
 
 class ChapterPlanStatus(str, Enum):
@@ -1287,13 +1354,25 @@ class ChapterPlanContentUnit(BaseModel):
     unit_id: str = Field(min_length=1)
     title: str = Field(min_length=1)
     instructions: str = Field(min_length=1)
+    purpose: str = ""
+    must_answer: str = ""
     order: int = Field(ge=0)
+    requirement_ids: list[str] = Field(default_factory=list)
+    score_point_ids: list[str] = Field(default_factory=list)
+    condition_ids: list[str] = Field(default_factory=list)
     source_refs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def source_refs_are_unique(self) -> "ChapterPlanContentUnit":
-        if len(self.source_refs) != len(set(self.source_refs)):
-            raise ValueError("ChapterPlanContentUnit 不允许重复 source_refs")
+        for field_name in (
+            "requirement_ids",
+            "score_point_ids",
+            "condition_ids",
+            "source_refs",
+        ):
+            values = list(getattr(self, field_name))
+            if len(values) != len(set(values)):
+                raise ValueError(f"ChapterPlanContentUnit 不允许重复 {field_name}")
         return self
 
 
@@ -1338,6 +1417,11 @@ class ChapterWritingPlanCandidate(BaseModel):
         "v3.chapter-writing-plan.v2"
     )
     content_units: list[ChapterPlanContentUnit] = Field(min_length=1)
+    sources: list[ChapterPlanMaterialSource] = Field(default_factory=list)
+    source_bindings: list[ChapterPlanSourceBinding] = Field(default_factory=list)
+    research_decisions: list[ChapterPlanResearchDecision] = Field(
+        default_factory=list
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -1350,6 +1434,43 @@ class ChapterWritingPlanCandidate(BaseModel):
             raise ValueError("ChapterWritingPlanCandidate 不允许重复 order")
         if orders != sorted(orders):
             raise ValueError("ChapterWritingPlanCandidate 必须按 order 升序提交")
+        if orders != list(range(len(orders))):
+            raise ValueError("ChapterWritingPlanCandidate order 必须从 0 连续递增")
+        source_ids = [item.source_id for item in self.sources]
+        if len(source_ids) != len(set(source_ids)):
+            raise ValueError("ChapterWritingPlanCandidate 不允许重复 source_id")
+        known_sources = set(source_ids)
+        known_units = set(unit_ids)
+        for unit in self.content_units:
+            if self.sources and (unknown := set(unit.source_refs) - known_sources):
+                raise ValueError(
+                    f"content unit 指向未知 source: {sorted(unknown)}"
+                )
+        binding_keys: list[tuple[str, str, str]] = []
+        for binding in self.source_bindings:
+            if binding.source_id not in known_sources:
+                raise ValueError(
+                    f"source binding 指向未知 source: {binding.source_id}"
+                )
+            if binding.content_unit_id not in known_units:
+                raise ValueError(
+                    "source binding 指向未知 content unit: "
+                    f"{binding.content_unit_id}"
+                )
+            binding_keys.append(
+                (
+                    binding.source_id,
+                    binding.content_unit_id,
+                    binding.usage_type.value,
+                )
+            )
+        if len(binding_keys) != len(set(binding_keys)):
+            raise ValueError("ChapterWritingPlanCandidate 不允许重复 source binding")
+        decision_units = [item.content_unit_id for item in self.research_decisions]
+        if len(decision_units) != len(set(decision_units)):
+            raise ValueError("同一 content unit 只能有一条 research decision")
+        if unknown := set(decision_units) - known_units:
+            raise ValueError(f"research decision 指向未知 content unit: {sorted(unknown)}")
         return self
 
 
@@ -1368,6 +1489,11 @@ class ChapterWritingPlanRevisionRecord(BaseModel):
     source: ChapterPlanSource
     binding: ChapterPlanBinding
     content_units: list[ChapterPlanContentUnit] = Field(min_length=1)
+    sources: list[ChapterPlanMaterialSource] = Field(default_factory=list)
+    source_bindings: list[ChapterPlanSourceBinding] = Field(default_factory=list)
+    research_decisions: list[ChapterPlanResearchDecision] = Field(
+        default_factory=list
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
     plan_hash: str = Field(min_length=1)
     dependency_fingerprint: str = Field(min_length=1)
