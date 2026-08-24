@@ -113,25 +113,7 @@ class PR01WorkspaceModeTests(unittest.TestCase):
             self.assertEqual(snapshot["writing_mode"], "full_write")
             self.assertEqual(snapshot["chapter_plan_flow"], "legacy_inline")
             self.assertFalse(snapshot["capabilities"]["bid_rewrite"]["released"])
-            self.assertFalse(
-                snapshot["capabilities"]["chapter_plan_v2"]["workbench_enabled"]
-            )
             self.assertEqual(listed["workspaces"][0]["writing_mode"], "full_write")
-
-    def test_chapter_plan_workbench_capability_is_independently_reversible(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
-            runs = Path(temporary) / "runs"
-            (runs / "alpha").mkdir(parents=True)
-            context = WorkspaceContext.resolve(runs, "alpha")
-            ControlStore(context)
-            with mock.patch.dict(
-                os.environ,
-                {"BID_AGENT_CHAPTER_PLAN_WORKBENCH_ENABLED": "1"},
-            ):
-                snapshot = V3WorkspaceSnapshotBuilder(context).build()
-            self.assertTrue(
-                snapshot["capabilities"]["chapter_plan_v2"]["workbench_enabled"]
-            )
 
     def test_invalid_and_unreleased_rewrite_modes_are_rejected_without_workspace(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

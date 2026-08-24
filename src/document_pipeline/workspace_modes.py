@@ -9,7 +9,6 @@ from .contracts import ChapterPlanFlowVersion, ProjectWritingMode
 CHAPTER_PLAN_V2_ENABLED_ENV = "BID_AGENT_CHAPTER_PLAN_V2_ENABLED"
 CHAPTER_PLAN_V2_DEFAULT_ENV = "BID_AGENT_CHAPTER_PLAN_V2_DEFAULT"
 CHAPTER_PLAN_SHADOW_ENABLED_ENV = "BID_AGENT_CHAPTER_PLAN_SHADOW_ENABLED"
-CHAPTER_PLAN_WORKBENCH_ENABLED_ENV = "BID_AGENT_CHAPTER_PLAN_WORKBENCH_ENABLED"
 BID_REWRITE_ENABLED_ENV = "BID_AGENT_BID_REWRITE_ENABLED"
 LEGACY_OUTLINE_FUSION_ENABLED_ENV = "BID_AGENT_LEGACY_OUTLINE_FUSION_ENABLED"
 
@@ -29,7 +28,6 @@ def workspace_capabilities(
     )
     plan_enabled = env_flag(CHAPTER_PLAN_V2_ENABLED_ENV)
     shadow_enabled = env_flag(CHAPTER_PLAN_SHADOW_ENABLED_ENV)
-    workbench_enabled = env_flag(CHAPTER_PLAN_WORKBENCH_ENABLED_ENV)
     rewrite_enabled = env_flag(BID_REWRITE_ENABLED_ENV)
     return {
         "chapter_plan_v2": {
@@ -45,7 +43,6 @@ def workspace_capabilities(
                 and shadow_enabled
                 and flow is ChapterPlanFlowVersion.LEGACY_INLINE
             ),
-            "workbench_enabled": workbench_enabled,
         },
         "bid_rewrite": {
             "enabled": rewrite_enabled,
