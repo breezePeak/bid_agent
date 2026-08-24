@@ -338,6 +338,16 @@ export function fetchChapter(runId, chapterId) {
   })
 }
 
+export function fetchChapterWritingPlan(runId, chapterId, options = {}) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}/plan`), {
+    params: options.revision ? { revision: Number(options.revision) } : undefined,
+    headers: { 'Cache-Control': 'no-cache' },
+    signal: options.signal,
+  })
+}
+
 export async function streamChapterDraft(runId, chapterId, payload = {}, options = {}) {
   const id = encodeURIComponent(String(chapterId || '').trim())
   if (!id) throw new TypeError('chapterId is required')
