@@ -43,6 +43,17 @@ class InputRole(str, Enum):
     COMPANY = "company"
     REFERENCE = "reference"
     GUIDANCE = "guidance"
+    LEGACY_BID = "legacy_bid"
+
+
+class ProjectWritingMode(str, Enum):
+    FULL_WRITE = "full_write"
+    BID_REWRITE = "bid_rewrite"
+
+
+class ChapterPlanFlowVersion(str, Enum):
+    LEGACY_INLINE = "legacy_inline"
+    CONFIRMED_PLAN_V2 = "confirmed_plan_v2"
 
 
 class InputItem(BaseModel):
@@ -196,7 +207,7 @@ class SourceInputStatus(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     input_id: str = Field(min_length=1)
-    status: Literal["processed", "blocked", "partial"]
+    status: Literal["processed", "blocked", "partial", "excluded"]
     block_count: int = Field(default=0, ge=0)
     reason: str | None = None
 

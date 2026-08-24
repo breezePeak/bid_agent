@@ -18,6 +18,16 @@ const apiClient = await readFile(
   new URL('../src/api/index.js', import.meta.url),
   'utf8',
 )
+const createWorkspaceDialog = await readFile(
+  new URL('../src/components/CreateWorkspaceDialog.vue', import.meta.url),
+  'utf8',
+)
+
+test('PR-01 keeps bid rewrite hidden while sending the full-write default', () => {
+  assert.doesNotMatch(createWorkspaceDialog, /bid_rewrite|标书改写/)
+  assert.match(apiClient, /writingMode = 'full_write'/)
+  assert.match(apiClient, /writing_mode:\s*writingMode/)
+})
 
 test('business content owns vertical scrolling inside the fixed application shell', () => {
   const rule = stylesheet.match(/\.main-content\s*\{([^}]*)\}/)

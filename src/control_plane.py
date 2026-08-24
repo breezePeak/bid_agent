@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 29
+    SCHEMA_VERSION = 30
     WORKFLOW_PHASES = ("materials", "planning", "writing")
     PHASE_STATUSES = {
         "not_started", "ready", "running", "waiting_confirmation",
@@ -701,6 +701,8 @@ class ControlStore:
                     CREATE TABLE IF NOT EXISTS document_state (
                         workspace_id TEXT PRIMARY KEY,
                         document_mode TEXT NOT NULL DEFAULT '',
+                        writing_mode TEXT NOT NULL DEFAULT 'full_write',
+                        chapter_plan_flow TEXT NOT NULL DEFAULT 'legacy_inline',
                         project_model_revision INTEGER,
                         document_contract_revision INTEGER,
                         document_plan_revision INTEGER,
@@ -3677,6 +3679,17 @@ class ControlStore:
         }
         if "stage_runs" in tables:
             add("stage_runs", "output_json", "output_json TEXT")
+        if "document_state" in tables:
+            add(
+                "document_state",
+                "writing_mode",
+                "writing_mode TEXT NOT NULL DEFAULT 'full_write'",
+            )
+            add(
+                "document_state",
+                "chapter_plan_flow",
+                "chapter_plan_flow TEXT NOT NULL DEFAULT 'legacy_inline'",
+            )
         if "content_unit_states" in tables:
             add(
                 "content_unit_states",
@@ -5047,6 +5060,54 @@ class ControlStore:
     def revision(self) -> int:
         with self._connection() as connection:
             return self._revision(connection)
+
+    def initialize_document_state(
+        self,
+        *,
+        writing_mode: str = "full_write",
+        chapter_plan_flow: str = "legacy_inline",
+    ) -> dict[str, Any]:
+        mode = str(writing_mode or "").strip()
+        flow = str(chapter_plan_flow or "").strip()
+        if mode not in {"full_write", "bid_rewrite"}:
+            raise ControlPlaneError(
+                "WRITING_MODE_INVALID",
+                f"无效项目写作模式: {mode}",
+                status_code=400,
+            )
+        if flow not in {"legacy_inline", "confirmed_plan_v2"}:
+            raise ControlPlaneError(
+                "CHAPTER_PLAN_FLOW_INVALID",
+                f"无效章节规划流程版本: {flow}",
+                status_code=400,
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO document_state(
+                    workspace_id, writing_mode, chapter_plan_flow, updated_at
+                ) VALUES (?, ?, ?, ?)
+                """,
+                (self.context.workspace_id, mode, flow, now),
+            )
+        return self.document_state()
+
+    def document_state(self) -> dict[str, Any]:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM document_state WHERE workspace_id = ?",
+                (self.context.workspace_id,),
+            ).fetchone()
+        if row is None:
+            return {
+                "workspace_id": self.context.workspace_id,
+                "document_mode": "",
+                "writing_mode": "full_write",
+                "chapter_plan_flow": "legacy_inline",
+                "delivery_status": "draft_with_gaps",
+            }
+        return dict(row)
 
     def record_stage_run(
         self,

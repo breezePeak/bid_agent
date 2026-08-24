@@ -183,6 +183,24 @@ test('workspace snapshot normalization preserves pipeline stages and products', 
   assert.equal(normalized.analysis.pipeline.products[0].kind, 'ScoreStructureDraft')
 })
 
+test('workspace snapshot normalizes PR-01 mode and capability fields compatibly', () => {
+  const current = normalizeV3WorkspaceSnapshot({
+    snapshot: {
+      writing_mode: 'bid_rewrite',
+      chapter_plan_flow: 'confirmed_plan_v2',
+      capabilities: { bid_rewrite: { enabled: true, released: false } },
+    },
+  })
+  assert.equal(current.writing_mode, 'bid_rewrite')
+  assert.equal(current.chapter_plan_flow, 'confirmed_plan_v2')
+  assert.equal(current.capabilities.bid_rewrite.released, false)
+
+  const legacy = normalizeV3WorkspaceSnapshot({ snapshot: { unknown_future: true } })
+  assert.equal(legacy.writing_mode, 'full_write')
+  assert.equal(legacy.chapter_plan_flow, 'legacy_inline')
+  assert.deepEqual(legacy.capabilities, {})
+})
+
 test('workspace snapshot keeps one normalized global project context for every chapter view', () => {
   const normalized = normalizeV3WorkspaceSnapshot({
     snapshot: {

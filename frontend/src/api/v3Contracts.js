@@ -279,10 +279,19 @@ export function normalizeV3WorkspaceSnapshot(payload) {
     },
   }
   const revision = Number(raw.workspace_revision)
+  const writingMode = ['full_write', 'bid_rewrite'].includes(raw.writing_mode)
+    ? raw.writing_mode
+    : 'full_write'
+  const chapterPlanFlow = ['legacy_inline', 'confirmed_plan_v2'].includes(raw.chapter_plan_flow)
+    ? raw.chapter_plan_flow
+    : 'legacy_inline'
 
   return {
     ...raw,
     workspace_revision: Number.isFinite(revision) && revision >= 0 ? revision : 0,
+    writing_mode: writingMode,
+    chapter_plan_flow: chapterPlanFlow,
+    capabilities: objectOrEmpty(raw.capabilities),
     inputs: {
       ...inputs,
       inputs: arrayOrEmpty(inputs.inputs),
