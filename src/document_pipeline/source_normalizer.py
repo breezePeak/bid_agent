@@ -65,15 +65,6 @@ class SourceNormalizer:
         for item in manifest.inputs:
             if not item.active:
                 continue
-            if item.role is InputRole.LEGACY_BID:
-                input_status.append(
-                    SourceInputStatus(
-                        input_id=item.input_id,
-                        status="excluded",
-                        reason="legacy_bid is reserved for the unreleased rewrite pipeline",
-                    )
-                )
-                continue
             source = self.root / V3_ROOT / "sources" / item.input_id / item.filename
             try:
                 source_blocks, coverage = self._blocks_for(item, source)
@@ -110,11 +101,7 @@ class SourceNormalizer:
         manifest_hash = str(active_manifest["artifact_hash"]) if active_manifest is not None else ""
         index = SourceIndex(
             revision=max(1, int(manifest.revision)),
-            source_hashes={
-                entry.input_id: entry.sha256
-                for entry in manifest.inputs
-                if entry.active and entry.role is not InputRole.LEGACY_BID
-            },
+            source_hashes={entry.input_id: entry.sha256 for entry in manifest.inputs if entry.active},
             parser_version=SOURCE_PARSER_VERSION,
             input_manifest_revision=int(manifest.revision),
             input_manifest_artifact_hash=manifest_hash,

@@ -57,12 +57,11 @@ export function fetchRuns() {
   return api.get(V3_WORKSPACES_PATH)
 }
 
-export function createRun(name, projectType, expectedPages, writingMode = 'full_write') {
+export function createRun(name, projectType, expectedPages) {
   return api.post(V3_WORKSPACES_PATH, {
     name,
     project_type: projectType,
     expected_pages: expectedPages,
-    writing_mode: writingMode,
   })
 }
 
