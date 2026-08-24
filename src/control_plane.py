@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 31
+    SCHEMA_VERSION = 30
     WORKFLOW_PHASES = ("materials", "planning", "writing")
     PHASE_STATUSES = {
         "not_started", "ready", "running", "waiting_confirmation",
@@ -1147,9 +1147,6 @@ class ControlStore:
                 head_content_revision INTEGER NOT NULL DEFAULT 0,
                 formal_content_revision INTEGER NOT NULL DEFAULT 0,
                 head_context_revision INTEGER NOT NULL DEFAULT 0,
-                head_plan_revision INTEGER NOT NULL DEFAULT 0,
-                confirmed_plan_revision INTEGER NOT NULL DEFAULT 0,
-                plan_status TEXT NOT NULL DEFAULT 'not_started',
                 metadata_json TEXT NOT NULL DEFAULT '{}',
                 state_hash TEXT NOT NULL DEFAULT '',
                 created_at TEXT NOT NULL,
@@ -1199,76 +1196,8 @@ class ControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_chapter_approval_receipts_chapter
                 ON chapter_approval_receipts(chapter_id, content_revision DESC);
-            CREATE TABLE IF NOT EXISTS chapter_writing_plan_revisions (
-                chapter_id TEXT NOT NULL,
-                plan_revision INTEGER NOT NULL,
-                plan_json TEXT NOT NULL,
-                plan_hash TEXT NOT NULL,
-                dependency_snapshot_json TEXT NOT NULL,
-                dependency_fingerprint TEXT NOT NULL,
-                source TEXT NOT NULL,
-                parent_plan_revision INTEGER,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (chapter_id, plan_revision),
-                UNIQUE (chapter_id, plan_hash, dependency_fingerprint)
-            );
-            CREATE INDEX IF NOT EXISTS idx_chapter_writing_plan_head
-                ON chapter_writing_plan_revisions(chapter_id, plan_revision DESC);
-            CREATE TABLE IF NOT EXISTS chapter_plan_approval_receipts (
-                receipt_id TEXT PRIMARY KEY,
-                receipt_hash TEXT NOT NULL UNIQUE,
-                chapter_id TEXT NOT NULL,
-                plan_revision INTEGER NOT NULL,
-                plan_hash TEXT NOT NULL,
-                dependency_snapshot_json TEXT NOT NULL,
-                dependency_fingerprint TEXT NOT NULL,
-                principal_id TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                UNIQUE (chapter_id, plan_revision, plan_hash, principal_id)
-            );
-            CREATE INDEX IF NOT EXISTS idx_chapter_plan_receipts_chapter
-                ON chapter_plan_approval_receipts(chapter_id, plan_revision DESC);
-            CREATE TABLE IF NOT EXISTS chapter_plan_events (
-                event_id TEXT PRIMARY KEY,
-                chapter_id TEXT NOT NULL,
-                event_type TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_chapter_plan_events_chapter
-                ON chapter_plan_events(chapter_id, created_at, event_id);
             """
         )
-        columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(chapter_workspaces)")}
-        for column, definition in (("head_plan_revision", "INTEGER NOT NULL DEFAULT 0"), ("confirmed_plan_revision", "INTEGER NOT NULL DEFAULT 0"), ("plan_status", "TEXT NOT NULL DEFAULT 'not_started'")):
-            if column not in columns:
-                connection.execute(f"ALTER TABLE chapter_workspaces ADD COLUMN {column} {definition}")
-        plan_columns = {
-            str(row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(chapter_writing_plan_revisions)"
-            )
-        }
-        if "dependency_snapshot_json" not in plan_columns:
-            connection.execute(
-                "ALTER TABLE chapter_writing_plan_revisions "
-                "ADD COLUMN dependency_snapshot_json TEXT NOT NULL DEFAULT '{}'"
-            )
-        receipt_columns = {
-            str(row["name"])
-            for row in connection.execute(
-                "PRAGMA table_info(chapter_plan_approval_receipts)"
-            )
-        }
-        for column, definition in (
-            ("receipt_hash", "TEXT NOT NULL DEFAULT ''"),
-            ("dependency_snapshot_json", "TEXT NOT NULL DEFAULT '{}'"),
-        ):
-            if column not in receipt_columns:
-                connection.execute(
-                    f"ALTER TABLE chapter_plan_approval_receipts "
-                    f"ADD COLUMN {column} {definition}"
-                )
 
     @staticmethod
     def _normalize_chapter_id(chapter_id: str) -> str:
@@ -1302,9 +1231,6 @@ class ControlStore:
         head_content_revision: int,
         formal_content_revision: int,
         head_context_revision: int,
-        head_plan_revision: int = 0,
-        confirmed_plan_revision: int = 0,
-        plan_status: str = "not_started",
         metadata: dict[str, Any],
     ) -> str:
         payload = {
@@ -1320,9 +1246,6 @@ class ControlStore:
             "head_content_revision": int(head_content_revision),
             "formal_content_revision": int(formal_content_revision),
             "head_context_revision": int(head_context_revision),
-            "head_plan_revision": int(head_plan_revision),
-            "confirmed_plan_revision": int(confirmed_plan_revision),
-            "plan_status": plan_status,
             "metadata": metadata,
         }
         return hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
@@ -1350,9 +1273,6 @@ class ControlStore:
             "head_content_revision": int(item.get("head_content_revision") or 0),
             "formal_content_revision": int(item.get("formal_content_revision") or 0),
             "head_context_revision": int(item.get("head_context_revision") or 0),
-            "head_plan_revision": int(item.get("head_plan_revision") or 0),
-            "confirmed_plan_revision": int(item.get("confirmed_plan_revision") or 0),
-            "plan_status": str(item.get("plan_status") or "not_started"),
             "metadata": metadata,
             "state_hash": str(item.get("state_hash") or ""),
             "created_at": str(item.get("created_at") or ""),
@@ -1558,17 +1478,6 @@ class ControlStore:
                 head_content_revision = int(current.get("head_content_revision") or 0)
                 formal_content_revision = int(current.get("formal_content_revision") or 0)
                 head_context_revision = int(current.get("head_context_revision") or 0)
-                head_plan_revision = int(current.get("head_plan_revision") or 0)
-                confirmed_plan_revision = int(
-                    current.get("confirmed_plan_revision") or 0
-                )
-                plan_status = str(current.get("plan_status") or "not_started")
-                if head_plan_revision and (
-                    int(current["blueprint_revision"]) != bp_revision
-                    or str(current["blueprint_hash"]) != bp_hash
-                ):
-                    confirmed_plan_revision = 0
-                    plan_status = "stale_blueprint"
                 created_at = str(current.get("created_at") or now)
                 state_hash = self._chapter_workspace_state_hash(
                     chapter_id=normalized,
@@ -1583,9 +1492,6 @@ class ControlStore:
                     head_content_revision=head_content_revision,
                     formal_content_revision=formal_content_revision,
                     head_context_revision=head_context_revision,
-                    head_plan_revision=head_plan_revision,
-                    confirmed_plan_revision=confirmed_plan_revision,
-                    plan_status=plan_status,
                     metadata=merged_meta,
                 )
                 connection.execute(
@@ -1599,8 +1505,6 @@ class ControlStore:
                         status = ?,
                         approval_status = ?,
                         chapter_revision = ?,
-                        confirmed_plan_revision = ?,
-                        plan_status = ?,
                         metadata_json = ?,
                         state_hash = ?,
                         updated_at = ?
@@ -1615,8 +1519,6 @@ class ControlStore:
                         status,
                         approval_status,
                         chapter_revision,
-                        confirmed_plan_revision,
-                        plan_status,
                         _json(merged_meta),
                         state_hash,
                         now,
@@ -1716,11 +1618,6 @@ class ControlStore:
                     head_content_revision=int(current.get("head_content_revision") or 0),
                     formal_content_revision=int(current.get("formal_content_revision") or 0),
                     head_context_revision=int(current.get("head_context_revision") or 0),
-                    head_plan_revision=int(current.get("head_plan_revision") or 0),
-                    confirmed_plan_revision=int(
-                        current.get("confirmed_plan_revision") or 0
-                    ),
-                    plan_status=str(current.get("plan_status") or "not_started"),
                     metadata=meta,
                 )
                 connection.execute(
@@ -1827,11 +1724,6 @@ class ControlStore:
                     head_content_revision=int(current.get("head_content_revision") or 0),
                     formal_content_revision=int(current.get("formal_content_revision") or 0),
                     head_context_revision=int(current.get("head_context_revision") or 0),
-                    head_plan_revision=int(current.get("head_plan_revision") or 0),
-                    confirmed_plan_revision=int(
-                        current.get("confirmed_plan_revision") or 0
-                    ),
-                    plan_status=str(current.get("plan_status") or "not_started"),
                     metadata=merged,
                 )
                 connection.execute(
@@ -2076,12 +1968,6 @@ class ControlStore:
                 parent = head_context if head_context >= 1 else None
                 chapter_revision = current_revision + 1
                 meta = dict(current.get("metadata") or {})
-                head_plan_revision = int(current.get("head_plan_revision") or 0)
-                plan_status = (
-                    "stale_chapter_context"
-                    if head_plan_revision
-                    else str(current.get("plan_status") or "not_started")
-                )
                 state_hash = self._chapter_workspace_state_hash(
                     chapter_id=normalized,
                     blueprint_revision=int(current["blueprint_revision"]),
@@ -2095,9 +1981,6 @@ class ControlStore:
                     head_content_revision=int(current.get("head_content_revision") or 0),
                     formal_content_revision=int(current.get("formal_content_revision") or 0),
                     head_context_revision=next_context_revision,
-                    head_plan_revision=head_plan_revision,
-                    confirmed_plan_revision=0,
-                    plan_status=plan_status,
                     metadata=meta,
                 )
                 connection.execute(
@@ -2123,8 +2006,6 @@ class ControlStore:
                     UPDATE chapter_workspaces SET
                         chapter_revision = ?,
                         head_context_revision = ?,
-                        confirmed_plan_revision = 0,
-                        plan_status = ?,
                         state_hash = ?,
                         updated_at = ?
                     WHERE chapter_id = ?
@@ -2132,7 +2013,6 @@ class ControlStore:
                     (
                         chapter_revision,
                         next_context_revision,
-                        plan_status,
                         state_hash,
                         now,
                         normalized,
@@ -2468,11 +2348,6 @@ class ControlStore:
                     head_content_revision=next_content_revision,
                     formal_content_revision=formal,
                     head_context_revision=int(current.get("head_context_revision") or 0),
-                    head_plan_revision=int(current.get("head_plan_revision") or 0),
-                    confirmed_plan_revision=int(
-                        current.get("confirmed_plan_revision") or 0
-                    ),
-                    plan_status=str(current.get("plan_status") or "not_started"),
                     metadata=meta,
                 )
                 connection.execute(
@@ -2543,749 +2418,6 @@ class ControlStore:
             normalized, int(chapter.get("head_content_revision") or 0)
         ) or {}
         return {"chapter": chapter, "content": content, "unchanged": False}
-
-    @staticmethod
-    def _active_artifact_ref(
-        connection: sqlite3.Connection,
-        artifact_kind: str,
-    ) -> dict[str, Any]:
-        row = connection.execute(
-            "SELECT revision.revision, revision.artifact_hash, revision.payload_json "
-            "FROM v3_active_artifacts active "
-            "JOIN v3_artifact_revisions revision "
-            "ON revision.artifact_kind=active.artifact_kind "
-            "AND revision.revision=active.revision "
-            "WHERE active.artifact_kind=?",
-            (artifact_kind,),
-        ).fetchone()
-        if row is None:
-            return {"revision": 0, "hash": "", "payload": {}}
-        return {
-            "revision": int(row["revision"] or 0),
-            "hash": str(row["artifact_hash"] or ""),
-            "payload": _decode(row["payload_json"], {}),
-        }
-
-    def _chapter_plan_dependency_snapshot(
-        self,
-        connection: sqlite3.Connection,
-        chapter_id: str,
-        *,
-        require_leaf: bool = False,
-        require_current_blueprint: bool = False,
-    ) -> dict[str, Any]:
-        row = connection.execute(
-            "SELECT * FROM chapter_workspaces WHERE chapter_id=?",
-            (chapter_id,),
-        ).fetchone()
-        if row is None:
-            raise ControlPlaneError(
-                "CHAPTER_NOT_FOUND",
-                f"章节 Workspace 不存在: {chapter_id}",
-                status_code=404,
-            )
-        chapter = self._chapter_workspace_row(row)
-        blueprint = self._active_artifact_ref(connection, "ChapterBlueprint")
-        if not blueprint["revision"] or not blueprint["hash"]:
-            raise ControlPlaneError(
-                "PLAN_BLUEPRINT_REQUIRED",
-                "缺少已晋级的 ChapterBlueprint。",
-                status_code=409,
-            )
-        nodes = [
-            item
-            for item in (blueprint["payload"].get("nodes") or [])
-            if isinstance(item, dict)
-        ]
-        node = next(
-            (
-                item
-                for item in nodes
-                if str(item.get("chapter_id") or "") == chapter_id
-            ),
-            None,
-        )
-        if node is None:
-            raise ControlPlaneError(
-                "PLAN_CHAPTER_NOT_IN_BLUEPRINT",
-                "当前 Blueprint 中不存在该章节。",
-                status_code=409,
-            )
-        if require_leaf and any(
-            str(item.get("parent_chapter_id") or "") == chapter_id
-            for item in nodes
-        ):
-            raise ControlPlaneError(
-                "CHAPTER_BODY_REQUIRES_LEAF",
-                "只有叶子章节可以建立章节编写规划。",
-                status_code=409,
-            )
-        if require_current_blueprint and (
-            int(chapter["blueprint_revision"]) != int(blueprint["revision"])
-            or str(chapter["blueprint_hash"]) != str(blueprint["hash"])
-        ):
-            raise ControlPlaneError(
-                "PLAN_CHAPTER_BLUEPRINT_STALE",
-                "章节 Workspace 尚未同步到当前 Blueprint。",
-                status_code=409,
-            )
-        global_context = self._active_artifact_ref(connection, "ProjectModel")
-        source_index = self._active_artifact_ref(connection, "SourceIndex")
-        context_revision = int(chapter.get("head_context_revision") or 0)
-        context_hash = ""
-        if context_revision:
-            context_row = connection.execute(
-                "SELECT content_hash FROM chapter_context_revisions "
-                "WHERE chapter_id=? AND context_revision=?",
-                (chapter_id, context_revision),
-            ).fetchone()
-            context_hash = str(context_row["content_hash"] or "") if context_row else ""
-        evidence_rows = connection.execute(
-            "SELECT * FROM evidence_needs ORDER BY need_id"
-        ).fetchall()
-        evidence_payload = [dict(item) for item in evidence_rows]
-        evidence_hash = (
-            hashlib.sha256(_json(evidence_payload).encode("utf-8")).hexdigest()
-            if evidence_payload
-            else ""
-        )
-        return {
-            "chapter_id": chapter_id,
-            "blueprint_revision": int(blueprint["revision"]),
-            "blueprint_hash": str(blueprint["hash"]),
-            "global_context_revision": int(global_context["revision"]),
-            "global_context_hash": str(global_context["hash"]),
-            "chapter_context_revision": context_revision,
-            "chapter_context_hash": context_hash,
-            "source_index_revision": int(source_index["revision"]),
-            "source_index_hash": str(source_index["hash"]),
-            "evidence_revision": len(evidence_payload),
-            "evidence_hash": evidence_hash,
-        }
-
-    def chapter_plan_dependency_snapshot(self, chapter_id: str) -> dict[str, Any]:
-        normalized = self._normalize_chapter_id(chapter_id)
-        with self._connection() as connection:
-            return self._chapter_plan_dependency_snapshot(connection, normalized)
-
-    @staticmethod
-    def _chapter_plan_fingerprint(snapshot: dict[str, Any]) -> str:
-        return hashlib.sha256(_json(snapshot).encode("utf-8")).hexdigest()
-
-    @staticmethod
-    def _chapter_plan_status(
-        stored: dict[str, Any],
-        current: dict[str, Any],
-        *,
-        confirmed: bool,
-    ) -> str:
-        for status, keys in (
-            ("stale_blueprint", ("blueprint_revision", "blueprint_hash")),
-            (
-                "stale_global_context",
-                ("global_context_revision", "global_context_hash"),
-            ),
-            (
-                "stale_chapter_context",
-                ("chapter_context_revision", "chapter_context_hash"),
-            ),
-            ("stale_source", ("source_index_revision", "source_index_hash")),
-            ("stale_evidence", ("evidence_revision", "evidence_hash")),
-        ):
-            if any(stored.get(key) != current.get(key) for key in keys):
-                return status
-        return "confirmed" if confirmed else "current"
-
-    @staticmethod
-    def _chapter_plan_record(row: sqlite3.Row, status: str) -> dict[str, Any]:
-        value = dict(row)
-        payload = _decode(value.pop("plan_json", "{}"), {})
-        binding = payload.get("binding") if isinstance(payload, dict) else {}
-        return {
-            "chapter_id": str(value.get("chapter_id") or ""),
-            "plan_revision": int(value.get("plan_revision") or 0),
-            "parent_plan_revision": (
-                int(value["parent_plan_revision"])
-                if value.get("parent_plan_revision") is not None
-                else None
-            ),
-            "source": str(value.get("source") or "agent_proposal"),
-            "binding": dict(binding) if isinstance(binding, dict) else {},
-            "content_units": list(payload.get("content_units") or [])
-            if isinstance(payload, dict)
-            else [],
-            "metadata": dict(payload.get("metadata") or {})
-            if isinstance(payload, dict)
-            else {},
-            "plan_hash": str(value.get("plan_hash") or ""),
-            "dependency_fingerprint": str(
-                value.get("dependency_fingerprint") or ""
-            ),
-            "status": status,
-            "created_at": str(value.get("created_at") or ""),
-        }
-
-    def chapter_writing_plan(
-        self,
-        chapter_id: str,
-        revision: int | None = None,
-    ) -> dict[str, Any] | None:
-        normalized = self._normalize_chapter_id(chapter_id)
-        with self._connection() as connection:
-            chapter_row = connection.execute(
-                "SELECT * FROM chapter_workspaces WHERE chapter_id=?",
-                (normalized,),
-            ).fetchone()
-            if chapter_row is None:
-                raise ControlPlaneError(
-                    "CHAPTER_NOT_FOUND",
-                    f"章节 Workspace 不存在: {normalized}",
-                    status_code=404,
-                )
-            chapter = self._chapter_workspace_row(chapter_row)
-            target = (
-                int(revision)
-                if revision is not None
-                else int(chapter["head_plan_revision"])
-            )
-            if target < 1:
-                return None
-            row = connection.execute(
-                "SELECT * FROM chapter_writing_plan_revisions "
-                "WHERE chapter_id=? AND plan_revision=?",
-                (normalized, target),
-            ).fetchone()
-            if row is None:
-                return None
-            stored = _decode(row["dependency_snapshot_json"], {})
-            current = self._chapter_plan_dependency_snapshot(connection, normalized)
-            status = self._chapter_plan_status(
-                stored if isinstance(stored, dict) else {},
-                current,
-                confirmed=(
-                    target == int(chapter["confirmed_plan_revision"])
-                    and target == int(chapter["head_plan_revision"])
-                ),
-            )
-        return self._chapter_plan_record(row, status)
-
-    def chapter_plan_approval_receipt(
-        self,
-        chapter_id: str,
-        plan_revision: int | None = None,
-    ) -> dict[str, Any] | None:
-        normalized = self._normalize_chapter_id(chapter_id)
-        with self._connection() as connection:
-            if plan_revision is None:
-                chapter = connection.execute(
-                    "SELECT confirmed_plan_revision FROM chapter_workspaces "
-                    "WHERE chapter_id=?",
-                    (normalized,),
-                ).fetchone()
-                plan_revision = int(chapter["confirmed_plan_revision"] or 0) if chapter else 0
-            if not plan_revision:
-                return None
-            row = connection.execute(
-                "SELECT * FROM chapter_plan_approval_receipts "
-                "WHERE chapter_id=? AND plan_revision=? "
-                "ORDER BY created_at, receipt_id LIMIT 1",
-                (normalized, int(plan_revision)),
-            ).fetchone()
-        if row is None:
-            return None
-        value = dict(row)
-        value["binding"] = _decode(value.pop("dependency_snapshot_json", "{}"), {})
-        return value
-
-    @staticmethod
-    def _chapter_plan_event(
-        connection: sqlite3.Connection,
-        chapter_id: str,
-        event_type: str,
-        payload: dict[str, Any],
-    ) -> None:
-        connection.execute(
-            "INSERT INTO chapter_plan_events("
-            "event_id, chapter_id, event_type, payload_json, created_at"
-            ") VALUES (?, ?, ?, ?, ?)",
-            (str(uuid.uuid4()), chapter_id, event_type, _json(payload), _now()),
-        )
-
-    def append_chapter_writing_plan(
-        self,
-        *,
-        chapter_id: str,
-        expected_chapter_revision: int,
-        plan: dict[str, Any],
-        dependency_fingerprint: str,
-        source: str = "agent_proposal",
-    ) -> dict[str, Any]:
-        """Validate and append one immutable plan revision under chapter CAS."""
-        from document_pipeline.contracts import ChapterWritingPlanPayload
-
-        normalized = self._normalize_chapter_id(chapter_id)
-        if source not in {"agent_proposal", "legacy_projection"}:
-            raise ControlPlaneError(
-                "PLAN_SOURCE_INVALID",
-                "不支持的 plan source。",
-                status_code=400,
-            )
-        try:
-            payload = ChapterWritingPlanPayload.model_validate(plan).model_dump(mode="json")
-        except Exception as exc:
-            raise ControlPlaneError(
-                "PLAN_INVALID",
-                "章节编写规划不符合严格 Schema。",
-                status_code=400,
-                details={"error": f"{type(exc).__name__}: {exc}"[:1200]},
-            ) from exc
-        fingerprint = str(dependency_fingerprint or "").strip()
-        plan_hash = hashlib.sha256(_json(payload).encode("utf-8")).hexdigest()
-        now = _now()
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    "SELECT * FROM chapter_workspaces WHERE chapter_id=?",
-                    (normalized,),
-                ).fetchone()
-                if row is None:
-                    raise ControlPlaneError(
-                        "CHAPTER_NOT_FOUND",
-                        f"章节 Workspace 不存在: {normalized}",
-                        status_code=404,
-                    )
-                chapter = self._chapter_workspace_row(row)
-                snapshot = self._chapter_plan_dependency_snapshot(
-                    connection,
-                    normalized,
-                    require_leaf=True,
-                    require_current_blueprint=True,
-                )
-                expected_fingerprint = self._chapter_plan_fingerprint(snapshot)
-                if fingerprint != expected_fingerprint:
-                    raise ControlPlaneError(
-                        "PLAN_DEPENDENCY_MISMATCH",
-                        "规划依赖指纹不是当前权威依赖。",
-                        status_code=409,
-                        details={"current_dependency_fingerprint": expected_fingerprint},
-                    )
-                if payload.get("binding") != snapshot:
-                    raise ControlPlaneError(
-                        "PLAN_BINDING_MISMATCH",
-                        "规划绑定不是当前权威依赖快照。",
-                        status_code=409,
-                    )
-                head = int(chapter["head_plan_revision"])
-                duplicate = connection.execute(
-                    "SELECT * FROM chapter_writing_plan_revisions "
-                    "WHERE chapter_id=? AND plan_hash=? AND dependency_fingerprint=?",
-                    (normalized, plan_hash, fingerprint),
-                ).fetchone()
-                if duplicate is not None and int(duplicate["plan_revision"]) == head:
-                    connection.commit()
-                    return {
-                        "chapter": chapter,
-                        "plan": self._chapter_plan_record(
-                            duplicate,
-                            "confirmed"
-                            if int(chapter["confirmed_plan_revision"]) == head
-                            else "current",
-                        ),
-                        "unchanged": True,
-                    }
-                if int(expected_chapter_revision) != int(chapter["chapter_revision"]):
-                    raise ControlPlaneError(
-                        "CHAPTER_REVISION_CONFLICT",
-                        "章节状态已变化，请刷新后重试。",
-                        status_code=409,
-                        details={
-                            "current_chapter_revision": chapter["chapter_revision"]
-                        },
-                    )
-                next_revision = head + 1
-                chapter_revision = int(chapter["chapter_revision"]) + 1
-                state_hash = self._chapter_workspace_state_hash(
-                    chapter_id=normalized,
-                    blueprint_revision=chapter["blueprint_revision"],
-                    blueprint_hash=chapter["blueprint_hash"],
-                    title=chapter["title"],
-                    parent_chapter_id=chapter["parent_chapter_id"],
-                    order_index=chapter["order"],
-                    status=chapter["status"],
-                    approval_status=chapter["approval_status"],
-                    chapter_revision=chapter_revision,
-                    head_content_revision=chapter["head_content_revision"],
-                    formal_content_revision=chapter["formal_content_revision"],
-                    head_context_revision=chapter["head_context_revision"],
-                    head_plan_revision=next_revision,
-                    confirmed_plan_revision=0,
-                    plan_status="current",
-                    metadata=chapter["metadata"],
-                )
-                connection.execute(
-                    "INSERT INTO chapter_writing_plan_revisions("
-                    "chapter_id, plan_revision, plan_json, plan_hash, "
-                    "dependency_snapshot_json, dependency_fingerprint, source, "
-                    "parent_plan_revision, created_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        normalized,
-                        next_revision,
-                        _json(payload),
-                        plan_hash,
-                        _json(snapshot),
-                        fingerprint,
-                        source,
-                        head or None,
-                        now,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE chapter_workspaces SET chapter_revision=?, "
-                    "head_plan_revision=?, confirmed_plan_revision=0, "
-                    "plan_status='current', state_hash=?, updated_at=? "
-                    "WHERE chapter_id=?",
-                    (
-                        chapter_revision,
-                        next_revision,
-                        state_hash,
-                        now,
-                        normalized,
-                    ),
-                )
-                workspace_revision = self._bump_revision(connection)
-                event_payload = {
-                    "chapter_id": normalized,
-                    "plan_revision": next_revision,
-                    "plan_hash": plan_hash,
-                    "dependency_fingerprint": fingerprint,
-                    "source": source,
-                }
-                self._event(
-                    connection,
-                    workspace_revision,
-                    "ChapterWritingPlanAppended",
-                    "ChapterWritingPlan",
-                    f"{normalized}@{next_revision}",
-                    event_payload,
-                )
-                self._chapter_plan_event(
-                    connection,
-                    normalized,
-                    "appended",
-                    event_payload,
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-        return {
-            "chapter": self.chapter_workspace(normalized),
-            "plan": self.chapter_writing_plan(normalized),
-            "unchanged": False,
-        }
-
-    def confirm_chapter_writing_plan(
-        self,
-        *,
-        chapter_id: str,
-        expected_chapter_revision: int,
-        plan_revision: int,
-        plan_hash: str,
-        dependency_fingerprint: str,
-        principal_id: str,
-    ) -> dict[str, Any]:
-        normalized = self._normalize_chapter_id(chapter_id)
-        principal = str(principal_id or "").strip()
-        if not principal:
-            raise ControlPlaneError(
-                "PLAN_APPROVAL_INVALID",
-                "缺少已认证用户。",
-                status_code=403,
-            )
-        target_revision = int(plan_revision)
-        wanted_hash = str(plan_hash or "").strip()
-        wanted_fingerprint = str(dependency_fingerprint or "").strip()
-        receipt_body = {
-            "chapter_id": normalized,
-            "plan_revision": target_revision,
-            "plan_hash": wanted_hash,
-            "dependency_fingerprint": wanted_fingerprint,
-            "principal_id": principal,
-        }
-        receipt_hash = hashlib.sha256(
-            _json(receipt_body).encode("utf-8")
-        ).hexdigest()
-        receipt_id = f"plan-{receipt_hash[:24]}"
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                existing = connection.execute(
-                    "SELECT * FROM chapter_plan_approval_receipts "
-                    "WHERE receipt_id=? AND receipt_hash=?",
-                    (receipt_id, receipt_hash),
-                ).fetchone()
-                if existing is not None:
-                    connection.commit()
-                    result = dict(existing)
-                    result["binding"] = _decode(
-                        result.pop("dependency_snapshot_json", "{}"), {}
-                    )
-                    return result
-                row = connection.execute(
-                    "SELECT * FROM chapter_workspaces WHERE chapter_id=?",
-                    (normalized,),
-                ).fetchone()
-                if row is None:
-                    raise ControlPlaneError(
-                        "CHAPTER_NOT_FOUND",
-                        "章节 Workspace 不存在。",
-                        status_code=404,
-                    )
-                chapter = self._chapter_workspace_row(row)
-                if int(expected_chapter_revision) != int(chapter["chapter_revision"]):
-                    raise ControlPlaneError(
-                        "CHAPTER_REVISION_CONFLICT",
-                        "章节状态已变化，请刷新后重试。",
-                        status_code=409,
-                        details={
-                            "current_chapter_revision": chapter["chapter_revision"]
-                        },
-                    )
-                if target_revision != int(chapter["head_plan_revision"]):
-                    raise ControlPlaneError(
-                        "PLAN_NOT_HEAD",
-                        "只能确认当前规划版本。",
-                        status_code=409,
-                    )
-                plan = connection.execute(
-                    "SELECT * FROM chapter_writing_plan_revisions "
-                    "WHERE chapter_id=? AND plan_revision=?",
-                    (normalized, target_revision),
-                ).fetchone()
-                if (
-                    plan is None
-                    or str(plan["plan_hash"]) != wanted_hash
-                    or str(plan["dependency_fingerprint"]) != wanted_fingerprint
-                ):
-                    raise ControlPlaneError(
-                        "PLAN_BINDING_MISMATCH",
-                        "规划版本、哈希或依赖指纹不一致。",
-                        status_code=409,
-                    )
-                stored_snapshot = _decode(plan["dependency_snapshot_json"], {})
-                current_snapshot = self._chapter_plan_dependency_snapshot(
-                    connection,
-                    normalized,
-                    require_leaf=True,
-                    require_current_blueprint=True,
-                )
-                current_fingerprint = self._chapter_plan_fingerprint(current_snapshot)
-                status = self._chapter_plan_status(
-                    stored_snapshot if isinstance(stored_snapshot, dict) else {},
-                    current_snapshot,
-                    confirmed=False,
-                )
-                if status != "current" or current_fingerprint != wanted_fingerprint:
-                    raise ControlPlaneError(
-                        "PLAN_STALE",
-                        "规划依赖已变化，必须重新生成或追加规划后再确认。",
-                        status_code=409,
-                        details={
-                            "status": status,
-                            "current_dependency_fingerprint": current_fingerprint,
-                        },
-                    )
-                chapter_revision = int(chapter["chapter_revision"]) + 1
-                state_hash = self._chapter_workspace_state_hash(
-                    chapter_id=normalized,
-                    blueprint_revision=chapter["blueprint_revision"],
-                    blueprint_hash=chapter["blueprint_hash"],
-                    title=chapter["title"],
-                    parent_chapter_id=chapter["parent_chapter_id"],
-                    order_index=chapter["order"],
-                    status=chapter["status"],
-                    approval_status=chapter["approval_status"],
-                    chapter_revision=chapter_revision,
-                    head_content_revision=chapter["head_content_revision"],
-                    formal_content_revision=chapter["formal_content_revision"],
-                    head_context_revision=chapter["head_context_revision"],
-                    head_plan_revision=chapter["head_plan_revision"],
-                    confirmed_plan_revision=target_revision,
-                    plan_status="confirmed",
-                    metadata=chapter["metadata"],
-                )
-                now = _now()
-                connection.execute(
-                    "INSERT INTO chapter_plan_approval_receipts("
-                    "receipt_id, receipt_hash, chapter_id, plan_revision, plan_hash, "
-                    "dependency_snapshot_json, dependency_fingerprint, principal_id, "
-                    "created_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        receipt_id,
-                        receipt_hash,
-                        normalized,
-                        target_revision,
-                        wanted_hash,
-                        _json(current_snapshot),
-                        wanted_fingerprint,
-                        principal,
-                        now,
-                    ),
-                )
-                connection.execute(
-                    "UPDATE chapter_workspaces SET chapter_revision=?, "
-                    "confirmed_plan_revision=?, plan_status='confirmed', "
-                    "state_hash=?, updated_at=? WHERE chapter_id=?",
-                    (
-                        chapter_revision,
-                        target_revision,
-                        state_hash,
-                        now,
-                        normalized,
-                    ),
-                )
-                workspace_revision = self._bump_revision(connection)
-                event_payload = {**receipt_body, "receipt_id": receipt_id}
-                self._event(
-                    connection,
-                    workspace_revision,
-                    "ChapterWritingPlanConfirmed",
-                    "ChapterWritingPlan",
-                    f"{normalized}@{target_revision}",
-                    event_payload,
-                )
-                self._chapter_plan_event(
-                    connection,
-                    normalized,
-                    "confirmed",
-                    event_payload,
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-        return {
-            "receipt_id": receipt_id,
-            "receipt_hash": receipt_hash,
-            **receipt_body,
-            "binding": current_snapshot,
-            "created_at": now,
-        }
-
-    def invalidate_chapter_writing_plan(
-        self,
-        *,
-        chapter_id: str,
-        expected_chapter_revision: int,
-        actor: dict[str, Any] | None = None,
-        reason: str = "",
-    ) -> dict[str, Any]:
-        normalized = self._normalize_chapter_id(chapter_id)
-        with self._connection() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            try:
-                row = connection.execute(
-                    "SELECT * FROM chapter_workspaces WHERE chapter_id=?",
-                    (normalized,),
-                ).fetchone()
-                if row is None:
-                    raise ControlPlaneError(
-                        "CHAPTER_NOT_FOUND",
-                        "章节 Workspace 不存在。",
-                        status_code=404,
-                    )
-                chapter = self._chapter_workspace_row(row)
-                if int(chapter["head_plan_revision"]) < 1:
-                    raise ControlPlaneError(
-                        "PLAN_NOT_FOUND",
-                        "当前章节没有可失效的规划。",
-                        status_code=404,
-                    )
-                if int(chapter["confirmed_plan_revision"]) == 0:
-                    connection.commit()
-                    return {"chapter": chapter, "unchanged": True}
-                if int(expected_chapter_revision) != int(chapter["chapter_revision"]):
-                    raise ControlPlaneError(
-                        "CHAPTER_REVISION_CONFLICT",
-                        "章节状态已变化，请刷新后重试。",
-                        status_code=409,
-                        details={
-                            "current_chapter_revision": chapter["chapter_revision"]
-                        },
-                    )
-                plan_row = connection.execute(
-                    "SELECT * FROM chapter_writing_plan_revisions "
-                    "WHERE chapter_id=? AND plan_revision=?",
-                    (normalized, int(chapter["head_plan_revision"])),
-                ).fetchone()
-                stored = _decode(plan_row["dependency_snapshot_json"], {}) if plan_row else {}
-                current = self._chapter_plan_dependency_snapshot(connection, normalized)
-                plan_status = self._chapter_plan_status(
-                    stored if isinstance(stored, dict) else {},
-                    current,
-                    confirmed=False,
-                )
-                chapter_revision = int(chapter["chapter_revision"]) + 1
-                state_hash = self._chapter_workspace_state_hash(
-                    chapter_id=normalized,
-                    blueprint_revision=chapter["blueprint_revision"],
-                    blueprint_hash=chapter["blueprint_hash"],
-                    title=chapter["title"],
-                    parent_chapter_id=chapter["parent_chapter_id"],
-                    order_index=chapter["order"],
-                    status=chapter["status"],
-                    approval_status=chapter["approval_status"],
-                    chapter_revision=chapter_revision,
-                    head_content_revision=chapter["head_content_revision"],
-                    formal_content_revision=chapter["formal_content_revision"],
-                    head_context_revision=chapter["head_context_revision"],
-                    head_plan_revision=chapter["head_plan_revision"],
-                    confirmed_plan_revision=0,
-                    plan_status=plan_status,
-                    metadata=chapter["metadata"],
-                )
-                now = _now()
-                connection.execute(
-                    "UPDATE chapter_workspaces SET chapter_revision=?, "
-                    "confirmed_plan_revision=0, plan_status=?, state_hash=?, "
-                    "updated_at=? WHERE chapter_id=?",
-                    (
-                        chapter_revision,
-                        plan_status,
-                        state_hash,
-                        now,
-                        normalized,
-                    ),
-                )
-                workspace_revision = self._bump_revision(connection)
-                payload = {
-                    "chapter_id": normalized,
-                    "plan_revision": int(chapter["head_plan_revision"]),
-                    "reason": str(reason or ""),
-                    "actor": dict(actor or {}),
-                }
-                self._event(
-                    connection,
-                    workspace_revision,
-                    "ChapterWritingPlanInvalidated",
-                    "ChapterWritingPlan",
-                    f"{normalized}@{chapter['head_plan_revision']}",
-                    payload,
-                )
-                self._chapter_plan_event(
-                    connection,
-                    normalized,
-                    "invalidated",
-                    payload,
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-        return {"chapter": self.chapter_workspace(normalized), "unchanged": False}
 
     def set_chapter_formal_pointer(
         self,
@@ -3383,11 +2515,6 @@ class ControlStore:
                     head_content_revision=int(current.get("head_content_revision") or 0),
                     formal_content_revision=target_revision,
                     head_context_revision=int(current.get("head_context_revision") or 0),
-                    head_plan_revision=int(current.get("head_plan_revision") or 0),
-                    confirmed_plan_revision=int(
-                        current.get("confirmed_plan_revision") or 0
-                    ),
-                    plan_status=str(current.get("plan_status") or "not_started"),
                     metadata=meta,
                 )
                 connection.execute(
@@ -7719,8 +6846,6 @@ class CommandGateway:
                     "completed_stages",
                     "planning_snapshot",
                     "planning_receipt",
-                    "plan",
-                    "receipt",
                     "chapter",
                     "context",
                     "content",
