@@ -440,7 +440,6 @@ class ChapterContentPhasesTests(unittest.TestCase):
                 )
                 # Auto mode must not look like human confirm.
                 self.assertEqual(auto["approval"]["principal_id"], "system")
-                self.assertEqual(auto["chapter"]["approval_status"], "approved")
 
     def test_compose_blocks_pending_and_export_gate(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

@@ -300,7 +300,7 @@ class ChapterEditingService:
             expected_chapter_revision=int(chapter.get("chapter_revision") or 0),
             content_revision=int(content.get("content_revision") or 0),
             content_hash=str(content.get("content_hash") or ""),
-            approval_status="approved",
+            approval_status="auto_approved",
             actor=actor,
         )
         return {**result, "chapter": promoted, "approval": receipt}
