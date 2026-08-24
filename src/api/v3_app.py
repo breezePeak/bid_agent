@@ -24,13 +24,18 @@ from starlette.concurrency import run_in_threadpool
 
 from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext
 from document_pipeline.canonicalization import canonical_hash, chapter_context_hash
-from document_pipeline.contracts import InputRole
+from document_pipeline.contracts import (
+    ChapterPlanFlowVersion,
+    InputRole,
+    ProjectWritingMode,
+)
 from document_pipeline.execution_controller import V3ExecutionController
 from document_pipeline.document_preview import DocumentPreviewService
 from document_pipeline.input_manifest import InputManifestService, V3_ROOT
 from document_pipeline.renderers.render_verifier import RENDER_OUTPUT_PATH, RENDER_QUALITY_PATH
 from document_pipeline.source_normalizer import NORMALIZABLE_EXTENSIONS
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder
+from document_pipeline.workspace_modes import workspace_capabilities
 from utils import read_json
 
 from .settings_service import SettingsService
@@ -631,10 +636,55 @@ def _delete_workspace_root(workspace_id: str) -> None:
 @app.post("/api/v3/workspaces")
 async def create_workspace(request: Request) -> JSONResponse:
     try:
-        workspace_id = _workspace_id(str((await request.json()).get("name") or "")); root = RUNS_DIR / workspace_id
+        body = await request.json()
+        if not isinstance(body, dict):
+            body = {}
+        workspace_id = _workspace_id(str(body.get("name") or ""))
+        try:
+            writing_mode = ProjectWritingMode(
+                str(body.get("writing_mode") or ProjectWritingMode.FULL_WRITE.value)
+            )
+        except ValueError as exc:
+            raise ControlPlaneError(
+                "WRITING_MODE_INVALID",
+                f"无效项目写作模式: {body.get('writing_mode')}",
+                status_code=400,
+            ) from exc
+        chapter_plan_flow = ChapterPlanFlowVersion.LEGACY_INLINE
+        capabilities = workspace_capabilities(writing_mode, chapter_plan_flow)
+        if writing_mode is ProjectWritingMode.BID_REWRITE:
+            if not capabilities["bid_rewrite"]["enabled"]:
+                raise ControlPlaneError(
+                    "CAPABILITY_DISABLED",
+                    "标书改写能力未启用。",
+                    status_code=403,
+                )
+            raise ControlPlaneError(
+                "FEATURE_NOT_RELEASED",
+                "标书改写能力尚未发布。",
+                status_code=409,
+            )
+        root = RUNS_DIR / workspace_id
         (root / "workspace" / "v3").mkdir(parents=True); (root / "outputs" / "v3").mkdir(parents=True)
-        ControlStore(_context(workspace_id)).grant_workspace_access(str(_principal(request)["id"]), role="owner")
-        return JSONResponse({"ok": True, "workspace": {"id": workspace_id, "name": workspace_id}}, status_code=201)
+        store = ControlStore(_context(workspace_id))
+        store.initialize_document_state(
+            writing_mode=writing_mode.value,
+            chapter_plan_flow=chapter_plan_flow.value,
+        )
+        store.grant_workspace_access(str(_principal(request)["id"]), role="owner")
+        return JSONResponse(
+            {
+                "ok": True,
+                "workspace": {
+                    "id": workspace_id,
+                    "name": workspace_id,
+                    "writing_mode": writing_mode.value,
+                    "chapter_plan_flow": chapter_plan_flow.value,
+                    "capabilities": capabilities,
+                },
+            },
+            status_code=201,
+        )
     except ControlPlaneError as exc: return _error(exc)
 
 
@@ -670,6 +720,9 @@ def list_workspaces(request: Request) -> JSONResponse:
                 "id": root.name,
                 "name": root.name,
                 "mode": document.get("mode"),
+                "writing_mode": snapshot.get("writing_mode"),
+                "chapter_plan_flow": snapshot.get("chapter_plan_flow"),
+                "capabilities": snapshot.get("capabilities") or {},
                 "delivery_status": (document.get("delivery") or {}).get("status", "new"),
                 "chapters": {
                     "total": int(chapters.get("total") or 0),
@@ -716,6 +769,22 @@ async def upload(workspace_id: str, role: str = Form(...), file: UploadFile = Fi
                 status_code=400,
             ) from exc
         context = _context(workspace_id)
+        if input_role is InputRole.LEGACY_BID:
+            state = ControlStore(context).document_state()
+            capabilities = workspace_capabilities(
+                state["writing_mode"], state["chapter_plan_flow"]
+            )
+            if not capabilities["bid_rewrite"]["enabled"]:
+                raise ControlPlaneError(
+                    "CAPABILITY_DISABLED",
+                    "旧投标书上传能力未启用。",
+                    status_code=403,
+                )
+            raise ControlPlaneError(
+                "FEATURE_NOT_RELEASED",
+                "旧投标书上传能力尚未发布。",
+                status_code=409,
+            )
         filename = Path(file.filename or "input").name
         _validate_upload_type(input_role, filename)
         temporary = (

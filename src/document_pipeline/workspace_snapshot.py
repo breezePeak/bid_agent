@@ -12,6 +12,7 @@ from .input_manifest import V3_ROOT
 from .research_service import load_published_batch
 from .writer_bundle import BUNDLE_DIR
 from .writer_policy import assess_content_unit, registered_content_path
+from .workspace_modes import workspace_capabilities
 
 
 class V3WorkspaceSnapshotBuilder:
@@ -79,6 +80,10 @@ class V3WorkspaceSnapshotBuilder:
 
     def build(self) -> dict[str, Any]:
         control = ControlStore(self.context)
+        document_state = control.document_state()
+        writing_mode = str(document_state["writing_mode"])
+        chapter_plan_flow = str(document_state["chapter_plan_flow"])
+        capabilities = workspace_capabilities(writing_mode, chapter_plan_flow)
         artifacts = {item["artifact_kind"]: item for item in control.v3_promoted_artifacts()}
 
         def payload(kind: str) -> dict[str, Any] | None:
@@ -259,6 +264,9 @@ class V3WorkspaceSnapshotBuilder:
             "schema_version": "v3",
             "workspace_id": self.context.workspace_id,
             "workspace_revision": control.revision(),
+            "writing_mode": writing_mode,
+            "chapter_plan_flow": chapter_plan_flow,
+            "capabilities": capabilities,
             # Files in workspace/v3 may be drafts or legacy compatibility
             # outputs. They are intentionally invisible here until a Receipt
             # promotes an artifact through ArtifactPromotionService.
