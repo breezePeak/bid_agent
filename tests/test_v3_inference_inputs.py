@@ -74,7 +74,17 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
     assert request.requirement_ledger == {
         "projection_version": "v3.project_input.v3",
         "revision": 1,
+        "requirements": [
+            {
+                "requirement_id": "R-1",
+                "kind": "mandatory",
+                "normalized_requirement": "项目范围包括完成数据处理",
+                "status": "open",
+                "severity": "normal",
+            }
+        ],
     }
+    assert "raw_transcript" not in request.model_dump_json()
     assert request.scanned_source_block_count == 1
     assert request.source_context == [
         {

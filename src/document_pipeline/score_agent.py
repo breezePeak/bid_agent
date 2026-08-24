@@ -42,6 +42,7 @@ from .scoring_outline_policy import (
     full_score_condition_heading,
     highest_score_conditions,
     is_document_quality_score,
+    is_evaluative_sentence_heading,
 )
 
 
@@ -1173,6 +1174,9 @@ class ScoreAgent:
             )
             selected_unit_requirement_ids: set[str] = set()
             for unit_index, unit in enumerate(interpretation.units, start=1):
+                unit_title = unit.title
+                if is_evaluative_sentence_heading(unit_title):
+                    unit_title = full_score_condition_heading(unit_title, 1)
                 unit_requirement_ids = list(unit.linked_requirement_ids)
                 if unknown_requirement_ids := (
                     set(unit_requirement_ids)
@@ -1191,8 +1195,12 @@ class ScoreAgent:
                 units.append(
                     ScoreResponseUnit(
                         unit_id=f"{point.score_point_id}-U{unit_index:02d}",
-                        title=unit.title,
-                        outline_path=unit.outline_path,
+                        title=unit_title,
+                        outline_path=[
+                            title
+                            for title in unit.outline_path
+                            if not is_evaluative_sentence_heading(title)
+                        ],
                         source_level_ids=[
                             item.level_id for item in unit.band_semantics
                         ],
@@ -1227,10 +1235,14 @@ class ScoreAgent:
             compiled_points.append(
                 point.model_copy(
                     update={
-                        "title": single_unit.title if single_unit is not None else point.title,
+                        "title": (
+                            units[0].title
+                            if single_unit is not None
+                            else point.title
+                        ),
                         "outline_path": (
-                            single_unit.outline_path
-                            if single_unit is not None and single_unit.outline_path
+                            units[0].outline_path
+                            if single_unit is not None and units[0].outline_path
                             else point.outline_path
                         ),
                         "response_scope": (

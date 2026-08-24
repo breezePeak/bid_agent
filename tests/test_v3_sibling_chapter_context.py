@@ -190,7 +190,7 @@ class SiblingChapterContextTests(unittest.TestCase):
                 include_bodies=True,
             )
 
-            self.assertEqual(payload["chapter_role"], "general")
+            self.assertEqual(payload["chapter_role"], "visual")
             self.assertEqual(payload["parent_chapter_id"], "parent-route")
             sibling_ids = [item["chapter_id"] for item in payload["siblings"]]
             self.assertEqual(sibling_ids, ["ch-overview", "ch-method"])
@@ -206,9 +206,9 @@ class SiblingChapterContextTests(unittest.TestCase):
             self.assertTrue(overview_row["has_content"])
             self.assertIn("四个阶段", overview_row["summary"])
             self.assertEqual(overview_row["relation"], "upstream")
-            self.assertEqual(overview_row["role"], "general")
+            self.assertEqual(overview_row["role"], "overview")
             self.assertFalse(method_row["has_content"])
-            self.assertEqual(method_row["role"], "general")
+            self.assertEqual(method_row["role"], "method")
             self.assertTrue(payload["ready_for_dependent_writing"])
             self.assertEqual(payload["missing_upstream"], [])
 
@@ -218,9 +218,16 @@ class SiblingChapterContextTests(unittest.TestCase):
             _seed_blueprint(context, _route_nodes())
             diagram = ChapterWorkspaceService(context).get_chapter("ch-diagram")
             payload = SiblingChapterContextService(context).build_for_chapter(diagram)
-            self.assertEqual(payload["chapter_role"], "general")
-            self.assertTrue(payload["ready_for_dependent_writing"])
-            self.assertEqual(payload["missing_upstream"], [])
+            self.assertEqual(payload["chapter_role"], "visual")
+            self.assertFalse(payload["ready_for_dependent_writing"])
+            self.assertEqual(
+                payload["missing_upstream"][0]["chapter_id"],
+                "ch-overview",
+            )
+            self.assertEqual(
+                payload["missing_upstream"][0]["reason"],
+                "recommended_upstream_empty",
+            )
 
 
 if __name__ == "__main__":

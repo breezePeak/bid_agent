@@ -21,6 +21,11 @@ _GROUNDING_FACT_FIELDS = (
     "processing", "outputs", "deliverables", "acceptance_conditions",
     "constraints", "risks", "roles",
 )
+_CLEARLY_GENERIC_POLICY = re.compile(
+    r"(?:招标投标|政府采购|市场配置资源|交易规则|全过程监管).{0,80}"
+    r"(?:公开|公平|公正|诚实信用|监管|竞争)",
+    re.DOTALL,
+)
 
 
 def _compact(value: Any) -> str:
@@ -511,7 +516,13 @@ class ContentGroundingGate:
             or (requirements and not matched_requirements)
             or (require_evidence_use and evidence_rows and not used_evidence_ids)
         )
-        if semantic_needed:
+        # Procurement-policy boilerplate with no lexical project binding is a
+        # deterministic specificity failure, not a provider-availability error.
+        clearly_generic = bool(
+            specificity_missing_before_semantic
+            and _CLEARLY_GENERIC_POLICY.search(body)
+        )
+        if semantic_needed and not clearly_generic:
             semantic_review = _semantic_relevance_review(
                 chapter=chapter,
                 content=body,

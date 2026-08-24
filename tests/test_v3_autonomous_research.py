@@ -41,7 +41,13 @@ class _Provider:
             ResearchCandidate(
                 title="公开实施指南",
                 publisher="example.gov.cn",
-                content="实施过程应建立可核验的质量控制、测试与验收记录。",
+                content=(
+                    "建设单位要求完成系统部署、接口联调、测试和验收，"
+                    "并提交全过程质量记录。实施过程应建立可核验的"
+                    "质量控制、测试与验收记录。系统实施与验收方案"
+                    "用于说明部署、联调、测试、质量控制及验收方法，"
+                    "响应实施方案完整性要求。"
+                ),
                 source_url="https://example.gov.cn/guide",
                 source_type=EvidenceSourceType.OFFICIAL,
                 claim_types=("project_context", "method"),
@@ -61,6 +67,17 @@ class _ExhaustedProvider:
         if self.calls % 2:
             raise RuntimeError("temporary DeepSeek failure")
         return []
+
+
+def _deterministic_review(_need, candidate):
+    return {
+        "verdict": "relevant",
+        "confidence": 1.0,
+        "reason": "deterministic fixture",
+        "supporting_excerpts": [candidate.content],
+        "extracted_points": [candidate.content],
+        "usage_category": "technical_method",
+    }
 
 
 class AutonomousResearchTests(unittest.TestCase):
@@ -232,13 +249,15 @@ class AutonomousResearchTests(unittest.TestCase):
                     "os.environ",
                     {"BID_AGENT_AUTO_RESEARCH_MAX_QUERIES": "1"},
                 ),
+                validation_policy_scope(False),
             ):
                 report = AutonomousResearchCoordinator(
                     context,
                     provider=provider,
+                    semantic_reviewer=_deterministic_review,
                     enabled=True,
                 ).resolve()
-            self.assertEqual(report["published_count"], 1)
+            self.assertEqual(report["published_count"], 1, report)
             self.assertEqual(report["failed_count"], 0)
             self.assertEqual(len(provider.questions), 1)
             self.assertTrue(

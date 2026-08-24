@@ -179,7 +179,8 @@ def select_planning_source_context(
         for block in source_blocks
         if (
             not project_input
-            or block.input_role in {InputRole.TENDER, InputRole.AMENDMENT}
+            or block.input_role
+            in {InputRole.TENDER, InputRole.AMENDMENT, InputRole.COMPANY}
         )
         and (
             block.source_anchor.chunk_id in cited_chunks
@@ -226,7 +227,8 @@ def select_planning_source_context(
         project_blocks = [
             block
             for block in source_blocks
-            if block.input_role in {InputRole.TENDER, InputRole.AMENDMENT}
+            if block.input_role
+            in {InputRole.TENDER, InputRole.AMENDMENT, InputRole.COMPANY}
         ]
         ranked = sorted(
             enumerate(project_blocks),
@@ -289,11 +291,26 @@ def select_planning_source_context(
 
 
 def _project_requirement_snapshot(ledger: RequirementLedger) -> dict[str, Any]:
-    """Keep only compiler metadata; project prose comes from raw SourceIndex blocks."""
+    """Keep the bounded requirement contract consumed by project providers.
+
+    Raw SourceIndex blocks remain the primary prose input.  Requirement IDs and
+    their normalized statements are retained because the provider and compiler
+    must agree on exact coverage and provenance.
+    """
 
     return {
         "projection_version": PROJECT_INPUT_PROJECTION_VERSION,
         "revision": ledger.revision,
+        "requirements": [
+            {
+                "requirement_id": item.requirement_id,
+                "kind": item.kind.value,
+                "normalized_requirement": item.normalized_requirement,
+                "status": item.status,
+                "severity": item.severity,
+            }
+            for item in ledger.requirements
+        ],
     }
 
 

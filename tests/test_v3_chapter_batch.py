@@ -165,18 +165,14 @@ def test_worker_only_completes_after_content_revision_increases() -> None:
             context_ref=service._context_ref(service.chapters.get_chapter("leaf-a")),
         )
 
-        class Receipt:
+        class WritingService:
             @staticmethod
-            def as_dict():
-                return {"status": "accepted", "result": {"operation_status": "succeeded"}}
+            def iter_events(request):
+                assert request.chapter_id == "leaf-a"
+                yield {"type": "done"}
 
-        def submit(envelope):
-            assert envelope.expected_revision == service.store.snapshot()["revision"]
-            assert envelope.expected_revision > 0
-            return Receipt()
-
-        with mock.patch("document_pipeline.chapter_batch.CommandGateway.submit", side_effect=submit):
-            service._run("batch-commit")
+        service._writing_service_factory = lambda _context: WritingService()
+        service._run("batch-commit")
 
         failed = service.store.batch_job("batch-commit")
         assert failed["status"] == "paused"
@@ -215,21 +211,19 @@ def test_worker_starts_next_chapter_only_after_previous_revision_increases() -> 
 
         started = []
 
-        class Receipt:
+        class WritingService:
             @staticmethod
-            def as_dict():
-                return {"status": "accepted", "result": {"operation_status": "succeeded"}}
+            def iter_events(request):
+                chapter_id = request.chapter_id
+                assert chapter_id is not None
+                if chapter_id == "leaf-b":
+                    assert service.chapters.revisions["leaf-a"] == 1
+                started.append(chapter_id)
+                service.chapters.revisions[chapter_id] += 1
+                yield {"type": "done"}
 
-        def submit(envelope):
-            chapter_id = envelope.payload["chapter_ids"][0]
-            if chapter_id == "leaf-b":
-                assert service.chapters.revisions["leaf-a"] == 1
-            started.append(chapter_id)
-            service.chapters.revisions[chapter_id] += 1
-            return Receipt()
-
-        with mock.patch("document_pipeline.chapter_batch.CommandGateway.submit", side_effect=submit):
-            service._run("batch-sequential")
+        service._writing_service_factory = lambda _context: WritingService()
+        service._run("batch-sequential")
 
         completed = service.store.batch_job("batch-sequential")
         assert started == ["leaf-a", "leaf-b"]

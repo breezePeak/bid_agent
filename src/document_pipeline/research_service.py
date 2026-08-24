@@ -129,9 +129,19 @@ class ResearchService:
                 return latest
             report("skipped", "本章未配置公开检索额度。")
             return self._publish(need, [], query_count=0, status="gap")
-        if _PROHIBITED_PUBLIC_RESEARCH.search(
-            f"{need.question}\n{json.dumps(need.relevance_context, ensure_ascii=False)}"
-        ):
+        requested_scope = (
+            f"{need.question}\n"
+            f"{json.dumps(need.relevance_context, ensure_ascii=False)}"
+        )
+        # Safety instructions such as “不得查询企业资质” describe exclusions,
+        # not the subject being requested.  Remove those negative clauses
+        # before applying the prohibited-scope detector.
+        requested_scope = re.sub(
+            r"(?:不得|禁止|不要)[^。；;\n]*",
+            "",
+            requested_scope,
+        )
+        if _PROHIBITED_PUBLIC_RESEARCH.search(requested_scope):
             report("prohibited", "该资料范围禁止通过公开网络补充。")
             return self._publish(
                 need,

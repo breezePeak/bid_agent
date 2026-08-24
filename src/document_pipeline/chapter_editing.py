@@ -7,6 +7,7 @@ append new content revisions and never set formal pointers by themselves.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import uuid
 from typing import Any
@@ -265,6 +266,46 @@ class ChapterEditingService:
         self.store = ControlStore(context)
 
     @staticmethod
+    def _confirmation_required() -> bool:
+        value = str(
+            os.environ.get("BID_AGENT_CHAPTER_CONFIRMATION_REQUIRED", "0")
+        ).strip().lower()
+        return value in {"1", "true", "yes", "on"}
+
+    def _finalize_revision(
+        self,
+        result: dict[str, Any],
+        *,
+        actor: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Apply the confirmation policy frozen on the new content revision."""
+
+        content = dict(result.get("content") or {})
+        chapter = dict(result.get("chapter") or {})
+        policy = dict(content.get("approval_policy") or {})
+        confirmation_required = bool(policy.get("confirmation_required", True))
+        if confirmation_required:
+            return result
+        receipt = self.store.record_chapter_approval_receipt(
+            chapter_id=str(chapter.get("chapter_id") or ""),
+            content_revision=int(content.get("content_revision") or 0),
+            content_hash=str(content.get("content_hash") or ""),
+            decision="auto_approved",
+            principal_id="system",
+            confirmation_required=False,
+            actor={"type": "system", "id": "system"},
+        )
+        promoted = self.store.set_chapter_formal_pointer(
+            chapter_id=str(chapter.get("chapter_id") or ""),
+            expected_chapter_revision=int(chapter.get("chapter_revision") or 0),
+            content_revision=int(content.get("content_revision") or 0),
+            content_hash=str(content.get("content_hash") or ""),
+            approval_status="auto_approved",
+            actor=actor,
+        )
+        return {**result, "chapter": promoted, "approval": receipt}
+
+    @staticmethod
     def _expected_chapter_revision(payload: dict[str, Any]) -> int:
         raw = payload.get("expected_chapter_revision", 0)
         try:
@@ -447,7 +488,7 @@ class ChapterEditingService:
         )
         previous_policy = dict((head or {}).get("approval_policy") or {})
         policy = {
-            "confirmation_required": True,
+            "confirmation_required": self._confirmation_required(),
             "frozen_at": _now_iso(),
             "grounding_required": bool(
                 previous_policy.get("grounding")
@@ -466,7 +507,7 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        return result
+        return self._finalize_revision(result, actor=actor)
 
     def restore_revision(
         self,
@@ -485,7 +526,7 @@ class ChapterEditingService:
                 status_code=404,
             )
         policy = {
-            "confirmation_required": True,
+            "confirmation_required": self._confirmation_required(),
             "frozen_at": _now_iso(),
             "restored_from": int(from_content_revision),
         }
@@ -503,7 +544,7 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        return result
+        return self._finalize_revision(result, actor=actor)
 
     def generate_draft(
         self,
@@ -590,7 +631,7 @@ class ChapterEditingService:
                     fact_bindings.get(str(index)) or []
                 )
         policy = {
-            "confirmation_required": True,
+            "confirmation_required": self._confirmation_required(),
             "frozen_at": _now_iso(),
             "overwrite_locked": bool(overwrite_locked),
             "grounding": report,
@@ -604,7 +645,7 @@ class ChapterEditingService:
             actor=actor,
             approval_status="draft",
         )
-        return result
+        return self._finalize_revision(result, actor=actor)
 
     def confirm_approval(
         self,

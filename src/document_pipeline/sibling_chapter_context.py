@@ -30,8 +30,21 @@ def _title_of(node: dict[str, Any], fallback: str = "") -> str:
     return str(node.get("title") or fallback or "").strip()
 
 
+_VISUAL_ROLE = re.compile(r"路线图|架构图|流程图|示意图|拓扑图|框架图|图示|以图呈现")
+_METHOD_ROLE = re.compile(r"关键技术|技术方法|核心方法|工艺|实施方法|方法与措施")
+_OVERVIEW_ROLE = re.compile(r"总体|总则|总述|概述|总路线|整体方案|总体方案")
+
+
 def _chapter_role(title: str, purpose: str = "") -> str:
-    """Do not infer execution behavior from chapter naming conventions."""
+    """Project an explicit semantic role without changing writer authority."""
+
+    raw = f"{title} {purpose}".strip()
+    if _VISUAL_ROLE.search(raw):
+        return "visual"
+    if _METHOD_ROLE.search(raw):
+        return "method"
+    if _OVERVIEW_ROLE.search(raw):
+        return "overview"
     return "general"
 
 

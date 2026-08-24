@@ -101,14 +101,8 @@ class _FakeProjectUnderstandingProvider:
             for index, block in enumerate(company_blocks, start=1)
         ]
         formal_refs = [
-            *(
-                f"RequirementLedger:{item['requirement_id']}"
-                for item in requirements
-            ),
-            *(
-                f"ScoreModel:{item['score_point_id']}"
-                for item in request.score_model["points"]
-            ),
+            f"RequirementLedger:{item['requirement_id']}"
+            for item in requirements
         ]
         facts.append(
             ProjectFactCandidate(
@@ -130,13 +124,6 @@ class _FakeProjectUnderstandingProvider:
             milestones=select("工期"),
             facts=facts,
             evidence_needs=evidence_needs,
-            covered_requirement_ids=[
-                str(item["requirement_id"]) for item in requirements
-            ],
-            covered_score_point_ids=[
-                str(item["score_point_id"])
-                for item in request.score_model["points"]
-            ],
             review_status="confirmed",
         )
         raw = canonical_json(candidate.model_dump(mode="json"))

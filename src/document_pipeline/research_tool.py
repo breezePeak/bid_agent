@@ -9,15 +9,22 @@ from .contracts import EvidenceNeed
 from .project_model import load_promoted_project_model
 from .score_model import load_promoted_score_model
 from .research_adapters import ResearchProviderAdapter, create_research_adapter
-from .research_service import ResearchService
+from .research_service import ResearchService, SemanticReviewer
 
 
 class V3ResearchTool:
     """Resolve exactly one V3 EvidenceNeed through a configured provider adapter."""
 
-    def __init__(self, context: WorkspaceContext, provider: ResearchProviderAdapter | None = None) -> None:
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        provider: ResearchProviderAdapter | None = None,
+        *,
+        semantic_reviewer: SemanticReviewer | None = None,
+    ) -> None:
         self.context = context
         self.provider = provider
+        self.semantic_reviewer = semantic_reviewer
 
     def invoke(
         self,
@@ -35,7 +42,11 @@ class V3ResearchTool:
         provider = self.provider or create_research_adapter(
             provider_id,
         )
-        batch = ResearchService(self.context, provider).resolve(need)
+        batch = ResearchService(
+            self.context,
+            provider,
+            semantic_reviewer=self.semantic_reviewer,
+        ).resolve(need)
         return {
             "provider_id": provider.provider_id,
             "need_id": need.need_id,

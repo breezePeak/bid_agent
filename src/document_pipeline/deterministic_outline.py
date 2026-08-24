@@ -16,6 +16,7 @@ from .planning_inference import ChapterOutlineCandidate, ChapterOutlineNodeCandi
 from .scoring_outline_policy import (
     full_score_condition_heading,
     is_contextless_heading,
+    is_evaluative_sentence_heading,
     is_hollow_quality_heading,
     is_sectionable_quality_condition,
     outline_subject,
@@ -36,7 +37,12 @@ def _group_subject(title: str) -> str:
 
 def _path_for_unit(unit: object, point: object, group_title: str) -> list[str]:
     raw = list(getattr(unit, "outline_path", []) or getattr(point, "outline_path", []))
-    path = [str(item).strip() for item in raw if str(item).strip()]
+    path = [
+        str(item).strip()
+        for item in raw
+        if str(item).strip()
+        and not is_evaluative_sentence_heading(str(item))
+    ]
     if path and _group_subject(path[0]) == _group_subject(group_title):
         path.pop(0)
     compact: list[str] = []

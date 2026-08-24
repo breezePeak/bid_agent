@@ -52,6 +52,17 @@ class _FailingProvider:
         raise RuntimeError("browser unavailable")
 
 
+def _deterministic_review(_need, candidate):
+    return {
+        "verdict": "relevant",
+        "confidence": 1.0,
+        "reason": "deterministic fixture",
+        "supporting_excerpts": [candidate.content],
+        "extracted_points": [candidate.content],
+        "usage_category": "industry_standard",
+    }
+
+
 class _ResearchProjectProvider:
     capability_id = "planning.project_understanding"
     capability_version = PROJECT_CAPABILITY_VERSION
@@ -165,7 +176,11 @@ class V3ResearchToolTests(unittest.TestCase):
             (runs / "alpha").mkdir(parents=True)
             context = WorkspaceContext.resolve(runs, "alpha")
             need_ids = self._promote_project_model(context, [{"need_id": "EN-1", "question": "适用标准", "topic_id": "standard", "deadline_stage": "plan_document", "query_budget": 1}])
-            result = V3ResearchTool(context, _Provider()).invoke(
+            result = V3ResearchTool(
+                context,
+                _Provider(),
+                semantic_reviewer=_deterministic_review,
+            ).invoke(
                 need_ids["EN-1"]
             )
             self.assertEqual(result["provider_id"], "test")
