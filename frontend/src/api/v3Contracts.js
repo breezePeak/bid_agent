@@ -225,6 +225,8 @@ export function normalizeV3WorkspaceSnapshot(payload) {
   const rawGenerationResearch = objectOrEmpty(rawGeneration.research)
   const rawWorkflow = objectOrEmpty(raw.workflow)
   const rawGlobalProjectContext = objectOrEmpty(raw.global_project_context)
+  const rawProfile = objectOrEmpty(raw.profile)
+  const rawLegacyBid = objectOrEmpty(raw.legacy_bid)
   const globalProjectContext = {
     ...rawGlobalProjectContext,
     identity: objectOrEmpty(rawGlobalProjectContext.identity),
@@ -283,6 +285,19 @@ export function normalizeV3WorkspaceSnapshot(payload) {
   return {
     ...raw,
     workspace_revision: Number.isFinite(revision) && revision >= 0 ? revision : 0,
+    profile: {
+      ...rawProfile,
+      project_mode: String(rawProfile.project_mode || 'full_write'),
+    },
+    legacy_bid: {
+      ...rawLegacyBid,
+      status: String(rawLegacyBid.status || 'not_uploaded'),
+      active_id: String(rawLegacyBid.active_id || ''),
+      filename: String(rawLegacyBid.filename || ''),
+      section_count: Number(rawLegacyBid.section_count) || 0,
+      block_count: Number(rawLegacyBid.block_count) || 0,
+      needs_review_count: Number(rawLegacyBid.needs_review_count) || 0,
+    },
     inputs: {
       ...inputs,
       inputs: arrayOrEmpty(inputs.inputs),

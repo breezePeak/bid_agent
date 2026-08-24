@@ -57,11 +57,29 @@ export function fetchRuns() {
   return api.get(V3_WORKSPACES_PATH)
 }
 
-export function createRun(name, projectType, expectedPages) {
+export function createRun(name, projectType, expectedPages, projectMode = 'full_write') {
   return api.post(V3_WORKSPACES_PATH, {
     name,
     project_type: projectType,
     expected_pages: expectedPages,
+    project_mode: projectMode,
+  })
+}
+
+export function uploadLegacyBid(runId, file) {
+  const formData = new FormData()
+  formData.append('file', file)
+  return api.post(v3WorkspacePath(runId, 'legacy-bids'), formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  })
+}
+
+export function fetchLegacyBidIndex(runId, legacyBidId) {
+  const id = encodeURIComponent(String(legacyBidId || '').trim())
+  if (!id) throw new TypeError('legacyBidId is required')
+  return api.get(v3WorkspacePath(runId, `legacy-bids/${id}/index`), {
+    headers: { 'Cache-Control': 'no-cache' },
   })
 }
 

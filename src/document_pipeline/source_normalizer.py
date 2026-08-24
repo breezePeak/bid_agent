@@ -162,6 +162,12 @@ class SourceNormalizer:
             return self._docx_blocks(item, source)
         return self._pdf_blocks(item, source)
 
+    def parse_frozen_file(
+        self, item: InputItem, source: Path
+    ) -> tuple[list[SourceBlock], list[SourceNormalizationCoverageItem]]:
+        """Parse one frozen file without reading or mutating InputManifest."""
+        return self._blocks_for(item, source)
+
     def _markdown_blocks(
         self, item: InputItem, source: Path
     ) -> tuple[list[SourceBlock], list[SourceNormalizationCoverageItem]]:

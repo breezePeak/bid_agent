@@ -1,5 +1,11 @@
 <template>
   <section class="v3-workspace" :aria-busy="running || uploading">
+    <LegacyBidUploadPanel
+      v-if="projectMode === 'bid_rewrite'"
+      :run-id="runId"
+      :summary="legacyBidSummary"
+      @uploaded="refresh"
+    />
 
     <!-- 步骤细节诊断 Drawer 抽屉/弹窗 -->
     <div v-if="selectedDrawerStage" class="stage-drawer-overlay" @click.self="closeStageDrawer">
@@ -1862,6 +1868,7 @@ defineOptions({ name: 'V3WorkspaceView' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AiProcessDisclosure from './AiProcessDisclosure.vue'
+import LegacyBidUploadPanel from './LegacyBidUploadPanel.vue'
 import { confirmDialog } from '../composables/appDialog.js'
 import {
   chatV3,
@@ -2276,6 +2283,8 @@ function markdownTable(rows) {
 }
 
 const uploading = computed(() => Boolean(uploadingRole.value))
+const projectMode = computed(() => snapshot.value.profile?.project_mode || 'full_write')
+const legacyBidSummary = computed(() => snapshot.value.legacy_bid || {})
 const workspaceName = computed(() => {
   const matched = props.runId.match(/^(.+?)_(\d{8}_\d{6})(?:_\d+)?$/)
   return matched ? matched[1].replace(/_/g, ' ') : props.runId

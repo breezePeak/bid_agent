@@ -44,7 +44,16 @@ class CapabilityRegistry:
         "writer_agent": RoleCapability("writer_agent", frozenset({"ContentBlock"})),
         "integration_agent": RoleCapability("integration_agent", frozenset({"IntegrationProposal", "RepairRequest"})),
         "quality_audit_agent": RoleCapability("quality_audit_agent", frozenset({"AuditReport"})),
-        "source_service": RoleCapability("source_service", frozenset({"InputManifest", "SourceIndex", "TemplateStructureContract"})),
+        "source_service": RoleCapability(
+            "source_service",
+            frozenset({
+                "InputManifest",
+                "SourceIndex",
+                "TemplateStructureContract",
+                "LegacyBidSourceManifest",
+                "LegacyBidIndex",
+            }),
+        ),
         "evidence_service": RoleCapability("evidence_service", frozenset({"EvidenceRepository", "EvidenceSnapshot"})),
         "bundle_service": RoleCapability("bundle_service", frozenset({"WriterInputBundle"})),
         "document_integration_service": RoleCapability("document_integration_service", frozenset({"IntegratedDocument"})),

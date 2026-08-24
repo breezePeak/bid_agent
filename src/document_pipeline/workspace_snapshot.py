@@ -86,6 +86,8 @@ class V3WorkspaceSnapshotBuilder:
             return value if isinstance(value, dict) else None
 
         source_index = payload("SourceIndex")
+        legacy_manifest = payload("LegacyBidSourceManifest")
+        legacy_index = payload("LegacyBidIndex")
         requirement_ledger = payload("RequirementLedger")
         score_model = payload("ScoreModel")
         project_model = payload("ProjectModel")
@@ -255,10 +257,36 @@ class V3WorkspaceSnapshotBuilder:
             project_model_current=artifact_states.get("ProjectModel") is True,
             phase_states=phase_states,
         )
+        active_legacy_sources = [
+            item
+            for item in (legacy_manifest or {}).get("sources", [])
+            if isinstance(item, dict) and item.get("active")
+        ]
+        legacy_current = artifact_states.get("LegacyBidIndex") is True
+        inferred_legacy_status = (
+            "not_uploaded"
+            if not active_legacy_sources
+            else ("ready" if legacy_index and legacy_current else "parsing")
+        )
+        legacy_state = control.legacy_bid_state()
+        legacy_status = str(legacy_state.get("status") or inferred_legacy_status)
+        if legacy_status == "not_uploaded" and active_legacy_sources:
+            legacy_status = inferred_legacy_status
         return {
             "schema_version": "v3",
             "workspace_id": self.context.workspace_id,
             "workspace_revision": control.revision(),
+            "profile": control.workspace_profile(),
+            "legacy_bid": {
+                "status": legacy_status,
+                "active_id": str((active_legacy_sources[0] if active_legacy_sources else {}).get("legacy_bid_id") or ""),
+                "filename": str((active_legacy_sources[0] if active_legacy_sources else {}).get("filename") or ""),
+                "section_count": len((legacy_index or {}).get("sections") or []) if legacy_current else 0,
+                "block_count": len((legacy_index or {}).get("blocks") or []) if legacy_current else 0,
+                "needs_review_count": len((legacy_index or {}).get("needs_review") or []) if legacy_current else 0,
+                "index_revision": int((legacy_index or {}).get("revision") or 0) if legacy_current else 0,
+                "error": str(legacy_state.get("error") or ""),
+            },
             # Files in workspace/v3 may be drafts or legacy compatibility
             # outputs. They are intentionally invisible here until a Receipt
             # promotes an artifact through ArtifactPromotionService.
@@ -1682,6 +1710,19 @@ class V3WorkspaceSnapshotBuilder:
                 if expected_hash and expected_hash != str(active.get("artifact_hash") or ""):
                     current = False
             states[kind] = current
+        legacy_manifest = artifacts.get("LegacyBidSourceManifest")
+        legacy_index = artifacts.get("LegacyBidIndex")
+        if legacy_manifest is not None:
+            states["LegacyBidSourceManifest"] = True
+        if legacy_index is not None:
+            legacy_payload = legacy_index.get("payload")
+            legacy_value = legacy_payload if isinstance(legacy_payload, dict) else {}
+            states["LegacyBidIndex"] = bool(legacy_manifest) and (
+                int(legacy_value.get("source_manifest_revision") or 0)
+                == int((legacy_manifest or {}).get("revision") or 0)
+                and str(legacy_value.get("source_manifest_artifact_hash") or "")
+                == str((legacy_manifest or {}).get("artifact_hash") or "")
+            )
         return states
 
     @classmethod
