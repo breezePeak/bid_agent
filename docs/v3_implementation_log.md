@@ -1,6 +1,6 @@
 # V3 开发实施记录
 
-PR-0～PR-13 与历史基线 [v3_development_plan.md](./v3_development_plan.md) 对应；PR-14 起与当前权威计划 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md) 对应。每个 Accepted PR 都必须包含验收证据和独立 Git 提交。
+PR-0～PR-13 的旧计划文档已经清理，历史以本实施记录和 Git 提交为准；PR-14 起以当前权威计划 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md) 为准。每个 Accepted PR 都必须包含验收证据和独立 Git 提交。
 
 Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文审计的后续建设见 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)。
 
@@ -13,7 +13,7 @@ Bid Master Agent、投标中间语言、Evidence Layer、受控写作与全文�
 
 - 状态：已完成
 - 提交：`9040c68 chore(v3): freeze PR-0 baseline`
-- 记录：[v3_pr0_baseline.md](./v3_pr0_baseline.md)
+- 基线记录已归入 Git 历史；当前以提交 `9040c68` 和本实施记录为准。
 - 验证：`python -m unittest tests.test_v3_pr0_baseline tests.test_pipeline_registry tests.test_main_v2_cli_guard`（10 tests passed）。全量 `unittest discover` 在 120 秒超时，未用于验收结论。
 
 ## PR-1：契约、Artifact 和 Schema V3

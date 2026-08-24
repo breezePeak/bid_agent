@@ -7,7 +7,6 @@
 - **业务使用**：如何上传资料、启动流程、拿到 Word → 看本文即可。
 - **3D 态势大屏**：炼丹阁可视化全流程与 Agent 活动 → 见 [frontend-3d/README.md](frontend-3d/README.md)。
 - **当前控制架构 V3**：唯一执行链、Artifact 和工作空间状态 → 见 [docs/current_logic_flow_v3.md](docs/current_logic_flow_v3.md)。
-- **V1 历史归档**：仅供迁移取证，不提供兼容接口 → 见 [docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)。
 
 ## 安装
 
@@ -184,8 +183,8 @@ python src/main.py control snapshot --workspace demo
 
 - 流程版本导航：[docs/current_logic_flow.md](docs/current_logic_flow.md)  
 - 当前控制架构 V3：[docs/current_logic_flow_v3.md](docs/current_logic_flow_v3.md)
-- V2 历史归档（非运行时依据）：[docs/current_logic_flow_v2.md](docs/current_logic_flow_v2.md)
-- V1 历史归档：[docs/current_logic_flow_v1.md](docs/current_logic_flow_v1.md)
-- 开发演进：[docs/bid_agent_development_plan.md](docs/bid_agent_development_plan.md)  
-- 历史 Agent 化阶段记录：[docs/agentization_development_plan.md](docs/agentization_development_plan.md)  
+- 当前 V3 开发与验收记录：[docs/v3_implementation_log.md](docs/v3_implementation_log.md)
+- 标书编写公共核心流程：[docs/bid_writing_logic_flow.md](docs/bid_writing_logic_flow.md)
+- 评分拆解与目录领域策略：[docs/bid_scoring_outline_domain_policy.md](docs/bid_scoring_outline_domain_policy.md)
+- 章节公开资料研究链路：[docs/deep_research_integration.md](docs/deep_research_integration.md)
 - 3D 前端：[frontend-3d/README.md](frontend-3d/README.md)  

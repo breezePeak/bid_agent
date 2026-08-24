@@ -3,7 +3,7 @@
 > 状态：PR-14～PR-20 已形成工程骨架但尚未通过 M0/M1 收口验收，PR-21 暂停
 > 日期：2026-07-29
 > 审计基线：`45c7715 feat(v3): require planning confirmation before writing`
-> 历史 PR-0～PR-13 方案：[v3_development_plan.md](./v3_development_plan.md)
+> 历史 PR-0～PR-13 方案已清理，实施结果以 [v3_implementation_log.md](./v3_implementation_log.md) 和 Git 历史为准
 > 当前逻辑：[current_logic_flow_v3.md](./current_logic_flow_v3.md)
 > 实施记录：[v3_implementation_log.md](./v3_implementation_log.md)
 

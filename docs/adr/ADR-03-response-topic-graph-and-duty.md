@@ -1,7 +1,10 @@
 # ADR-03：ResponseTopicGraph 与 ResponseDuty
 
-- 状态：Accepted（PR-14.1 骨架冻结）
+- 状态：Superseded（仅保留为历史决策记录）
 - 日期：2026-07-27
+
+> 当前自动目录主链不再使用 `ResponseTopicGraph` / `ResponseDuty`；现行策略见
+> [bid_scoring_outline_domain_policy.md](../bid_scoring_outline_domain_policy.md)。
 
 ## 决策
 

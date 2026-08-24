@@ -1,10 +1,10 @@
 # 标书 Agent 整体架构 V3
 
-> 版本：V3 目标架构  
-> 状态：已确定方案，待按 `v3_development_plan.md` 实施  
-> 日期：2026-07-26  
-> 当前生产基线：V2 控制面  
-> 配套开发计划：[v3_development_plan.md](./v3_development_plan.md)
+> 版本：V3 当前架构
+> 状态：现行唯一运行架构
+> 日期：2026-07-26
+> 当前开发与验收：[v3_implementation_log.md](./v3_implementation_log.md)
+> 当前详细计划：[v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)
 
 ## 1. 架构结论
 
@@ -654,4 +654,4 @@ V1、V2 架构文档可以保留为历史取证，但必须明确标记“非运
 13. V1 文件状态工作空间：拒绝运行并提供归档/重建提示，不进行隐式导入。
 14. 正式交付：只有当前 GateReceipt 与输入和终稿 Artifact 指纹一致时允许下载。
 
-V3 的详细实施顺序、删除清单、迁移步骤和测试计划见 [v3_development_plan.md](./v3_development_plan.md)。
+V3 的当前实施顺序、验收门和后续任务见 [v3_semantic_understanding_and_outline_development_plan.md](./v3_semantic_understanding_and_outline_development_plan.md)，实际完成状态见 [v3_implementation_log.md](./v3_implementation_log.md)。
