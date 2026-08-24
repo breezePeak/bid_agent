@@ -218,7 +218,29 @@
         <span>；已完成 {{ batchWritingProgress.completed_count }} 章</span>
       </div>
 
-      <div ref="docBodyEl" class="chapter-doc-body">
+      <div v-if="planWorkbenchEnabled && selectedIsLeaf" class="doc-tabs" role="tablist" aria-label="章节工作区视图">
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="centerTab === 'logic'"
+          :class="{ active: centerTab === 'logic' }"
+          @click="selectCenterTab('logic')"
+        >
+          编写逻辑
+          <span v-if="planProjection?.stale" class="tab-alert">陈旧</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          :aria-selected="centerTab === 'document'"
+          :class="{ active: centerTab === 'document' }"
+          @click="selectCenterTab('document')"
+        >
+          正文
+        </button>
+      </div>
+
+      <div v-show="centerTab === 'document'" ref="docBodyEl" class="chapter-doc-body">
         <div class="document-stage">
           <article
             class="document-paper"
@@ -269,6 +291,14 @@
             </template>
           </article>
         </div>
+      </div>
+      <div v-if="planWorkbenchEnabled && selectedIsLeaf" v-show="centerTab === 'logic'" class="chapter-plan-body" role="tabpanel">
+        <ChapterWritingPlanPanel
+          :loading="planLoading"
+          :error="planError"
+          :projection="planProjection"
+          @retry="loadChapterPlan({ force: true })"
+        />
       </div>
     </main>
 
@@ -663,6 +693,7 @@ import {
   clearChapterChatHistory,
   fetchChapterReadonlyView,
   fetchChapter,
+  fetchChapterWritingPlan,
   fetchChapterRevisions,
   fetchChapters,
   fetchDocumentCompose,
@@ -690,7 +721,9 @@ import {
 } from '../batchChapterJobReducer.js'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
+import ChapterWritingPlanPanel from './ChapterWritingPlanPanel.vue'
 import { confirmDialog } from '../composables/appDialog.js'
+import { normalizeChapterWritingPlanResponse } from '../api/chapterContracts.js'
 
 const props = defineProps({
   workspaceId: { type: String, required: true },
@@ -758,6 +791,7 @@ const revisions = ref([])
 const composeResult = ref(null)
 const workspaceRevision = ref(0)
 const globalProjectContext = ref({})
+const workspaceCapabilities = ref({})
 const chapterWriteJob = ref(null)
 const batchWritingProgress = ref(null)
 const batchJobState = ref(initialBatchChapterJobState())
@@ -787,6 +821,8 @@ const researchStatus = ref('')
 const researchSources = ref([])
 const docBodyEl = ref(null)
 let draftAbortController = null
+let planAbortController = null
+let planLoadToken = 0
 
 const showCreateModal = ref(false)
 const newChapterId = ref('')
@@ -959,6 +995,11 @@ const chatLoading = ref(false)
 const asking = ref(false)
 const chatHistoryEl = ref(null)
 const editorRef = ref(null)
+const centerTab = ref('document')
+const centerTabByChapter = new Map()
+const planProjection = ref(null)
+const planLoading = ref(false)
+const planError = ref('')
 /** In-session cache of chapter dialogue; server history remains source of truth. */
 const chatByChapter = new Map()
 let chatLoadToken = 0
@@ -979,6 +1020,12 @@ const selectedIsLeaf = computed(() => {
   return !items.value.some(item => item.parent_chapter_id === selectedId.value)
 })
 const editorBlocks = computed(() => chapterDetail.value?.content?.blocks || [])
+const hasDocumentContent = computed(() => editorBlocks.value.some(block => (
+  String(block?.content || '').trim() || String(block?.text || '').trim()
+)))
+const planWorkbenchEnabled = computed(() => (
+  workspaceCapabilities.value?.chapter_plan_v2?.workbench_enabled === true
+))
 const contextItems = computed(() => chapterDetail.value?.context?.items || [])
 const chapterRequirements = computed(() => chapterDetail.value?.chapter_requirements || [])
 const chapterScoringRequirements = computed(() => chapterDetail.value?.chapter_scoring_requirements || [])
@@ -1412,6 +1459,7 @@ async function refreshSnapshotRevision() {
   if (snap.data?.ok) {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
     globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
+    workspaceCapabilities.value = snap.data.snapshot?.capabilities || {}
     const job = snap.data.snapshot?.chapter_write_job || null
     // Blocked and failed jobs are historical results.  Keeping them in this
     // banner makes a later one-click draft look like it was rejected by that
@@ -1507,14 +1555,76 @@ async function loadChapterDetail(options = {}) {
   }
 }
 
+function applyDefaultCenterTab(chapterId = selectedId.value) {
+  if (!planWorkbenchEnabled.value || !chapterId || !selectedIsLeaf.value) {
+    centerTab.value = 'document'
+    return
+  }
+  const saved = centerTabByChapter.get(chapterId)
+  if (saved) {
+    centerTab.value = saved
+    return
+  }
+  centerTab.value = planProjection.value?.plan && !hasDocumentContent.value ? 'logic' : 'document'
+}
+
+function selectCenterTab(tab) {
+  if (!['logic', 'document'].includes(tab)) return
+  centerTab.value = tab
+  if (selectedId.value) centerTabByChapter.set(selectedId.value, tab)
+  if (tab === 'logic' && !planProjection.value && !planLoading.value) {
+    void loadChapterPlan({ force: true })
+  }
+}
+
+async function loadChapterPlan(options = {}) {
+  if (!planWorkbenchEnabled.value || !selectedId.value || !selectedIsLeaf.value) {
+    planProjection.value = null
+    planError.value = ''
+    planLoading.value = false
+    return
+  }
+  const { force = false } = options
+  if (planLoading.value && !force) return
+  planAbortController?.abort()
+  const controller = new AbortController()
+  planAbortController = controller
+  const requestedChapterId = selectedId.value
+  const token = ++planLoadToken
+  planLoading.value = true
+  planError.value = ''
+  try {
+    const { data } = await fetchChapterWritingPlan(props.workspaceId, requestedChapterId, {
+      signal: controller.signal,
+    })
+    if (controller.signal.aborted || token !== planLoadToken || requestedChapterId !== selectedId.value) return
+    planProjection.value = normalizeChapterWritingPlanResponse(data)
+  } catch (error) {
+    if (controller.signal.aborted || error?.code === 'ERR_CANCELED') return
+    if (token !== planLoadToken || requestedChapterId !== selectedId.value) return
+    planProjection.value = null
+    planError.value = error?.response?.data?.error?.message
+      || error?.response?.data?.message
+      || error?.message
+      || String(error)
+  } finally {
+    if (token === planLoadToken && requestedChapterId === selectedId.value) {
+      planLoading.value = false
+      applyDefaultCenterTab(requestedChapterId)
+    }
+  }
+}
+
 async function reloadAll() {
   busy.value = true
   try {
     await loadChapterList()
     await Promise.all([
       loadChapterDetail({ force: true }),
+      loadChapterPlan({ force: true }),
       selectedId.value ? loadChapterChat(selectedId.value, { force: true }) : Promise.resolve(),
     ])
+    applyDefaultCenterTab()
   } finally {
     busy.value = false
   }
@@ -1568,6 +1678,9 @@ function selectChapter(chapterId) {
     return
   }
   if (draftAbortController) draftAbortController.abort()
+  planAbortController?.abort()
+  planAbortController = null
+  planLoadToken += 1
   draftAbortController = null
   streamingDraft.value = false
   busy.value = false
@@ -1578,6 +1691,10 @@ function selectChapter(chapterId) {
   researchSources.value = []
   detailError.value = ''
   chapterDetail.value = null
+  planProjection.value = null
+  planError.value = ''
+  planLoading.value = false
+  centerTab.value = 'document'
   selectedId.value = chapterId
   router.replace(`/business/${props.workspaceId}/chapters/${encodeURIComponent(chapterId)}`).catch(() => {})
 }
@@ -2477,6 +2594,7 @@ function connectWorkspaceStream() {
   closeWorkspaceStream = subscribeV3Workspace(props.workspaceId, {
     onSnapshot: payload => {
       const snapshot = payload?.snapshot || payload || {}
+      workspaceCapabilities.value = snapshot?.capabilities || workspaceCapabilities.value
       const nextItems = snapshot?.chapters?.items
       if (Array.isArray(nextItems)) items.value = nextItems
       if (selectedId.value && !streamingDraft.value) {
@@ -2494,8 +2612,10 @@ watch(
     closeReadonlyView()
     await Promise.all([
       loadChapterDetail({ force: true }),
+      loadChapterPlan({ force: true }),
       loadChapterChat(id),
     ])
+    applyDefaultCenterTab(id)
   },
 )
 
@@ -2506,9 +2626,15 @@ watch(
   },
 )
 
+watch(planWorkbenchEnabled, (enabled) => {
+  if (enabled && selectedId.value) void loadChapterPlan({ force: true })
+  if (!enabled) centerTab.value = 'document'
+})
+
 onMounted(async () => {
   if (props.initialChapterId) selectedId.value = props.initialChapterId
   await restoreCurrentBatchJob()
+  await refreshSnapshotRevision()
   await reloadAll()
   connectWorkspaceStream()
 })
@@ -2518,6 +2644,7 @@ onUnmounted(() => {
   closeWorkspaceStream?.()
   closeWorkspaceStream = null
   draftAbortController?.abort()
+  planAbortController?.abort()
 })
 </script>
 
@@ -2782,6 +2909,34 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
 }
+.doc-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 14px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #fff;
+  flex-shrink: 0;
+}
+.doc-tabs button {
+  min-width: 108px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #f8fafc;
+  color: #475569;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.doc-tabs button.active { border-color: #93c5fd; background: #eff6ff; color: #1d4ed8; }
+.doc-tabs button:focus-visible { outline: 3px solid rgb(37 99 235 / 28%); outline-offset: 2px; }
+.tab-alert { padding: 1px 6px; border-radius: 999px; background: #fee2e2; color: #b91c1c; font-size: 10px; }
+.chapter-plan-body { flex: 1; min-height: 0; overflow: auto; background: #f8fafc; }
 .chapter-doc-body {
   --word-page-width: 850px;
   --word-page-min-height: 1120px;
