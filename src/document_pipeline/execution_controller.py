@@ -8,6 +8,8 @@ from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, Work
 
 from .chapter_editing import ChapterEditingService
 from .chapter_workspace import ChapterWorkspaceService
+from .material_readiness import MaterialReadinessService
+from .rewrite_zero_pollution import audit_rewrite_zero_pollution
 from .stage_runner import V3StageRunner
 from .research_tool import V3ResearchTool
 
@@ -407,6 +409,8 @@ class V3ExecutionController:
 
         from .artifact_promotion import HumanGateService
 
+        MaterialReadinessService(self.context).require_outline_ready()
+
         payload = envelope.payload if isinstance(envelope.payload, dict) else {}
         review_feedback = str(payload.get("review_feedback") or "").strip()
         base_blueprint_hash = str(payload.get("base_blueprint_hash") or "").strip()
@@ -526,6 +530,7 @@ class V3ExecutionController:
             if was_reused:
                 reused.append(stage)
             completed.append(stage)
+        zero_pollution_audit = audit_rewrite_zero_pollution(self.context)
         planning_snapshot = HumanGateService(self.context).planning_snapshot()
         workspaces = ChapterWorkspaceService(self.context).ensure_all(
             actor=envelope.actor if isinstance(envelope.actor, dict) else {},
@@ -543,6 +548,7 @@ class V3ExecutionController:
             "completed_stages": completed,
             "reused_stages": reused,
             "review_feedback_applied": bool(review_feedback),
+            "zero_pollution_audit": zero_pollution_audit,
             "planning_snapshot": planning_snapshot,
             "chapter_workspaces": workspaces,
         }
