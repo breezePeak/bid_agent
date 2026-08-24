@@ -434,6 +434,34 @@ class ChapterChatServiceTests(unittest.TestCase):
                 shared,
             )
 
+    def test_chat_context_reads_committed_draft_when_input_chapter_is_stale(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context, _nodes())
+            workspace = ChapterWorkspaceService(context)
+            workspace.create(chapter_id="ch-a")
+            stale_chapter = workspace.get_chapter("ch-a")
+            ControlStore(context).append_chapter_content_revision(
+                chapter_id="ch-a",
+                expected_chapter_revision=int(stale_chapter["chapter_revision"]),
+                source="ai_draft",
+                blocks=[
+                    {
+                        "block_id": "draft-1",
+                        "target_node_id": "ch-a",
+                        "type": "paragraph",
+                        "content": "这是一段已经写入章节正文的内容。",
+                        "confidence": 0.9,
+                    }
+                ],
+            )
+
+            chat_context = ChapterChatService(context).build_chapter_chat_context(
+                stale_chapter
+            )
+
+            self.assertIn("已经写入章节正文", chat_context["draft_preview"])
+
     def test_fallback_reply_stays_on_chapter_goal(self) -> None:
         reply = ChapterChatService._fallback_answer(
             {

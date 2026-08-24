@@ -508,6 +508,22 @@ class ChapterAgentService:
         content = chapter.get("content")
         content = content if isinstance(content, dict) else {}
         blocks = content.get("blocks") if isinstance(content.get("blocks"), list) else []
+        # Chat callers may carry a workspace row captured before the writer
+        # commits its revision.  The document renderer can still show that
+        # revision, while this stale row would incorrectly leave the Agent
+        # with an empty draft_preview.  The content head is the canonical
+        # source for the next dialogue turn.
+        if not blocks:
+            persisted_content = self.store.chapter_content_head(
+                str(chapter.get("chapter_id") or "")
+            )
+            if isinstance(persisted_content, dict):
+                content = persisted_content
+                blocks = (
+                    content.get("blocks")
+                    if isinstance(content.get("blocks"), list)
+                    else []
+                )
         draft_parts: list[str] = []
         for block in blocks:
             if not isinstance(block, dict):
