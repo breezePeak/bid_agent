@@ -94,7 +94,6 @@ class V3ExecutionController:
             "chapter.plan.append": writing_plans.handle_append,
             "chapter.plan.confirm": writing_plans.handle_confirm,
             "chapter.plan.invalidate": writing_plans.handle_invalidate,
-            "chapter.plan.shadow.generate": writing_plans.handle_shadow_generate,
             "chapter.content.apply": editing.handle_content_apply,
             "chapter.revision.restore": editing.handle_revision_restore,
             "chapter.generate_draft": editing.handle_generate_draft,

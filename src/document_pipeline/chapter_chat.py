@@ -228,25 +228,18 @@ class ChapterAgentService:
         *,
         seed_only: bool,
     ) -> None:
-        """Best-effort shadow write; legacy_inline must never be blocked."""
+        """Best-effort PR-02 shadow write; legacy_inline must never be blocked."""
         try:
             from .chapter_writing_plan import ChapterWritingPlanService
 
             service = ChapterWritingPlanService(self.context)
             if not service.enabled():
                 return
-            if service.shadow_enabled():
-                service.append_shadow_best_effort(
-                    chapter_id=chapter_id,
-                    writing_plan=writing_plan,
-                    seed_only=seed_only,
-                )
-            else:
-                service.append_legacy_projection(
-                    chapter_id=chapter_id,
-                    writing_plan=writing_plan,
-                    seed_only=seed_only,
-                )
+            service.append_legacy_projection(
+                chapter_id=chapter_id,
+                writing_plan=writing_plan,
+                seed_only=seed_only,
+            )
         except Exception:
             return
 

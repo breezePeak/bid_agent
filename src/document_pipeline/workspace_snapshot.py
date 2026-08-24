@@ -530,12 +530,6 @@ class V3WorkspaceSnapshotBuilder:
                 writing_plan = control.chapter_writing_plan(chapter_id)
             except ControlPlaneError:
                 writing_plan = None
-            try:
-                shadow_failure = control.latest_chapter_plan_shadow_failure(
-                    chapter_id
-                )
-            except ControlPlaneError:
-                shadow_failure = None
             if writing_plan is None:
                 summary = {
                     "head_plan_revision": int(item.get("head_plan_revision") or 0),
@@ -545,19 +539,8 @@ class V3WorkspaceSnapshotBuilder:
                     "status": "not_started",
                     "plan_hash": "",
                     "dependency_fingerprint": "",
-                    "source": "",
-                    "shadow_status": (
-                        "failed" if shadow_failure is not None else ""
-                    ),
-                    "shadow_diff": {},
-                    "shadow_error": dict(shadow_failure or {}),
                 }
             else:
-                metadata = (
-                    writing_plan.get("metadata")
-                    if isinstance(writing_plan.get("metadata"), dict)
-                    else {}
-                )
                 summary = {
                     "head_plan_revision": int(
                         writing_plan.get("plan_revision") or 0
@@ -570,38 +553,13 @@ class V3WorkspaceSnapshotBuilder:
                     "dependency_fingerprint": str(
                         writing_plan.get("dependency_fingerprint") or ""
                     ),
-                    "source": str(writing_plan.get("source") or ""),
-                    "shadow_status": str(metadata.get("shadow_status") or ""),
-                    "shadow_diff": dict(metadata.get("shadow_diff") or {})
-                    if isinstance(metadata.get("shadow_diff"), dict)
-                    else {},
-                    "shadow_error": (
-                        dict(shadow_failure)
-                        if shadow_failure is not None
-                        and str(shadow_failure.get("created_at") or "")
-                        > str(writing_plan.get("created_at") or "")
-                        else {}
-                    ),
                 }
-                if summary["shadow_error"]:
-                    summary["shadow_status"] = "failed"
             item["writing_plan"] = summary
             status = str(summary["status"])
             status_counts[status] = status_counts.get(status, 0) + 1
         snapshot["writing_plans"] = {
             "count": sum(status_counts.values()),
             "status_counts": status_counts,
-            "shadow_status_counts": {
-                shadow_status: sum(
-                    1
-                    for item in (snapshot.get("items") or [])
-                    if isinstance(item, dict)
-                    and isinstance(item.get("writing_plan"), dict)
-                    and str(item["writing_plan"].get("shadow_status") or "")
-                    == shadow_status
-                )
-                for shadow_status in ("ready", "failed")
-            },
         }
         return snapshot
 

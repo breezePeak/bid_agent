@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 from pathlib import Path
 from typing import Any
 
@@ -25,14 +24,8 @@ from .contracts import (
     ChapterWritingPlanCandidate,
     ChapterWritingPlanPayload,
 )
-from .chapter_writing_plan_builder import ChapterWritingPlanBuilder
 from .input_manifest import V3_ROOT
-from .workspace_modes import (
-    CHAPTER_PLAN_SHADOW_ENABLED_ENV,
-    CHAPTER_PLAN_V2_ENABLED_ENV,
-    env_flag,
-)
-from .writer_research import ResearchExecutionKernel
+from .workspace_modes import CHAPTER_PLAN_V2_ENABLED_ENV, env_flag
 
 
 LEGACY_WRITING_PLAN_PATH = V3_ROOT / "chapter_chats" / "_writing_plans.json"
@@ -52,20 +45,6 @@ class ChapterWritingPlanService:
             raise ControlPlaneError(
                 "CAPABILITY_DISABLED",
                 "章节编写规划 v2 能力未启用。",
-                status_code=403,
-            )
-
-    @staticmethod
-    def shadow_enabled() -> bool:
-        return env_flag(CHAPTER_PLAN_V2_ENABLED_ENV) and env_flag(
-            CHAPTER_PLAN_SHADOW_ENABLED_ENV
-        )
-
-    def require_shadow_enabled(self) -> None:
-        if not self.shadow_enabled():
-            raise ControlPlaneError(
-                "CAPABILITY_DISABLED",
-                "章节编写规划影子运行能力未启用。",
                 status_code=403,
             )
 
@@ -165,9 +144,6 @@ class ChapterWritingPlanService:
         binding = ChapterPlanBinding.model_validate(snapshot)
         payload = ChapterWritingPlanPayload(
             content_units=candidate.content_units,
-            sources=candidate.sources,
-            source_bindings=candidate.source_bindings,
-            research_decisions=candidate.research_decisions,
             metadata=candidate.metadata,
             binding=binding,
         )
@@ -207,292 +183,6 @@ class ChapterWritingPlanService:
             plan=candidate.model_dump(mode="json"),
             source="legacy_projection",
         )
-
-    def append_shadow_candidate(
-        self,
-        *,
-        chapter_id: str,
-        chapter: dict[str, Any],
-        writing_plan: dict[str, Any] | None = None,
-        tender_requirements: list[dict[str, Any]] | None = None,
-        scoring_requirements: list[dict[str, Any]] | None = None,
-        project_context: dict[str, Any] | None = None,
-        chapter_context_items: list[dict[str, Any]] | None = None,
-        user_material_blocks: list[dict[str, Any]] | None = None,
-        sibling_references: list[dict[str, Any]] | None = None,
-        operation_id: str = "chapter-plan-shadow",
-        deterministic_test: bool = False,
-    ) -> dict[str, Any]:
-        """Build and append a shadow revision; never confirms or switches Writer."""
-
-        self.require_shadow_enabled()
-        current = self.store.chapter_workspace(chapter_id)
-        if current is None:
-            raise ControlPlaneError(
-                "CHAPTER_NOT_FOUND",
-                f"章节 Workspace 不存在: {chapter_id}",
-                status_code=404,
-            )
-        builder = ChapterWritingPlanBuilder(
-            ResearchExecutionKernel(
-                self.context,
-                operation_id=operation_id,
-                deterministic_test=deterministic_test,
-            )
-        )
-        candidate = builder.build(
-            chapter=chapter,
-            writing_plan=writing_plan,
-            tender_requirements=tender_requirements,
-            scoring_requirements=scoring_requirements,
-            project_context=project_context,
-            chapter_context_items=chapter_context_items,
-            user_material_blocks=user_material_blocks,
-            sibling_references=sibling_references,
-        )
-        result = self.append(
-            chapter_id=chapter_id,
-            expected_chapter_revision=int(current.get("chapter_revision") or 0),
-            plan=candidate.model_dump(mode="json"),
-            source="shadow_builder",
-        )
-        result["shadow_status"] = str(candidate.metadata.get("shadow_status") or "ready")
-        result["shadow_diff"] = dict(candidate.metadata.get("shadow_diff") or {})
-        return result
-
-    def authoritative_shadow_inputs(
-        self,
-        chapter_id: str,
-        *,
-        writing_plan: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Load the promoted planning authorities for one chapter."""
-
-        from .chapter_workspace import ChapterWorkspaceService
-
-        chapter = ChapterWorkspaceService(self.context).get_chapter(chapter_id)
-        if not chapter.get("materialized"):
-            raise ControlPlaneError(
-                "CHAPTER_NOT_MATERIALIZED",
-                f"章节 Workspace 尚未创建: {chapter_id}",
-                status_code=409,
-            )
-        ledger_artifact = self.store.v3_active_artifact("RequirementLedger") or {}
-        score_artifact = self.store.v3_active_artifact("ScoreModel") or {}
-        project_artifact = self.store.v3_active_artifact("ProjectModel") or {}
-        source_artifact = self.store.v3_active_artifact("SourceIndex") or {}
-        ledger = ledger_artifact.get("payload")
-        ledger = ledger if isinstance(ledger, dict) else {}
-        score = score_artifact.get("payload")
-        score = score if isinstance(score, dict) else {}
-        project = project_artifact.get("payload")
-        project = project if isinstance(project, dict) else {}
-        source_index = source_artifact.get("payload")
-        source_index = source_index if isinstance(source_index, dict) else {}
-        context = chapter.get("context")
-        context = context if isinstance(context, dict) else {}
-        try:
-            from .sibling_chapter_context import SiblingChapterContextService
-
-            sibling_context = SiblingChapterContextService(
-                self.context
-            ).build_for_chapter(chapter, include_bodies=True)
-        except Exception:
-            sibling_context = {}
-        return {
-            "chapter": chapter,
-            "writing_plan": writing_plan,
-            "tender_requirements": [
-                item
-                for item in (ledger.get("requirements") or [])
-                if isinstance(item, dict)
-            ],
-            "scoring_requirements": [
-                item
-                for item in (score.get("points") or [])
-                if isinstance(item, dict)
-            ],
-            "project_context": project,
-            "chapter_context_items": [
-                item
-                for item in (context.get("items") or [])
-                if isinstance(item, dict)
-            ],
-            "user_material_blocks": [
-                item
-                for item in (source_index.get("blocks") or [])
-                if isinstance(item, dict)
-                and str(item.get("input_role") or "")
-                in {"company", "material", "user_material"}
-            ],
-            "sibling_references": [
-                item
-                for item in (sibling_context.get("siblings") or [])
-                if isinstance(item, dict)
-            ],
-        }
-
-    def append_shadow_from_authority(
-        self,
-        *,
-        chapter_id: str,
-        writing_plan: dict[str, Any] | None = None,
-        operation_id: str = "chapter-plan-shadow",
-        deterministic_test: bool = False,
-        seed_only: bool = False,
-    ) -> dict[str, Any]:
-        """Mainline PR-03 entry: promoted authorities in, shadow revision out."""
-
-        self.require_shadow_enabled()
-        started = time.perf_counter()
-        current_plan = self.read(chapter_id)
-        if (
-            seed_only
-            and isinstance(current_plan, dict)
-            and str(current_plan.get("source") or "") == "shadow_builder"
-        ):
-            return {
-                "chapter": self.store.chapter_workspace(chapter_id),
-                "plan": current_plan,
-                "unchanged": True,
-                "shadow_status": str(
-                    (current_plan.get("metadata") or {}).get("shadow_status")
-                    or "ready"
-                ),
-                "shadow_diff": dict(
-                    (current_plan.get("metadata") or {}).get("shadow_diff") or {}
-                ),
-            }
-        inputs = self.authoritative_shadow_inputs(
-            chapter_id,
-            writing_plan=writing_plan,
-        )
-        result = self.append_shadow_candidate(
-            chapter_id=chapter_id,
-            operation_id=operation_id,
-            deterministic_test=deterministic_test,
-            **inputs,
-        )
-        plan = result.get("plan") if isinstance(result.get("plan"), dict) else {}
-        decisions = [
-            item
-            for item in (plan.get("research_decisions") or [])
-            if isinstance(item, dict)
-        ]
-        metrics = {
-            "duration_ms": int((time.perf_counter() - started) * 1000),
-            "content_unit_count": len(plan.get("content_units") or []),
-            "source_count": len(plan.get("sources") or []),
-            "search_count": sum(bool(item.get("needs_research")) for item in decisions),
-            "published_search_count": sum(
-                str(item.get("status") or "") == "published"
-                for item in decisions
-            ),
-            "failed_search_count": sum(
-                str(item.get("status") or "") == "failed"
-                for item in decisions
-            ),
-        }
-        try:
-            self.store.record_chapter_plan_shadow_success(
-                chapter_id,
-                plan_revision=int(plan.get("plan_revision") or 0),
-                metrics=metrics,
-            )
-        except Exception:
-            pass
-        result["shadow_metrics"] = metrics
-        return result
-
-    def append_shadow_best_effort(
-        self,
-        *,
-        chapter_id: str,
-        writing_plan: dict[str, Any] | None = None,
-        seed_only: bool = False,
-    ) -> dict[str, Any]:
-        """Legacy integration boundary: record failure and never block writing."""
-
-        started = time.perf_counter()
-        try:
-            return self.append_shadow_from_authority(
-                chapter_id=chapter_id,
-                writing_plan=writing_plan,
-                seed_only=seed_only,
-            )
-        except Exception as exc:
-            code = (
-                exc.code
-                if isinstance(exc, ControlPlaneError)
-                else type(exc).__name__
-            )
-            failure = self.store.record_chapter_plan_shadow_failure(
-                chapter_id,
-                error_code=str(code),
-                error_message=str(exc),
-                duration_ms=int((time.perf_counter() - started) * 1000),
-            )
-            return {
-                "chapter": self.store.chapter_workspace(chapter_id),
-                "plan": self.read(chapter_id),
-                "unchanged": True,
-                "shadow_status": "failed",
-                "shadow_error": failure,
-                "shadow_metrics": {
-                    "duration_ms": int(failure.get("duration_ms") or 0),
-                    "failed_search_count": 1,
-                },
-            }
-
-    def handle_shadow_generate(
-        self,
-        context: WorkspaceContext,
-        envelope: CommandEnvelope,
-        operation_id: str,
-    ) -> dict[str, Any]:
-        payload = envelope.payload if isinstance(envelope.payload, dict) else {}
-        chapter_id = str(payload.get("chapter_id") or "").strip()
-        if not chapter_id:
-            raise ControlPlaneError(
-                "PLAN_COMMAND_INVALID",
-                "影子规划命令缺少 chapter_id。",
-                status_code=400,
-            )
-        supplied_chapter = payload.get("chapter")
-        if isinstance(supplied_chapter, dict):
-            result = self.append_shadow_candidate(
-                chapter_id=chapter_id,
-                chapter=supplied_chapter,
-                writing_plan=payload.get("writing_plan") if isinstance(payload.get("writing_plan"), dict) else None,
-                tender_requirements=payload.get("tender_requirements") if isinstance(payload.get("tender_requirements"), list) else None,
-                scoring_requirements=payload.get("scoring_requirements") if isinstance(payload.get("scoring_requirements"), list) else None,
-                project_context=payload.get("project_context") if isinstance(payload.get("project_context"), dict) else None,
-                chapter_context_items=payload.get("chapter_context_items") if isinstance(payload.get("chapter_context_items"), list) else None,
-                user_material_blocks=payload.get("user_material_blocks") if isinstance(payload.get("user_material_blocks"), list) else None,
-                sibling_references=payload.get("sibling_references") if isinstance(payload.get("sibling_references"), list) else None,
-                operation_id=operation_id,
-                deterministic_test=bool(payload.get("deterministic_test")),
-            )
-        else:
-            result = self.append_shadow_from_authority(
-                chapter_id=chapter_id,
-                writing_plan=payload.get("writing_plan") if isinstance(payload.get("writing_plan"), dict) else None,
-                operation_id=operation_id,
-                deterministic_test=bool(payload.get("deterministic_test")),
-            )
-        return {
-            "accepted": True,
-            "operation_status": "succeeded",
-            "message": f"章节影子规划已生成: {chapter_id}",
-            "plan": result.get("plan"),
-            "chapter": result.get("chapter"),
-            "unchanged": bool(result.get("unchanged")),
-            "shadow": {
-                "status": result.get("shadow_status"),
-                "diff": result.get("shadow_diff"),
-                "metrics": result.get("shadow_metrics"),
-            },
-        }
 
     def read(self, chapter_id: str, revision: int | None = None) -> dict[str, Any] | None:
         return self.store.chapter_writing_plan(chapter_id, revision)
