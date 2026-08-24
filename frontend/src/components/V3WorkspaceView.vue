@@ -399,6 +399,7 @@
 
     <!-- 大模型调用明细与诊断 Modal 弹窗 -->
     <Teleport to="body">
+      <Transition name="dialog">
       <div v-if="showLlmModal" class="llm-modal-overlay" @click.self="showLlmModal = false">
         <div class="llm-modal-content" role="dialog" aria-modal="true" aria-labelledby="llm-modal-title">
         <header class="llm-modal-header">
@@ -406,7 +407,7 @@
             <p class="section-kicker">大模型调用轨迹与日志审计</p>
             <h3 id="llm-modal-title">大模型请求明细与内容诊断</h3>
           </div>
-          <button class="modal-close-btn" type="button" aria-label="关闭" @click="showLlmModal = false">
+          <button class="dialog-close" type="button" aria-label="关闭" @click="showLlmModal = false">
             <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" /></svg>
           </button>
         </header>
@@ -467,10 +468,12 @@
           </div>
         </div>
       </div>
+      </Transition>
     </Teleport>
 
     <!-- 目录进入人工确认时，明确打断对话并引导到可审核页面。 -->
     <Teleport to="body">
+      <Transition name="dialog">
       <div v-if="showPlanningReviewPrompt" class="planning-review-overlay" role="presentation">
         <section
           class="planning-review-dialog"
@@ -517,6 +520,7 @@
           </div>
         </section>
       </div>
+      </Transition>
     </Teleport>
 
         <div v-show="activeTab === 'upload'" class="workspace-tab-view tab-upload">
@@ -1858,6 +1862,7 @@ defineOptions({ name: 'V3WorkspaceView' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AiProcessDisclosure from './AiProcessDisclosure.vue'
+import { confirmDialog } from '../composables/appDialog.js'
 import {
   chatV3,
   confirmV3Planning,
@@ -2114,6 +2119,19 @@ function openPlanningReview() {
   activeTab.value = 'planning'
 }
 
+async function deleteInitialChatTurn(turn) {
+  if (!turn) return
+  const confirmed = await confirmDialog({
+    title: '删除对话',
+    message: '确定删除此条对话吗？删除后无法恢复。',
+    confirmText: '删除',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
+  initialChatTurns.value = initialChatTurns.value.filter(t => t.id !== turn.id)
+}
+
 async function sendInitialChat() {
   const msg = initialChatInput.value.trim()
   if (!msg) return
@@ -2130,12 +2148,6 @@ async function sendInitialChat() {
     startedAt,
     finishedAt: 0,
   })
-function deleteInitialChatTurn(turn) {
-  if (!turn) return
-  if (!window.confirm('确定删除此条对话吗？')) return
-  initialChatTurns.value = initialChatTurns.value.filter(t => t.id !== turn.id)
-}
-
   initialChatTurns.value.push(userTurn)
   initialChatTurns.value.push(assistantTurn)
   initialPendingCount.value += 1

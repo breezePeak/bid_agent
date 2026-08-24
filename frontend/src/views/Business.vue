@@ -58,6 +58,7 @@ import SettingsDialog from '../components/SettingsDialog.vue'
 import V3WorkspaceView from '../components/V3WorkspaceView.vue'
 import ChapterWorkbenchView from '../components/ChapterWorkbenchView.vue'
 import { fetchRuns, fetchV3WorkspaceSnapshot, deleteRun, subscribeV3Workspace } from '../api'
+import { alertDialog, confirmDialog } from '../composables/appDialog.js'
 
 const route = useRoute()
 const router = useRouter()
@@ -202,7 +203,14 @@ function handleSelectRun(runId) {
 }
 
 async function handleDeleteRun(runId) {
-  if (!confirm(`确定要删除工作空间 "${extractName(runId)}" 吗？`)) return
+  const confirmed = await confirmDialog({
+    title: '删除工作空间',
+    message: `确定删除工作空间「${extractName(runId)}」吗？此操作会移除该空间的材料、规划和正文，且无法恢复。`,
+    confirmText: '删除工作空间',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
   try {
     // Stop every workspace poll before the destructive request. Otherwise a
     // just-started snapshot request can keep SQLite/WAL files open on Windows
@@ -217,7 +225,12 @@ async function handleDeleteRun(runId) {
     await deleteRun(runId)
     await loadRuns()
   } catch (e) {
-    alert('删除工作空间失败: ' + (e?.response?.data?.message || e?.message || '未知错误'))
+    await alertDialog({
+      title: '删除失败',
+      message: e?.response?.data?.message || e?.message || '未知错误',
+      tone: 'danger',
+      confirmText: '知道了',
+    })
   }
 }
 

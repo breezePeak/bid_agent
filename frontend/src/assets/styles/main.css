@@ -2470,8 +2470,9 @@ body {
 .dialog-overlay { 
   position: fixed; 
   inset: 0; 
-  background: rgba(15, 23, 42, 0.4); 
-  backdrop-filter: blur(8px);
+  background: rgba(15, 23, 42, 0.48);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   display: flex; 
   align-items: center; 
   justify-content: center; 
@@ -2483,10 +2484,10 @@ body {
   max-width: min(90vw, 100%);
   max-height: min(90vh, 100%);
   background: var(--color-surface); 
-  border-radius: var(--radius-lg); 
-  box-shadow: var(--shadow-lg); 
+  border-radius: 16px;
+  box-shadow: 0 24px 64px rgba(15, 23, 42, 0.18), 0 8px 16px rgba(15, 23, 42, 0.06);
   overflow: auto;
-  border: 1px solid rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(226, 232, 240, 0.9);
   display: flex;
   flex-direction: column;
 }
@@ -2494,13 +2495,15 @@ body {
   display: flex; 
   align-items: center; 
   justify-content: space-between; 
-  padding: 24px 24px 0; 
+  gap: 12px;
+  padding: 22px 24px 0;
   flex-shrink: 0;
 }
 .dialog-header h2 { 
   font-size: 18px; 
   font-weight: 700; 
-  letter-spacing: -0.01em;
+  letter-spacing: -0.02em;
+  color: var(--color-text);
 }
 .dialog-body { 
   padding: 20px 24px 24px; 
@@ -2512,6 +2515,174 @@ body {
   justify-content: flex-end; 
   gap: 8px; 
   margin-top: 24px; 
+}
+.dialog-close {
+  display: grid;
+  flex: 0 0 36px;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border: none;
+  border-radius: 50%;
+  background: #f1f5f9;
+  color: #64748b;
+  cursor: pointer;
+  box-shadow: none;
+  transition: var(--transition);
+}
+.dialog-close:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+  transform: none;
+  box-shadow: none;
+}
+.dialog-close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-primary-glow);
+}
+.dialog-close svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.dialog-enter-active,
+.dialog-leave-active {
+  transition: opacity 0.2s ease;
+}
+.dialog-enter-active .dialog,
+.dialog-leave-active .dialog {
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.dialog-enter-from,
+.dialog-leave-to {
+  opacity: 0;
+}
+.dialog-enter-from .dialog,
+.dialog-leave-to .dialog {
+  transform: translateY(10px) scale(0.97);
+}
+
+.app-dialog-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2400;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(15, 23, 42, 0.5);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+.app-dialog {
+  width: min(420px, 100%);
+  padding: 28px 24px 20px;
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 18px;
+  background: #fff;
+  box-shadow: 0 28px 64px rgba(15, 23, 42, 0.22);
+  text-align: center;
+}
+.app-dialog-icon {
+  display: grid;
+  width: 52px;
+  height: 52px;
+  margin: 0 auto 16px;
+  place-items: center;
+  border-radius: 16px;
+  background: var(--color-primary-light);
+  color: var(--color-primary);
+}
+.app-dialog.tone-danger .app-dialog-icon {
+  background: var(--color-error-light);
+  color: var(--color-error);
+}
+.app-dialog.tone-warning .app-dialog-icon {
+  background: var(--color-warning-light);
+  color: var(--color-warning);
+}
+.app-dialog.tone-success .app-dialog-icon {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+.app-dialog-icon svg {
+  width: 24px;
+  height: 24px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.app-dialog-title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.35;
+}
+.app-dialog-message {
+  margin: 10px 0 0;
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  line-height: 1.65;
+}
+.app-dialog-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 22px;
+}
+.app-dialog-actions .btn {
+  min-width: 96px;
+  min-height: 40px;
+}
+.app-dialog-enter-active,
+.app-dialog-leave-active {
+  transition: opacity 0.2s ease;
+}
+.app-dialog-enter-active .app-dialog,
+.app-dialog-leave-active .app-dialog {
+  transition: transform 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.app-dialog-enter-from,
+.app-dialog-leave-to {
+  opacity: 0;
+}
+.app-dialog-enter-from .app-dialog,
+.app-dialog-leave-to .app-dialog {
+  transform: translateY(12px) scale(0.96);
+}
+
+@media (max-width: 520px) {
+  .app-dialog {
+    padding: 24px 18px 16px;
+    border-radius: 16px;
+  }
+  .app-dialog-actions {
+    flex-direction: column-reverse;
+  }
+  .app-dialog-actions .btn {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dialog-enter-active,
+  .dialog-leave-active,
+  .dialog-enter-active .dialog,
+  .dialog-leave-active .dialog,
+  .app-dialog-enter-active,
+  .app-dialog-leave-active,
+  .app-dialog-enter-active .app-dialog,
+  .app-dialog-leave-active .app-dialog {
+    transition: none;
+  }
 }
 
 /* ===== Settings dialog ===== */

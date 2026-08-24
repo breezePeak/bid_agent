@@ -1,10 +1,13 @@
 <template>
   <Teleport to="body">
+    <Transition name="dialog">
     <div v-if="visible" class="dialog-overlay" @click.self="$emit('close')">
-      <div class="dialog">
+      <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="create-workspace-title">
         <div class="dialog-header">
-          <h2>新建工作空间</h2>
-          <button class="btn btn-icon" @click="$emit('close')">&times;</button>
+          <h2 id="create-workspace-title">新建工作空间</h2>
+          <button type="button" class="dialog-close" aria-label="关闭" @click="$emit('close')">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18" /></svg>
+          </button>
         </div>
         <form class="dialog-body" @submit.prevent="handleSubmit">
           <div class="form-group">
@@ -28,6 +31,7 @@
         </form>
       </div>
     </div>
+    </Transition>
   </Teleport>
 </template>
 
