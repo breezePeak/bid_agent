@@ -307,6 +307,29 @@ class TestV3ScoreAgent(unittest.TestCase):
             ],
         )
 
+    def test_semantic_outline_keeps_table_hierarchy_and_drops_scope_headings(self) -> None:
+        self.assertEqual(
+            ScoreAgent._canonical_semantic_outline_path(
+                structural_path=[
+                    "技术方法（43分）",
+                    "年度全国国土变更调查成果国家级内、外业核查质量控制检查和成果复核（31分）",
+                ],
+                semantic_path=[
+                    "技术部分（暗标，65分）",
+                    "包5到包9：",
+                    "技术方法",
+                    "年度全国国土变更调查成果国家级内、外业核查质量控制检查和成果复核",
+                    "检查结果汇总分析与成果表达",
+                ],
+                group_title="技术部分（暗标，65分）",
+            ),
+            [
+                "技术方法（43分）",
+                "年度全国国土变更调查成果国家级内、外业核查质量控制检查和成果复核（31分）",
+                "检查结果汇总分析与成果表达",
+            ],
+        )
+
     def test_compound_full_score_band_splits_all_independent_response_subjects(self) -> None:
         criterion = (
             "变更图斑正确性检查分析条理清楚、逻辑清晰、重点突出；"

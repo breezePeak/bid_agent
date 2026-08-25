@@ -38,6 +38,7 @@
             <strong>步骤状态：{{ pipelineStageStatus(selectedDrawerStage) }}</strong>
             <span>流程尝试 {{ selectedDrawerStage.attempt || 0 }} 次</span>
             <span>模型请求 {{ selectedDrawerStage.llm_request_count || 0 }} 次</span>
+            <span v-if="selectedDrawerStage.inference_reuse_count">复用已校验模型结果 {{ selectedDrawerStage.inference_reuse_count }} 次</span>
           </div>
           <section
             v-if="selectedDrawerStage.stage_id === 'plan_response'"
@@ -58,12 +59,17 @@
               <div><dt>扫描原文</dt><dd>{{ selectedDrawerStageData.scanned_source_block_count || 0 }}</dd></div>
               <div><dt>送入模型</dt><dd>{{ selectedDrawerStageData.source_block_count || 0 }}</dd></div>
               <div><dt>模型请求</dt><dd>{{ selectedDrawerStageData.llm_request_count || 0 }}</dd></div>
+              <div><dt>结果复用</dt><dd>{{ selectedDrawerStageData.inference_reuse_count || 0 }}</dd></div>
+              <div v-if="selectedDrawerStageData.project_batch_count"><dt>项目批次</dt><dd>{{ selectedDrawerStageData.project_batch_reused_count || 0 }}/{{ selectedDrawerStageData.project_batch_count }} 已复用</dd></div>
               <div><dt>自动处理引用</dt><dd>{{ selectedDrawerStageData.normalized_reference_count || 0 }}</dd></div>
             </dl>
             <p
               v-if="selectedDrawerStage.status === 'reused'"
               class="project-fact-reuse-note"
             >当前结果经过依赖、版本和哈希校验，本次没有重新调用模型。</p>
+            <p v-for="reuse in selectedDrawerStageData.inference_reuses || []" :key="reuse.checkpoint_id" class="project-fact-reuse-note">
+              复用{{ reuse.batch_id ? `批次 ${reuse.batch_id}` : '已校验模型结果' }}，来源时间 {{ formatTimestamp(reuse.source_time) }}
+            </p>
             <div v-if="selectedDrawerStageData.summary && Object.keys(selectedDrawerStageData.summary).length" class="project-fact-summary">
               <strong>事实摘要</strong>
               <p v-if="selectedDrawerStageData.summary.project_name">项目：{{ selectedDrawerStageData.summary.project_name }}</p>
@@ -85,8 +91,9 @@
                 rows="3"
                 placeholder="可选：告诉 Agent 哪些项目事实需要调整；不能覆盖招标文件中的正式要求"
               />
-              <button class="btn btn-primary" type="button" :disabled="outlineActionDisabled" @click="retryProjectFacts(false)">再试一次</button>
+              <button class="btn btn-primary" type="button" :disabled="outlineActionDisabled" @click="retryProjectFacts(false)">复用结果继续处理</button>
               <button class="btn" type="button" :disabled="outlineActionDisabled || !projectFactFeedback.trim()" @click="retryProjectFacts(true)">带意见重试</button>
+              <button class="btn" type="button" :disabled="outlineActionDisabled" title="会产生新的模型调用费用" @click="retryProjectFacts(false, true)">重新请求模型（产生费用）</button>
               <button class="btn" type="button" @click="closeStageDrawer">稍后处理</button>
             </div>
           </section>
@@ -549,8 +556,13 @@
                 <path d="M8 13h.01M16 13h.01M9 16h6" />
               </svg>
             </span>
-            <div>
-              <h3>AI 标书编制助手</h3>
+            <div class="bot-title-wrap">
+              <div class="bot-title-row">
+                <h3>AI 标书编制助手</h3>
+                <span class="mode-pill" :class="projectMode === 'bid_rewrite' ? 'mode-pill-rewrite' : 'mode-pill-full'">
+                  {{ projectMode === 'bid_rewrite' ? '标书改写' : '全量编写' }}
+                </span>
+              </div>
               <p>智能对话 · 材料投递 · 目录与正文生成</p>
             </div>
           </div>
@@ -563,7 +575,10 @@
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
               公司资料 {{ companyInputs.length }} 份
             </span>
-            <span v-else class="stat-tag">旧投标书 {{ legacyBidItems.length ? `${legacyBidItems.length} 份${hasLegacyBid ? '已解析' : '解析中'}` : '待上传' }}</span>
+            <span v-else class="stat-tag">
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+              旧投标书 {{ legacyBidItems.length ? (legacyBidItems.length + ' 份' + (hasLegacyBid ? '已解析' : '解析中')) : '待上传' }}
+            </span>
           </div>
         </header>
 
@@ -594,9 +609,11 @@
               <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M12 10v7M8.5 13.5h7" /></svg>
             </div>
             <div class="msg-bubble upload-start-bubble">
-              <span class="workflow-result-kicker">开始投递</span>
-              <h4>请先补齐必传材料</h4>
-              <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书解析完成后才能生成新目录；公司资料为可选。' : '仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。' }}</p>
+              <div class="upload-start-header">
+                <span class="workflow-result-kicker">开始投递</span>
+                <h4>请先补齐必传材料</h4>
+                <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书解析完成后才能生成新目录；公司资料为可选。' : '仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。' }}</p>
+              </div>
               <div class="required-upload-zones">
                 <div
                   v-for="zone in uploadZones"
@@ -613,27 +630,60 @@
                       :disabled="uploading || running"
                       @change="handleQuickUpload(zone.role, $event)"
                     />
-                    <span class="required-upload-zone-icon" aria-hidden="true">{{ zone.role === 'tender' ? '▤' : '▦' }}</span>
-                    <span>
-                      <strong>{{ zone.title }} <em v-if="zone.required">必传</em></strong>
+                    <div class="zone-icon-box">
+                      <svg v-if="zone.role === 'tender'" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                        <polyline points="14 2 14 8 20 8"/>
+                        <line x1="16" y1="13" x2="8" y2="13"/>
+                        <line x1="16" y1="17" x2="8" y2="17"/>
+                        <polyline points="10 9 9 9 8 9"/>
+                      </svg>
+                      <svg v-else-if="zone.role === 'legacy_bid'" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                      </svg>
+                      <svg v-else viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M3 6h7l2 2h9v11H3z"/>
+                      </svg>
+                    </div>
+                    <div class="zone-info-box">
+                      <div class="zone-title-line">
+                        <strong>{{ zone.title }}</strong>
+                        <span v-if="zone.required" class="zone-req-badge">必传</span>
+                      </div>
                       <small>{{ zone.description }}</small>
-                    </span>
-                    <b>{{ inputsForRole(zone.role).length ? `已上传 ${inputsForRole(zone.role).length} 份` : '点击上传' }}</b>
+                    </div>
+                    <div class="zone-status-box">
+                      <span v-if="inputsForRole(zone.role).length" class="zone-uploaded-tag">
+                        ✓ 已上传 {{ inputsForRole(zone.role).length }} 份
+                      </span>
+                      <span v-else class="zone-upload-btn-text">
+                        + 点击上传
+                      </span>
+                    </div>
                   </label>
                 </div>
               </div>
             </div>
           </div>
 
-          <!-- 步骤 1.1：已登记材料卡片消息（Cursor 风格文件变动卡片） -->
-          <div v-if="displayInputs.length" class="chat-msg bot-msg">
-            <div class="file-changes-card" style="width: 100%; max-width: 640px;">
+          <!-- 步骤 1.1：已登记材料卡片消息 -->
+          <div v-if="displayInputs.length" class="chat-msg bot-msg timeline-step-msg file-list-msg">
+            <div class="msg-avatar file-summary-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </div>
+            <div class="file-changes-card">
+              <div class="file-changes-header">
+                <span class="file-changes-title">已登记与解析材料（{{ displayInputs.length }} 份）</span>
+              </div>
               <div class="file-changes-list">
                 <div v-for="item in displayInputs" :key="item.input_id" class="file-change-item">
-                  <span class="file-path">
-                    <span class="dir">{{ roleLabel(item.role) }} / </span>
-                    <span class="name">{{ item.filename }}</span>
-                  </span>
+                  <div class="file-item-left">
+                    <span class="file-role-badge" :class="`role-${item.role}`">{{ roleLabel(item.role) }}</span>
+                    <span class="file-path" :title="item.filename">
+                      <span class="name">{{ formatFilename(item.filename) }}</span>
+                    </span>
+                  </div>
                   <div class="file-diff-stats">
                     <span class="diff-tag add">✓ {{ displayInputStatusLabel(item) }}</span>
                     <button
@@ -649,18 +699,34 @@
           </div>
 
           <div v-if="initialMaterialsReady && !uploading && !secondStageConfirmed && !hasOutline && !outlineBusy && !planningReadyForReview" class="chat-msg bot-msg timeline-step-msg highlight-msg">
-            <div class="msg-avatar step-avatar" aria-hidden="true">?</div>
+            <div class="msg-avatar step-avatar step-action-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+            </div>
             <div class="msg-bubble action-launch-bubble">
               <header class="workflow-step-header">
                 <div class="workflow-step-heading">
-                  <span class="step-tag">材料已就绪</span>
+                  <span class="step-tag ready">材料已就绪</span>
                   <div>
                     <h4>是否继续第二阶段？</h4>
-                    <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书均已就绪。确认后将仅依据新招标材料生成目录。' : '招标文件和公司资质/参考资料均已上传。请在下方回复“继续第二阶段”后，再开始解析评分点并生成目录。' }}</p>
+                    <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书均已就绪。确认后将仅依据新招标材料生成目录。' : '招标文件和公司资质/参考资料均已上传。请确认后开始解析评分点并生成目录。' }}</p>
                   </div>
                 </div>
-                <span class="workflow-step-status action">等待回复</span>
+                <span class="workflow-step-status action">
+                  <span class="pulse-indicator"></span> 等待确认
+                </span>
               </header>
+              <div class="action-launch-actions">
+                <button
+                  type="button"
+                  class="btn-primary-action"
+                  :disabled="outlineBusy || running"
+                  @click="sendPresetChat('继续第二阶段')"
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                  立即开始第二阶段（生成评分与目录）
+                </button>
+                <span class="action-launch-subtext">或在下方输入特定要求后发送</span>
+              </div>
             </div>
           </div>
 
@@ -671,6 +737,12 @@
             class="chat-msg"
             :class="turn.role === 'user' ? 'user-msg' : 'bot-msg'"
           >
+            <div v-if="turn.role === 'bot'" class="msg-avatar conversation-avatar" aria-hidden="true">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M12 3v3M8 3h8M6 8h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2Z" />
+                <path d="M8 13h.01M16 13h.01M9 16h6" />
+              </svg>
+            </div>
             <div class="msg-bubble conversation-bubble">
               <button
                 v-if="turn.role === 'user'"
@@ -709,7 +781,7 @@
                       <span class="ai-stage-marker" :class="`stage-${stage.status}`" aria-hidden="true">
                         <span v-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
                         <span v-else-if="stage.status === 'failed'">×</span>
-                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
+                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot"></span>
                         <span v-else>{{ index + 1 }}</span>
                       </span>
                       <span class="ai-stage-copy">
@@ -780,7 +852,7 @@
                       <span class="ai-stage-marker" :class="`stage-${stage.status}`" aria-hidden="true">
                         <span v-if="stage.status === 'succeeded' || stage.status === 'reused'">✓</span>
                         <span v-else-if="stage.status === 'failed'">×</span>
-                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot" />
+                        <span v-else-if="['running', 'queued', 'processing'].includes(stage.status)" class="spinner-dot"></span>
                         <span v-else>{{ index + 1 }}</span>
                       </span>
                       <span class="ai-stage-copy">
@@ -878,14 +950,29 @@
                   :disabled="uploading || running"
                   @change="handleQuickUpload('legacy_bid', $event)"
                 />
+                <div class="quick-chip-bar">
+                  <label class="toolbar-chip-btn" for="quick-upload-tender" title="上传招标文件">
+                    <span class="chip-icon">+</span>
+                    <span>招标文件 <em class="tag-req">必传</em></span>
+                  </label>
+                  <label v-if="projectMode === 'full_write'" class="toolbar-chip-btn" for="quick-upload-company" title="上传公司资料">
+                    <span class="chip-icon">+</span>
+                    <span>公司资料</span>
+                  </label>
+                  <label v-else class="toolbar-chip-btn" for="quick-upload-legacy-bid" title="上传旧投标书">
+                    <span class="chip-icon">+</span>
+                    <span>旧投标书 <em class="tag-req">必传</em></span>
+                  </label>
+                </div>
+
                 <div class="toolbar-attachment-menu">
                   <button
                     class="attachment-trigger"
                     type="button"
                     :aria-expanded="showQuickUploadMenu"
                     aria-controls="quick-upload-menu"
-                    aria-label="添加项目材料"
-                    title="添加项目材料"
+                    aria-label="更多材料上传选项"
+                    title="更多材料上传选项"
                     @click="showQuickUploadMenu = !showQuickUploadMenu"
                   >
                     <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" /></svg>
@@ -904,7 +991,7 @@
                 </div>
 
                 <span v-if="uploadingRole" class="uploading-state-hint">
-                  <span class="spinner" /> 正在上传并解析 {{ roleLabel(uploadingRole) }}…
+                  <span class="spinner"></span> 正在上传并解析 {{ roleLabel(uploadingRole) }}…
                 </span>
               </div>
 
@@ -917,7 +1004,7 @@
                   aria-label="发送消息"
                   @click="sendInitialChat"
                 >
-                  <span v-if="initialAsking && !initialChatInput.trim()" class="spinner-dot" />
+                  <span v-if="initialAsking && !initialChatInput.trim()" class="spinner-dot"></span>
                   <svg v-else aria-hidden="true" viewBox="0 0 24 24">
                     <path d="M5 12h14M12 5l7 7-7 7" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
                   </svg>
@@ -963,7 +1050,7 @@
                 :disabled="running || generationBusy || !selectedGenerationChapterIds.length"
                 @click="runSelectedChapters"
               >
-                一键生成所选{{ selectedGenerationChapterIds.length ? `（${selectedGenerationChapterIds.length}）` : '' }}
+                一键生成所选{{ selectedGenerationChapterIds.length ? ('（' + selectedGenerationChapterIds.length + '）') : '' }}
               </button>
               <button
                 v-if="selectedGenerationChapterIds.length"
@@ -987,7 +1074,7 @@
                   class="writer-chapter-check"
                   type="checkbox"
                   :checked="isGenerationChapterSelected(chapter.chapter_id)"
-                  :aria-label="`选择${chapter.title || chapter.chapter_id}及其子章节生成`"
+                  :aria-label="'选择' + (chapter.title || chapter.chapter_id) + '及其子章节生成'"
                   @click.stop
                   @change="toggleGenerationChapter(chapter)"
                 >
@@ -1010,7 +1097,7 @@
             <header>
               <div>
                 <p class="section-kicker">实时 Word 草稿</p>
-                <h3 :id="`writer-document-${selectedWriterChapterId}`">{{ selectedWriterChapter?.title || writerUnit?.current_chapter_title || writerUnit?.title || '等待开始写作' }}</h3>
+                <h3 :id="'writer-document-' + selectedWriterChapterId">{{ selectedWriterChapter?.title || writerUnit?.current_chapter_title || writerUnit?.title || '等待开始写作' }}</h3>
               </div>
               <div class="writer-chapter-actions">
                 <span class="writer-live-status">{{ writerPhaseText }}</span>
@@ -1498,7 +1585,7 @@
             :disabled="outlineActionDisabled"
             @click="prepareOutline"
           >
-            <span v-if="outlineBusy" class="spinner" aria-hidden="true" />
+            <span v-if="outlineBusy" class="spinner" aria-hidden="true"></span>
             {{ outlineBusy ? outlineRunningLabel : outlineActionLabel }}
           </button>
           <template v-if="hasOutline">
@@ -1585,302 +1672,631 @@
           当前结果不能视为“按评分点拆分”的目录。请检查招标文件是否包含评分办法、评分表或分值条款后重试。
         </div>
 
-        <div v-else class="planning-content">
-          <details class="score-filter-panel">
-            <summary>
-              <span>
-                <strong>按评分点核验目录</strong>
-                <small>选择评分点后，仅高亮对应的章节与满分条件。</small>
-              </span>
-              <b>{{ planningView.score_points.length }} 项评分点</b>
-            </summary>
-            <aside class="score-list" aria-label="评分点列表">
-            <div class="subpanel-title">
-              <h3>评分点</h3>
-              <button
-                v-if="selectedScoreId"
-                class="text-button"
-                type="button"
-                @click="selectedScoreId = ''"
-              >
-                清除筛选
-              </button>
-            </div>
-            <article
-              v-for="point in planningView.score_points"
-              :key="point.score_point_id"
-              class="score-point-card"
-              :class="{ selected: selectedScoreId === point.score_point_id }"
-            >
-              <button
-                class="score-item"
-                :class="{ selected: selectedScoreId === point.score_point_id }"
-                type="button"
-                :aria-pressed="selectedScoreId === point.score_point_id"
-                @click="toggleScore(point.score_point_id)"
-              >
-                <span class="score-item-heading">
-                  <strong>{{ point.title }}</strong>
-                  <b>{{ scorePointValue(point) }}</b>
-                </span>
-                <span class="score-criterion">{{ point.criterion }}</span>
-                <span class="score-meta">
-                  {{ responseDepthLabel(point.response_depth) }}
-                  <em v-if="point.review_status !== 'confirmed'">需复核</em>
-                </span>
-              </button>
-              <details
-                v-if="point.score_conditions?.length"
-                class="condition-trace"
-                :open="selectedScoreId === point.score_point_id"
-              >
-                <summary>
-                  查看 {{ point.score_conditions.length }} 个满分条件与落位
-                </summary>
-                <div class="condition-list">
-                  <article
-                    v-for="condition in point.score_conditions"
-                    :key="condition.condition_id"
-                    class="condition-card"
+        <div v-else class="planning-word-layout">
+          <!-- 左侧：Word 风格目录导航窗格 -->
+          <aside class="planning-nav-pane" aria-label="目录导航窗格">
+            <div class="nav-pane-header">
+              <div class="nav-search-bar">
+                <span class="nav-search-icon" aria-hidden="true">🔍</span>
+                <input
+                  v-model="outlineSearchQuery"
+                  class="nav-search-input"
+                  type="search"
+                  placeholder="搜索章节标题 / 序号 / 目的..."
+                />
+                <button
+                  v-if="outlineSearchQuery"
+                  class="nav-search-clear"
+                  type="button"
+                  title="清除搜索"
+                  @click="outlineSearchQuery = ''"
+                >×</button>
+              </div>
+              <div class="nav-pane-toolbar">
+                <button
+                  class="nav-tool-btn"
+                  type="button"
+                  title="添加顶级章节"
+                  @click="addRootChapter"
+                >
+                  <span class="tool-icon">➕</span> 新建章节
+                </button>
+                <div class="nav-tool-group">
+                  <button
+                    v-if="hasCollapsibleChapters"
+                    class="nav-tool-link"
+                    type="button"
+                    title="全部展开"
+                    @click="expandAllChapters"
                   >
-                    <header>
-                      <code>{{ condition.condition_id }}</code>
-                      <span :class="`condition-role role-${condition.condition_role}`">
-                        {{ conditionRoleLabel(condition.condition_role) }}
-                      </span>
-                    </header>
-                    <strong>{{ condition.normalized_condition || condition.text }}</strong>
-                    <p v-if="condition.text" class="condition-raw">
-                      原始拆解：{{ condition.text }}
-                    </p>
-                    <blockquote>{{ condition.source_excerpt }}</blockquote>
-                    <p class="source-location">
-                      <span>来源</span>
-                      {{ condition.source_location.label }}
-                      <code v-if="condition.source_location.chunk_id">
-                        {{ condition.source_location.chunk_id }}
-                      </code>
-                    </p>
-                    <dl class="trace-relations">
-                      <div>
-                        <dt>响应任务</dt>
-                        <dd v-if="condition.response_units.length">
-                          <span
-                            v-for="unit in condition.response_units"
-                            :key="unit.unit_id"
-                          >
-                            <code>{{ unit.unit_id }}</code>
-                            {{ unit.title }}
-                          </span>
-                        </dd>
-                        <dd v-else class="trace-missing">未绑定 ScoreResponseUnit</dd>
-                      </div>
-                      <div>
-                        <dt>最终落位</dt>
-                        <dd v-if="condition.destinations.length">
-                          <a
-                            v-for="destination in condition.destinations"
-                            :key="traceDestinationKey(destination)"
-                            :href="traceDestinationHref(destination)"
-                            @click="destination.type === 'chapter' && expandChapterPath(destination.chapter_id)"
-                          >
-                            {{ traceDestinationLabel(destination) }}
-                          </a>
-                        </dd>
-                        <dd v-else class="trace-missing">尚未绑定章节或全文质量门</dd>
-                      </div>
-                    </dl>
-                  </article>
+                    全部展开
+                  </button>
+                  <button
+                    v-if="hasCollapsibleChapters"
+                    class="nav-tool-link"
+                    type="button"
+                    title="全部收起"
+                    @click="collapseAllChapters"
+                  >
+                    全部收起
+                  </button>
+                  <button
+                    v-if="planningView.outline?.length"
+                    class="nav-tool-link"
+                    type="button"
+                    title="导出 Markdown 格式目录"
+                    @click="exportOutlineMarkdown"
+                  >
+                    导出 MD
+                  </button>
                 </div>
-              </details>
-            </article>
-            </aside>
-          </details>
-
-          <div class="outline-list" aria-label="章节目录">
-            <div class="subpanel-title">
-              <h3>章节目录</h3>
-              <div class="outline-actions">
-                <span v-if="selectedScoreId">已高亮覆盖所选评分点的章节</span>
-                <button
-                  v-if="hasCollapsibleChapters"
-                  class="text-button"
-                  type="button"
-                  @click="expandAllChapters"
-                >
-                  全部展开
-                </button>
-                <button
-                  v-if="hasCollapsibleChapters"
-                  class="text-button"
-                  type="button"
-                  @click="collapseAllChapters"
-                >
-                  全部收起
-                </button>
-                <button
-                  v-if="visibleOutline && visibleOutline.length"
-                  class="text-button"
-                  type="button"
-                  @click="exportOutlineMarkdown"
-                >
-                  导出 MD
-                </button>
               </div>
             </div>
-            <article
-              v-for="chapter in visibleOutline"
-              :key="chapter.chapter_id"
-              :id="`chapter-${chapter.chapter_id}`"
-              class="chapter-row"
-              :class="{
-                highlighted: selectedScoreId && chapter.score_point_ids.includes(selectedScoreId),
-                dimmed: selectedScoreId && !chapter.score_point_ids.includes(selectedScoreId),
-              }"
-              :style="{ '--chapter-depth': chapter.depth - 1 }"
-            >
-              <span class="chapter-number">{{ chapter.number }}</span>
-              <div class="chapter-body">
-                <div class="chapter-title-row">
+
+            <!-- 树状目录导航列表 -->
+            <nav class="nav-tree-container">
+              <div
+                v-if="!visibleNavOutline.length"
+                class="nav-tree-empty"
+              >
+                {{ outlineSearchQuery ? '未找到匹配的章节' : '暂无目录节点' }}
+              </div>
+              <div
+                v-for="chapter in visibleNavOutline"
+                :key="chapter.chapter_id"
+                class="nav-tree-row"
+                :class="{
+                  active: selectedOutlineChapterId === chapter.chapter_id,
+                  highlighted: selectedScoreId && chapter.score_point_ids.includes(selectedScoreId),
+                  dimmed: selectedScoreId && !chapter.score_point_ids.includes(selectedScoreId),
+                }"
+                :style="{ paddingLeft: ((chapter.depth - 1) * 16 + 8) + 'px' }"
+                @click="selectedOutlineChapterId = chapter.chapter_id"
+              >
+                <!-- 折叠/展开三角按钮 -->
+                <button
+                  v-if="chapter.children?.length"
+                  class="nav-tree-toggle"
+                  type="button"
+                  :aria-expanded="isChapterExpanded(chapter.chapter_id)"
+                  :title="isChapterExpanded(chapter.chapter_id) ? '收起子章节' : '展开子章节'"
+                  @click.stop="toggleChapter(chapter.chapter_id)"
+                >
+                  {{ isChapterExpanded(chapter.chapter_id) ? '▾' : '▸' }}
+                </button>
+                <span v-else class="nav-tree-spacer" aria-hidden="true"></span>
+
+                <!-- 章节序号与标题（支持内联编辑） -->
+                <div class="nav-tree-content">
+                  <span class="nav-chapter-num">{{ chapter.number }}</span>
+                  <template v-if="inlineEditingChapterId === chapter.chapter_id">
+                    <input
+                      v-model="inlineEditingTitle"
+                      class="nav-inline-input"
+                      autofocus
+                      @click.stop
+                      @keydown.enter="saveInlineEdit(chapter.chapter_id)"
+                      @keydown.esc="cancelInlineEdit"
+                      @blur="saveInlineEdit(chapter.chapter_id)"
+                    />
+                  </template>
+                  <template v-else>
+                    <span class="nav-chapter-title" :title="chapter.title">
+                      {{ chapter.title }}
+                    </span>
+                  </template>
+                </div>
+
+                <!-- 评分覆盖徽标 -->
+                <span
+                  v-if="chapter.score_point_ids.length"
+                  class="nav-coverage-badge"
+                  :title="`覆盖 ${chapter.score_point_ids.length} 项评分点`"
+                >
+                  {{ chapter.score_point_ids.length }}
+                </span>
+
+                <!-- 悬浮快捷操作按钮组 -->
+                <div class="nav-row-actions" @click.stop>
                   <button
-                    v-if="chapter.children?.length"
-                    class="chapter-heading-control chapter-heading-toggle"
+                    class="nav-action-icon"
                     type="button"
-                    :aria-expanded="isChapterExpanded(chapter.chapter_id)"
-                    :aria-label="`${isChapterExpanded(chapter.chapter_id) ? '收起' : '展开'} ${chapter.title} 的子章节`"
-                    @click="toggleChapter(chapter.chapter_id)"
+                    title="内联重命名"
+                    @click="startInlineEdit(chapter)"
                   >
-                    <span class="chapter-disclosure" aria-hidden="true">›</span>
-                    <h4>{{ chapter.title }}</h4>
+                    ✏️
                   </button>
-                  <div v-else class="chapter-heading-control">
-                    <span class="chapter-disclosure-spacer" aria-hidden="true" />
-                    <h4>{{ chapter.title }}</h4>
+                  <button
+                    class="nav-action-icon"
+                    type="button"
+                    title="添加子章节"
+                    @click="addChildChapter(chapter.chapter_id)"
+                  >
+                    ➕
+                  </button>
+                  <button
+                    class="nav-action-icon"
+                    type="button"
+                    title="向上移动"
+                    @click="moveOutlineChapter(chapter.chapter_id, 'up')"
+                  >
+                    ⬆️
+                  </button>
+                  <button
+                    class="nav-action-icon"
+                    type="button"
+                    title="向下移动"
+                    @click="moveOutlineChapter(chapter.chapter_id, 'down')"
+                  >
+                    ⬇️
+                  </button>
+                  <button
+                    class="nav-action-icon nav-action-delete"
+                    type="button"
+                    title="删除章节"
+                    @click="deleteOutlineChapter(chapter.chapter_id)"
+                  >
+                    🗑️
+                  </button>
+                </div>
+              </div>
+            </nav>
+
+            <!-- 底部辅助导航（全局质量门 / 评分点核验） -->
+            <footer class="nav-pane-footer">
+              <button
+                v-if="planningView.quality_gates?.length"
+                class="nav-footer-item"
+                :class="{ active: selectedOutlineChapterId === '__quality_gates__' }"
+                type="button"
+                @click="selectedOutlineChapterId = '__quality_gates__'"
+              >
+                <span>🛡️ 全文质量门</span>
+                <b class="nav-footer-badge">{{ planningView.quality_gates.length }} 项</b>
+              </button>
+              <button
+                v-if="planningView.score_points?.length"
+                class="nav-footer-item"
+                :class="{ active: selectedOutlineChapterId === '__all_scores__' }"
+                type="button"
+                @click="selectedOutlineChapterId = '__all_scores__'"
+              >
+                <span>🏆 评分点全景核验</span>
+                <b class="nav-footer-badge">{{ planningView.score_points.length }} 项</b>
+              </button>
+            </footer>
+          </aside>
+
+          <!-- 右侧：选中章节关联信息与编辑面板 -->
+          <main class="planning-detail-pane" aria-label="章节关联信息与编辑">
+            <!-- 视图 A：普通章节详情与编辑 -->
+            <template v-if="currentOutlineChapter && selectedOutlineChapterId !== '__quality_gates__' && selectedOutlineChapterId !== '__all_scores__'">
+              <!-- 顶部 Header 卡片 -->
+              <header class="detail-header-card">
+                <div class="detail-header-main">
+                  <div class="detail-chapter-meta">
+                    <span class="detail-depth-pill">第 {{ currentOutlineChapter.depth }} 级章节</span>
+                    <span v-if="currentOutlineChapter.parent_chapter_id" class="detail-parent-hint">
+                      所属上级：{{ flatOutline.find(c => c.chapter_id === currentOutlineChapter.parent_chapter_id)?.title || currentOutlineChapter.parent_chapter_id }}
+                    </span>
+                    <span v-if="currentOutlineChapter.score_point_ids?.length" class="coverage-count">
+                      关联 {{ currentOutlineChapter.score_point_ids.length }} 项评分点
+                    </span>
                   </div>
-                  <span v-if="chapter.score_point_ids.length" class="coverage-count">
-                    覆盖 {{ chapter.score_point_ids.length }} 项
-                  </span>
+                  <h3 class="detail-title-display">
+                    <span class="detail-num-tag">{{ currentOutlineChapter.number }}</span>
+                    {{ currentOutlineChapter.title }}
+                  </h3>
                 </div>
-                <p>{{ chapter.purpose }}</p>
-                <div v-if="chapter.direct_score_points.length" class="chapter-scores">
+
+                <div class="detail-header-actions">
                   <button
-                    v-for="point in chapter.direct_score_points"
-                    :key="point.score_point_id"
+                    class="btn btn-sm"
                     type="button"
-                    :class="{ active: selectedScoreId === point.score_point_id }"
-                    :aria-pressed="selectedScoreId === point.score_point_id"
-                    @click="toggleScore(point.score_point_id)"
+                    title="添加下属子章节"
+                    @click="addChildChapter(currentOutlineChapter.chapter_id)"
                   >
-                    {{ point.title }} · {{ scorePointValue(point) }}
+                    ➕ 添加子章节
+                  </button>
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    title="上移此章节"
+                    @click="moveOutlineChapter(currentOutlineChapter.chapter_id, 'up')"
+                  >
+                    ⬆️ 上移
+                  </button>
+                  <button
+                    class="btn btn-sm"
+                    type="button"
+                    title="下移此章节"
+                    @click="moveOutlineChapter(currentOutlineChapter.chapter_id, 'down')"
+                  >
+                    ⬇️ 下移
+                  </button>
+                  <button
+                    class="btn btn-sm btn-danger-outline"
+                    type="button"
+                    title="删除本章节"
+                    @click="deleteOutlineChapter(currentOutlineChapter.chapter_id)"
+                  >
+                    🗑️ 删除本章
                   </button>
                 </div>
-                <ul v-if="chapter.writing_objectives?.length" class="chapter-objectives">
-                  <li v-for="objective in chapter.writing_objectives.slice(0, 2)" :key="objective">
-                    {{ objective }}
-                  </li>
-                </ul>
-                <div v-if="chapter.score_conditions.length" class="chapter-conditions">
-                  <strong>满分条件</strong>
-                  <span
-                    v-for="condition in chapter.score_conditions"
-                    :key="condition.condition_id"
+              </header>
+
+              <div class="detail-sections-container">
+                <!-- 1. 基本信息编辑 -->
+                <section class="detail-card">
+                  <div class="detail-card-header">
+                    <h4>📝 基本信息</h4>
+                    <span class="detail-hint-text">可直接在下方编辑章节序号、标题与编写目的</span>
+                  </div>
+                  <div class="detail-form-grid">
+                    <label class="form-field-group">
+                      <span class="field-label">章节序号</span>
+                      <input
+                        class="form-input"
+                        type="text"
+                        :value="currentOutlineChapter.number"
+                        placeholder="例如：3.2 或 三、"
+                        @input="updateOutlineChapter(currentOutlineChapter.chapter_id, { number: $event.target.value })"
+                      />
+                    </label>
+                    <label class="form-field-group">
+                      <span class="field-label">章节标题</span>
+                      <input
+                        class="form-input"
+                        type="text"
+                        :value="currentOutlineChapter.title"
+                        placeholder="例如：技术方案与实施路径"
+                        @input="updateOutlineChapter(currentOutlineChapter.chapter_id, { title: $event.target.value })"
+                      />
+                    </label>
+                  </div>
+                  <label class="form-field-group full-width">
+                    <span class="field-label">编写目的与响应导向 (Purpose)</span>
+                    <textarea
+                      class="form-textarea"
+                      rows="3"
+                      :value="currentOutlineChapter.purpose"
+                      placeholder="明确该章节的响应意图、核心论述重点及满足的招标文件要求..."
+                      @input="updateOutlineChapter(currentOutlineChapter.chapter_id, { purpose: $event.target.value })"
+                    ></textarea>
+                  </label>
+                </section>
+
+                <!-- 2. 写作目标与要求 (Writing Objectives) -->
+                <section class="detail-card">
+                  <div class="detail-card-header">
+                    <h4>🎯 写作目标与核心要点</h4>
+                    <span class="detail-hint-text">指导后续 AI 正文编写，支持增删改</span>
+                  </div>
+                  <div v-if="currentOutlineChapter.writing_objectives?.length" class="objectives-edit-list">
+                    <div
+                      v-for="(obj, idx) in currentOutlineChapter.writing_objectives"
+                      :key="idx"
+                      class="objective-edit-item"
+                    >
+                      <span class="objective-index">{{ idx + 1 }}</span>
+                      <input
+                        class="form-input objective-input"
+                        type="text"
+                        :value="obj"
+                        placeholder="填写具体写作目标或论述要点..."
+                        @input="updateChapterObjective(currentOutlineChapter.chapter_id, idx, $event.target.value)"
+                      />
+                      <button
+                        class="objective-remove-btn"
+                        type="button"
+                        title="删除该目标"
+                        @click="removeChapterObjective(currentOutlineChapter.chapter_id, idx)"
+                      >×</button>
+                    </div>
+                  </div>
+                  <p v-else class="detail-empty-text">当前暂未设定写作目标，可在下方添加。</p>
+
+                  <div class="objective-add-bar">
+                    <input
+                      v-model="newObjectiveText"
+                      class="form-input objective-new-input"
+                      type="text"
+                      placeholder="输入新的写作目标/论述要点..."
+                      @keydown.enter="addChapterObjective(currentOutlineChapter.chapter_id)"
+                    />
+                    <button
+                      class="btn btn-sm btn-primary"
+                      type="button"
+                      :disabled="!newObjectiveText.trim()"
+                      @click="addChapterObjective(currentOutlineChapter.chapter_id)"
+                    >
+                      ➕ 添加目标
+                    </button>
+                  </div>
+                </section>
+
+                <!-- 3. 直接关联评分点 (Direct Score Points) -->
+                <section class="detail-card">
+                  <div class="detail-card-header">
+                    <h4>🏆 关联评分点</h4>
+                    <span class="detail-badge-count">{{ currentOutlineChapter.direct_score_points?.length || currentOutlineChapter.score_points?.length || 0 }} 项</span>
+                  </div>
+                  <div
+                    v-if="(currentOutlineChapter.direct_score_points?.length || currentOutlineChapter.score_points?.length)"
+                    class="detail-score-list"
                   >
-                    <code>{{ condition.condition_id }}</code>
-                    {{ condition.normalized_condition || condition.text }}
-                  </span>
-                </div>
-                <details v-if="chapter.requirements.length" class="chapter-requirements">
-                  <summary>关联需求原文 · {{ chapter.requirements.length }} 项</summary>
+                    <article
+                      v-for="point in (currentOutlineChapter.direct_score_points?.length ? currentOutlineChapter.direct_score_points : currentOutlineChapter.score_points)"
+                      :key="point.score_point_id"
+                      class="detail-score-card"
+                    >
+                      <div class="detail-score-head">
+                        <strong>{{ point.title }}</strong>
+                        <span class="detail-score-val">{{ scorePointValue(point) }}</span>
+                      </div>
+                      <p class="detail-score-crit">{{ point.criterion || '无评分细则说明' }}</p>
+                      <div class="detail-score-footer">
+                        <span class="score-depth-tag">{{ responseDepthLabel(point.response_depth) }}</span>
+                        <em v-if="point.review_status !== 'confirmed'" class="review-tag">需复核</em>
+                      </div>
+                    </article>
+                  </div>
+                  <p v-else class="detail-empty-text">本章节未直接绑定评分点（可能由子章节承载响应或属于通用章节）。</p>
+                </section>
+
+                <!-- 4. 关联满分条件与落位 (Score Conditions) -->
+                <section class="detail-card">
+                  <div class="detail-card-header">
+                    <h4>💎 关联满分条件与落位</h4>
+                    <span class="detail-badge-count">{{ currentOutlineChapter.score_conditions?.length || 0 }} 项</span>
+                  </div>
+                  <div v-if="currentOutlineChapter.score_conditions?.length" class="detail-conditions-list">
+                    <article
+                      v-for="cond in currentOutlineChapter.score_conditions"
+                      :key="cond.condition_id"
+                      class="condition-card"
+                    >
+                      <header>
+                        <code>{{ cond.condition_id }}</code>
+                        <span :class="`condition-role role-${cond.condition_role}`">
+                          {{ conditionRoleLabel(cond.condition_role) }}
+                        </span>
+                      </header>
+                      <strong>{{ cond.normalized_condition || cond.text }}</strong>
+                      <p v-if="cond.text && cond.text !== cond.normalized_condition" class="condition-raw">
+                        原始拆解：{{ cond.text }}
+                      </p>
+                      <blockquote v-if="cond.source_excerpt">{{ cond.source_excerpt }}</blockquote>
+                      <p v-if="cond.source_location?.label" class="source-location">
+                        <span>来源</span> {{ cond.source_location.label }}
+                        <code v-if="cond.source_location.chunk_id">{{ cond.source_location.chunk_id }}</code>
+                      </p>
+                    </article>
+                  </div>
+                  <p v-else class="detail-empty-text">当前章节无独立满分条件要求。</p>
+                </section>
+
+                <!-- 5. 关联招标文件需求原文 (Requirements) -->
+                <section class="detail-card">
+                  <div class="detail-card-header">
+                    <h4>📄 关联招标文件需求原文</h4>
+                    <span class="detail-badge-count">{{ currentOutlineChapter.requirements?.length || 0 }} 项</span>
+                  </div>
+                  <div v-if="currentOutlineChapter.requirements?.length" class="detail-requirements-list">
+                    <article
+                      v-for="req in currentOutlineChapter.requirements"
+                      :key="req.requirement_id"
+                      class="requirement-card"
+                    >
+                      <header>
+                        <code>{{ req.requirement_id }}</code>
+                        <small v-if="req.source_location?.label">{{ req.source_location.label }}</small>
+                      </header>
+                      <p>{{ req.original_text || req.normalized_requirement || '未找到关联需求原文' }}</p>
+                    </article>
+                  </div>
+                  <p v-else class="detail-empty-text">当前章节无直接关联的需求原文条目。</p>
+                </section>
+
+                <!-- 6. 下属子章节概览（若有） -->
+                <section v-if="currentOutlineChapter.children?.length" class="detail-card">
+                  <div class="detail-card-header">
+                    <h4>📂 下属子章节一览</h4>
+                    <span class="detail-badge-count">{{ currentOutlineChapter.children.length }} 个子章节</span>
+                  </div>
+                  <div class="detail-subchapters-grid">
+                    <button
+                      v-for="child in currentOutlineChapter.children"
+                      :key="child.chapter_id"
+                      class="subchapter-item-btn"
+                      type="button"
+                      @click="selectedOutlineChapterId = child.chapter_id"
+                    >
+                      <span class="subchapter-num">{{ child.number }}</span>
+                      <strong class="subchapter-title">{{ child.title }}</strong>
+                      <span v-if="child.score_point_ids?.length" class="subchapter-score-pill">
+                        覆盖 {{ child.score_point_ids.length }} 项
+                      </span>
+                    </button>
+                  </div>
+                </section>
+              </div>
+            </template>
+
+            <!-- 视图 B：全文质量门全景 -->
+            <template v-else-if="selectedOutlineChapterId === '__quality_gates__'">
+              <div class="quality-gate-view">
+                <header class="detail-header-card">
+                  <div>
+                    <p class="section-kicker">全局保障机制</p>
+                    <h3>🛡️ 全文质量门 (Document Quality Gates)</h3>
+                    <p class="panel-description">不生成机械章节，贯穿全文的质量把控要求与审核标准。</p>
+                  </div>
+                  <span class="detail-badge-count">{{ planningView.quality_gates.length }} 项质量门</span>
+                </header>
+
+                <div class="quality-gate-list">
                   <article
-                    v-for="requirement in chapter.requirements"
-                    :key="requirement.requirement_id"
+                    v-for="gate in planningView.quality_gates"
+                    :id="'quality-gate-' + gate.gate_id"
+                    :key="gate.gate_id"
+                    class="quality-gate-card"
                   >
                     <header>
-                      <code>{{ requirement.requirement_id }}</code>
-                      <small>{{ requirement.source_location.label }}</small>
+                      <code>{{ gate.gate_id }}</code>
+                      <span>document_quality_gate</span>
                     </header>
-                    <p>
-                      {{
-                        requirement.original_text
-                          || requirement.normalized_requirement
-                          || '未找到关联需求原文'
-                      }}
-                    </p>
+                    <ul>
+                      <li v-for="criterion in gate.criteria" :key="criterion">{{ criterion }}</li>
+                    </ul>
+                    <div v-if="gate.response_units.length" class="quality-gate-bindings">
+                      <strong>全文响应任务</strong>
+                      <span v-for="unit in gate.response_units" :key="unit.unit_id">
+                        <code>{{ unit.unit_id }}</code> {{ unit.title }}
+                      </span>
+                    </div>
+                    <div v-if="gate.score_conditions.length" class="quality-gate-bindings">
+                      <strong>满分条件</strong>
+                      <span v-for="condition in gate.score_conditions" :key="condition.condition_id">
+                        <code>{{ condition.condition_id }}</code>
+                        {{ condition.normalized_condition || condition.text }}
+                      </span>
+                    </div>
+                    <details v-if="gate.requirements?.length" class="chapter-requirements">
+                      <summary>关联需求原文 · {{ gate.requirements.length }} 项</summary>
+                      <article
+                        v-for="requirement in gate.requirements"
+                        :key="requirement.requirement_id"
+                      >
+                        <header>
+                          <code>{{ requirement.requirement_id }}</code>
+                          <small>{{ requirement.source_location.label }}</small>
+                        </header>
+                        <p>{{ requirement.original_text || requirement.normalized_requirement || '未找到关联需求原文' }}</p>
+                      </article>
+                    </details>
+                    <details v-if="gate.check_items?.length">
+                      <summary>查看 {{ gate.check_items.length }} 个检查项</summary>
+                      <ul>
+                        <li v-for="item in gate.check_items" :key="item">{{ item }}</li>
+                      </ul>
+                    </details>
                   </article>
-                </details>
+                </div>
               </div>
-            </article>
-          </div>
-        </div>
+            </template>
 
-        <section
-          v-if="planningView.quality_gates.length"
-          class="quality-gate-section"
-          aria-labelledby="quality-gate-heading"
-        >
-          <div class="subpanel-title">
-            <div>
-              <p class="section-kicker">不生成机械章节</p>
-              <h3 id="quality-gate-heading">全文质量门</h3>
-            </div>
-            <span>{{ planningView.quality_gates.length }} 项</span>
-          </div>
-          <div class="quality-gate-list">
-            <article
-              v-for="gate in planningView.quality_gates"
-              :id="`quality-gate-${gate.gate_id}`"
-              :key="gate.gate_id"
-              class="quality-gate-card"
-            >
-              <header>
-                <code>{{ gate.gate_id }}</code>
-                <span>document_quality_gate</span>
-              </header>
-              <ul>
-                <li v-for="criterion in gate.criteria" :key="criterion">{{ criterion }}</li>
-              </ul>
-              <div v-if="gate.response_units.length" class="quality-gate-bindings">
-                <strong>全文响应任务</strong>
-                <span v-for="unit in gate.response_units" :key="unit.unit_id">
-                  <code>{{ unit.unit_id }}</code>
-                  {{ unit.title }}
-                </span>
+            <!-- 视图 C：评分点全景核验 -->
+            <template v-else-if="selectedOutlineChapterId === '__all_scores__'">
+              <div class="all-scores-view">
+                <header class="detail-header-card">
+                  <div>
+                    <p class="section-kicker">逐项核验</p>
+                    <h3>🏆 评分点全景核验与落位跟踪</h3>
+                    <p class="panel-description">选择评分点后，左侧目录树将高亮对应覆盖的章节节点。</p>
+                  </div>
+                  <button
+                    v-if="selectedScoreId"
+                    class="btn btn-sm"
+                    type="button"
+                    @click="selectedScoreId = ''"
+                  >
+                    清除高亮筛选
+                  </button>
+                </header>
+
+                <div class="all-scores-grid">
+                  <article
+                    v-for="point in planningView.score_points"
+                    :key="point.score_point_id"
+                    class="score-point-card"
+                    :class="{ selected: selectedScoreId === point.score_point_id }"
+                  >
+                    <button
+                      class="score-item"
+                      :class="{ selected: selectedScoreId === point.score_point_id }"
+                      type="button"
+                      :aria-pressed="selectedScoreId === point.score_point_id"
+                      @click="toggleScore(point.score_point_id)"
+                    >
+                      <span class="score-item-heading">
+                        <strong>{{ point.title }}</strong>
+                        <b>{{ scorePointValue(point) }}</b>
+                      </span>
+                      <span class="score-criterion">{{ point.criterion }}</span>
+                      <span class="score-meta">
+                        {{ responseDepthLabel(point.response_depth) }}
+                        <em v-if="point.review_status !== 'confirmed'">需复核</em>
+                      </span>
+                    </button>
+                    <details
+                      v-if="point.score_conditions?.length"
+                      class="condition-trace"
+                      :open="selectedScoreId === point.score_point_id"
+                    >
+                      <summary>查看 {{ point.score_conditions.length }} 个满分条件与落位</summary>
+                      <div class="condition-list">
+                        <article
+                          v-for="condition in point.score_conditions"
+                          :key="condition.condition_id"
+                          class="condition-card"
+                        >
+                          <header>
+                            <code>{{ condition.condition_id }}</code>
+                            <span :class="`condition-role role-${condition.condition_role}`">
+                              {{ conditionRoleLabel(condition.condition_role) }}
+                            </span>
+                          </header>
+                          <strong>{{ condition.normalized_condition || condition.text }}</strong>
+                          <p v-if="condition.text" class="condition-raw">原始拆解：{{ condition.text }}</p>
+                          <blockquote>{{ condition.source_excerpt }}</blockquote>
+                          <p class="source-location">
+                            <span>来源</span> {{ condition.source_location.label }}
+                            <code v-if="condition.source_location.chunk_id">{{ condition.source_location.chunk_id }}</code>
+                          </p>
+                          <dl class="trace-relations">
+                            <div>
+                              <dt>响应任务</dt>
+                              <dd v-if="condition.response_units.length">
+                                <span v-for="unit in condition.response_units" :key="unit.unit_id">
+                                  <code>{{ unit.unit_id }}</code> {{ unit.title }}
+                                </span>
+                              </dd>
+                              <dd v-else class="trace-missing">未绑定 ScoreResponseUnit</dd>
+                            </div>
+                            <div>
+                              <dt>最终落位</dt>
+                              <dd v-if="condition.destinations.length">
+                                <a
+                                  v-for="destination in condition.destinations"
+                                  :key="traceDestinationKey(destination)"
+                                  :href="traceDestinationHref(destination)"
+                                  @click="destination.type === 'chapter' && (selectedOutlineChapterId = destination.chapter_id)"
+                                >
+                                  {{ traceDestinationLabel(destination) }}
+                                </a>
+                              </dd>
+                              <dd v-else class="trace-missing">尚未绑定章节或全文质量门</dd>
+                            </div>
+                          </dl>
+                        </article>
+                      </div>
+                    </details>
+                  </article>
+                </div>
               </div>
-              <div v-if="gate.score_conditions.length" class="quality-gate-bindings">
-                <strong>满分条件</strong>
-                <span v-for="condition in gate.score_conditions" :key="condition.condition_id">
-                  <code>{{ condition.condition_id }}</code>
-                  {{ condition.normalized_condition || condition.text }}
-                </span>
+            </template>
+
+            <!-- 视图 D：未选择章节提示 -->
+            <template v-else>
+              <div class="planning-empty">
+                <h3>请在左侧选择章节</h3>
+                <p>点击左侧目录树中的任意章节查看关联信息与在线修改，或点击左上角“➕ 新建章节”。</p>
               </div>
-              <details v-if="gate.requirements?.length" class="chapter-requirements">
-                <summary>关联需求原文 · {{ gate.requirements.length }} 项</summary>
-                <article
-                  v-for="requirement in gate.requirements"
-                  :key="requirement.requirement_id"
-                >
-                  <header>
-                    <code>{{ requirement.requirement_id }}</code>
-                    <small>{{ requirement.source_location.label }}</small>
-                  </header>
-                  <p>
-                    {{
-                      requirement.original_text
-                        || requirement.normalized_requirement
-                        || '未找到关联需求原文'
-                    }}
-                  </p>
-                </article>
-              </details>
-              <details v-if="gate.check_items?.length">
-                <summary>查看 {{ gate.check_items.length }} 个检查项</summary>
-                <ul>
-                  <li v-for="item in gate.check_items" :key="item">{{ item }}</li>
-                </ul>
-              </details>
-            </article>
-          </div>
-        </section>
+            </template>
+            <div class="detail-pane-bottom-spacer" aria-hidden="true"></div>
+          </main>
+        </div>
 
         <div v-if="planningView.uncovered_response_units.length" class="uncovered-warning" role="alert">
           <strong>仍有 {{ planningView.uncovered_response_units.length }} 个评分响应任务未被目录或全文质量门覆盖：</strong>
@@ -1892,6 +2308,7 @@
 </template>
 
 <script setup>
+// V3WorkspaceView - updated 2026-08-25
 defineOptions({ name: 'V3WorkspaceView' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -1985,6 +2402,11 @@ const writerChatTurns = ref([])
 const selectedScoreId = ref('')
 const selectedPipelineProductKind = ref('')
 const expandedChapterIds = ref(new Set())
+const selectedOutlineChapterId = ref('')
+const outlineSearchQuery = ref('')
+const inlineEditingChapterId = ref('')
+const inlineEditingTitle = ref('')
+const newObjectiveText = ref('')
 const pendingUploads = reactive({ tender: [], score: [], company: [] })
 const waitingForOutlineCompletion = ref(false)
 const activeTab = ref('upload')
@@ -2183,6 +2605,17 @@ async function deleteInitialChatTurn(turn) {
   })
   if (!confirmed) return
   initialChatTurns.value = initialChatTurns.value.filter(t => t.id !== turn.id)
+}
+
+function formatFilename(name) {
+  if (!name) return ''
+  return String(name).replace(/^[\/\\]?[a-f0-9]{20,}_?/i, '').replace(/^[\/\\]/, '')
+}
+
+async function sendPresetChat(msg) {
+  if (!msg || uploading.value || running.value || outlineBusy.value) return
+  initialChatInput.value = msg
+  await sendInitialChat()
 }
 
 async function sendInitialChat() {
@@ -2657,52 +3090,11 @@ const outlineActionDisabled = computed(() => (
   || !secondStageConfirmed.value
 ))
 
-// 过程与大模型监控相关（已置于全部依赖变量声明之后，确保安全求值）
+// 过程与大模型监控相关
 const showLlmModal = ref(false)
 const runningDurationSeconds = ref(0)
 let runningTimer = null
 let assistantClockTimer = null
-
-watch(
-  () => (
-    outlineBusy.value
-    || generationBusy.value
-    || (running.value && ['outline', 'document'].includes(runningAction.value))
-    || ['running', 'processing'].includes(pipelineStatus.value)
-  ),
-  (isBusy, wasBusy) => {
-    if (isBusy) {
-      if (!wasBusy) runningDurationSeconds.value = 0
-      if (!runningTimer) {
-        runningTimer = window.setInterval(() => {
-          runningDurationSeconds.value += 1
-        }, 1000)
-      }
-    } else {
-      if (runningTimer) {
-        window.clearInterval(runningTimer)
-        runningTimer = null
-      }
-    }
-  },
-  { immediate: true },
-)
-
-watch(
-  () => initialAsking.value || outlineBusy.value || generationBusy.value,
-  isActive => {
-    if (isActive && !assistantClockTimer) {
-      assistantClockNow.value = Date.now()
-      assistantClockTimer = window.setInterval(() => {
-        assistantClockNow.value = Date.now()
-      }, 1000)
-    } else if (!isActive && assistantClockTimer) {
-      window.clearInterval(assistantClockTimer)
-      assistantClockTimer = null
-    }
-  },
-  { immediate: true },
-)
 
 const allLlmRequests = computed(() => {
   const result = []
@@ -2806,21 +3198,21 @@ function timestampMilliseconds(value) {
 }
 
 function workflowElapsedSeconds(stages, isRunning, fallbackSeconds = 0, operation = null) {
-  const startedAt = stages
-    .map(stage => timestampMilliseconds(stage.started_at))
+  const startedAt = (stages || [])
+    .map(stage => timestampMilliseconds(stage?.started_at))
     .filter(Boolean)
   if (!startedAt.length) {
     if (operation && (operation.started_at || operation.created_at)) {
       const opStart = timestampMilliseconds(operation.started_at || operation.created_at)
-      const opEnd = isRunning ? assistantClockNow.value : timestampMilliseconds(operation.updated_at || operation.completed_at || operation.created_at)
+      const opEnd = isRunning ? assistantClockNow.value : timestampMilliseconds(operation.completed_at || operation.updated_at || operation.created_at)
       if (opStart && opEnd) {
         return Math.max(0, Math.floor((opEnd - opStart) / 1000))
       }
     }
     return fallbackSeconds
   }
-  const completedAt = stages
-    .map(stage => timestampMilliseconds(stage.completed_at))
+  const completedAt = (stages || [])
+    .map(stage => timestampMilliseconds(stage?.completed_at))
     .filter(Boolean)
   const end = isRunning ? assistantClockNow.value : (Math.max(...completedAt, ...startedAt))
   return Math.max(0, Math.floor((end - Math.min(...startedAt)) / 1000))
@@ -2832,20 +3224,95 @@ function assistantTurnElapsedSeconds(turn) {
   return Math.max(0, Math.floor((finishedAt - startedAt) / 1000))
 }
 
-const outlineElapsedSeconds = computed(() => planningPhaseState.value.elapsed_seconds ?? null)
-const generationElapsedSeconds = computed(() => writingPhaseState.value.elapsed_seconds ?? null)
 function phaseProcessStatus(status) {
   if (['running', 'in_progress'].includes(status)) return 'processing'
   if (status === 'completed') return 'completed'
   if (['failed', 'blocked', 'outdated'].includes(status)) return 'failed'
   return 'waiting'
 }
+
 const outlineProcessStatus = computed(() => {
   return phaseProcessStatus(String(planningPhaseState.value.phase_status || 'not_started'))
 })
+
 const generationProcessStatus = computed(() => {
   return phaseProcessStatus(String(writingPhaseState.value.phase_status || 'not_started'))
 })
+
+const outlineElapsedSeconds = computed(() => {
+  const isRunning = outlineProcessStatus.value === 'processing' || outlineBusy.value
+  const stages = pipelineStages.value || []
+  const operation = planningPhaseState.value || null
+  const fallback = runningDurationSeconds.value || (isRunning ? 1 : null)
+  const calc = workflowElapsedSeconds(stages, isRunning, fallback, operation)
+  if (isRunning) {
+    const _now = assistantClockNow.value
+    return Math.max(1, calc || runningDurationSeconds.value || 1)
+  }
+  return calc ?? planningPhaseState.value.elapsed_seconds ?? null
+})
+
+const generationElapsedSeconds = computed(() => {
+  const isRunning = generationProcessStatus.value === 'processing' || generationBusy.value
+  const stages = generationExecutionStages.value || []
+  const operation = writingPhaseState.value || null
+  const fallback = runningDurationSeconds.value || (isRunning ? 1 : null)
+  const calc = workflowElapsedSeconds(stages, isRunning, fallback, operation)
+  if (isRunning) {
+    const _now = assistantClockNow.value
+    return Math.max(1, calc || runningDurationSeconds.value || 1)
+  }
+  return calc ?? writingPhaseState.value.elapsed_seconds ?? null
+})
+
+watch(
+  () => (
+    outlineBusy.value
+    || generationBusy.value
+    || (running.value && ['outline', 'document'].includes(runningAction.value))
+    || ['running', 'processing'].includes(pipelineStatus.value)
+  ),
+  (isBusy, wasBusy) => {
+    if (isBusy) {
+      if (!wasBusy) runningDurationSeconds.value = 0
+      if (!runningTimer) {
+        runningTimer = window.setInterval(() => {
+          runningDurationSeconds.value += 1
+        }, 1000)
+      }
+    } else {
+      if (runningTimer) {
+        window.clearInterval(runningTimer)
+        runningTimer = null
+      }
+    }
+  },
+  { immediate: true },
+)
+
+watch(
+  () => (
+    initialAsking.value
+    || outlineBusy.value
+    || generationBusy.value
+    || outlineProcessStatus.value === 'processing'
+    || generationProcessStatus.value === 'processing'
+    || (running.value && ['outline', 'document'].includes(runningAction.value))
+    || ['running', 'processing'].includes(pipelineStatus.value)
+  ),
+  isActive => {
+    if (isActive && !assistantClockTimer) {
+      assistantClockNow.value = Date.now()
+      assistantClockTimer = window.setInterval(() => {
+        assistantClockNow.value = Date.now()
+      }, 1000)
+    } else if (!isActive && assistantClockTimer) {
+      window.clearInterval(assistantClockTimer)
+      assistantClockTimer = null
+    }
+  },
+  { immediate: true },
+)
 const showOutlineProcessMessage = computed(() => (
   hasOutline.value
   || planningReadyForReview.value
@@ -3156,9 +3623,324 @@ watch(
         .filter(chapter => chapter.children?.length)
         .map(chapter => chapter.chapter_id),
     )
+    if (!selectedOutlineChapterId.value || !flatOutline.value.some(c => c.chapter_id === selectedOutlineChapterId.value)) {
+      if (flatOutline.value.length > 0 && selectedOutlineChapterId.value !== '__quality_gates__' && selectedOutlineChapterId.value !== '__all_scores__') {
+        selectedOutlineChapterId.value = flatOutline.value[0].chapter_id
+      }
+    }
   },
   { immediate: true },
 )
+
+const currentOutlineChapter = computed(() => {
+  if (!selectedOutlineChapterId.value) return flatOutline.value[0] || null
+  return flatOutline.value.find(c => c.chapter_id === selectedOutlineChapterId.value) || flatOutline.value[0] || null
+})
+
+const filteredOutlineTree = computed(() => {
+  const query = outlineSearchQuery.value.trim().toLowerCase()
+  if (!query) return planningView.value.outline
+
+  function filterNodes(nodes) {
+    const matched = []
+    for (const node of nodes) {
+      const matchSelf = (node.title && String(node.title).toLowerCase().includes(query))
+        || (node.number && String(node.number).toLowerCase().includes(query))
+        || (node.purpose && String(node.purpose).toLowerCase().includes(query))
+      const matchedChildren = node.children?.length ? filterNodes(node.children) : []
+      if (matchSelf || matchedChildren.length > 0) {
+        matched.push({
+          ...node,
+          children: matchedChildren,
+        })
+      }
+    }
+    return matched
+  }
+  return filterNodes(planningView.value.outline)
+})
+
+const visibleNavOutline = computed(() => {
+  const query = outlineSearchQuery.value.trim().toLowerCase()
+  const source = query ? filteredOutlineTree.value : planningView.value.outline
+  const result = []
+  const appendVisible = chapters => {
+    for (const chapter of chapters) {
+      const directIds = new Set(chapter.direct_score_point_ids || [])
+      const projected = {
+        ...chapter,
+        direct_score_points: (chapter.score_points || []).filter(
+          point => directIds.has(point.score_point_id),
+        ),
+      }
+      result.push(projected)
+      if (projected.children?.length && (query || expandedChapterIds.value.has(projected.chapter_id))) {
+        appendVisible(projected.children)
+      }
+    }
+  }
+  appendVisible(source)
+  return result
+})
+
+function getBlueprintNodes() {
+  if (!snapshot.value) snapshot.value = {}
+  if (!snapshot.value.analysis) snapshot.value.analysis = {}
+  if (!snapshot.value.analysis.chapter_blueprint) snapshot.value.analysis.chapter_blueprint = {}
+  if (!Array.isArray(snapshot.value.analysis.chapter_blueprint.nodes)) {
+    snapshot.value.analysis.chapter_blueprint.nodes = (snapshot.value.planning?.blueprint?.nodes || []).map(n => ({ ...n }))
+  }
+  return snapshot.value.analysis.chapter_blueprint.nodes
+}
+
+function ensureBlueprintSync() {
+  if (!snapshot.value.planning) snapshot.value.planning = {}
+  if (!snapshot.value.planning.snapshot) snapshot.value.planning.snapshot = {}
+  if (!snapshot.value.planning.snapshot.chapter_blueprint) snapshot.value.planning.snapshot.chapter_blueprint = {}
+  snapshot.value.planning.snapshot.chapter_blueprint.nodes = getBlueprintNodes()
+}
+
+function updateOutlineChapter(chapterId, patch) {
+  const nodes = getBlueprintNodes()
+  let target = nodes.find(n => n.chapter_id === chapterId)
+  if (!target) {
+    const flat = flatOutline.value.find(c => c.chapter_id === chapterId)
+    if (flat) {
+      target = {
+        chapter_id: flat.chapter_id,
+        title: flat.title,
+        number: flat.number,
+        parent_chapter_id: flat.parent_chapter_id || '',
+        order: flat.order || 0,
+        purpose: flat.purpose || '',
+        writing_objectives: [...(flat.writing_objectives || [])],
+        score_point_ids: [...(flat.score_point_ids || [])],
+        score_condition_ids: [...(flat.score_condition_ids || [])],
+        primary_response_unit_ids: [...(flat.primary_response_unit_ids || [])],
+        supporting_response_unit_ids: [...(flat.supporting_response_unit_ids || [])],
+        requirement_ids: [...(flat.requirement_ids || [])],
+      }
+      nodes.push(target)
+    }
+  }
+  if (target) {
+    Object.assign(target, patch)
+  }
+  ensureBlueprintSync()
+}
+
+function addRootChapter() {
+  const nodes = getBlueprintNodes()
+  if (!nodes.length && flatOutline.value.length) {
+    for (const f of flatOutline.value) {
+      nodes.push({
+        chapter_id: f.chapter_id,
+        title: f.title,
+        number: f.number,
+        parent_chapter_id: f.parent_chapter_id || '',
+        order: f.order || 0,
+        purpose: f.purpose || '',
+        writing_objectives: [...(f.writing_objectives || [])],
+        score_point_ids: [...(f.score_point_ids || [])],
+        score_condition_ids: [...(f.score_condition_ids || [])],
+        primary_response_unit_ids: [...(f.primary_response_unit_ids || [])],
+        supporting_response_unit_ids: [...(f.supporting_response_unit_ids || [])],
+        requirement_ids: [...(f.requirement_ids || [])],
+      })
+    }
+  }
+  const rootNodes = nodes.filter(n => !n.parent_chapter_id)
+  const nextIndex = rootNodes.length + 1
+  const newId = `chapter_custom_${Date.now()}`
+  const newNode = {
+    chapter_id: newId,
+    parent_chapter_id: '',
+    order: rootNodes.length ? Math.max(...rootNodes.map(n => Number(n.order || 0))) + 1 : 1,
+    number: `${nextIndex}`,
+    title: `新章节 ${nextIndex}`,
+    purpose: '',
+    writing_objectives: [],
+    score_point_ids: [],
+    score_condition_ids: [],
+    primary_response_unit_ids: [],
+    supporting_response_unit_ids: [],
+    requirement_ids: [],
+  }
+  nodes.push(newNode)
+  ensureBlueprintSync()
+  selectedOutlineChapterId.value = newId
+}
+
+function addChildChapter(parentChapterId) {
+  const nodes = getBlueprintNodes()
+  if (!nodes.length && flatOutline.value.length) {
+    for (const f of flatOutline.value) {
+      nodes.push({
+        chapter_id: f.chapter_id,
+        title: f.title,
+        number: f.number,
+        parent_chapter_id: f.parent_chapter_id || '',
+        order: f.order || 0,
+        purpose: f.purpose || '',
+        writing_objectives: [...(f.writing_objectives || [])],
+        score_point_ids: [...(f.score_point_ids || [])],
+        score_condition_ids: [...(f.score_condition_ids || [])],
+        primary_response_unit_ids: [...(f.primary_response_unit_ids || [])],
+        supporting_response_unit_ids: [...(f.supporting_response_unit_ids || [])],
+        requirement_ids: [...(f.requirement_ids || [])],
+      })
+    }
+  }
+  const parent = nodes.find(n => n.chapter_id === parentChapterId) || flatOutline.value.find(c => c.chapter_id === parentChapterId)
+  if (!parent) return
+  const siblings = nodes.filter(n => n.parent_chapter_id === parentChapterId)
+  const nextSubIndex = siblings.length + 1
+  const parentNumber = parent.number || '1'
+  const newNumber = `${parentNumber}.${nextSubIndex}`
+  const newId = `chapter_custom_${Date.now()}`
+  const newNode = {
+    chapter_id: newId,
+    parent_chapter_id: parentChapterId,
+    order: siblings.length ? Math.max(...siblings.map(n => Number(n.order || 0))) + 1 : 1,
+    number: newNumber,
+    title: `新子章节 ${newNumber}`,
+    purpose: '',
+    writing_objectives: [],
+    score_point_ids: [],
+    score_condition_ids: [],
+    primary_response_unit_ids: [],
+    supporting_response_unit_ids: [],
+    requirement_ids: [],
+  }
+  nodes.push(newNode)
+  ensureBlueprintSync()
+  expandedChapterIds.value.add(parentChapterId)
+  selectedOutlineChapterId.value = newId
+}
+
+async function deleteOutlineChapter(chapterId) {
+  const confirmed = await confirmDialog({
+    title: '删除章节',
+    message: '确定要删除该章节及其所有子章节吗？',
+    confirmText: '删除',
+    cancelText: '取消',
+    tone: 'danger',
+  })
+  if (!confirmed) return
+  const nodes = getBlueprintNodes()
+  if (!nodes.length && flatOutline.value.length) {
+    for (const f of flatOutline.value) {
+      nodes.push({
+        chapter_id: f.chapter_id,
+        title: f.title,
+        number: f.number,
+        parent_chapter_id: f.parent_chapter_id || '',
+        order: f.order || 0,
+        purpose: f.purpose || '',
+        writing_objectives: [...(f.writing_objectives || [])],
+        score_point_ids: [...(f.score_point_ids || [])],
+        score_condition_ids: [...(f.score_condition_ids || [])],
+        primary_response_unit_ids: [...(f.primary_response_unit_ids || [])],
+        supporting_response_unit_ids: [...(f.supporting_response_unit_ids || [])],
+        requirement_ids: [...(f.requirement_ids || [])],
+      })
+    }
+  }
+  const toDelete = new Set([chapterId])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const node of nodes) {
+      if (node.parent_chapter_id && toDelete.has(node.parent_chapter_id) && !toDelete.has(node.chapter_id)) {
+        toDelete.add(node.chapter_id)
+        changed = true
+      }
+    }
+  }
+  const remaining = nodes.filter(n => !toDelete.has(n.chapter_id))
+  snapshot.value.analysis.chapter_blueprint.nodes = remaining
+  ensureBlueprintSync()
+  if (selectedOutlineChapterId.value === chapterId || toDelete.has(selectedOutlineChapterId.value)) {
+    selectedOutlineChapterId.value = remaining[0]?.chapter_id || ''
+  }
+}
+
+function moveOutlineChapter(chapterId, direction) {
+  const nodes = getBlueprintNodes()
+  if (!nodes.length && flatOutline.value.length) {
+    for (const f of flatOutline.value) {
+      nodes.push({
+        chapter_id: f.chapter_id,
+        title: f.title,
+        number: f.number,
+        parent_chapter_id: f.parent_chapter_id || '',
+        order: f.order || 0,
+        purpose: f.purpose || '',
+        writing_objectives: [...(f.writing_objectives || [])],
+        score_point_ids: [...(f.score_point_ids || [])],
+        score_condition_ids: [...(f.score_condition_ids || [])],
+        primary_response_unit_ids: [...(f.primary_response_unit_ids || [])],
+        supporting_response_unit_ids: [...(f.supporting_response_unit_ids || [])],
+        requirement_ids: [...(f.requirement_ids || [])],
+      })
+    }
+  }
+  const target = nodes.find(n => n.chapter_id === chapterId)
+  if (!target) return
+  const parentId = target.parent_chapter_id || ''
+  const siblings = nodes.filter(n => (n.parent_chapter_id || '') === parentId)
+  siblings.sort((a, b) => Number(a.order || 0) - Number(b.order || 0))
+  const currentIndex = siblings.findIndex(n => n.chapter_id === chapterId)
+  if (currentIndex === -1) return
+  const targetIndex = direction === 'up' ? currentIndex - 1 : currentIndex + 1
+  if (targetIndex < 0 || targetIndex >= siblings.length) return
+  const other = siblings[targetIndex]
+  const tempOrder = target.order || currentIndex
+  target.order = other.order || targetIndex
+  other.order = tempOrder
+  ensureBlueprintSync()
+}
+
+function startInlineEdit(chapter) {
+  inlineEditingChapterId.value = chapter.chapter_id
+  inlineEditingTitle.value = chapter.title || ''
+}
+
+function saveInlineEdit(chapterId) {
+  if (inlineEditingTitle.value.trim()) {
+    updateOutlineChapter(chapterId, { title: inlineEditingTitle.value.trim() })
+  }
+  inlineEditingChapterId.value = ''
+}
+
+function cancelInlineEdit() {
+  inlineEditingChapterId.value = ''
+}
+
+function addChapterObjective(chapterId) {
+  const text = newObjectiveText.value.trim()
+  if (!text) return
+  const chapter = flatOutline.value.find(c => c.chapter_id === chapterId)
+  if (!chapter) return
+  const objectives = [...(chapter.writing_objectives || []), text]
+  updateOutlineChapter(chapterId, { writing_objectives: objectives })
+  newObjectiveText.value = ''
+}
+
+function removeChapterObjective(chapterId, index) {
+  const chapter = flatOutline.value.find(c => c.chapter_id === chapterId)
+  if (!chapter || !chapter.writing_objectives) return
+  const objectives = chapter.writing_objectives.filter((_, i) => i !== index)
+  updateOutlineChapter(chapterId, { writing_objectives: objectives })
+}
+
+function updateChapterObjective(chapterId, index, text) {
+  const chapter = flatOutline.value.find(c => c.chapter_id === chapterId)
+  if (!chapter || !chapter.writing_objectives) return
+  const objectives = [...chapter.writing_objectives]
+  objectives[index] = text
+  updateOutlineChapter(chapterId, { writing_objectives: objectives })
+}
 watch(
   () => planningView.value.outline.map(chapter => chapter.chapter_id).join('|'),
   () => {
@@ -3407,7 +4189,7 @@ async function prepareOutline() {
   }
 }
 
-async function retryProjectFacts(withFeedback) {
+async function retryProjectFacts(withFeedback, regenerate = false) {
   if (outlineBusy.value || (running.value && runningAction.value === 'outline')) return
   const feedback = withFeedback ? projectFactFeedback.value.trim() : ''
   if (withFeedback && !feedback) return
@@ -3417,7 +4199,10 @@ async function retryProjectFacts(withFeedback) {
   try {
     const { data } = await prepareV3Outline(
       props.runId,
-      feedback ? { projectFeedback: feedback } : {},
+      {
+        ...(feedback ? { projectFeedback: feedback } : {}),
+        ...(regenerate ? { regenerateCapabilities: ['planning.project_understanding'] } : {}),
+      },
     )
     assertCommandAccepted(data, '全局项目事实重新生成失败。')
     projectFactFeedback.value = ''
@@ -4231,6 +5016,12 @@ function isChapterExpanded(chapterId) {
   return expandedChapterIds.value.has(chapterId)
 }
 
+function getChapterAriaLabel(chapter) {
+  if (!chapter) return ''
+  const action = isChapterExpanded(chapter.chapter_id) ? '收起' : '展开'
+  return `${action} ${chapter.title || ''} 的子章节`
+}
+
 function toggleChapter(chapterId) {
   const next = new Set(expandedChapterIds.value)
   if (next.has(chapterId)) next.delete(chapterId)
@@ -4251,23 +5042,30 @@ function collapseAllChapters() {
 }
 
 function exportOutlineMarkdown() {
-  const outlineChapters = visibleOutline.value || []
-  if (!outlineChapters.length) return
-  let mdText = '# 章节目录\n\n'
+  const rootChapters = planningView.value.outline || []
+  if (!rootChapters.length) return
+  let mdText = '# 章节目录草案\n\n'
   function renderChapter(ch, depth = 0) {
     const indent = '  '.repeat(depth)
+    const num = ch.number ? `${ch.number} ` : ''
     const title = ch.title || ch.chapter_id || ch.id
-    mdText += `${indent}- ${title}\n`
+    mdText += `${indent}- ${num}${title}\n`
+    if (ch.purpose) {
+      mdText += `${indent}  - **编制目的**：${ch.purpose}\n`
+    }
+    if (ch.writing_objectives?.length) {
+      mdText += `${indent}  - **写作目标**：${ch.writing_objectives.join('；')}\n`
+    }
     if (ch.children && ch.children.length) {
       ch.children.forEach(child => renderChapter(child, depth + 1))
     }
   }
-  outlineChapters.forEach(ch => renderChapter(ch, 0))
+  rootChapters.forEach(ch => renderChapter(ch, 0))
   const blob = new Blob([mdText], { type: 'text/markdown;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `章节目录_${props.workspaceId || 'outline'}.md`
+  a.download = `章节目录_${props.runId || 'outline'}.md`
   a.click()
   URL.revokeObjectURL(url)
 }
@@ -5289,6 +6087,22 @@ onUnmounted(() => {
   animation: tabFadeIn 0.25s ease-out;
 }
 
+.workspace-tab-view.tab-planning {
+  width: min(65vw, 1320px);
+  max-width: 95vw;
+  min-width: 0;
+  margin-inline: auto;
+  box-sizing: border-box;
+  flex: 1;
+  min-height: 0;
+  height: 100%;
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 16px 20px 20px;
+}
+
 @keyframes tabFadeIn {
   from {
     opacity: 0;
@@ -5309,13 +6123,15 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  margin-bottom: 20px;
-  padding: 14px 20px;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+  padding: 12px 18px;
   border: 1px solid rgba(226, 232, 240, 0.8);
   border-radius: 14px;
   background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(12px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+  box-sizing: border-box;
 }
 
 .sticky-bar-info {
@@ -5637,6 +6453,14 @@ onUnmounted(() => {
 
 .pipeline-panel,
 .planning-panel { grid-column: 1 / -1; }
+.planning-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-sizing: border-box;
+}
 .pipeline-heading { align-items: flex-end; }
 .pipeline-state {
   flex: 0 0 auto;
@@ -6491,60 +7315,764 @@ onUnmounted(() => {
 .planning-empty h3 { margin: 0; color: #334155; font-size: 15px; }
 .planning-empty p { max-width: 460px; margin: 7px 20px 0; font-size: 12px; }
 .zero-score-warning { margin-top: 18px; padding: 16px; font-size: 13px; }
-.planning-content {
+.planning-word-layout {
+  flex: 1;
+  min-height: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  gap: 12px;
-  margin-top: 18px;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  margin-top: 14px;
+  align-items: stretch;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+  padding-bottom: 16px;
 }
-.score-filter-panel {
-  min-width: 0;
+
+/* 左侧：Word 风格目录导航窗格 */
+.planning-nav-pane {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: #f8fafc;
   border: 1px solid #dbe3ee;
   border-radius: 12px;
-  background: #fbfcfe;
+  overflow: hidden;
+  width: 240px;
+  min-width: 240px;
+  max-width: 240px;
+  box-sizing: border-box;
+  flex-shrink: 0;
 }
-.score-filter-panel > summary {
+
+.nav-pane-header {
+  padding: 12px;
+  border-bottom: 1px solid #e2e8f0;
+  background: #ffffff;
+}
+
+.nav-search-bar {
   display: flex;
-  min-height: 58px;
+  align-items: center;
+  gap: 6px;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.nav-search-icon {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.nav-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: #1e293b;
+  outline: none;
+}
+
+.nav-search-clear {
+  border: none;
+  background: transparent;
+  font-size: 14px;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.nav-search-clear:hover {
+  color: #475569;
+}
+
+.nav-pane-toolbar {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 14px;
-  padding: 11px 14px;
-  color: #1e293b;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.nav-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid #3b82f6;
+  border-radius: 6px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 11px;
+  font-weight: 600;
   cursor: pointer;
-  list-style: none;
+  transition: all 0.15s ease;
 }
-.score-filter-panel > summary::-webkit-details-marker { display: none; }
-.score-filter-panel > summary > span { display: grid; gap: 3px; min-width: 0; }
-.score-filter-panel > summary strong { font-size: 13px; }
-.score-filter-panel > summary small { color: #64748b; font-size: 10px; line-height: 1.4; }
-.score-filter-panel > summary b {
-  flex: 0 0 auto;
-  color: #4338ca;
-  font-size: 10px;
+
+.nav-tool-btn:hover {
+  background: #dbeafe;
 }
-.score-filter-panel[open] > summary { border-bottom: 1px solid #e2e8f0; }
-.score-list,
-.outline-list {
+
+.nav-tool-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.nav-tool-link {
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.nav-tool-link:hover {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+
+.nav-tree-container {
+  flex: 1;
+  overflow-y: auto;
+  padding: 6px 0;
+  min-height: 380px;
+}
+
+.nav-tree-empty {
+  padding: 24px 16px;
+  text-align: center;
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.nav-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  position: relative;
+  transition: background-color 0.15s ease;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #334155;
+  user-select: none;
+}
+
+.nav-tree-row:hover {
+  background: #f1f5f9;
+}
+
+.nav-tree-row.active {
+  background: #e0e7ff;
+  color: #3730a3;
+  font-weight: 600;
+  box-shadow: inset 3px 0 #4f46e5;
+}
+
+.nav-tree-row.highlighted {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.nav-tree-row.dimmed {
+  opacity: 0.45;
+}
+
+.nav-tree-toggle,
+.nav-tree-spacer {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+}
+
+.nav-tree-toggle {
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0;
+  border-radius: 3px;
+}
+
+.nav-tree-toggle:hover {
+  background: #cbd5e1;
+  color: #0f172a;
+}
+
+.nav-tree-content {
+  flex: 1;
   min-width: 0;
-  padding: 14px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nav-chapter-num {
+  font-weight: 700;
+  color: #475569;
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.nav-tree-row.active .nav-chapter-num {
+  color: #4338ca;
+}
+
+.nav-chapter-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-inline-input {
+  width: 100%;
+  padding: 2px 4px;
+  border: 1px solid #4f46e5;
+  border-radius: 4px;
+  font-size: 12px;
+  outline: none;
+  background: #ffffff;
+}
+
+.nav-coverage-badge {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.nav-row-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.nav-tree-row:hover .nav-row-actions,
+.nav-tree-row.active .nav-row-actions {
+  display: inline-flex;
+}
+
+.nav-action-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  border-radius: 3px;
+  padding: 0;
+  opacity: 0.75;
+}
+
+.nav-action-icon:hover {
+  opacity: 1;
+  background: #cbd5e1;
+}
+
+.nav-action-delete:hover {
+  background: #fee2e2;
+}
+
+.nav-pane-footer {
+  border-top: 1px solid #e2e8f0;
+  padding: 8px 10px;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav-footer-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.nav-footer-item:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.nav-footer-item.active {
+  background: #eef2ff;
+  border-color: #a5b4fc;
+  color: #4338ca;
+}
+
+.nav-footer-badge {
+  font-size: 10px;
+  color: #64748b;
+  font-weight: normal;
+}
+
+/* 右侧：选中章节详情与编辑面板 (仅在右侧面板内部独立滚动) */
+.planning-detail-pane {
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 8px;
+  padding-bottom: 24px;
+  box-sizing: border-box;
+}
+
+.quality-gate-view,
+.all-scores-view,
+.detail-sections-container {
+  width: 100%;
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.detail-pane-bottom-spacer {
+  height: 80px;
+  width: 100%;
+  flex-shrink: 0;
+}
+
+.planning-detail-pane::-webkit-scrollbar,
+.nav-tree-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.planning-detail-pane::-webkit-scrollbar-track,
+.nav-tree-container::-webkit-scrollbar-track {
+  background: #f1f5f9;
+  border-radius: 4px;
+}
+
+.planning-detail-pane::-webkit-scrollbar-thumb,
+.nav-tree-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.planning-detail-pane::-webkit-scrollbar-thumb:hover,
+.nav-tree-container::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+.detail-header-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  background: #ffffff;
   border: 1px solid #e2e8f0;
   border-radius: 12px;
-  background: #fbfcfe;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
 }
-.subpanel-title { min-height: 34px; justify-content: space-between; gap: 10px; }
-.subpanel-title h3 { margin: 0; font-size: 14px; }
-.subpanel-title span { color: #64748b; font-size: 10px; }
-.outline-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; }
-.outline-actions .text-button { min-height: 30px; padding: 4px 6px; font-size: 9px; }
-.score-filter-panel .score-list {
-  max-height: 440px;
-  padding: 14px;
-  overflow: auto;
-  border: 0;
-  border-radius: 0;
+
+.detail-header-main {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.detail-chapter-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 11px;
+}
+
+.detail-depth-pill {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-weight: 700;
+}
+
+.detail-parent-hint {
+  color: #64748b;
+}
+
+.detail-title-display {
+  margin: 0;
+  font-size: 18px;
+  color: #0f172a;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  line-height: 1.35;
+}
+
+.detail-num-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 14px;
+}
+
+.detail-header-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+
+.btn-danger-outline {
+  border: 1px solid #fca5a5;
+  color: #b91c1c;
+  background: #fff;
+}
+
+.btn-danger-outline:hover {
+  background: #fef2f2;
+}
+
+.detail-sections-container {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.detail-card {
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px 18px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+}
+
+.detail-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.detail-card-header h4 {
+  margin: 0;
+  font-size: 14px;
+  color: #1e293b;
+  font-weight: 700;
+}
+
+.detail-hint-text {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.detail-badge-count {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  font-weight: 600;
+}
+
+.detail-form-grid {
+  display: grid;
+  grid-template-columns: 140px minmax(0, 1fr);
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.form-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form-field-group.full-width {
+  grid-column: 1 / -1;
+}
+
+.field-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #475569;
+}
+
+.form-input,
+.form-textarea {
+  width: 100%;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  padding: 7px 10px;
+  font-size: 13px;
+  color: #1e293b;
+  background: #ffffff;
+  outline: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  box-sizing: border-box;
+}
+
+.form-input:focus,
+.form-textarea:focus {
+  border-color: #4f46e5;
+  box-shadow: 0 0 0 2px rgba(79, 70, 229, 0.12);
+}
+
+.form-textarea {
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.objectives-edit-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.objective-edit-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.objective-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  border-radius: 50%;
+  background: #eef2ff;
+  color: #4338ca;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.objective-input {
+  flex: 1;
+}
+
+.objective-remove-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: none;
   background: transparent;
+  color: #94a3b8;
+  font-size: 16px;
+  cursor: pointer;
+  border-radius: 4px;
 }
+
+.objective-remove-btn:hover {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.objective-add-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.objective-new-input {
+  flex: 1;
+}
+
+.detail-empty-text {
+  margin: 8px 0;
+  color: #94a3b8;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.detail-score-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+
+.detail-score-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f8fafc;
+}
+
+.detail-score-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.detail-score-head strong {
+  font-size: 13px;
+  color: #0f172a;
+}
+
+.detail-score-val {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4338ca;
+  flex: 0 0 auto;
+}
+
+.detail-score-crit {
+  margin: 6px 0 8px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.detail-score-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.score-depth-tag {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.review-tag {
+  font-size: 10px;
+  color: #b45309;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.detail-conditions-list,
+.detail-requirements-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.requirement-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fafbfc;
+}
+
+.requirement-card header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.requirement-card p {
+  margin: 0;
+  font-size: 12px;
+  color: #334155;
+  line-height: 1.5;
+}
+
+.detail-subchapters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.subchapter-item-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.subchapter-item-btn:hover {
+  border-color: #a5b4fc;
+  background: #eff6ff;
+}
+
+.subchapter-num {
+  font-size: 11px;
+  font-weight: 700;
+  color: #4338ca;
+}
+
+.subchapter-title {
+  font-size: 12px;
+  color: #1e293b;
+  line-height: 1.35;
+}
+
+.subchapter-score-pill {
+  font-size: 10px;
+  color: #15803d;
+  background: #dcfce7;
+  padding: 1px 6px;
+  border-radius: 999px;
+  margin-top: 2px;
+}
+
+.all-scores-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+}
+
 .score-point-card { min-width: 0; margin-top: 8px; }
 .score-item {
   display: block;
@@ -6669,13 +8197,932 @@ onUnmounted(() => {
 .source-location > span { color: #334155; font-weight: 800; }
 .source-location code { display: block; margin-top: 2px; }
 .trace-relations { display: grid; gap: 6px; margin: 9px 0 0; }
-.trace-relations > div {
-  display: grid;
-  grid-template-columns: 54px minmax(0, 1fr);
-  gap: 7px;
+.msg-bubble {
+  background: #ffffff;
+  border: none;
+  border-radius: 14px;
+  padding: 16px 18px;
+  font-size: 14px;
+  color: #1e293b;
+  line-height: 1.6;
+  box-shadow: none;
+  max-width: 100%;
 }
-.trace-relations dt { color: #64748b; font-size: 8px; font-weight: 800; }
-.trace-relations dd { display: grid; gap: 3px; min-width: 0; margin: 0; font-size: 9px; }
+
+.user-msg .msg-bubble {
+  background: #1e293b;
+  color: #ffffff;
+  border: none;
+  border-radius: 16px;
+  padding: 12px 18px;
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+}
+
+.user-msg .msg-bubble p {
+  color: #ffffff;
+  margin: 0;
+}
+
+.timeline-step-msg {
+  width: 100%;
+}
+
+.timeline-step-msg > .msg-bubble {
+  width: 100%;
+  max-width: 100%;
+}
+
+.workflow-step-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.workflow-step-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.workflow-step-heading h4 {
+  margin: 0;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.workflow-step-heading p {
+  margin: 4px 0 0;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.workflow-step-intro {
+  margin-top: 12px;
+  color: #475569;
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.step-tag {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f5f9;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.step-tag.ready {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.workflow-step-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.workflow-step-status.done {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.workflow-step-status.pending {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.workflow-step-status.action {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.pulse-indicator {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #3b82f6;
+  margin-right: 6px;
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0% { transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.6); }
+  70% { transform: scale(1.1); opacity: 1; box-shadow: 0 0 0 5px rgba(59, 130, 246, 0); }
+  100% { transform: scale(0.95); opacity: 0.7; box-shadow: 0 0 0 0 rgba(59, 130, 246, 0); }
+}
+
+/* 必传材料卡片 */
+.upload-start-bubble {
+  width: 100%;
+  max-width: 720px;
+  background: #ffffff;
+  border: 1px solid #dbeafe;
+  border-radius: 14px;
+  padding: 16px 18px;
+  box-shadow: 0 4px 14px rgba(37, 99, 235, 0.04);
+}
+
+.upload-start-header h4 {
+  margin: 2px 0 4px;
+  color: #0f172a;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.upload-start-header p {
+  margin: 0 0 14px;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.workflow-result-kicker {
+  display: block;
+  margin-bottom: 3px;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+.required-upload-zones {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.required-upload-zone {
+  min-width: 0;
+  border: 1.5px dashed #cbd5e1;
+  border-radius: 12px;
+  background: #f8fafc;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.required-upload-zone:hover {
+  border-color: #3b82f6;
+  background: #eff6ff;
+  transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(37, 99, 235, 0.08);
+}
+
+.required-upload-zone.complete {
+  border-style: solid;
+  border-color: #86efac;
+  background: #f0fdf4;
+}
+
+.required-upload-zone.complete:hover {
+  border-color: #22c55e;
+  background: #dcfce7;
+}
+
+.required-upload-zone-label {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+  cursor: pointer;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.zone-icon-box {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  background: #eff6ff;
+  color: #2563eb;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.required-upload-zone.complete .zone-icon-box {
+  background: #dcfce7;
+  color: #16a34a;
+}
+
+.zone-info-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.zone-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zone-title-line strong {
+  font-size: 14px;
+  color: #0f172a;
+  font-weight: 700;
+}
+
+.zone-req-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #fee2e2;
+  color: #dc2626;
+  font-weight: 700;
+}
+
+.zone-info-box small {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.zone-status-box {
+  margin-top: auto;
+  padding-top: 6px;
+}
+
+.zone-uploaded-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #16a34a;
+}
+
+.zone-upload-btn-text {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #2563eb;
+}
+
+@media (max-width: 640px) {
+  .required-upload-zones { grid-template-columns: 1fr; }
+}
+
+/* 已登记材料清单卡片 */
+.file-list-msg .file-changes-card {
+  width: 100%;
+  max-width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+.file-changes-header {
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: none;
+}
+
+.file-changes-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #475569;
+}
+
+.file-changes-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.file-change-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  transition: all 0.15s ease;
+}
+
+.file-change-item:hover {
+  background: #eff6ff;
+  border-color: #dbeafe;
+}
+
+.file-item-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-role-badge {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.file-role-badge.role-tender {
+  background: #dbeafe;
+  color: #1e40af;
+}
+
+.file-role-badge.role-company {
+  background: #e0e7ff;
+  color: #3730a3;
+}
+
+.file-role-badge.role-legacy_bid {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+.file-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  color: #1e293b;
+  font-weight: 600;
+}
+
+.diff-tag.add {
+  font-size: 11px;
+  color: #15803d;
+  background: #dcfce7;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.legacy-preview-trigger {
+  font-size: 11px;
+  font-weight: 700;
+  color: #2563eb;
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  padding: 3px 8px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.legacy-preview-trigger:hover {
+  background: #2563eb;
+  color: #ffffff;
+}
+
+/* 阶段 2 确认卡片 */
+.action-launch-bubble {
+  width: 100%;
+  max-width: 720px;
+  background: linear-gradient(135deg, #ffffff 0%, #f0fdf4 100%);
+  border: 1px solid #86efac;
+  border-radius: 14px;
+  padding: 16px 18px;
+  box-shadow: 0 4px 14px rgba(22, 163, 74, 0.06);
+}
+
+.action-launch-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(134, 239, 172, 0.4);
+  flex-wrap: wrap;
+}
+
+.btn-primary-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: linear-gradient(135deg, #16a34a 0%, #15803d 100%);
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 2px 6px rgba(22, 163, 74, 0.25);
+  transition: all 0.15s ease;
+}
+
+.btn-primary-action:hover:not(:disabled) {
+  background: linear-gradient(135deg, #15803d 0%, #166534 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(22, 163, 74, 0.35);
+}
+
+.btn-primary-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.action-launch-subtext {
+  font-size: 12px;
+  color: #64748b;
+}
+
+/* 阶段 2 与阶段 3 结果卡片 */
+.outline-card-bubble,
+.generation-stage-bubble {
+  width: 100%;
+  max-width: 720px;
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+
+.outline-card-bubble {
+  background: #ffffff;
+  border: 1px solid #bfdbfe;
+}
+
+.generation-stage-bubble {
+  background: #ffffff;
+  border: 1px solid #c7d2fe;
+}
+
+.outline-card-summary {
+  margin: 0 0 10px;
+  color: #475569;
+  font-size: 13px;
+}
+
+.status-chat-msg {
+  width: 100%;
+  max-width: 720px;
+}
+
+.status-avatar {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+  color: #047857;
+}
+
+.status-bubble {
+  width: 100%;
+  box-shadow: none;
+}
+
+.success-chat-msg .status-bubble {
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+  color: #065f46;
+}
+
+.error-chat-msg .status-avatar {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #dc2626;
+}
+
+.error-chat-msg .status-bubble {
+  border-color: #fecaca;
+  background: #fff5f5;
+  color: #991b1b;
+  border-left: 4px solid #ef4444;
+}
+
+.error-detail-list {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #fecaca;
+}
+
+.error-detail-list ol {
+  display: grid;
+  gap: 6px;
+  margin: 7px 0 0;
+  padding-left: 20px;
+}
+
+.error-detail-list li span {
+  display: block;
+  font-size: 12px;
+  color: #b91c1c;
+}
+
+/* 底部输入控制台 */
+.studio-input-footer {
+  position: relative;
+  flex-shrink: 0;
+  padding: 14px clamp(16px, 3vw, 32px) 18px;
+  background: #ffffff;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: 0 -2px 10px rgba(15, 23, 42, 0.02);
+}
+
+.workbench-entry-card {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #f8fbff;
+}
+
+.workbench-entry-icon {
+  width: 40px;
+  height: 40px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.workbench-entry-icon svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.workbench-entry-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.workbench-entry-copy strong {
+  color: #0f172a;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.workbench-entry-copy small {
+  margin-top: 2px;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.workbench-entry-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.workbench-entry-action:hover {
+  background: #1d4ed8;
+}
+
+.workbench-entry-action svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.modern-input-card {
+  width: 100%;
+  background: #f8fafc;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 14px;
+  padding: 12px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.modern-input-card:focus-within {
+  background: #ffffff;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15), 0 4px 14px rgba(15, 23, 42, 0.04);
+}
+
+.modern-textarea {
+  border: none;
+  outline: none;
+  background: transparent;
+  font-size: 14px;
+  color: #0f172a;
+  resize: none;
+  width: 100%;
+  min-height: 48px;
+  line-height: 1.5;
+  font-family: inherit;
+}
+
+.modern-textarea::placeholder {
+  color: #94a3b8;
+}
+
+.modern-card-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-top: 8px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.quick-chip-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.toolbar-chip-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.toolbar-chip-btn:hover {
+  background: #eff6ff;
+  border-color: #93c5fd;
+  color: #1d4ed8;
+}
+
+.chip-icon {
+  font-weight: 700;
+  font-size: 14px;
+  color: #2563eb;
+}
+
+.chip-req {
+  font-size: 10px;
+  font-style: normal;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #fee2e2;
+  color: #dc2626;
+  margin-left: 2px;
+}
+
+.attachment-trigger {
+  display: inline-grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid #cbd5e1;
+  border-radius: 50%;
+  background: #ffffff;
+  color: #475569;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.attachment-trigger:hover,
+.attachment-trigger[aria-expanded="true"] {
+  border-color: #93c5fd;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.attachment-trigger svg {
+  width: 16px;
+  height: 16px;
+}
+
+.quick-upload-menu {
+  position: absolute;
+  z-index: 20;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  min-width: 184px;
+  padding: 6px;
+  border: 1px solid #dbe3ef;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 24px rgba(15, 23, 42, .12);
+}
+
+.quick-upload-option {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 7px;
+  color: #334155;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.quick-upload-option:hover {
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.modern-send-circle-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: #2563eb;
+  color: #ffffff;
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.modern-send-circle-btn:hover:not(:disabled) {
+  background: #1d4ed8;
+  transform: scale(1.05);
+}
+
+.modern-send-circle-btn:disabled {
+  background: #e2e8f0;
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
+.studio-compliance-note {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+/* 目录预览树与确认按钮 */
+.outline-card-details {
+  margin-top: 12px;
+}
+
+.outline-card-details > summary {
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.outline-card-details[open] > summary {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+  background: #dbeafe;
+}
+
+.preview-tree-box {
+  background: #ffffff;
+  border: 1px solid #bfdbfe;
+  border-top: none;
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.full-outline-preview {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.tree-preview-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 8px calc(6px) calc(8px + var(--outline-depth, 0) * 16px);
+  border-radius: 6px;
+  font-size: 13px;
+  color: #334155;
+  transition: background 0.15s ease;
+}
+
+.tree-preview-item:hover {
+  background: #f8fafc;
+}
+
+.tree-preview-item .node-num {
+  font-weight: 800;
+  color: #2563eb;
+  flex-shrink: 0;
+}
+
+.tree-preview-item .node-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tree-preview-item .node-title {
+  color: #0f172a;
+  font-weight: 600;
+}
+
+.tree-preview-item .node-content small {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.tree-preview-item .node-coverage {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #047857;
+  font-weight: 600;
+}
+
+.workflow-result-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 40px;
+  margin-top: 12px;
+  padding: 8px 16px;
+  border: 1px solid #bfdbfe;
+  border-radius: 8px;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  color: #1d4ed8;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.workflow-result-link:hover {
+  background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 3px 8px rgba(37, 99, 235, 0.15);
+}
+
 .trace-relations dd span,
 .trace-relations dd a { line-height: 1.4; }
 .trace-relations dd a { color: #4338ca; text-decoration: none; }
@@ -6919,6 +9366,7 @@ onUnmounted(() => {
   .planning-panel { grid-column: auto; }
   .pipeline-product-flow { grid-template-columns: minmax(190px, 260px) minmax(0, 1fr); }
   .support-panel { min-height: 0; }
+  .workspace-tab-view.tab-planning { width: 92vw; max-width: 92vw; min-width: 0; }
 }
 
 @media (max-width: 900px) {
@@ -6939,6 +9387,11 @@ onUnmounted(() => {
     padding: 44px 36px;
   }
   .zone-heading { min-height: 0; }
+  .planning-word-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
+  .planning-nav-pane { position: static; height: 380px; max-height: 380px; }
+  .planning-detail-pane { height: auto; max-height: none; overflow-y: visible; padding-bottom: 24px; }
+  .detail-header-card { flex-direction: column; }
+  .detail-form-grid { grid-template-columns: 1fr; }
   .planning-content { grid-template-columns: 1fr; }
   .score-filter-panel .score-list { max-height: 420px; }
   .quality-gate-list { grid-template-columns: 1fr; }
@@ -7007,557 +9460,42 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-/* 极简 AI 对话中心与材料投递视窗 (精确自适应无遮挡) */
+/* 现代 AI 工作台样式 */
 .initial-chat-studio {
+  width: 50vw;
+  max-width: 50vw;
+  min-width: 560px;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  margin-inline: auto;
+  background: #ffffff;
+  box-shadow: 0 0 30px rgba(15, 23, 42, 0.04);
+  border-left: 1px solid #e2e8f0;
+  border-right: 1px solid #e2e8f0;
   display: flex;
   flex-direction: column;
-  height: 100%;
-  flex: 1;
-  min-height: 0;
-  max-height: none;
-  background: #ffffff;
-  border: none;
-  border-radius: 0;
-  box-shadow: none;
   overflow: hidden;
 }
+
 .studio-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 16px 22px;
-  background: #f8fafc;
+  min-height: 68px;
+  padding: 12px 24px;
+  background: #ffffff;
   border-bottom: 1px solid #e2e8f0;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.02);
   flex-shrink: 0;
+  gap: 16px;
+  flex-wrap: wrap;
 }
+
 .bot-brand {
   display: flex;
   align-items: center;
   gap: 12px;
-}
-.bot-icon {
-  font-size: 24px;
-  background: #eff6ff;
-  padding: 6px 10px;
-  border-radius: 12px;
-}
-.bot-brand h3 { margin: 0; font-size: 16px; color: #0f172a; font-weight: 700; }
-.bot-brand p { margin: 2px 0 0; font-size: 12px; color: #64748b; }
-.studio-header-stats { display: flex; gap: 8px; }
-.stat-tag {
-  font-size: 12px;
-  padding: 4px 10px;
-  background: #fff;
-  border: 1px solid #cbd5e1;
-  border-radius: 999px;
-  color: #475569;
-  font-weight: 500;
-}
-.studio-chat-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 20px;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  background: #fafafa;
-}
-.legacy-chat-stream {
-  display: flex;
-  width: 100%;
-  flex-direction: column;
-  gap: 16px;
-}
-.chat-msg {
-  display: flex;
-  gap: 12px;
-  max-width: 88%;
-}
-.chat-msg.bot-msg { align-self: flex-start; }
-.chat-msg.user-msg { align-self: flex-end; flex-direction: row-reverse; }
-.msg-avatar {
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  background: #eff6ff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 16px;
-  flex-shrink: 0;
-}
-.user-msg .msg-avatar { background: #f1f5f9; }
-.msg-bubble {
-  background: #ffffff;
-  border: 1px solid #e2e8f0;
-  border-radius: 14px;
-  padding: 12px 16px;
-  font-size: 14px;
-  color: #1e293b;
-  line-height: 1.6;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.02);
-}
-.user-msg .msg-bubble {
-  position: relative;
-  background: #27272a;
-  color: #ffffff;
-  border: none;
-  border-radius: 16px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
-  padding: 12px 18px;
-}
-.user-msg .msg-bubble p {
-  color: #ffffff;
-}
-.user-msg .msg-bubble .chat-delete-btn {
-  position: absolute;
-  top: -8px;
-  left: -8px;
-  display: none;
-  width: 20px;
-  height: 20px;
-  border: 0;
-  border-radius: 50%;
-  background: #fee2e2;
-  color: #b91c1c;
-  font-size: 16px;
-  line-height: 18px;
-  cursor: pointer;
-  box-shadow: 0 2px 5px rgba(0,0,0,0.1);
-  align-items: center;
-  justify-content: center;
-}
-.user-msg .msg-bubble:hover .chat-delete-btn {
-  display: flex;
-}
-.upload-start-bubble {
-  width: 100%;
-  max-width: 560px;
-  background: #f8fbff;
-  border-color: #c7d7fe;
-}
-.upload-start-bubble h4 { margin: 2px 0 4px; color: #172554; font-size: 15px; }
-.upload-start-bubble p { margin: 0; color: #475569; font-size: 13px; }
-.upload-start-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-.upload-start-actions .btn { display: inline-flex; align-items: center; cursor: pointer; }
-.upload-start-actions .btn span { margin-left: 6px; font-size: 11px; opacity: .82; }
-.required-upload-zones { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
-.required-upload-zone { min-width: 0; border: 1px dashed #93c5fd; border-radius: 10px; background: #fff; transition: border-color .2s ease, background .2s ease; }
-.required-upload-zone.complete { border-style: solid; border-color: #86efac; background: #f0fdf4; }
-.required-upload-zone-label { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 9px; padding: 12px; cursor: pointer; }
-.required-upload-zone-label:hover { background: #eff6ff; }
-.required-upload-zone.complete .required-upload-zone-label:hover { background: #dcfce7; }
-.required-upload-zone-icon { display: grid; place-items: center; width: 26px; height: 30px; color: #2563eb; font-size: 22px; }
-.required-upload-zone-label strong { display: block; color: #172554; font-size: 13px; }
-.required-upload-zone-label strong em { margin-left: 4px; color: #dc2626; font-size: 11px; font-style: normal; }
-.required-upload-zone-label small { display: block; margin-top: 3px; color: #64748b; font-size: 11px; line-height: 1.45; }
-.required-upload-zone-label b { grid-column: 2; color: #2563eb; font-size: 12px; }
-.required-upload-zone.complete .required-upload-zone-label b { color: #15803d; }
-@media (max-width: 720px) {
-  .required-upload-zones { grid-template-columns: 1fr; }
-}
-.card-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
-.card-title-row h4 { margin: 0; font-size: 14px; color: #0f172a; }
-.chat-materials-grid { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 8px; }
-.chat-material-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 12px;
-  background: #fff;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-}
-.file-info { flex: 1; display: flex; flex-direction: column; }
-.file-info strong { font-size: 13px; color: #0f172a; }
-.file-info small { font-size: 11px; color: #64748b; }
-.file-badge { font-size: 11px; color: #166534; background: #dcfce7; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
-.highlight-msg .msg-bubble {
-  background: #f0fdf4;
-  border-color: #bbf7d0;
-  width: 100%;
-  max-width: 540px;
-}
-.launch-card-content { display: flex; flex-direction: column; gap: 12px; }
-.launch-card-content h4 { margin: 0; color: #14532d; font-size: 15px; }
-.launch-card-content p { margin: 4px 0 0; color: #166534; font-size: 13px; }
-.launch-plan-btn { margin-top: 4px; width: 100%; justify-content: center; font-weight: 700; font-size: 15px; height: 42px; }
-.plan-preview-bubble { width: 100%; max-width: 560px; background: #eff6ff; border-color: #bfdbfe; }
-.plan-preview-bubble h4 { margin: 0; color: #1e40af; font-size: 15px; }
-.plan-summary-line { font-size: 12px; color: #2563eb; font-weight: 600; margin: 4px 0 10px; }
-.chat-outline-details { margin-bottom: 12px; }
-.chat-outline-details > summary { cursor: pointer; color: #1d4ed8; font-size: 13px; font-weight: 700; }
-.chat-outline-details > summary::marker { color: #2563eb; }
-.preview-tree-box { background: #fff; border-radius: 8px; padding: 10px 12px; border: 1px solid #cbd5e1; margin-bottom: 12px; display: flex; flex-direction: column; gap: 6px; }
-.tree-preview-item { font-size: 13px; color: #334155; }
-.tree-preview-item .node-num { font-weight: 700; margin-right: 6px; color: #2563eb; }
-.full-outline-preview { margin: 8px 0 0; max-height: 360px; overflow: auto; }
-.full-outline-preview .tree-preview-item { display: flex; align-items: flex-start; gap: 6px; padding: 5px 0 5px calc(var(--outline-depth) * 16px); border-bottom: 1px solid #f1f5f9; }
-.full-outline-preview .tree-preview-item:last-child { border-bottom: 0; }
-.full-outline-preview .node-num { flex: 0 0 auto; margin-right: 0; }
-.node-content { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 2px; }
-.node-content small { color: #64748b; font-size: 11px; line-height: 1.45; }
-.node-coverage { flex: 0 0 auto; padding: 1px 6px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 10px; white-space: nowrap; }
-.more-tree-hint { font-size: 11px; color: #94a3b8; padding-top: 4px; }
-.plan-actions-row { display: flex; gap: 10px; justify-content: flex-end; }
-.studio-input-footer {
-  flex-shrink: 0;
-  position: sticky;
-  bottom: 0;
-  z-index: 10;
-  padding: 14px 20px;
-  background: #fff;
-  border-top: 1px solid #e2e8f0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.upload-quick-toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.toolbar-label { font-size: 12px; font-weight: 600; color: #475569; }
-.upload-quick-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  background: #f1f5f9;
-  border: 1px dashed #cbd5e1;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 13px;
-  color: #334155;
-  transition: all 0.15s ease;
-}
-.upload-quick-btn:hover { background: #e2e8f0; border-color: #94a3b8; }
-.upload-quick-btn.tender { background: #eff6ff; border-color: #93c5fd; color: #1d4ed8; }
-.upload-quick-btn.tender:hover { background: #dbeafe; }
-.tag-req { font-size: 10px; background: #dc2626; color: #fff; padding: 1px 4px; border-radius: 4px; }
-.uploading-state-hint { font-size: 12px; color: #2563eb; font-weight: 500; display: flex; align-items: center; gap: 6px; }
-.chat-input-box { display: flex; gap: 10px; }
-.studio-text-field {
-  flex: 1;
-  padding: 10px 14px;
-  border: 1px solid #cbd5e1;
-  border-radius: 10px;
-  font-size: 14px;
-  outline: none;
-}
-.studio-text-field:focus { border-color: #2563eb; box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12); }
-.send-btn { padding: 0 20px; font-weight: 600; border-radius: 10px; }
-
-/* 现代一体化浅色 AI 胶囊输入框 */
-.modern-input-card {
-  background: #f8fafc;
-  border: 1px solid #dbe3ef;
-  border-radius: 12px;
-  box-shadow: none;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  transition: all 0.2s ease;
-}
-.workbench-entry-card {
-  display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  width: 100%;
-  padding: 12px 14px;
-  border: 1px solid #bfdbfe;
-  border-radius: 12px;
-  background: #f8fbff;
-}
-.workbench-entry-icon {
-  width: 40px;
-  height: 40px;
-  display: inline-grid;
-  place-items: center;
-  border-radius: 10px;
-  color: #1d4ed8;
-  background: #dbeafe;
-}
-.workbench-entry-icon svg,
-.workbench-entry-action svg {
-  width: 20px;
-  height: 20px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-.workbench-entry-copy { min-width: 0; }
-.workbench-entry-copy strong,
-.workbench-entry-copy small { display: block; }
-.workbench-entry-copy strong { color: #172033; font-size: 13px; line-height: 1.45; }
-.workbench-entry-copy small { margin-top: 2px; color: #64748b; font-size: 11px; line-height: 1.45; }
-.workbench-entry-action {
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 9px 13px;
-  border: 1px solid #2563eb;
-  border-radius: 9px;
-  color: #fff;
-  background: #2563eb;
-  font: inherit;
-  font-size: 12px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background-color .2s ease, border-color .2s ease;
-}
-.workbench-entry-action:hover { border-color: #1d4ed8; background: #1d4ed8; }
-.workbench-entry-action:focus-visible { outline: 3px solid rgba(37, 99, 235, .24); outline-offset: 2px; }
-.workbench-entry-action svg { width: 16px; height: 16px; }
-.modern-input-card:focus-within {
-  border-color: #2563eb;
-  box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12), 0 4px 14px rgba(15, 23, 42, 0.05);
-}
-.modern-textarea {
-  border: none;
-  outline: none;
-  background: transparent;
-  font-size: 14px;
-  color: #0f172a;
-  resize: none;
-  width: 100%;
-  line-height: 1.5;
-  font-family: inherit;
-}
-.modern-textarea::placeholder {
-  color: #94a3b8;
-}
-.modern-card-toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-top: 6px;
-  border-top: 1px solid #f1f5f9;
-}
-.toolbar-left {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-}
-.toolbar-attachment-menu {
-  position: relative;
-}
-.attachment-trigger {
-  display: inline-grid;
-  width: 44px;
-  height: 44px;
-  place-items: center;
-  padding: 0;
-  border: 1px solid #cbd5e1;
-  border-radius: 10px;
-  background: #fff;
-  color: #475569;
-  cursor: pointer;
-}
-.attachment-trigger:hover,
-.attachment-trigger[aria-expanded="true"] {
-  border-color: #93c5fd;
-  background: #eff6ff;
-  color: #1d4ed8;
-}
-.attachment-trigger svg {
-  width: 20px;
-  height: 20px;
-}
-.quick-upload-menu {
-  position: absolute;
-  z-index: 20;
-  bottom: calc(100% + 8px);
-  left: 0;
-  display: grid;
-  min-width: 184px;
-  padding: 6px;
-  border: 1px solid #dbe3ef;
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 12px 24px rgba(15, 23, 42, .12);
-}
-.quick-upload-option {
-  display: flex;
-  min-height: 40px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 0 10px;
-  border-radius: 7px;
-  color: #334155;
-  cursor: pointer;
-  font-size: 13px;
-}
-.quick-upload-option:hover {
-  background: #eff6ff;
-  color: #1d4ed8;
-}
-.toolbar-chip-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 5px 10px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
-  border-radius: 999px;
-  font-size: 12px;
-  color: #475569;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.toolbar-chip-btn:hover {
-  background: #eff6ff;
-  border-color: #93c5fd;
-  color: #1d4ed8;
-}
-.chip-icon {
-  font-weight: 700;
-  font-size: 14px;
-  color: #2563eb;
-}
-.modern-send-circle-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: #2563eb;
-  color: #ffffff;
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.modern-send-circle-btn:hover:not(:disabled) {
-  background: #1d4ed8;
-  transform: scale(1.05);
-}
-.modern-send-circle-btn:disabled {
-  background: #e2e8f0;
-  color: #94a3b8;
-  cursor: not-allowed;
-}
-
-/* 聊天窗口内嵌项目流程卡片 */
-.flow-card-msg .msg-bubble {
-  width: 100%;
-  max-width: 680px;
-  background: #f8fafc;
-  border-color: #cbd5e1;
-  padding: 14px 18px;
-}
-.embedded-pipeline-bubble { display: flex; flex-direction: column; gap: 12px; }
-.pipeline-card-header { display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e2e8f0; padding-bottom: 10px; }
-.pipeline-card-header h4 { margin: 0; font-size: 15px; color: #0f172a; font-weight: 700; }
-.pipeline-card-header p { margin: 2px 0 0; font-size: 12px; color: #64748b; }
-.chat-workflow-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 4px 0; }
-.chat-step-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px;
-  background: #fff;
-  border: 1px solid #cbd5e1;
-  border-radius: 8px;
-  opacity: 0.7;
-}
-.chat-step-item.active { opacity: 1; border-color: #2563eb; background: #eff6ff; }
-.step-num { font-weight: 800; font-size: 12px; color: #2563eb; background: #dbeafe; padding: 2px 6px; border-radius: 4px; }
-.step-info { display: flex; flex-direction: column; }
-.step-info strong { font-size: 12px; color: #0f172a; }
-.step-info small { font-size: 11px; color: #64748b; }
-.chat-stepper-list { display: flex; flex-wrap: wrap; gap: 6px; list-style: none; padding: 0; margin: 0; }
-.chat-stepper-node {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px;
-  background: #fff;
-  border: 1px solid #cbd5e1;
-  border-radius: 6px;
-  cursor: pointer;
-  font-size: 11px;
-  transition: all 0.15s ease;
-}
-.chat-stepper-node:hover { border-color: #2563eb; background: #eff6ff; }
-.chat-stepper-node.stage-succeeded { border-color: #a7f3d0; background: #ecfdf5; }
-.chat-stepper-node.stage-running { border-color: #93c5fd; background: #eff6ff; }
-.mini-node-badge {
-  width: 16px; height: 16px; border-radius: 50%; background: #e2e8f0; font-size: 10px; display: flex; align-items: center; justify-content: center; font-weight: 700;
-}
-.stage-succeeded .mini-node-badge { background: #166534; color: #fff; }
-.stage-running .mini-node-badge { background: #2563eb; color: #fff; }
-.mini-node-info { display: flex; flex-direction: column; }
-.mini-node-info strong { font-size: 11px; color: #1e293b; }
-.mini-node-info small { font-size: 10px; color: #64748b; }
-
-/* 步骤时间线卡片 header */
-.step-card-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 8px;
-}
-.step-card-header h4 { margin: 0; font-size: 15px; color: #0f172a; font-weight: 700; }
-.step-tag {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: #f1f5f9;
-  color: #475569;
-}
-.step-tag.ready { background: #dbeafe; color: #1d4ed8; }
-.step-tag.finish { background: #dcfce7; color: #166534; }
-.mini-stepper-title { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 12px; color: #475569; font-weight: 600; }
-.chat-stepper-container { background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
-
-/* 聊天工作区最终布局：状态、过程、结果都在同一条消息流内。 */
-.v3-workspace {
-  height: auto;
-  background: #f8fafc;
-}
-
-.workspace-tab-view {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-}
-
-.workspace-tab-view.tab-upload {
-  height: auto;
-  overflow: hidden;
-}
-
-.initial-chat-studio {
-  width: 60vw;
-  max-width: 60vw;
-  height: auto;
-  margin-inline: auto;
-  background: #fff;
-}
-
-.studio-header {
-  min-height: 72px;
-  gap: 20px;
-  padding: 14px clamp(16px, 2.5vw, 28px);
-}
-
-.bot-brand,
-.bot-brand > div,
-.studio-header-stats,
-.stat-tag,
-.chat-msg,
-.msg-bubble,
-.process-card-title,
-.mini-node-info,
-.file-info {
-  min-width: 0;
 }
 
 .bot-icon {
@@ -7567,17 +9505,15 @@ onUnmounted(() => {
   height: 40px;
   padding: 0;
   place-items: center;
-  color: #4f46e5;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  color: #2563eb;
+  box-shadow: 0 2px 6px rgba(37, 99, 235, 0.1);
 }
 
-.bot-icon svg,
-.material-avatar svg,
-.outline-avatar svg,
-.file-icon svg,
-.stat-tag svg,
-.chip-icon {
-  width: 20px;
-  height: 20px;
+.bot-icon svg {
+  width: 22px;
+  height: 22px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -7585,190 +9521,163 @@ onUnmounted(() => {
   stroke-linejoin: round;
 }
 
-.studio-header-stats {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.stat-tag {
-  min-height: 36px;
-  gap: 7px;
-  padding: 6px 11px;
-}
-
-.stat-tag svg {
-  flex: 0 0 16px;
-  width: 16px;
-  height: 16px;
-}
-
-.studio-chat-body {
-  padding: 24px clamp(14px, 3vw, 36px) 28px;
-  gap: 18px;
-  overflow-x: hidden;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-  background: #f6f8fb;
-}
-
-/* 任务驾驶舱：当前事项优先，过程和诊断按需展开。 */
-.cockpit-chat-body {
-  align-items: center;
-}
-
-.workspace-cockpit {
-  display: grid;
-  width: min(100%, 960px);
-  gap: 14px;
-}
-
-.cockpit-steps {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.cockpit-steps li {
+.bot-title-wrap {
   display: flex;
-  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bot-title-row {
+  display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
-  border: 1px solid #dbe4f0;
-  border-radius: 10px;
-  background: #fff;
-  color: #64748b;
-  font-size: 12px;
+  gap: 8px;
+}
+
+.bot-title-row h3 {
+  margin: 0;
+  font-size: 16px;
+  color: #0f172a;
   font-weight: 700;
 }
 
-.cockpit-step-index {
-  display: grid;
-  flex: 0 0 20px;
-  width: 20px;
-  height: 20px;
-  place-items: center;
-  border-radius: 50%;
-  background: #e2e8f0;
-  color: #475569;
-  font-size: 10px;
-}
-
-.cockpit-steps .is-done { border-color: #bbf7d0; color: #047857; }
-.cockpit-steps .is-done .cockpit-step-index { background: #15803d; color: #fff; }
-.cockpit-steps .is-current { border-color: #a5b4fc; background: #eef2ff; color: #3730a3; }
-.cockpit-steps .is-current .cockpit-step-index { background: #4f46e5; color: #fff; }
-.cockpit-steps .is-error { border-color: #fecaca; background: #fef2f2; color: #b91c1c; }
-.cockpit-steps .is-error .cockpit-step-index { background: #dc2626; color: #fff; }
-.cockpit-steps .is-locked { background: #f8fafc; color: #94a3b8; }
-
-.cockpit-current-card {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 24px;
-  align-items: center;
-  padding: 24px;
-  border: 1px solid #c7d2fe;
-  border-radius: 16px;
-  background: linear-gradient(135deg, #fff 0%, #f5f7ff 100%);
-  box-shadow: 0 10px 24px rgba(15, 23, 42, .06);
-}
-
-.cockpit-current-card.has-failure { border-color: #fecaca; background: linear-gradient(135deg, #fff 0%, #fff7f7 100%); }
-.cockpit-current-copy h4 { margin: 0; color: #172554; font-size: 20px; line-height: 1.35; }
-.cockpit-current-copy p { max-width: 660px; margin: 7px 0 0; color: #52627a; font-size: 14px; line-height: 1.65; }
-.cockpit-current-copy .cockpit-stage-hint { color: #3730a3; font-weight: 700; }
-.cockpit-current-action { display: grid; min-width: 152px; gap: 8px; justify-items: stretch; }
-.cockpit-primary-action { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; cursor: pointer; text-align: center; }
-.cockpit-secondary-action { min-height: 36px; color: #475569; font-size: 12px; }
-
-.cockpit-inline-error {
+.bot-title-wrap p {
   margin: 0;
-  padding: 11px 13px;
-  border: 1px solid #fecaca;
-  border-radius: 10px;
-  background: #fef2f2;
-  color: #991b1b;
-  font-size: 13px;
+  font-size: 12px;
+  color: #64748b;
 }
 
-.cockpit-history-card {
-  padding: 0 14px;
-  border: 1px solid #dbe4f0;
-  border-radius: 12px;
-  background: #fff;
+.mode-pill {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.5px;
 }
 
-.cockpit-history-card > summary {
+.mode-pill-full {
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.mode-pill-rewrite {
+  background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%);
+  color: #6d28d9;
+  border: 1px solid #ddd6fe;
+}
+
+.studio-header-stats {
   display: flex;
-  min-height: 48px;
   align-items: center;
-  cursor: pointer;
-  color: #334155;
-  font-size: 13px;
-  font-weight: 750;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
-.cockpit-history-card > p { margin: 0 0 10px; color: #64748b; font-size: 12px; line-height: 1.55; }
-.cockpit-history-card > .text-button { margin: 0 0 12px; color: #3730a3; font-size: 12px; }
-.cockpit-material-list { display: grid; gap: 8px; margin: 0 0 12px; padding: 0; list-style: none; }
-.cockpit-material-list li { display: grid; gap: 2px; padding: 9px 10px; border-radius: 8px; background: #f8fafc; }
-.cockpit-material-list strong { overflow-wrap: anywhere; color: #334155; font-size: 12px; }
-.cockpit-material-list span { color: #64748b; font-size: 11px; }
-.cockpit-generation-history ol { display: grid; gap: 8px; margin: 0 0 12px; padding: 0; list-style: none; }
-.cockpit-generation-history li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 10px; border: 1px solid #e2e8f0; border-radius: 8px; }
-.cockpit-generation-history li.stage-failed { border-color: #fecaca; background: #fff7f7; }
-.cockpit-generation-history li > div { display: grid; gap: 2px; min-width: 0; }
-.cockpit-generation-history strong { color: #334155; font-size: 12px; }
-.cockpit-generation-history span { color: #64748b; font-size: 11px; }
-.cockpit-generation-history button { flex: 0 0 auto; min-height: 36px; padding: 6px 9px; border: 1px solid #dbe4f0; border-radius: 7px; background: #f8fafc; color: #334155; cursor: pointer; font: inherit; font-size: 11px; font-weight: 700; }
-.cockpit-diagnostics { border-style: dashed; }
+.stat-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 5px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  color: #475569;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+
+.stat-tag:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+
+.stat-tag svg {
+  width: 15px;
+  height: 15px;
+  color: #64748b;
+}
+
+.studio-chat-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 24px clamp(16px, 3vw, 32px) 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  background: #f8fafc;
+}
+
+.legacy-chat-stream {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  gap: 20px;
+}
 
 .chat-msg {
+  display: flex;
+  gap: 14px;
   width: 100%;
   max-width: 100%;
   align-items: flex-start;
 }
 
-.chat-msg.process-msg {
-  width: 100%;
-}
-
+.chat-msg.bot-msg { align-self: flex-start; }
 .chat-msg.user-msg {
-  width: auto;
-  max-width: min(78%, 720px);
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  align-self: flex-end;
+  width: 100%;
+  max-width: 100%;
 }
 
 .msg-avatar {
   display: grid;
-  flex: 0 0 36px;
-  width: 36px;
-  height: 36px;
+  flex: 0 0 38px;
+  width: 38px;
+  height: 38px;
   place-items: center;
-  border: 1px solid #dbe4f0;
-  background: #fff;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
   color: #475569;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.04);
 }
 
 .step-avatar {
   border-color: #c7d2fe;
-  background: #eef2ff;
+  background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 100%);
   color: #4338ca;
 }
 
 .material-avatar {
-  background: #f8fafc;
+  border-color: #bfdbfe;
+  background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%);
+  color: #1d4ed8;
+}
+
+.material-avatar svg,
+.file-summary-avatar svg,
+.step-action-avatar svg {
+  width: 18px;
+  height: 18px;
+}
+
+.file-summary-avatar {
+  border-color: #cbd5e1;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
   color: #475569;
 }
 
-.material-avatar svg {
-  width: 18px;
-  height: 18px;
+.step-action-avatar {
+  border-color: #93c5fd;
+  background: linear-gradient(135deg, #eff6ff 0%, #bfdbfe 100%);
+  color: #1d4ed8;
 }
 
 .outline-avatar {
@@ -7794,10 +9703,10 @@ onUnmounted(() => {
 
 .msg-bubble {
   max-width: 100%;
-  border-color: #dbe4f0;
+  border: none;
   border-radius: 4px 16px 16px;
   padding: 14px 16px;
-  box-shadow: 0 4px 12px rgba(15, 23, 42, .035);
+  box-shadow: none;
   overflow-wrap: anywhere;
 }
 
@@ -7815,7 +9724,7 @@ onUnmounted(() => {
 .materials-card-bubble,
 .highlight-msg .msg-bubble {
   width: 100%;
-  max-width: 680px;
+  max-width: 100%;
 }
 
 .chat-material-card {
@@ -8080,7 +9989,7 @@ onUnmounted(() => {
 
 /* 统一步骤卡片：每一步都按“步骤头部 → 操作/进度 → 步骤结果”组织。 */
 .timeline-step-msg {
-  width: min(100%, 960px);
+  width: 100%;
 }
 
 .timeline-step-msg > .msg-bubble {
@@ -9209,28 +11118,82 @@ onUnmounted(() => {
 .pipeline-plan-actions button { margin-left: 4px; }
 
 /* 对话统一为浅色消息流，用户与 AI 的内容在时间线上清晰区分。 */
-.legacy-chat-stream > .chat-msg.user-msg { justify-content: flex-end; }
-.legacy-chat-stream > .chat-msg.user-msg .msg-avatar { order: initial; }
+.legacy-chat-stream > .chat-msg.user-msg {
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  align-items: flex-end;
+  width: 100%;
+}
+.legacy-chat-stream > .chat-msg.user-msg .msg-avatar { display: none; }
 .legacy-chat-stream > .chat-msg.user-msg .msg-bubble {
-  max-width: min(760px, 88%);
-  border: 1px solid #bfdbfe;
-  border-radius: 16px;
-  background: #eaf2ff;
-  color: #172554;
-  box-shadow: none;
+  margin-left: auto;
+  margin-right: 0;
+  max-width: min(760px, 80%);
+  border: none;
+  border-radius: 14px 14px 2px 14px;
+  background: #2563eb;
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.15);
+  padding: 10px 16px;
+  font-size: 14px;
+  line-height: 1.5;
+  position: relative;
+  align-self: flex-end;
+}
+.legacy-chat-stream > .chat-msg.user-msg .msg-bubble p {
+  color: #ffffff;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.chat-delete-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 18px;
+  height: 18px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #94a3b8;
+  color: #ffffff;
+  border: none;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.15);
+  transition: all 0.15s ease;
+}
+.legacy-chat-stream > .chat-msg.user-msg:hover .chat-delete-btn {
+  display: flex;
+}
+.chat-delete-btn:hover {
+  background: #ef4444;
+  color: #ffffff;
 }
 .legacy-chat-stream > .chat-msg.bot-msg:not(.timeline-step-msg):not(.pipeline-plan-chat-msg) .msg-bubble {
-  border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  background: #fff;
+  border: none;
+  border-radius: 14px;
+  background: #ffffff;
   color: #334155;
-  box-shadow: 0 4px 16px rgba(15, 23, 42, .04);
+  box-shadow: none;
+}
+
+@media (max-width: 1100px) {
+  .initial-chat-studio {
+    width: 75vw;
+    max-width: 75vw;
+  }
 }
 
 @media (max-width: 760px) {
   .initial-chat-studio {
     width: 100%;
     max-width: 100%;
+    min-width: 0;
   }
 
   .studio-header {

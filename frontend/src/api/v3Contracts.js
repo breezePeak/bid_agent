@@ -275,6 +275,10 @@ export function normalizeV3WorkspaceSnapshot(payload) {
         ...objectOrEmpty(stage),
         llm_request_count: Number(objectOrEmpty(stage).llm_request_count) || 0,
         llm_requests: arrayOrEmpty(objectOrEmpty(stage).llm_requests),
+        inference_reuse_count: Number(objectOrEmpty(stage).inference_reuse_count) || 0,
+        inference_reuses: arrayOrEmpty(objectOrEmpty(stage).inference_reuses),
+        project_batch_count: Number(objectOrEmpty(stage).project_batch_count) || 0,
+        project_batch_reused_count: Number(objectOrEmpty(stage).project_batch_reused_count) || 0,
         warnings: arrayOrEmpty(objectOrEmpty(stage).warnings),
         warning_count: Number(objectOrEmpty(stage).warning_count) || 0,
       })),
@@ -326,6 +330,10 @@ export function normalizeV3WorkspaceSnapshot(payload) {
         attempt: Number(objectOrEmpty(stage).attempt) || 0,
         llm_request_count: Number(objectOrEmpty(stage).llm_request_count) || 0,
         llm_requests: arrayOrEmpty(objectOrEmpty(stage).llm_requests),
+        inference_reuse_count: Number(objectOrEmpty(stage).inference_reuse_count) || 0,
+        inference_reuses: arrayOrEmpty(objectOrEmpty(stage).inference_reuses),
+        project_batch_count: Number(objectOrEmpty(stage).project_batch_count) || 0,
+        project_batch_reused_count: Number(objectOrEmpty(stage).project_batch_reused_count) || 0,
       })),
       pending_reviews: arrayOrEmpty(rawWorkflow.pending_reviews).map(review => ({
         ...objectOrEmpty(review),
@@ -820,6 +828,9 @@ export function buildPrepareOutlineCommand(commandId, expectedRevision, options 
   const reviewFeedback = String(options.reviewFeedback || '').trim()
   const baseBlueprintHash = String(options.baseBlueprintHash || '').trim()
   const projectFeedback = String(options.projectFeedback || '').trim()
+  const regenerateCapabilities = Array.isArray(options.regenerateCapabilities)
+    ? options.regenerateCapabilities.map(item => String(item).trim()).filter(Boolean)
+    : []
   return buildV3Command({
     commandId,
     kind: 'document.prepare_outline',
@@ -827,6 +838,7 @@ export function buildPrepareOutlineCommand(commandId, expectedRevision, options 
       ...(reviewFeedback ? { review_feedback: reviewFeedback } : {}),
       ...(baseBlueprintHash ? { base_blueprint_hash: baseBlueprintHash } : {}),
       ...(projectFeedback ? { project_feedback: projectFeedback } : {}),
+      ...(regenerateCapabilities.length ? { regenerate_capabilities: regenerateCapabilities } : {}),
     },
     expectedRevision,
   })

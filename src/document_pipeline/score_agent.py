@@ -43,6 +43,7 @@ from .scoring_outline_policy import (
     highest_score_conditions,
     is_document_quality_score,
     is_evaluative_sentence_heading,
+    outline_subject,
 )
 
 
@@ -1083,6 +1084,9 @@ class ScoreAgent:
         }:
             raise ValueError("评分语义候选未完整覆盖确定性评分规则")
         compiled_points: list[ScorePoint] = []
+        group_titles = {
+            group.group_id: group.title for group in structural_model.groups
+        }
         for point in structural_model.points:
             normalized_levels = ScoreAgent._scoring_levels(point.criterion)
             normalized_disqualifying = (
@@ -1196,11 +1200,11 @@ class ScoreAgent:
                     ScoreResponseUnit(
                         unit_id=f"{point.score_point_id}-U{unit_index:02d}",
                         title=unit_title,
-                        outline_path=[
-                            title
-                            for title in unit.outline_path
-                            if not is_evaluative_sentence_heading(title)
-                        ],
+                        outline_path=ScoreAgent._canonical_semantic_outline_path(
+                            structural_path=point.outline_path,
+                            semantic_path=unit.outline_path,
+                            group_title=group_titles.get(point.group_id, ""),
+                        ),
                         source_level_ids=[
                             item.level_id for item in unit.band_semantics
                         ],
@@ -1287,6 +1291,56 @@ class ScoreAgent:
                 )
             )
         return structural_model.model_copy(update={"points": compiled_points})
+
+    @staticmethod
+    def _canonical_semantic_outline_path(
+        *,
+        structural_path: list[str],
+        semantic_path: list[str],
+        group_title: str,
+    ) -> list[str]:
+        """Keep scoring-table hierarchy authoritative and append only a semantic leaf."""
+
+        def cleaned(values: list[str]) -> list[str]:
+            return [
+                text
+                for value in values
+                if (text := re.sub(r"\s+", " ", str(value)).strip())
+                and not is_evaluative_sentence_heading(text)
+            ]
+
+        source = cleaned(structural_path)
+        semantic = cleaned(semantic_path)
+        group_key = outline_subject(group_title)
+        while source and group_key and outline_subject(source[0]) == group_key:
+            source.pop(0)
+        while semantic and group_key and outline_subject(semantic[0]) == group_key:
+            semantic.pop(0)
+
+        if not source:
+            return semantic
+
+        source_keys = [outline_subject(title) for title in source]
+        semantic_keys = [outline_subject(title) for title in semantic]
+        suffix_start: int | None = None
+        for start in range(len(semantic_keys) - len(source_keys) + 1):
+            if semantic_keys[start : start + len(source_keys)] == source_keys:
+                suffix_start = start + len(source_keys)
+                break
+        if suffix_start is None and source_keys[-1] in semantic_keys:
+            suffix_start = len(semantic_keys) - 1 - semantic_keys[::-1].index(
+                source_keys[-1]
+            ) + 1
+
+        suffix = semantic[suffix_start:] if suffix_start is not None else semantic
+        result = list(source)
+        seen = set(source_keys)
+        for title in suffix:
+            key = outline_subject(title)
+            if key and key not in seen:
+                result.append(title)
+                seen.add(key)
+        return result
 
     def create_score_model_proposal(
         self,

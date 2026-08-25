@@ -305,6 +305,12 @@ test('outline command stops at the score-aware planning boundary', () => {
     expected_revision: 18,
     idempotency_key: 'cmd-outline-1',
   })
+  assert.deepEqual(
+    buildPrepareOutlineCommand('cmd-outline-2', 19, {
+      regenerateCapabilities: ['planning.project_understanding'],
+    }).payload,
+    { regenerate_capabilities: ['planning.project_understanding'] },
+  )
 })
 
 test('research command uses Tavily without browser-provider attachments', () => {

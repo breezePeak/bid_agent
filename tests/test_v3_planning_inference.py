@@ -1023,6 +1023,33 @@ def test_batched_outline_reuses_shared_factor_parent_across_fragments() -> None:
     )
 
 
+def test_outline_normalizes_scope_heading_and_score_suffix_drift() -> None:
+    payload = _large_outline_request().model_dump(mode="json")
+    for index, point in enumerate(payload["score_model"]["points"]):
+        path = (
+            ["评分组", "包5到包9：", "技术方法（43分）"]
+            if index == 0
+            else ["技术方法"]
+        )
+        point["outline_path"] = path
+        point["response_units"][0]["outline_path"] = path
+    request = OutlineDecompositionInput.model_validate(payload)
+
+    normalized = LLMOutlineDecompositionProvider._normalize_auto_outline_request(
+        request
+    )
+
+    assert {
+        tuple(point["outline_path"])
+        for point in normalized.score_model["points"]
+    } == {("技术方法（43分）",)}
+    assert all(
+        unit["outline_path"] == ["技术方法（43分）"]
+        for point in normalized.score_model["points"]
+        for unit in point["response_units"]
+    )
+
+
 def test_outline_rejects_redundant_task_level_after_source_factor_path() -> None:
     request_payload = _outline_request().model_dump(mode="json")
     point = request_payload["score_model"]["points"][0]

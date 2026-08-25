@@ -42,9 +42,10 @@ from .deterministic_outline import build_deterministic_outline_candidate
 from .inference_receipts import InferenceReceiptService
 from .inference_inputs import (
     build_outline_decomposition_input,
-    build_project_understanding_input,
+    build_project_understanding_input_batches,
     select_planning_source_context,
 )
+from .inference_checkpoints import InferenceCheckpointService
 from .inference_runtime import (
     INFERENCE_RUNTIME_REGISTRY,
     InferenceRuntimeMetadata,
@@ -81,6 +82,7 @@ from .planning_inference import (
     TopicDutyPlanningCandidate,
     TopicDutyPlanningInput,
     TopicDutyPlanningProvider,
+    merge_project_understanding_candidates,
 )
 from .planning_skill_registry import get_planning_skill
 from .pipeline_policy import (
@@ -106,6 +108,7 @@ from .score_semantic import (
     ScoreSemanticInferenceResult,
     ScoreSemanticInput,
     ScoreSemanticProvider,
+    ScoreSemanticCandidate,
     semantic_coverage_text,
 )
 from .score_model import (
@@ -217,6 +220,115 @@ class V3StageRunner:
         self._stage_warnings: dict[str, list[dict[str, Any]]] = {}
         self._stage_metrics: dict[str, dict[str, Any]] = {}
         self._generation_chapter_ids: list[str] = []
+        self._regenerate_capabilities: set[str] = set()
+
+    def request_inference_regeneration(self, capabilities: list[str] | None) -> None:
+        requested = {
+            str(item).strip() for item in (capabilities or []) if str(item).strip()
+        }
+        allowed = {
+            SCORE_SEMANTIC_CAPABILITY_ID,
+            _PROJECT_CAPABILITY_ID,
+            _TOPIC_CAPABILITY_ID,
+            OUTLINE_SKILL_ID,
+        }
+        unknown = sorted(requested - allowed)
+        if unknown:
+            from control_plane import ControlPlaneError
+
+            raise ControlPlaneError(
+                "V3_UNKNOWN_REGENERATE_CAPABILITY",
+                f"不支持重新生成的推理能力：{', '.join(unknown)}",
+                status_code=422,
+            )
+        self._regenerate_capabilities.update(requested)
+
+    @staticmethod
+    def _checkpoint_result(hit: Any, *, structured: bool) -> Any:
+        record = hit.record
+        common = {
+            "candidate": record["candidate"],
+            "raw_output": str(record.get("raw_output") or ""),
+            "normalized_output": str(record.get("normalized_output") or ""),
+            "input_snapshot": str(record.get("input_snapshot") or ""),
+            "attempt_count": int(record.get("attempt_count") or 1),
+            "capability_id": str(record.get("capability_id") or ""),
+            "prompt_version": str(record.get("prompt_version") or ""),
+            "prompt_hash": str(record.get("prompt_hash") or ""),
+            "schema_version": str(record.get("schema_version") or ""),
+            "provider_fingerprint": str(record.get("provider_fingerprint") or ""),
+            "model_fingerprint": str(record.get("model_fingerprint") or ""),
+            "temperature": float(record.get("temperature") or 0),
+        }
+        if structured:
+            return StructuredInferenceResult(
+                **common,
+                reasoning=str(record.get("reasoning") or ""),
+                normalized_reference_count=int(
+                    record.get("normalized_reference_count") or 0
+                ),
+                validation_errors=tuple(record.get("validation_errors") or ()),
+            )
+        return ScoreSemanticInferenceResult(
+            **common,
+            warnings=tuple(record.get("warnings") or ()),
+        )
+
+    def _checkpoint_key(self, provider: Any, capability_id: str,
+                        capability_version: str, input_snapshot: Any) -> str:
+        return InferenceCheckpointService.cache_key(
+            capability_id=capability_id,
+            capability_version=capability_version,
+            prompt_version=provider.prompt_version,
+            prompt_hash=provider.prompt_hash,
+            schema_version=provider.schema_version,
+            provider_fingerprint=provider.provider_fingerprint,
+            model_fingerprint=provider.model_fingerprint,
+            temperature=provider.temperature,
+            input_snapshot=input_snapshot,
+        )
+
+    @staticmethod
+    def _validate_checkpoint_runtime(result: Any, provider: Any,
+                                     capability_id: str) -> None:
+        expected = (
+            capability_id,
+            provider.prompt_version,
+            provider.prompt_hash,
+            provider.schema_version,
+            provider.provider_fingerprint,
+            provider.model_fingerprint,
+            float(provider.temperature),
+        )
+        actual = (
+            result.capability_id,
+            result.prompt_version,
+            result.prompt_hash,
+            result.schema_version,
+            result.provider_fingerprint,
+            result.model_fingerprint,
+            float(result.temperature),
+        )
+        if actual != expected:
+            from control_plane import ControlPlaneError
+
+            raise ControlPlaneError(
+                "V3_INFERENCE_CAPABILITY_MISMATCH",
+                "模型候选的能力、Prompt、Schema 或运行参数与请求不一致，未写入断点。",
+                status_code=409,
+            )
+
+    def _note_checkpoint_reuse(self, stage: str, hit: Any, *, batch_id: str = "") -> None:
+        metrics = self._stage_metrics.setdefault(stage, {})
+        reuses = metrics.setdefault("inference_reuses", [])
+        reuses.append({
+            "checkpoint_id": hit.checkpoint_id,
+            "capability_id": str(hit.record.get("capability_id") or ""),
+            "source_time": hit.created_at,
+            "source_operation_id": hit.operation_id,
+            "batch_id": batch_id,
+        })
+        metrics["inference_reuse_count"] = len(reuses)
 
     def set_generation_scope(self, chapter_ids: list[str] | None) -> None:
         self._generation_chapter_ids = [
@@ -264,13 +376,22 @@ class V3StageRunner:
     def stage_reuse_metrics(self, stage: str) -> dict[str, Any]:
         if stage != "plan_response":
             return {}
-        request = build_project_understanding_input(
+        requests = build_project_understanding_input_batches(
             load_promoted_requirement_ledger(self.context),
             require_promoted_source_index(self.context),
         )
         return {
-            "input_chars": len(canonical_json(request.model_dump(mode="json"))),
-            "source_block_count": len(request.source_context),
+            "input_chars": sum(
+                len(canonical_json(request.model_dump(mode="json")))
+                for request in requests
+            ),
+            "source_block_count": sum(
+                len(request.source_context) for request in requests
+            ),
+            "project_batch_count": len(requests),
+            "project_batch_reused_count": len(requests),
+            "inference_reuse_count": 0,
+            "inference_reuses": [],
             "normalized_reference_count": 0,
             "repair_round": 0,
             "max_repair_rounds": 2,
@@ -425,6 +546,14 @@ class V3StageRunner:
 
     def can_reuse_stage(self, stage: str) -> bool:
         """Return whether an outline stage can be skipped before execution."""
+
+        stage_capability = {
+            "analyze_scores": SCORE_SEMANTIC_CAPABILITY_ID,
+            "plan_response": _PROJECT_CAPABILITY_ID,
+            "compile_chapter_blueprint": OUTLINE_SKILL_ID,
+        }.get(stage)
+        if stage_capability in self._regenerate_capabilities:
+            return False
 
         if stage == "build_requirement_ledger":
             return self._active_artifact_dependencies_are_current(
@@ -2362,19 +2491,61 @@ class V3StageRunner:
                 score_provider = self._score_provider()
                 from .llm_telemetry import llm_stage_context
 
+                checkpoint_service = InferenceCheckpointService(self.context)
+                score_checkpoint_key = self._checkpoint_key(
+                    score_provider,
+                    SCORE_SEMANTIC_CAPABILITY_ID,
+                    score_capability_version,
+                    semantic_input,
+                )
+                force_regenerate = (
+                    SCORE_SEMANTIC_CAPABILITY_ID in self._regenerate_capabilities
+                )
+                score_checkpoint_hit = None
+                if not force_regenerate:
+                    score_checkpoint_hit = checkpoint_service.load(
+                        cache_key=score_checkpoint_key,
+                        candidate_model=ScoreSemanticCandidate,
+                        expected_input_snapshot=semantic_input,
+                    )
                 try:
-                    with llm_stage_context(
-                        self.context,
-                        operation_id,
-                        "score_semantic",
-                        capability_id=SCORE_SEMANTIC_CAPABILITY_ID,
-                        prompt_version=score_provider.prompt_version,
-                        schema_version=score_provider.schema_version,
-                        model=score_provider.model_fingerprint,
-                        temperature=score_provider.temperature,
-                    ):
-                        score_inference = score_provider.interpret(
-                            semantic_input
+                    if score_checkpoint_hit is not None:
+                        score_inference = self._checkpoint_result(
+                            score_checkpoint_hit,
+                            structured=False,
+                        )
+                        self._note_checkpoint_reuse(
+                            "analyze_scores",
+                            score_checkpoint_hit,
+                        )
+                    else:
+                        with llm_stage_context(
+                            self.context,
+                            operation_id,
+                            "score_semantic",
+                            capability_id=SCORE_SEMANTIC_CAPABILITY_ID,
+                            prompt_version=score_provider.prompt_version,
+                            schema_version=score_provider.schema_version,
+                            model=score_provider.model_fingerprint,
+                            temperature=score_provider.temperature,
+                        ):
+                            score_inference = score_provider.interpret(
+                                semantic_input
+                            )
+                        self._validate_checkpoint_runtime(
+                            score_inference,
+                            score_provider,
+                            SCORE_SEMANTIC_CAPABILITY_ID,
+                        )
+                        checkpoint_service.save(
+                            cache_key=score_checkpoint_key,
+                            operation_id=str(operation_id or ""),
+                            result=score_inference,
+                            capability_version=score_capability_version,
+                            supersede_existing=force_regenerate,
+                        )
+                        self._regenerate_capabilities.discard(
+                            SCORE_SEMANTIC_CAPABILITY_ID
                         )
                 except ScoreSemanticInferenceError as exc:
                     # A required model stage is not a successful stage merely
@@ -2466,8 +2637,15 @@ class V3StageRunner:
                                 "details": {"blocking_findings": blocking_findings},
                             },
                         )
+                    error_code = "V3_SCORE_INTEGRITY_BLOCKED"
+                    if locals().get("score_checkpoint_hit") is not None:
+                        checkpoint_service.record_postprocess_error(
+                            score_checkpoint_hit.checkpoint_id,
+                            ValueError(message),
+                        )
+                        error_code = "V3_CACHED_INFERENCE_POSTPROCESS_FAILED"
                     raise ControlPlaneError(
-                        "V3_SCORE_INTEGRITY_BLOCKED",
+                        error_code,
                         message,
                         status_code=409,
                         details={
@@ -2558,11 +2736,12 @@ class V3StageRunner:
                 getattr(self, "_project_review_feedback", "") or ""
             ).strip()
             self._project_review_feedback = ""
-            project_request = build_project_understanding_input(
+            project_requests = build_project_understanding_input_batches(
                 ledger,
                 source_index,
                 review_feedback=project_feedback,
             )
+            project_request = project_requests[0]
             project_capability_version = PROJECT_CAPABILITY_VERSION
             if self._uses_deterministic_project:
                 project_prompt_version = (
@@ -2649,17 +2828,128 @@ class V3StageRunner:
                 else:
                     from .llm_telemetry import llm_stage_context
 
-                    with llm_stage_context(
-                        self.context,
-                        operation_id,
-                        "plan_response",
-                        capability_id=_PROJECT_CAPABILITY_ID,
-                        prompt_version=project_provider.prompt_version,
-                        schema_version=project_provider.schema_version,
-                        model=project_provider.model_fingerprint,
-                        temperature=project_provider.temperature,
-                    ):
-                        project_result = project_provider.understand(project_request)
+                    checkpoint_service = InferenceCheckpointService(self.context)
+                    batch_results: list[StructuredInferenceResult] = []
+                    reused_checkpoint_hits: list[Any] = []
+                    reused_batches = 0
+                    force_regenerate = (
+                        _PROJECT_CAPABILITY_ID in self._regenerate_capabilities
+                    )
+                    for batch_request in project_requests:
+                        checkpoint_key = self._checkpoint_key(
+                            project_provider,
+                            _PROJECT_CAPABILITY_ID,
+                            project_capability_version,
+                            batch_request,
+                        )
+                        hit = None
+                        if not force_regenerate:
+                            hit = checkpoint_service.load(
+                                cache_key=checkpoint_key,
+                                candidate_model=ProjectUnderstandingCandidate,
+                                expected_input_snapshot=batch_request,
+                            )
+                        if hit is not None:
+                            reused_checkpoint_hits.append(hit)
+                            batch_result = self._checkpoint_result(
+                                hit,
+                                structured=True,
+                            )
+                            reused_batches += 1
+                            self._note_checkpoint_reuse(
+                                "plan_response",
+                                hit,
+                                batch_id=batch_request.batch_id,
+                            )
+                        else:
+                            with llm_stage_context(
+                                self.context,
+                                operation_id,
+                                "plan_response",
+                                capability_id=_PROJECT_CAPABILITY_ID,
+                                prompt_version=project_provider.prompt_version,
+                                schema_version=project_provider.schema_version,
+                                model=project_provider.model_fingerprint,
+                                temperature=project_provider.temperature,
+                            ):
+                                batch_result = project_provider.understand(batch_request)
+                            self._validate_checkpoint_runtime(
+                                batch_result,
+                                project_provider,
+                                _PROJECT_CAPABILITY_ID,
+                            )
+                            checkpoint_service.save(
+                                cache_key=checkpoint_key,
+                                operation_id=str(operation_id or ""),
+                                result=batch_result,
+                                capability_version=project_capability_version,
+                                supersede_existing=force_regenerate,
+                            )
+                        batch_results.append(batch_result)
+                    self._regenerate_capabilities.discard(_PROJECT_CAPABILITY_ID)
+                    if len(batch_results) == 1:
+                        project_result = batch_results[0]
+                    else:
+                        merged_candidate = merge_project_understanding_candidates(
+                            [result.candidate for result in batch_results]
+                        )
+                        merged_snapshot = canonical_json(
+                            {
+                                "batches": [
+                                    request.model_dump(mode="json")
+                                    for request in project_requests
+                                ]
+                            }
+                        )
+                        project_result = StructuredInferenceResult(
+                            candidate=merged_candidate,
+                            raw_output=canonical_json(
+                                [result.raw_output for result in batch_results]
+                            ),
+                            normalized_output=canonical_json(
+                                merged_candidate.model_dump(mode="json")
+                            ),
+                            reasoning="\n".join(
+                                result.reasoning for result in batch_results
+                                if result.reasoning
+                            ),
+                            input_snapshot=merged_snapshot,
+                            attempt_count=sum(
+                                result.attempt_count for result in batch_results
+                            ),
+                            capability_id=_PROJECT_CAPABILITY_ID,
+                            prompt_version=project_provider.prompt_version,
+                            prompt_hash=project_provider.prompt_hash,
+                            schema_version=project_provider.schema_version,
+                            provider_fingerprint=project_provider.provider_fingerprint,
+                            model_fingerprint=project_provider.model_fingerprint,
+                            temperature=project_provider.temperature,
+                            normalized_reference_count=sum(
+                                result.normalized_reference_count
+                                for result in batch_results
+                            ),
+                            validation_errors=tuple(
+                                error
+                                for result in batch_results
+                                for error in result.validation_errors
+                            ),
+                        )
+                    project_request = (
+                        project_requests[0]
+                        if len(project_requests) == 1
+                        else {
+                            "batches": [
+                                request.model_dump(mode="json")
+                                for request in project_requests
+                            ]
+                        }
+                    )
+                    self._stage_metrics.setdefault("plan_response", {}).update(
+                        {
+                            "project_batch_count": len(project_requests),
+                            "project_batch_reused_count": reused_batches,
+                        }
+                    )
                     if (
                         project_result.capability_id != _PROJECT_CAPABILITY_ID
                         or project_result.prompt_version
@@ -2678,12 +2968,33 @@ class V3StageRunner:
                             "ProjectUnderstandingProvider 返回结果的受控元数据不一致",
                             status_code=409,
                         )
-                    project = agent.compile_project_candidate(
-                        project_result.candidate,
-                        ledger,
-                        source_index,
-                        revision=project_base + 1,
-                    )
+                    try:
+                        project = agent.compile_project_candidate(
+                            project_result.candidate,
+                            ledger,
+                            source_index,
+                            revision=project_base + 1,
+                        )
+                    except Exception as exc:
+                        for reused_hit in reused_checkpoint_hits:
+                            checkpoint_service.record_postprocess_error(
+                                reused_hit.checkpoint_id,
+                                exc,
+                            )
+                        if reused_checkpoint_hits:
+                            raise ControlPlaneError(
+                                "V3_CACHED_INFERENCE_POSTPROCESS_FAILED",
+                                "复用已校验的项目理解结果后，后置处理仍未通过；已停止，等待修复或显式重新请求模型。",
+                                status_code=409,
+                                details={
+                                    "capability_id": _PROJECT_CAPABILITY_ID,
+                                    "checkpoint_ids": [
+                                        item.checkpoint_id
+                                        for item in reused_checkpoint_hits
+                                    ],
+                                },
+                            ) from exc
+                        raise
                 project_op_id = operation_id or (
                     f"planning-project:{ledger.revision}:{source_index.revision}"
                 )
@@ -2697,24 +3008,54 @@ class V3StageRunner:
                     input_snapshot=project_request,
                     capability_version=project_capability_version,
                 )
-                self._validate_gate_promote(
-                    project_proposal,
-                    producer_role="planning_agent",
-                    gate_id="G1_PROJECT_MODEL_INTEGRITY",
-                )
+                try:
+                    self._validate_gate_promote(
+                        project_proposal,
+                        producer_role="planning_agent",
+                        gate_id="G1_PROJECT_MODEL_INTEGRITY",
+                    )
+                except Exception as exc:
+                    hits = locals().get("reused_checkpoint_hits", [])
+                    for reused_hit in hits:
+                        checkpoint_service.record_postprocess_error(
+                            reused_hit.checkpoint_id,
+                            exc,
+                        )
+                    if hits:
+                        raise ControlPlaneError(
+                            "V3_CACHED_INFERENCE_POSTPROCESS_FAILED",
+                            "复用已校验的项目理解结果后，审计或门禁仍未通过；已停止，等待修复或显式重新请求模型。",
+                            status_code=409,
+                            details={
+                                "capability_id": _PROJECT_CAPABILITY_ID,
+                                "checkpoint_ids": [
+                                    item.checkpoint_id for item in hits
+                                ],
+                            },
+                        ) from exc
+                    raise
             project = load_promoted_project_model(self.context)
             self._require_active_inference_artifact("ProjectModel")
             attempt_count = int(getattr(project_result, "attempt_count", 0) or 0)
             validation_errors = list(
                 getattr(project_result, "validation_errors", ()) or ()
             )
-            self._stage_metrics["plan_response"] = {
+            self._stage_metrics.setdefault("plan_response", {}).update({
                 "input_chars": len(
-                    canonical_json(project_request.model_dump(mode="json"))
+                    canonical_json(
+                        project_request.model_dump(mode="json")
+                        if isinstance(project_request, BaseModel)
+                        else project_request
+                    )
                 ),
-                "source_block_count": len(project_request.source_context),
+                "source_block_count": sum(
+                    len(request.source_context) for request in project_requests
+                ),
                 "scanned_source_block_count": (
-                    project_request.scanned_source_block_count
+                    max(
+                        request.scanned_source_block_count
+                        for request in project_requests
+                    )
                 ),
                 "normalized_reference_count": int(
                     getattr(project_result, "normalized_reference_count", 0) or 0
@@ -2729,7 +3070,7 @@ class V3StageRunner:
                     }
                     for index, message in enumerate(validation_errors, start=1)
                 ],
-            }
+            })
             self._record_stage_output(
                 operation_id,
                 "plan_response",
@@ -2896,20 +3237,60 @@ class V3StageRunner:
             else:
                 from .llm_telemetry import llm_stage_context
 
+                checkpoint_service = InferenceCheckpointService(self.context)
+                outline_checkpoint_key = self._checkpoint_key(
+                    outline_provider,
+                    OUTLINE_SKILL_ID,
+                    capability_version,
+                    outline_request,
+                )
+                force_regenerate = (
+                    OUTLINE_SKILL_ID in self._regenerate_capabilities
+                )
+                outline_checkpoint_hit = None
+                if not force_regenerate:
+                    outline_checkpoint_hit = checkpoint_service.load(
+                        cache_key=outline_checkpoint_key,
+                        candidate_model=ChapterOutlineCandidate,
+                        expected_input_snapshot=outline_request,
+                    )
                 try:
-                    with llm_stage_context(
-                        self.context,
-                        operation_id,
-                        "compile_chapter_blueprint",
-                        capability_id=OUTLINE_SKILL_ID,
-                        prompt_version=outline_provider.prompt_version,
-                        schema_version=outline_provider.schema_version,
-                        model=outline_provider.model_fingerprint,
-                        temperature=outline_provider.temperature,
-                    ):
-                        outline_result = outline_provider.split(
-                            outline_request
+                    if outline_checkpoint_hit is not None:
+                        outline_result = self._checkpoint_result(
+                            outline_checkpoint_hit,
+                            structured=True,
                         )
+                        self._note_checkpoint_reuse(
+                            "compile_chapter_blueprint",
+                            outline_checkpoint_hit,
+                        )
+                    else:
+                        with llm_stage_context(
+                            self.context,
+                            operation_id,
+                            "compile_chapter_blueprint",
+                            capability_id=OUTLINE_SKILL_ID,
+                            prompt_version=outline_provider.prompt_version,
+                            schema_version=outline_provider.schema_version,
+                            model=outline_provider.model_fingerprint,
+                            temperature=outline_provider.temperature,
+                        ):
+                            outline_result = outline_provider.split(
+                                outline_request
+                            )
+                        self._validate_checkpoint_runtime(
+                            outline_result,
+                            outline_provider,
+                            OUTLINE_SKILL_ID,
+                        )
+                        checkpoint_service.save(
+                            cache_key=outline_checkpoint_key,
+                            operation_id=str(operation_id or ""),
+                            result=outline_result,
+                            capability_version=capability_version,
+                            supersede_existing=force_regenerate,
+                        )
+                        self._regenerate_capabilities.discard(OUTLINE_SKILL_ID)
                 except PlanningInferenceValidationError as exc:
                     # A model-authored outline is a required artifact.  Do not
                     # promote a rule-generated substitute after its candidate
@@ -2984,8 +3365,15 @@ class V3StageRunner:
                         "章节目录覆盖校验未全部通过："
                         f"{self._outline_warning_detail(blueprint_audit.get('findings'))}"
                     )
+                    error_code = self._blueprint_audit_error_code(blueprint_audit)
+                    if locals().get("outline_checkpoint_hit") is not None:
+                        checkpoint_service.record_postprocess_error(
+                            outline_checkpoint_hit.checkpoint_id,
+                            ValueError(message),
+                        )
+                        error_code = "V3_CACHED_INFERENCE_POSTPROCESS_FAILED"
                     raise ControlPlaneError(
-                        self._blueprint_audit_error_code(blueprint_audit),
+                        error_code,
                         message,
                         status_code=409,
                         details={"blueprint_audit": blueprint_audit},

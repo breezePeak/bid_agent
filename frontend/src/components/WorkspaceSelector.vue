@@ -54,6 +54,13 @@
         class="grid-card workspace-card"
         @click="$emit('select', run.id)"
       >
+        <!-- 右上角斜角编写模式标签 -->
+        <div class="corner-ribbon-wrapper">
+          <div class="corner-ribbon" :class="projectModeClass(run)">
+            {{ projectModeLabel(run) }}
+          </div>
+        </div>
+
         <div class="card-top">
           <div class="card-avatar" :style="{ backgroundColor: thumbColor(extractName(run.id)) }">
             {{ firstChar(extractName(run.id)) }}
@@ -190,6 +197,18 @@ function deliveryClass(status) {
   if (value === 'ready_with_warnings') return 'badge-danger'
   if (value === 'draft_with_gaps') return 'badge-warning'
   return 'badge-info'
+}
+
+function isRewrite(run) {
+  return run?.project_mode === 'bid_rewrite'
+}
+
+function projectModeLabel(run) {
+  return isRewrite(run) ? '改写' : '全量'
+}
+
+function projectModeClass(run) {
+  return isRewrite(run) ? 'ribbon-rewrite' : 'ribbon-full'
 }
 </script>
 
@@ -349,6 +368,7 @@ function deliveryClass(status) {
 .workspace-card {
   cursor: pointer;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  overflow: hidden;
 }
 
 .workspace-card:hover {
@@ -357,11 +377,50 @@ function deliveryClass(status) {
   border-color: #bfdbfe;
 }
 
+.corner-ribbon-wrapper {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 72px;
+  height: 72px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.corner-ribbon {
+  position: absolute;
+  top: 13px;
+  right: -24px;
+  width: 88px;
+  transform: rotate(45deg);
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 18px;
+  color: #ffffff;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.15);
+  user-select: none;
+  letter-spacing: 1px;
+}
+
+.ribbon-full {
+  background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+}
+
+.ribbon-rewrite {
+  background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);
+}
+
 .card-top {
   display: flex;
   justify-content: space-between;
   align-items: center;
   margin-bottom: 14px;
+}
+
+.card-badge-group {
+  margin-right: 28px;
 }
 
 .card-avatar {

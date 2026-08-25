@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections import defaultdict
 from dataclasses import dataclass
@@ -24,19 +25,20 @@ from .scoring_outline_policy import (
     is_evaluative_sentence_heading,
     is_hollow_quality_heading,
     is_sectionable_quality_condition,
+    outline_subject,
 )
 
 PROJECT_PROMPT_FILE = "v3_planning_agent_project.md"
 TOPIC_PROMPT_FILE = "v3_planning_agent_topics.md"
 OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
 
-PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v1.9"
+PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v2.0"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
-OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v3.0"
+OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v3.1"
 
 PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
-OUTLINE_CAPABILITY_VERSION = "3.0.0"
+OUTLINE_CAPABILITY_VERSION = "3.1.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
@@ -47,8 +49,15 @@ DEFAULT_TEMPERATURE = 0.1
 MAX_REPAIR_ATTEMPTS = 1
 OUTLINE_BATCH_MAX_ITEMS = 8
 OUTLINE_BATCH_MAX_INPUT_CHARS = 12_000
-PROJECT_INPUT_MAX_CHARS = 16_000
-PROJECT_INPUT_PROJECTION_VERSION = "v3.project_input.v3"
+PROJECT_INPUT_TARGET_CHARS = max(
+    1,
+    int(os.getenv("PROJECT_UNDERSTANDING_TARGET_CHARS", "16000")),
+)
+PROJECT_INPUT_MAX_CHARS = max(
+    PROJECT_INPUT_TARGET_CHARS,
+    int(os.getenv("PROJECT_UNDERSTANDING_MAX_CHARS", "32000")),
+)
+PROJECT_INPUT_PROJECTION_VERSION = "v3.project_input.v4"
 
 _PROJECT_CITED_LIST_FIELDS = (
     "background",
@@ -115,6 +124,9 @@ class ProjectUnderstandingInput(StrictPlanningModel):
     source_context: list[dict[str, Any]] = Field(default_factory=list)
     scanned_source_block_count: int = Field(default=0, ge=0)
     review_feedback: str = ""
+    batch_id: str = "project-single"
+    batch_index: int = Field(default=1, ge=1)
+    batch_count: int = Field(default=1, ge=1)
 
 
 class TopicDutyPlanningInput(StrictPlanningModel):
@@ -731,7 +743,8 @@ class _StructuredLLMProvider(Generic[CandidateT]):
             and len(input_snapshot) > PROJECT_INPUT_MAX_CHARS
         ):
             raise PlanningInferenceError(
-                "ProjectUnderstandingInput exceeds the deterministic 16000-character budget"
+                "ProjectUnderstandingInput exceeds the configured single-batch "
+                f"budget ({PROJECT_INPUT_MAX_CHARS} characters)"
             )
         if isinstance(request, ProjectUnderstandingInput):
             if evidence_error := _project_input_evidence_error(request):
@@ -1507,6 +1520,111 @@ def _merge_verified_project_candidates(
     return ProjectUnderstandingCandidate.model_validate(value)
 
 
+def merge_project_understanding_candidates(
+    candidates: list[ProjectUnderstandingCandidate],
+) -> ProjectUnderstandingCandidate:
+    """Deterministically merge independently validated project batches."""
+
+    if not candidates:
+        raise ValueError("项目理解分批候选不能为空")
+    value = candidates[0].model_dump(mode="json")
+    needs_review = any(item.review_status != "confirmed" for item in candidates)
+    conflict_notes: list[str] = []
+
+    def norm(text: Any) -> str:
+        return "".join(str(text or "").split()).casefold()
+
+    first_name = candidates[0].project_name
+    for candidate in candidates[1:]:
+        if candidate.project_name is None:
+            continue
+        if first_name is None:
+            first_name = candidate.project_name
+            value["project_name"] = first_name.model_dump(mode="json")
+        elif norm(first_name.text) != norm(candidate.project_name.text):
+            needs_review = True
+            conflict_notes.append(
+                f"项目名称候选冲突：{first_name.text} / {candidate.project_name.text}"
+            )
+
+    def merge_items(field: str, *, text_field: str) -> None:
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, tuple[str, ...]]] = set()
+        for candidate in candidates:
+            for item in getattr(candidate, field):
+                key = (
+                    norm(getattr(item, text_field)),
+                    tuple(sorted(item.upstream_refs)),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append(item.model_dump(mode="json"))
+        value[field] = merged
+
+    identities: list[dict[str, Any]] = []
+    identity_by_field: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        for item in candidate.identity:
+            key = item.field.casefold()
+            prior = identity_by_field.get(key)
+            if prior is None:
+                dumped = item.model_dump(mode="json")
+                identity_by_field[key] = dumped
+                identities.append(dumped)
+            elif norm(prior.get("value")) != norm(item.value):
+                needs_review = True
+                conflict_notes.append(
+                    f"项目身份字段 {item.field} 候选冲突："
+                    f"{prior.get('value')} / {item.value}"
+                )
+    value["identity"] = identities
+
+    for field in _PROJECT_CITED_LIST_FIELDS:
+        merge_items(field, text_field="text")
+    merge_items("terminology", text_field="definition")
+
+    facts: list[dict[str, Any]] = []
+    seen_facts: set[tuple[str, tuple[str, ...]]] = set()
+    for batch_index, candidate in enumerate(candidates, start=1):
+        for item_index, item in enumerate(candidate.facts, start=1):
+            key = (norm(item.statement), tuple(sorted(item.upstream_refs)))
+            if key in seen_facts:
+                continue
+            seen_facts.add(key)
+            dumped = item.model_dump(mode="json")
+            dumped["local_id"] = f"PF-B{batch_index:02d}-{item_index:03d}"
+            facts.append(dumped)
+    value["facts"] = facts
+
+    needs: list[dict[str, Any]] = []
+    seen_needs: set[tuple[str, str, tuple[str, ...]]] = set()
+    for batch_index, candidate in enumerate(candidates, start=1):
+        for item_index, item in enumerate(candidate.evidence_needs, start=1):
+            key = (
+                norm(item.question),
+                item.topic_id.casefold(),
+                tuple(sorted(item.upstream_refs)),
+            )
+            if key in seen_needs:
+                continue
+            seen_needs.add(key)
+            dumped = item.model_dump(mode="json")
+            dumped["local_id"] = f"PEN-B{batch_index:02d}-{item_index:03d}"
+            needs.append(dumped)
+    value["evidence_needs"] = needs
+    value["unknowns"] = list(
+        dict.fromkeys(
+            [
+                *(text for item in candidates for text in item.unknowns),
+                *conflict_notes,
+            ]
+        )
+    )
+    value["review_status"] = "needs_review" if needs_review else "confirmed"
+    return ProjectUnderstandingCandidate.model_validate(value)
+
+
 class LLMProjectUnderstandingProvider(
     _StructuredLLMProvider[ProjectUnderstandingCandidate]
 ):
@@ -1596,7 +1714,7 @@ class LLMProjectUnderstandingProvider(
     ) -> StructuredInferenceResult[ProjectUnderstandingCandidate]:
         return self._invoke(
             request,
-            logical_batch_id="project-single",
+            logical_batch_id=request.batch_id,
             repair_attempts=(1 if self._raw_source_mode(request) else 2),
         )
 
@@ -2138,6 +2256,7 @@ class LLMOutlineDecompositionProvider(
             }
             return result
 
+        request = self._normalize_auto_outline_request(request)
         specs = self._build_batch_specs(request)
         if len(specs) <= 1:
             result = self._invoke(
@@ -2236,6 +2355,99 @@ class LLMOutlineDecompositionProvider(
             model_fingerprint=self.model_fingerprint,
             temperature=self.temperature,
         )
+
+    @staticmethod
+    def _normalize_auto_outline_request(
+        request: OutlineDecompositionInput,
+    ) -> OutlineDecompositionInput:
+        """Remove non-factor scope headings and reconcile score-suffix drift."""
+
+        score_model = dict(request.score_model)
+        groups = [dict(group) for group in score_model.get("groups", [])]
+        group_titles = {
+            str(group.get("group_id") or ""): str(group.get("title") or "")
+            for group in groups
+        }
+        points = [dict(point) for point in score_model.get("points", [])]
+
+        def is_scope_heading(title: str) -> bool:
+            compact = re.sub(r"\s+", "", title)
+            return bool(
+                re.fullmatch(
+                    r"包\d+(?:(?:到|至|[-—~～])包?\d+)?[：:]",
+                    compact,
+                )
+            )
+
+        def relative_path(path: Any, group_title: str) -> list[str]:
+            values = [
+                text
+                for value in (path if isinstance(path, list) else [])
+                if (text := re.sub(r"\s+", " ", str(value)).strip())
+                and not is_evaluative_sentence_heading(text)
+            ]
+            group_key = outline_subject(group_title)
+            while values and group_key and outline_subject(values[0]) == group_key:
+                values.pop(0)
+            return [title for title in values if not is_scope_heading(title)]
+
+        representatives: dict[tuple[str, str], str] = {}
+        for point in points:
+            group_id = str(point.get("group_id") or "")
+            group_title = group_titles.get(group_id, "")
+            paths = [
+                point.get("outline_path"),
+                *(
+                    unit.get("outline_path")
+                    for unit in point.get("response_units", [])
+                    if isinstance(unit, dict)
+                ),
+            ]
+            for path in paths:
+                for title in relative_path(path, group_title):
+                    key = (group_id, outline_subject(title))
+                    current = representatives.get(key)
+                    title_has_points = bool(
+                        re.search(r"[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]", title)
+                    )
+                    current_has_points = bool(
+                        current
+                        and re.search(
+                            r"[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]",
+                            current,
+                        )
+                    )
+                    if current is None or (title_has_points and not current_has_points):
+                        representatives[key] = title
+
+        normalized_points: list[dict[str, Any]] = []
+        for point in points:
+            group_id = str(point.get("group_id") or "")
+            group_title = group_titles.get(group_id, "")
+
+            def normalized_path(path: Any) -> list[str]:
+                return [
+                    representatives.get((group_id, outline_subject(title)), title)
+                    for title in relative_path(path, group_title)
+                ]
+
+            normalized_point = dict(point)
+            normalized_point["outline_path"] = normalized_path(
+                point.get("outline_path")
+            )
+            normalized_point["response_units"] = [
+                {
+                    **unit,
+                    "outline_path": normalized_path(unit.get("outline_path")),
+                }
+                for unit in point.get("response_units", [])
+                if isinstance(unit, dict)
+            ]
+            normalized_points.append(normalized_point)
+
+        score_model["groups"] = groups
+        score_model["points"] = normalized_points
+        return request.model_copy(update={"score_model": score_model})
 
     def _cache_key(self, spec: OutlineBatchSpec) -> str:
         return canonical_hash(
@@ -2506,7 +2718,7 @@ class LLMOutlineDecompositionProvider(
             ]
             for outline_path in outline_paths:
                 outline_titles_by_group[group_id].update(
-                    re.sub(r"\s+", " ", str(title)).strip()
+                    outline_subject(str(title))
                     for title in outline_path
                     if str(title).strip()
                     and not is_evaluative_sentence_heading(str(title))
@@ -2597,10 +2809,11 @@ class LLMOutlineDecompositionProvider(
                     else canonical_root
                 )
                 normalized_title = re.sub(r"\s+", " ", node.title).strip()
-                shared_key = (str(parent_id or ""), normalized_title)
+                normalized_title_key = outline_subject(normalized_title)
+                shared_key = (str(parent_id or ""), normalized_title_key)
                 existing_id = (
                     shared_node_id_by_group_path[spec.group_id].get(shared_key)
-                    if normalized_title in outline_titles_by_group[spec.group_id]
+                    if normalized_title_key in outline_titles_by_group[spec.group_id]
                     else None
                 )
                 if existing_id is not None:
@@ -2623,7 +2836,7 @@ class LLMOutlineDecompositionProvider(
                     }
                 )
                 nodes_by_group[spec.group_id].append(merged_node)
-                if normalized_title in outline_titles_by_group[spec.group_id]:
+                if normalized_title_key in outline_titles_by_group[spec.group_id]:
                     shared_node_id_by_group_path[spec.group_id][shared_key] = (
                         merged_node.local_id
                     )

@@ -61,6 +61,38 @@ class ControlPlaneTests(unittest.TestCase):
                 WorkspaceContext.resolve(runs, "missing")
             self.assertEqual(missing.exception.code, "WORKSPACE_NOT_FOUND")
 
+    def test_inference_checkpoint_is_reusable_and_preserves_superseded_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            context = self._workspace(Path(tmp), "checkpoint")
+            store = ControlStore(context)
+            first = store.append_v3_inference_checkpoint(
+                cache_key="cache-key",
+                capability_id="planning.project_understanding",
+                operation_id="op-1",
+                record={"candidate": {"project_name": "项目A"}},
+            )
+
+            loaded = store.latest_v3_inference_checkpoint("cache-key")
+            self.assertEqual(loaded["checkpoint_id"], first["checkpoint_id"])
+            store.use_v3_inference_checkpoint(first["checkpoint_id"])
+            self.assertEqual(
+                store.v3_inference_checkpoint(first["checkpoint_id"])["use_count"],
+                1,
+            )
+
+            second = store.append_v3_inference_checkpoint(
+                cache_key="cache-key",
+                capability_id="planning.project_understanding",
+                operation_id="op-2",
+                record={"candidate": {"project_name": "项目B"}},
+                supersede_existing=True,
+            )
+            self.assertEqual(second["generation"], 2)
+            self.assertEqual(
+                store.v3_inference_checkpoint(first["checkpoint_id"])["state"],
+                "superseded",
+            )
+
     def test_material_verification_is_immutable_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             context = self._workspace(Path(tmp), "alpha")

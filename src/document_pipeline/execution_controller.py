@@ -533,6 +533,22 @@ class V3ExecutionController:
         MaterialReadinessService(self.context).require_outline_ready()
 
         payload = envelope.payload if isinstance(envelope.payload, dict) else {}
+        regenerate_capabilities = payload.get("regenerate_capabilities") or []
+        if not isinstance(regenerate_capabilities, list) or any(
+            not isinstance(item, str) for item in regenerate_capabilities
+        ):
+            raise ControlPlaneError(
+                "V3_INVALID_REGENERATE_CAPABILITIES",
+                "regenerate_capabilities 必须是字符串数组。",
+                status_code=422,
+            )
+        request_regeneration = getattr(
+            self.runner,
+            "request_inference_regeneration",
+            None,
+        )
+        if callable(request_regeneration):
+            request_regeneration(regenerate_capabilities)
         review_feedback = str(payload.get("review_feedback") or "").strip()
         base_blueprint_hash = str(payload.get("base_blueprint_hash") or "").strip()
         project_feedback = str(payload.get("project_feedback") or "").strip()
@@ -594,12 +610,24 @@ class V3ExecutionController:
                     )
             except Exception as exc:
                 error = self._stage_error(exc)
+                failure_output: dict[str, Any] = {}
+                consume_metrics = getattr(
+                    self.runner,
+                    "consume_stage_metrics",
+                    None,
+                )
+                if callable(consume_metrics):
+                    metrics = consume_metrics(stage)
+                    if isinstance(metrics, dict):
+                        failure_output = metrics
                 project_action_required = (
                     stage == "plan_response"
                     and (
                         type(exc).__name__.startswith("PlanningInference")
                         or bool(getattr(exc, "retryable", False))
                         or "缺少可保留的项目" in str(exc)
+                        or error.get("code")
+                        == "V3_CACHED_INFERENCE_POSTPROCESS_FAILED"
                     )
                 )
                 if project_action_required:
@@ -609,6 +637,7 @@ class V3ExecutionController:
                         "paused",
                         disposition="project_understanding_action_required",
                         error=error,
+                        output=failure_output,
                     )
                     return {
                         "accepted": True,
@@ -621,7 +650,12 @@ class V3ExecutionController:
                         "error": error,
                         "action_required": {
                             "kind": "project_understanding",
-                            "actions": ["retry", "feedback", "later"],
+                            "actions": [
+                                "retry_cached",
+                                "regenerate_model",
+                                "feedback",
+                                "later",
+                            ],
                         },
                     }
                 self.store.record_stage_run(
@@ -630,6 +664,7 @@ class V3ExecutionController:
                     "failed",
                     disposition="v3_outline_command",
                     error=error,
+                    output=failure_output,
                 )
                 raise
             after_identity = self._active_artifact_identity(stage)

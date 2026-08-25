@@ -404,6 +404,8 @@ def test_strict_candidate_is_returned_without_repair() -> None:
     result = provider.interpret(_semantic_input())
 
     assert len(calls) == 1
+    assert "ALLOWED_REQUIREMENT_IDS_BY_RULE" in calls[0][1]["content"]
+    assert '{"SR-1":[]}' in calls[0][1]["content"]
     assert result.candidate.interpretations[0].units[0].title == "核查准备内容与检查方法"
     assert provider.prompt_hash
     assert provider.model_fingerprint == "fake-model:v1"
@@ -762,6 +764,7 @@ def test_partial_repair_reuses_independently_valid_rules_and_repairs_only_reject
     repair_prompt = calls[1][1]["content"]
     assert "[SR-2]" in repair_prompt
     assert "SR-1" not in repair_prompt
+    assert '{"SR-2":[]}' in repair_prompt
     assert '"rule_id":"SR-2"' in repair_prompt
     assert '"rule_id":"SR-1"' not in repair_prompt
     assert [item["rule_id"] for item in json.loads(result.input_snapshot)["rules"]] == [
@@ -1355,14 +1358,14 @@ def test_large_technical_group_balances_output_at_natural_prefixes() -> None:
         max_input_chars=1_000_000,
     )
 
-    assert [len(batch.semantic_input.rules) for batch in batches] == [9, 7]
+    assert [len(batch.semantic_input.rules) for batch in batches] == [5, 5, 5, 1]
     assert all(
-        len(batch.semantic_input.rules) <= 9 for batch in batches
+        len(batch.semantic_input.rules) <= 5 for batch in batches
     )
     assert batches[0].semantic_input.rules[-1].title.startswith(
         "年度全国国土变更调查成果核查"
     )
-    assert batches[1].semantic_input.rules[0].title.startswith(
+    assert batches[1].semantic_input.rules[-1].title.startswith(
         "相关内业核查工作"
     )
 

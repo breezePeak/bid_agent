@@ -805,6 +805,22 @@ class ControlStore:
                         receipt_json TEXT NOT NULL,
                         created_at TEXT NOT NULL
                     );
+                    CREATE TABLE IF NOT EXISTS v3_inference_checkpoints (
+                        checkpoint_id TEXT PRIMARY KEY,
+                        cache_key TEXT NOT NULL,
+                        generation INTEGER NOT NULL,
+                        capability_id TEXT NOT NULL,
+                        operation_id TEXT NOT NULL DEFAULT '',
+                        state TEXT NOT NULL DEFAULT 'valid',
+                        record_json TEXT NOT NULL,
+                        postprocess_error TEXT NOT NULL DEFAULT '',
+                        use_count INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        last_used_at TEXT,
+                        UNIQUE(cache_key, generation)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_v3_inference_checkpoints_key
+                        ON v3_inference_checkpoints(cache_key, generation DESC);
                     CREATE TABLE IF NOT EXISTS v3_validation_reports (
                         proposal_id TEXT PRIMARY KEY REFERENCES v3_proposals(proposal_id),
                         proposal_hash TEXT NOT NULL DEFAULT '',
@@ -3879,6 +3895,22 @@ class ControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_llm_requests_operation
                 ON llm_requests(operation_id, stage_id, request_index);
+            CREATE TABLE IF NOT EXISTS v3_inference_checkpoints (
+                checkpoint_id TEXT PRIMARY KEY,
+                cache_key TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                capability_id TEXT NOT NULL,
+                operation_id TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'valid',
+                record_json TEXT NOT NULL,
+                postprocess_error TEXT NOT NULL DEFAULT '',
+                use_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                last_used_at TEXT,
+                UNIQUE(cache_key, generation)
+            );
+            CREATE INDEX IF NOT EXISTS idx_v3_inference_checkpoints_key
+                ON v3_inference_checkpoints(cache_key, generation DESC);
             """
         )
 
@@ -3917,6 +3949,99 @@ class ControlStore:
                 ("policy_version", "policy_version TEXT NOT NULL DEFAULT ''"),
             ):
                 add("v3_promotion_receipts", col, ddl)
+
+    def append_v3_inference_checkpoint(
+        self,
+        *,
+        cache_key: str,
+        capability_id: str,
+        operation_id: str,
+        record: dict[str, Any],
+        supersede_existing: bool = False,
+    ) -> dict[str, Any]:
+        checkpoint_id = str(uuid.uuid4())
+        created_at = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(generation), 0) AS latest "
+                    "FROM v3_inference_checkpoints WHERE cache_key = ?",
+                    (str(cache_key),),
+                ).fetchone()
+                generation = int(row["latest"] or 0) + 1
+                if supersede_existing:
+                    connection.execute(
+                        "UPDATE v3_inference_checkpoints SET state = 'superseded' "
+                        "WHERE cache_key = ? AND state = 'valid'",
+                        (str(cache_key),),
+                    )
+                connection.execute(
+                    "INSERT INTO v3_inference_checkpoints("
+                    "checkpoint_id, cache_key, generation, capability_id, "
+                    "operation_id, state, record_json, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 'valid', ?, ?)",
+                    (
+                        checkpoint_id,
+                        str(cache_key),
+                        generation,
+                        str(capability_id),
+                        str(operation_id or ""),
+                        _json(record),
+                        created_at,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.v3_inference_checkpoint(checkpoint_id) or {}
+
+    def v3_inference_checkpoint(self, checkpoint_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM v3_inference_checkpoints WHERE checkpoint_id = ?",
+                (str(checkpoint_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["record"] = _decode(item.pop("record_json", None), {})
+        return item
+
+    def latest_v3_inference_checkpoint(self, cache_key: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT checkpoint_id FROM v3_inference_checkpoints "
+                "WHERE cache_key = ? AND state = 'valid' "
+                "ORDER BY generation DESC LIMIT 1",
+                (str(cache_key),),
+            ).fetchone()
+        return (
+            self.v3_inference_checkpoint(str(row["checkpoint_id"]))
+            if row is not None
+            else None
+        )
+
+    def use_v3_inference_checkpoint(self, checkpoint_id: str) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE v3_inference_checkpoints SET use_count = use_count + 1, "
+                "last_used_at = ? WHERE checkpoint_id = ? AND state = 'valid'",
+                (_now(), str(checkpoint_id)),
+            )
+
+    def record_v3_inference_checkpoint_error(
+        self,
+        checkpoint_id: str,
+        error: str,
+    ) -> None:
+        with self._connection() as connection:
+            connection.execute(
+                "UPDATE v3_inference_checkpoints SET postprocess_error = ? "
+                "WHERE checkpoint_id = ?",
+                (str(error or "")[:4000], str(checkpoint_id)),
+            )
 
     def append_v3_inference_receipt(
         self,

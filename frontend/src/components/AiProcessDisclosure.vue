@@ -56,15 +56,20 @@ const durationLabel = computed(() => {
 })
 
 const summaryLabel = computed(() => {
-  if (durationLabel.value == null) {
-    return normalizedStatus.value === 'waiting' ? '等待确认' : '尚未开始'
+  const duration = durationLabel.value
+  if (normalizedStatus.value === 'processing') {
+    return `正在处理 · 已用 ${duration || '1 秒'}`
   }
-  return {
-    processing: `正在处理 · 已用 ${durationLabel.value}`,
-    completed: `已处理 · 耗时 ${durationLabel.value}`,
-    failed: `处理失败 · 耗时 ${durationLabel.value}`,
-    waiting: `等待确认 · 已处理 ${durationLabel.value}`,
-  }[normalizedStatus.value]
+  if (normalizedStatus.value === 'completed') {
+    return duration ? `已处理 · 耗时 ${duration}` : '已完成'
+  }
+  if (normalizedStatus.value === 'failed') {
+    return duration ? `处理失败 · 耗时 ${duration}` : '处理失败'
+  }
+  if (normalizedStatus.value === 'waiting') {
+    return duration && duration !== '0 秒' ? `等待确认 · 前序耗时 ${duration}` : '等待确认'
+  }
+  return '准备就绪'
 })
 
 const defaultDetailText = computed(() => ({

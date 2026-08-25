@@ -21,6 +21,7 @@ from .planning_inference import (
     OutlineDecompositionInput,
     PROJECT_INPUT_MAX_CHARS,
     PROJECT_INPUT_PROJECTION_VERSION,
+    PROJECT_INPUT_TARGET_CHARS,
     ProjectUnderstandingInput,
     TopicDutyPlanningInput,
 )
@@ -274,9 +275,7 @@ def select_planning_source_context(
             "block_kind": block.block_kind,
             "ordinal": block.ordinal,
             "content": (
-                block.content[:PROJECT_SOURCE_TEXT_LIMIT]
-                if project_input
-                else block.content
+                block.content
             ),
             "heading_path": list(block.heading_path),
             "source_anchor": {
@@ -290,7 +289,13 @@ def select_planning_source_context(
     ]
 
 
-def _project_requirement_snapshot(ledger: RequirementLedger) -> dict[str, Any]:
+def _project_requirement_snapshot(
+    ledger: RequirementLedger,
+    *,
+    source_chunk_ids: set[str],
+    requirement_limit: int | None = None,
+    text_limit: int | None = None,
+) -> dict[str, Any]:
     """Keep the bounded requirement contract consumed by project providers.
 
     Raw SourceIndex blocks remain the primary prose input.  Requirement IDs and
@@ -298,74 +303,119 @@ def _project_requirement_snapshot(ledger: RequirementLedger) -> dict[str, Any]:
     must agree on exact coverage and provenance.
     """
 
-    return {
-        "projection_version": PROJECT_INPUT_PROJECTION_VERSION,
-        "revision": ledger.revision,
-        "requirements": [
+    kind_priority = {
+        "mandatory": 5,
+        "deliverable": 4,
+        "acceptance": 3,
+        "contract": 2,
+        "qualification": 1,
+    }
+    ranked = sorted(
+        enumerate(ledger.requirements),
+        key=lambda pair: (
+            0 if pair[1].status not in {"blocked", "waived"} else 1,
+            0 if pair[1].severity == "blocking" else 1,
+            0 if pair[1].source_anchor.chunk_id in source_chunk_ids else 1,
+            -kind_priority.get(pair[1].kind.value, 0),
+            pair[0],
+        ),
+    )
+    selected = [item for _, item in ranked]
+    if requirement_limit is not None:
+        selected = selected[:requirement_limit]
+    requirements = []
+    for item in selected:
+        normalized = item.normalized_requirement
+        if text_limit is not None:
+            normalized = normalized[:text_limit]
+        requirements.append(
             {
                 "requirement_id": item.requirement_id,
                 "kind": item.kind.value,
-                "normalized_requirement": item.normalized_requirement,
+                "normalized_requirement": normalized,
                 "status": item.status,
                 "severity": item.severity,
             }
-            for item in ledger.requirements
-        ],
+        )
+    return {
+        "projection_version": PROJECT_INPUT_PROJECTION_VERSION,
+        "revision": ledger.revision,
+        "total_requirement_count": len(ledger.requirements),
+        "selected_requirement_count": len(requirements),
+        "omitted_requirement_count": len(ledger.requirements) - len(requirements),
+        "requirements": requirements,
     }
 
 
 def _bounded_project_source_context(
     source_context: list[dict[str, Any]],
-    requirement_ledger: dict[str, Any],
+    ledger: RequirementLedger,
     scanned_source_block_count: int,
     review_feedback: str = "",
+    *,
+    max_chars: int = PROJECT_INPUT_TARGET_CHARS,
+    batch_id: str = "project-single",
+    batch_index: int = 1,
+    batch_count: int = 1,
 ) -> ProjectUnderstandingInput:
     """Build a non-empty, raw-source-first request within the input budget."""
 
     def make(
         blocks: list[dict[str, Any]],
-        ledger_snapshot: dict[str, Any] = requirement_ledger,
+        ledger_snapshot: dict[str, Any],
     ) -> ProjectUnderstandingInput:
         return ProjectUnderstandingInput(
             requirement_ledger=ledger_snapshot,
             source_context=blocks,
             scanned_source_block_count=scanned_source_block_count,
             review_feedback=str(review_feedback or "").strip()[:2000],
+            batch_id=batch_id,
+            batch_index=batch_index,
+            batch_count=batch_count,
         )
 
-    if len(canonical_json(make(source_context).model_dump(mode="json"))) <= PROJECT_INPUT_MAX_CHARS:
-        return make(source_context)
-
-    # Reduce the number/length of lower-ranked blocks, never the entire raw
-    # source context.  The previous fallback retained 60 derived requirements
-    # and silently sent zero tender blocks to the model.
-    for block_limit in (18, 15, 12, 10, 8, 6, 4, 2, 1):
-        for content_limit in (600, 500, 400, 300, 200, 120, 80):
-            compact_blocks = [
-                {
-                    **block,
-                    "content": str(block.get("content") or "")[:content_limit],
-                }
-                for block in source_context[:block_limit]
-            ]
-            candidate = make(compact_blocks)
-            if (
-                compact_blocks
-                and len(canonical_json(candidate.model_dump(mode="json")))
-                <= PROJECT_INPUT_MAX_CHARS
-            ):
-                return candidate
-    raise ValueError(
-        "ProjectUnderstandingInput 无法在 16000 字符内保留任何招标原文块"
+    chunk_ids = {
+        str((block.get("source_anchor") or {}).get("chunk_id") or "")
+        for block in source_context
+        if isinstance(block, dict)
+    }
+    limits = [
+        (None, None),
+        (80, 320),
+        (40, 240),
+        (24, 160),
+        (12, 120),
+        (6, 80),
+        (0, 0),
+    ]
+    for requirement_limit, text_limit in limits:
+        snapshot = _project_requirement_snapshot(
+            ledger,
+            source_chunk_ids=chunk_ids,
+            requirement_limit=requirement_limit,
+            text_limit=text_limit,
+        )
+        candidate = make(source_context, snapshot)
+        if len(canonical_json(candidate.model_dump(mode="json"))) <= max_chars:
+            return candidate
+    block_id = str((source_context[0] if source_context else {}).get("block_id") or "")
+    actual_chars = len(canonical_json(candidate.model_dump(mode="json")))
+    error = ValueError(
+        "单个项目理解原文块连同最小协议开销仍超过配置上限: "
+        f"block_id={block_id}, chars={actual_chars}, max_chars={max_chars}; "
+        "请在源文件预处理阶段按完整段落或表格边界拆分该块，或提高配置上限。"
     )
+    error.code = "PROJECT_INPUT_BLOCK_EXCEEDS_MAX"
+    error.retryable = False
+    raise error
 
 
-def build_project_understanding_input(
+def build_project_understanding_input_batches(
     ledger: RequirementLedger,
     source_index: SourceIndex,
     *,
     review_feedback: str = "",
-) -> ProjectUnderstandingInput:
+) -> list[ProjectUnderstandingInput]:
     source_context = select_planning_source_context(
         list(source_index.blocks),
         requirement_chunk_ids={
@@ -377,12 +427,82 @@ def build_project_understanding_input(
         compact=True,
         project_input=True,
     )
-    candidate = _bounded_project_source_context(
-        source_context,
-        _project_requirement_snapshot(ledger),
-        len(source_index.blocks),
-        review_feedback,
-    )
+    if not source_context:
+        return [
+            _bounded_project_source_context(
+                source_context,
+                ledger,
+                len(source_index.blocks),
+                review_feedback,
+                max_chars=PROJECT_INPUT_MAX_CHARS,
+            )
+        ]
+
+    grouped: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    for block in source_context:
+        proposed = [*current, block]
+        try:
+            _bounded_project_source_context(
+                proposed,
+                ledger,
+                len(source_index.blocks),
+                review_feedback,
+                max_chars=PROJECT_INPUT_TARGET_CHARS,
+            )
+        except ValueError:
+            if current:
+                grouped.append(current)
+                current = []
+            _bounded_project_source_context(
+                [block],
+                ledger,
+                len(source_index.blocks),
+                review_feedback,
+                max_chars=PROJECT_INPUT_MAX_CHARS,
+            )
+            current = [block]
+        else:
+            current = proposed
+    if current:
+        grouped.append(current)
+
+    batch_count = len(grouped)
+    batches: list[ProjectUnderstandingInput] = []
+    for index, blocks in enumerate(grouped, start=1):
+        digest = canonical_hash(
+            {
+                "revision": ledger.revision,
+                "block_ids": [block.get("block_id") for block in blocks],
+                "review_feedback": review_feedback,
+            }
+        )
+        batches.append(
+            _bounded_project_source_context(
+                blocks,
+                ledger,
+                len(source_index.blocks),
+                review_feedback,
+                max_chars=PROJECT_INPUT_MAX_CHARS,
+                batch_id=f"project-{digest[:16]}",
+                batch_index=index,
+                batch_count=batch_count,
+            )
+        )
+    return batches
+
+
+def build_project_understanding_input(
+    ledger: RequirementLedger,
+    source_index: SourceIndex,
+    *,
+    review_feedback: str = "",
+) -> ProjectUnderstandingInput:
+    candidate = build_project_understanding_input_batches(
+        ledger,
+        source_index,
+        review_feedback=review_feedback,
+    )[0]
     has_project_text = any(
         str(block.get("content") or "").strip()
         for block in candidate.source_context

@@ -22,7 +22,7 @@
     - `normalized_condition`：对原文条件做简洁、忠实、可写作的规范化表达；保留主语、对象、动作、范围、数量、时限、否定和情态强度，不得补充新事实；
     - `condition_role`：只能取 `content`（应写的实质内容/方法/成果）、`evidence`（需提交或引用的证明材料）、`constraint`（强制边界、阈值、时限或禁止事项）、`quality`（没有明确业务对象的完整性、科学性、合理性、可行性等纯质量标准）、`document`（全文格式、一致性、目录、页码、排版或整体表达）之一。带具体写作对象的质量描述应优先使用 `content`，保留质量要求在 `normalized_condition` 和 `response_intent` 中。
 11. `document_map` 是整份标书的标题级轻量地图：`heading_id`、`heading_path`、`title`、边界 `block_ids`、`block_count` 和 `content_type` 只用于定位章节，不代表发送了标题下的全部正文。`linked_requirements` 只包含本批评分规则定向检索到的少量采购需求原文。二者可帮助消歧，但都不能替代评分原文、扩大评分条件或成为虚构事实的依据；最高档逐字来源仍是唯一权威。
-12. 每个 `unit` 必须显式输出 `linked_requirement_ids`，并按该独立得分任务从本 `rule` 的 `linked_requirement_ids ∪ context_requirement_ids` 中选择精确子集。不得引用本规则未提供的 ID。`linked_requirement_ids` 是明确绑定，必须由至少一个相关 unit 选择；`context_requirement_ids` 只是定向检索候选，可以一个都不选。一个需求可以被多个确实相关的 unit 共享，但禁止为了覆盖ID或省事把全部检索候选机械复制给每个 unit。
+12. 每个 `unit` 必须显式输出 `linked_requirement_ids`，并按该独立得分任务从 `ALLOWED_REQUIREMENT_IDS_BY_RULE` 中本 `rule_id` 对应的唯一白名单选择精确子集。不得引用兄弟规则、旧输出或模型自行推断的 ID；白名单为空时必须输出 `[]`。其中本规则的 `linked_requirement_ids` 是明确绑定，必须由至少一个相关 unit 选择；`context_requirement_ids` 只是定向检索候选，可以一个都不选。一个需求可以被多个确实相关的 unit 共享，但禁止为了覆盖 ID 或省事把全部检索候选机械复制给每个 unit。
 13. `common_criterion` 是确定性解析器从最后一个得分档之后提取的共同资格、取证或证明要求。它同样属于拿满分的必要条件，必须逐项进入最相关 unit 的 `full_score_conditions`，但这些共同条件的 `source_level_id` 必须为 `null`。全部 unit 合计必须覆盖其中可独立响应的资格、取证和证明义务；“以下两项”等材料清单引导语、已由前文明确义务表达的泛指“未提供完整资料/不符合要求不得分”后果，以及“说明/注”标题本身不生成独立条件。
 14. 必须忠实表达条件之间的逻辑关系并填写 `condition_join`：所有条件同时满足用 `all`；任一即可用 `any`；有先后顺序用 `ordered`；按数量累计或达到阈值用 `threshold`；同一 unit 同时含“且”和“或”等嵌套关系用 `mixed`。如果“或/且/同时/①+②”等关系保留在某个原子条件的逐字 `source_excerpt` 中，不得在 `normalized_condition` 或响应意图中把它改成另一种关系。
 

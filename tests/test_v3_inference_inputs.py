@@ -20,6 +20,7 @@ from document_pipeline.contracts import (  # noqa: E402
 )
 from document_pipeline.inference_inputs import (  # noqa: E402
     build_project_understanding_input,
+    build_project_understanding_input_batches,
     build_score_semantic_input,
     build_score_semantic_input_batches,
 )
@@ -72,8 +73,11 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
     )
 
     assert request.requirement_ledger == {
-        "projection_version": "v3.project_input.v3",
+        "projection_version": "v3.project_input.v4",
         "revision": 1,
+        "total_requirement_count": 1,
+        "selected_requirement_count": 1,
+        "omitted_requirement_count": 0,
         "requirements": [
             {
                 "requirement_id": "R-1",
@@ -105,6 +109,73 @@ def test_project_input_omits_audit_transcript_and_layout_noise() -> None:
     ]
     assert "score_model" not in request.model_dump(mode="json")
     assert len(request.model_dump_json()) <= 16_000
+
+
+def test_project_input_allows_one_batch_between_target_and_maximum() -> None:
+    anchor = SourceAnchor(
+        source_input_id="tender",
+        chunk_id="C-LARGE",
+        location="paragraph:1",
+    )
+    source = SourceIndex(
+        input_manifest_revision=1,
+        blocks=[
+            SourceBlock(
+                block_id="B-LARGE",
+                input_id="tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=0,
+                content="完整招标原文" * 3_000,
+                source_anchor=anchor,
+                content_hash="large-hash",
+            )
+        ],
+    )
+
+    batches = build_project_understanding_input_batches(
+        RequirementLedger(),
+        source,
+    )
+
+    assert len(batches) == 1
+    assert 16_000 < len(batches[0].model_dump_json()) <= 32_000
+    assert batches[0].source_context[0]["content"] == "完整招标原文" * 3_000
+
+
+def test_project_input_batches_on_complete_source_block_boundaries() -> None:
+    blocks = []
+    for index in range(2):
+        content = f"第{index + 1}块" + ("招标原文" * 3_000)
+        blocks.append(
+            SourceBlock(
+                block_id=f"B-{index + 1}",
+                input_id="tender",
+                input_role=InputRole.TENDER,
+                block_kind="paragraph",
+                ordinal=index,
+                content=content,
+                source_anchor=SourceAnchor(
+                    source_input_id="tender",
+                    chunk_id=f"C-{index + 1}",
+                    location=f"paragraph:{index + 1}",
+                ),
+                content_hash=f"hash-{index + 1}",
+            )
+        )
+
+    batches = build_project_understanding_input_batches(
+        RequirementLedger(),
+        SourceIndex(input_manifest_revision=1, blocks=blocks),
+    )
+
+    assert len(batches) == 2
+    assert [batch.batch_index for batch in batches] == [1, 2]
+    assert all(batch.batch_count == 2 for batch in batches)
+    assert all(len(batch.model_dump_json()) <= 32_000 for batch in batches)
+    assert [
+        batch.source_context[0]["content"] for batch in batches
+    ] == [block.content for block in blocks]
 
 
 def test_score_semantic_input_contains_only_directionally_linked_context() -> None:
