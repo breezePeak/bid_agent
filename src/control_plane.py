@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 31
+    SCHEMA_VERSION = 32
     WORKFLOW_PHASES = ("materials", "planning", "writing")
     PHASE_STATUSES = {
         "not_started", "ready", "running", "waiting_confirmation",
@@ -936,6 +936,21 @@ class ControlStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_chapter_content_revisions_head
                         ON chapter_content_revisions(chapter_id, content_revision DESC);
+                    CREATE TABLE IF NOT EXISTS chapter_rewrite_match_revisions (
+                        chapter_id TEXT NOT NULL,
+                        match_revision INTEGER NOT NULL,
+                        blueprint_revision INTEGER NOT NULL,
+                        blueprint_hash TEXT NOT NULL,
+                        legacy_bid_id TEXT NOT NULL,
+                        legacy_index_revision INTEGER NOT NULL,
+                        legacy_index_hash TEXT NOT NULL,
+                        result_json TEXT NOT NULL,
+                        result_hash TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (chapter_id, match_revision)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_match_head
+                        ON chapter_rewrite_match_revisions(chapter_id, match_revision DESC);
                     CREATE TABLE IF NOT EXISTS chapter_approval_receipts (
                         receipt_id TEXT PRIMARY KEY,
                         receipt_hash TEXT NOT NULL UNIQUE,
@@ -1192,6 +1207,21 @@ class ControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_chapter_content_revisions_head
                 ON chapter_content_revisions(chapter_id, content_revision DESC);
+            CREATE TABLE IF NOT EXISTS chapter_rewrite_match_revisions (
+                chapter_id TEXT NOT NULL,
+                match_revision INTEGER NOT NULL,
+                blueprint_revision INTEGER NOT NULL,
+                blueprint_hash TEXT NOT NULL,
+                legacy_bid_id TEXT NOT NULL,
+                legacy_index_revision INTEGER NOT NULL,
+                legacy_index_hash TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                result_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chapter_id, match_revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_match_head
+                ON chapter_rewrite_match_revisions(chapter_id, match_revision DESC);
             CREATE TABLE IF NOT EXISTS chapter_approval_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 receipt_hash TEXT NOT NULL UNIQUE,
@@ -6777,6 +6807,81 @@ class ControlStore:
         if str(row["status"] or "") == "cancelled":
             raise ControlPlaneError("CHAPTER_BATCH_CANCELLED", "批量任务已取消。", status_code=409)
 
+    def append_chapter_rewrite_match_revision(
+        self,
+        *,
+        chapter_id: str,
+        blueprint_revision: int,
+        blueprint_hash: str,
+        legacy_bid_id: str,
+        legacy_index_revision: int,
+        legacy_index_hash: str,
+        result: dict[str, Any],
+        result_hash: str,
+    ) -> dict[str, Any]:
+        normalized = str(chapter_id or "").strip()
+        if not normalized:
+            raise ControlPlaneError(
+                "CHAPTER_ID_REQUIRED", "章节 ID 不能为空。", status_code=400
+            )
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(match_revision), 0) AS revision "
+                    "FROM chapter_rewrite_match_revisions WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                revision = int(row["revision"] or 0) + 1
+                connection.execute(
+                    """
+                    INSERT INTO chapter_rewrite_match_revisions(
+                        chapter_id, match_revision, blueprint_revision,
+                        blueprint_hash, legacy_bid_id, legacy_index_revision,
+                        legacy_index_hash, result_json, result_hash, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        normalized,
+                        revision,
+                        int(blueprint_revision),
+                        str(blueprint_hash),
+                        str(legacy_bid_id),
+                        int(legacy_index_revision),
+                        str(legacy_index_hash),
+                        _json(result),
+                        str(result_hash),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.chapter_rewrite_match_revision(normalized, revision) or {}
+
+    def chapter_rewrite_match_revision(
+        self, chapter_id: str, revision: int | None = None
+    ) -> dict[str, Any] | None:
+        query = (
+            "SELECT * FROM chapter_rewrite_match_revisions "
+            "WHERE chapter_id = ?"
+        )
+        values: list[Any] = [str(chapter_id or "")]
+        if revision is None:
+            query += " ORDER BY match_revision DESC LIMIT 1"
+        else:
+            query += " AND match_revision = ?"
+            values.append(int(revision))
+        with self._connection() as connection:
+            row = connection.execute(query, values).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["result"] = _decode(value.pop("result_json", None), {})
+        return value
+
     def snapshot(self) -> dict[str, Any]:
         with self._connection() as connection:
             revision = self._revision(connection)
@@ -6911,6 +7016,7 @@ class CommandGateway:
                     "approval",
                     "unchanged",
                     "batch_job",
+                    "rewrite_match",
                 )
                 if key in result
             }
