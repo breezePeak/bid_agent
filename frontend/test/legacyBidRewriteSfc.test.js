@@ -19,7 +19,8 @@ test('bid rewrite UI components parse and remain mode-gated', () => {
     assert.deepEqual(result.errors, [])
   }
   const workspace = fs.readFileSync(path.resolve('src/components/V3WorkspaceView.vue'), 'utf8')
-  assert.match(workspace, /v-if="projectMode === 'bid_rewrite'"/)
+  assert.match(workspace, /for="quick-upload-legacy-bid"/)
+  assert.match(workspace, /@click="openLegacyPreview\(item\)"/)
   for (const label of ['新招标文件解析', '评分与项目理解', '生成新目录', '等待目录确认']) {
     assert.match(workspace, new RegExp(label))
   }

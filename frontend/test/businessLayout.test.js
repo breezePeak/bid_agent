@@ -258,7 +258,7 @@ test('one compact workflow disclosure is rendered before the composer', () => {
   assert.doesNotMatch(workspaceView, /class="pipeline-plan-dock"/)
   assert.doesNotMatch(workspaceView, /class="pipeline-activity-group/)
   assert.ok(
-    workspaceView.indexOf('v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"') > conversationTurns,
+    workspaceView.indexOf('v-if="initialMaterialsReady && secondStageConfirmed" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"') > conversationTurns,
     'expected the phase-2 card after conversation once materials are ready',
   )
   return
@@ -304,8 +304,8 @@ test('workflow disclosure is light and keeps processing details progressively di
 })
 
 test('outline planning and full-document generation render as separate chat phases', () => {
-  assert.match(workspaceView, /v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"/)
-  assert.match(workspaceView, /v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg generation-stage-msg"/)
+  assert.match(workspaceView, /v-if="initialMaterialsReady && secondStageConfirmed" class="chat-msg bot-msg timeline-step-msg outline-stage-msg"/)
+  assert.match(workspaceView, /v-if="planningStatus === 'confirmed'" class="chat-msg bot-msg timeline-step-msg generation-stage-msg"/)
   assert.match(workspaceView, /const phaseStates = computed\(\(\) => workflow\.value\.phase_states \|\| \{\}\)/)
   assert.match(workspaceView, /planningPhaseState\.value\.phase_status/)
   assert.match(workspaceView, /writingPhaseState\.value\.phase_status/)
@@ -384,7 +384,7 @@ test('chat workflow prevents duplicate uploads and avoids duplicating completed 
 })
 
 test('first stage applies mode-specific material readiness before phase 2', () => {
-  assert.match(workspaceView, /v-if="!initialMaterialsReady && !loading"/)
+  assert.match(workspaceView, /v-if="!secondStageConfirmed && !hasOutline && !loading"/)
   assert.match(workspaceView, /class="required-upload-zones"/)
   assert.match(workspaceView, /class="required-upload-zone"/)
   assert.match(workspaceView, /role: 'tender'/)
