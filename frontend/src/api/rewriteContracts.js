@@ -22,3 +22,24 @@ export function normalizeChapterRewriteMatch(payload) {
     summary: root.summary && typeof root.summary === 'object' ? root.summary : {},
   }
 }
+
+export function normalizeChapterRewritePlan(payload) {
+  const root = payload?.rewrite_plan
+    || payload?.receipt?.result?.rewrite_plan
+    || payload?.result?.rewrite_plan
+    || payload
+    || {}
+  return {
+    ...root,
+    selected_legacy_blocks: arrayOfObjects(root.selected_legacy_blocks),
+    new_content_items: arrayOfObjects(root.new_content_items).map(item => ({
+      ...item,
+      evidence_ids: Array.isArray(item.evidence_ids) ? item.evidence_ids : [],
+    })),
+    coverage: arrayOfObjects(root.coverage),
+    pollution_findings: arrayOfObjects(root.pollution_findings),
+    target: root.target && typeof root.target === 'object' ? root.target : {},
+    dependencies: root.dependencies && typeof root.dependencies === 'object' ? root.dependencies : {},
+    stale_reasons: Array.isArray(root.stale_reasons) ? root.stale_reasons : [],
+  }
+}

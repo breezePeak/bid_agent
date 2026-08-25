@@ -1775,6 +1775,52 @@ def get_chapter_rewrite_match(
         return _error(exc)
 
 
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/rewrite-plan")
+def get_chapter_rewrite_plan(
+    workspace_id: str,
+    chapter_id: str,
+    revision: int | None = Query(default=None),
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_rewrite_plan import ChapterRewritePlanService
+
+        rewrite_plan = ChapterRewritePlanService(_context(workspace_id)).get(
+            chapter_id, revision
+        )
+        return JSONResponse({"ok": True, "rewrite_plan": rewrite_plan})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/rewrite-plan/revisions")
+def list_chapter_rewrite_plan_revisions(
+    workspace_id: str,
+    chapter_id: str,
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_rewrite_plan import ChapterRewritePlanService
+
+        revisions = ChapterRewritePlanService(_context(workspace_id)).history(chapter_id)
+        return JSONResponse({"ok": True, "revisions": revisions})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/rewrite-plan/events")
+def list_chapter_rewrite_plan_events(
+    workspace_id: str,
+    chapter_id: str,
+) -> JSONResponse:
+    try:
+        context = _context(workspace_id)
+        if ControlStore(context).workspace_profile().get("project_mode") != "bid_rewrite":
+            raise ControlPlaneError("REWRITE_MODE_REQUIRED", "当前工作空间不支持改写方案。", status_code=409)
+        events = ControlStore(context).chapter_rewrite_events(chapter_id)
+        return JSONResponse({"ok": True, "events": events})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 @app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/context/revisions")
 def list_chapter_context_revisions(
     workspace_id: str,

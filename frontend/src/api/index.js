@@ -450,6 +450,78 @@ export async function generateChapterRewriteMatch(runId, chapterId, options = {}
   }, options)
 }
 
+export function fetchChapterRewritePlan(runId, chapterId, options = {}) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}/rewrite-plan`), {
+    headers: { 'Cache-Control': 'no-cache' },
+    ...options,
+  })
+}
+
+export function fetchChapterRewritePlanRevisions(runId, chapterId, options = {}) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}/rewrite-plan/revisions`), {
+    headers: { 'Cache-Control': 'no-cache' },
+    ...options,
+  })
+}
+
+async function submitChapterRewritePlanCommand(runId, kind, payload, options = {}) {
+  const snapshot = await fetchV3WorkspaceSnapshot(runId, options)
+  const commandId = newCommandId()
+  return submitV3Command(runId, {
+    command_id: commandId,
+    kind,
+    payload,
+    expected_revision: workspaceRevisionFromV3Payload(snapshot?.data),
+    idempotency_key: `${kind}-${payload.chapter_id || 'chapter'}-${commandId}`,
+  }, options)
+}
+
+export function generateChapterRewritePlan(runId, chapterId, options = {}) {
+  return submitChapterRewritePlanCommand(runId, 'bid_rewrite.plan.generate', {
+    chapter_id: String(chapterId || '').trim(),
+  }, options)
+}
+
+export function updateChapterRewritePlan(runId, chapterId, plan, operations, options = {}) {
+  return submitChapterRewritePlanCommand(runId, 'bid_rewrite.plan.update', {
+    chapter_id: String(chapterId || '').trim(),
+    expected_plan_revision: Number(plan?.plan_revision || 0),
+    expected_plan_hash: String(plan?.plan_hash || ''),
+    operations: Array.isArray(operations) ? operations : [],
+  }, options)
+}
+
+export function searchChapterRewritePlan(runId, chapterId, plan, itemId, query, options = {}) {
+  return submitChapterRewritePlanCommand(runId, 'bid_rewrite.plan.search', {
+    chapter_id: String(chapterId || '').trim(),
+    expected_plan_revision: Number(plan?.plan_revision || 0),
+    expected_plan_hash: String(plan?.plan_hash || ''),
+    item_id: String(itemId || ''),
+    query: String(query || ''),
+  }, options)
+}
+
+export function confirmChapterRewritePlan(runId, chapterId, plan, chapterRevision, options = {}) {
+  return submitChapterRewritePlanCommand(runId, 'bid_rewrite.plan.confirm', {
+    chapter_id: String(chapterId || '').trim(),
+    expected_chapter_revision: Number(chapterRevision || 0),
+    plan_revision: Number(plan?.plan_revision || 0),
+    plan_hash: String(plan?.plan_hash || ''),
+  }, options)
+}
+
+export function reopenChapterRewritePlan(runId, chapterId, plan, options = {}) {
+  return submitChapterRewritePlanCommand(runId, 'bid_rewrite.plan.reopen', {
+    chapter_id: String(chapterId || '').trim(),
+    expected_plan_revision: Number(plan?.plan_revision || 0),
+    expected_plan_hash: String(plan?.plan_hash || ''),
+  }, options)
+}
+
 export function createChapterBatchJob(runId, chapterIds, idempotencyKey = '') {
   return api.post(v3WorkspacePath(runId, 'chapter-batch-jobs'), {
     chapter_ids: Array.isArray(chapterIds) ? chapterIds : [],

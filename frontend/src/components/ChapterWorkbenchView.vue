@@ -227,8 +227,21 @@
         v-if="isBidRewrite"
         v-show="middleTab === 'rewrite'"
         :match="rewriteMatch"
+        :plan="rewritePlan"
         :loading="rewriteMatchLoading"
+        :busy="rewritePlanBusy"
         :error="rewriteMatchError"
+        :conflict="rewritePlanConflict"
+        :confirmed-facts="globalProjectContext.confirmed_facts || []"
+        :history="rewritePlanHistory"
+        :show-history="showRewritePlanHistory"
+        @update="updateRewritePlan"
+        @search="searchRewritePlan"
+        @confirm="confirmRewritePlan"
+        @reopen="reopenRewritePlan"
+        @reload="loadRewriteMatch(selectedId)"
+        @history="loadRewritePlanHistory"
+        @close-history="showRewritePlanHistory = false"
       />
 
       <div ref="docBodyEl" v-show="!isBidRewrite || middleTab === 'body'" class="chapter-doc-body">
@@ -697,8 +710,15 @@ import {
   fetchChapterBatchEvents,
   fetchChapterRewriteMatch,
   generateChapterRewriteMatch,
+  fetchChapterRewritePlan,
+  fetchChapterRewritePlanRevisions,
+  generateChapterRewritePlan,
+  updateChapterRewritePlan,
+  searchChapterRewritePlan,
+  confirmChapterRewritePlan,
+  reopenChapterRewritePlan,
 } from '../api'
-import { normalizeChapterRewriteMatch } from '../api/rewriteContracts.js'
+import { normalizeChapterRewriteMatch, normalizeChapterRewritePlan } from '../api/rewriteContracts.js'
 import {
   hydrateBatchChapterJob,
   initialBatchChapterJobState,
@@ -778,9 +798,15 @@ const projectMode = ref('full_write')
 const isBidRewrite = computed(() => projectMode.value === 'bid_rewrite')
 const middleTab = ref('body')
 const rewriteMatch = ref(null)
+const rewritePlan = ref(null)
 const rewriteMatchLoading = ref(false)
 const rewriteMatchError = ref('')
+const rewritePlanBusy = ref(false)
+const rewritePlanConflict = ref(false)
+const rewritePlanHistory = ref([])
+const showRewritePlanHistory = ref(false)
 let rewriteMatchAbortController = null
+let rewritePlanMutationAbortController = null
 let rewriteModeInitialized = false
 const globalProjectContext = ref({})
 const chapterWriteJob = ref(null)
@@ -1597,7 +1623,10 @@ async function loadRewriteMatch(chapterId) {
   rewriteMatchAbortController?.abort()
   rewriteMatchAbortController = null
   rewriteMatch.value = null
+  rewritePlan.value = null
   rewriteMatchError.value = ''
+  rewritePlanConflict.value = false
+  showRewritePlanHistory.value = false
   const item = items.value.find(row => row.chapter_id === chapterId)
   const isLeaf = item && !items.value.some(row => row.parent_chapter_id === chapterId)
   if (!isBidRewrite.value || !chapterId || !isLeaf) return
@@ -1624,6 +1653,22 @@ async function loadRewriteMatch(chapterId) {
       throw new Error(data.receipt?.error?.message || data.message || '生成改写逻辑失败')
     }
     rewriteMatch.value = normalizeChapterRewriteMatch(data)
+    let planResponse
+    try {
+      planResponse = await fetchChapterRewritePlan(props.workspaceId, chapterId, {
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) return
+      if (Number(error?.response?.status || 0) !== 404) throw error
+      planResponse = await generateChapterRewritePlan(props.workspaceId, chapterId, {
+        signal: controller.signal,
+      })
+    }
+    if (controller.signal.aborted || selectedId.value !== chapterId) return
+    const planData = planResponse?.data || {}
+    if (!planData.ok) throw new Error(planData.receipt?.error?.message || planData.message || '生成改写方案失败')
+    rewritePlan.value = normalizeChapterRewritePlan(planData)
   } catch (error) {
     if (controller.signal.aborted || selectedId.value !== chapterId) return
     rewriteMatchError.value = error?.response?.data?.message
@@ -1638,6 +1683,101 @@ async function loadRewriteMatch(chapterId) {
   }
 }
 
+function rewritePlanError(error) {
+  const code = String(error?.response?.data?.error?.code || error?.response?.data?.receipt?.error?.code || '')
+  rewritePlanConflict.value = code === 'CHAPTER_REWRITE_PLAN_CONFLICT'
+  rewriteMatchError.value = error?.response?.data?.message
+    || error?.response?.data?.error?.message
+    || error?.response?.data?.receipt?.error?.message
+    || error.message
+    || String(error)
+}
+
+async function runRewritePlanMutation(request) {
+  if (!selectedId.value || !rewritePlan.value) return
+  const chapterId = selectedId.value
+  rewritePlanMutationAbortController?.abort()
+  const controller = new AbortController()
+  rewritePlanMutationAbortController = controller
+  rewritePlanBusy.value = true
+  rewriteMatchError.value = ''
+  rewritePlanConflict.value = false
+  try {
+    const response = await request(chapterId, controller.signal)
+    if (controller.signal.aborted || chapterId !== selectedId.value) return
+    const data = response?.data || {}
+    if (!data.ok) {
+      const error = new Error(data.receipt?.error?.message || data.message || '改写方案操作失败')
+      error.response = { data }
+      throw error
+    }
+    const nextPlan = normalizeChapterRewritePlan(data)
+    if (nextPlan?.plan_revision) {
+      rewritePlan.value = nextPlan
+    } else {
+      const confirmation = data?.receipt?.result?.rewrite_confirmation
+      if (confirmation) rewritePlan.value = { ...rewritePlan.value, status: 'confirmed', confirmation }
+    }
+    actionMessage.value = data.receipt?.message || data.message || '改写方案已更新'
+  } catch (error) {
+    if (!controller.signal.aborted && chapterId === selectedId.value) rewritePlanError(error)
+  } finally {
+    if (rewritePlanMutationAbortController === controller) {
+      rewritePlanMutationAbortController = null
+      rewritePlanBusy.value = false
+    }
+  }
+}
+
+function updateRewritePlan(operations) {
+  const current = rewritePlan.value
+  return runRewritePlanMutation((chapterId, signal) => updateChapterRewritePlan(
+    props.workspaceId, chapterId, current, operations, { signal },
+  ))
+}
+
+function searchRewritePlan({ itemId, query }) {
+  const current = rewritePlan.value
+  return runRewritePlanMutation((chapterId, signal) => searchChapterRewritePlan(
+    props.workspaceId, chapterId, current, itemId, query, { signal },
+  ))
+}
+
+function confirmRewritePlan() {
+  const current = rewritePlan.value
+  return runRewritePlanMutation((chapterId, signal) => confirmChapterRewritePlan(
+    props.workspaceId,
+    chapterId,
+    current,
+    Number(chapterDetail.value?.chapter_revision || current?.dependencies?.chapter_revision || 0),
+    { signal },
+  ))
+}
+
+function reopenRewritePlan() {
+  const current = rewritePlan.value
+  return runRewritePlanMutation((chapterId, signal) => reopenChapterRewritePlan(
+    props.workspaceId, chapterId, current, { signal },
+  ))
+}
+
+async function loadRewritePlanHistory() {
+  if (!selectedId.value) return
+  const chapterId = selectedId.value
+  rewritePlanBusy.value = true
+  try {
+    const { data } = await fetchChapterRewritePlanRevisions(props.workspaceId, chapterId)
+    if (chapterId !== selectedId.value) return
+    if (!data?.ok) throw new Error(data?.message || '加载方案历史失败')
+    rewritePlanHistory.value = (data.revisions || []).map(normalizeChapterRewritePlan)
+    showRewritePlanHistory.value = true
+  } catch (error) {
+    if (chapterId === selectedId.value) rewritePlanError(error)
+  } finally {
+    if (chapterId === selectedId.value) rewritePlanBusy.value = false
+  }
+}
+
 function selectChapter(chapterId) {
   if (selectedId.value === chapterId) return
   if (editorRef.value?.dirty) {
@@ -1646,6 +1786,7 @@ function selectChapter(chapterId) {
   }
   if (draftAbortController) draftAbortController.abort()
   rewriteMatchAbortController?.abort()
+  rewritePlanMutationAbortController?.abort()
   draftAbortController = null
   streamingDraft.value = false
   busy.value = false
@@ -2598,6 +2739,7 @@ onUnmounted(() => {
   closeWorkspaceStream = null
   draftAbortController?.abort()
   rewriteMatchAbortController?.abort()
+  rewritePlanMutationAbortController?.abort()
 })
 </script>
 

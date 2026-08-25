@@ -180,7 +180,7 @@ class ControlStore:
     the append-only workspace event stream.
     """
 
-    SCHEMA_VERSION = 32
+    SCHEMA_VERSION = 33
     WORKFLOW_PHASES = ("materials", "planning", "writing")
     PHASE_STATUSES = {
         "not_started", "ready", "running", "waiting_confirmation",
@@ -951,6 +951,53 @@ class ControlStore:
                     );
                     CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_match_head
                         ON chapter_rewrite_match_revisions(chapter_id, match_revision DESC);
+                    CREATE TABLE IF NOT EXISTS chapter_rewrite_states (
+                        chapter_id TEXT PRIMARY KEY,
+                        status TEXT NOT NULL,
+                        head_plan_revision INTEGER NOT NULL DEFAULT 0,
+                        head_plan_hash TEXT NOT NULL DEFAULT '',
+                        confirmed_plan_revision INTEGER NOT NULL DEFAULT 0,
+                        confirmed_plan_hash TEXT NOT NULL DEFAULT '',
+                        updated_at TEXT NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS chapter_rewrite_plan_revisions (
+                        chapter_id TEXT NOT NULL,
+                        plan_revision INTEGER NOT NULL,
+                        parent_plan_revision INTEGER,
+                        plan_json TEXT NOT NULL,
+                        plan_hash TEXT NOT NULL,
+                        actor_json TEXT NOT NULL DEFAULT '{}',
+                        created_at TEXT NOT NULL,
+                        PRIMARY KEY (chapter_id, plan_revision)
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_plan_head
+                        ON chapter_rewrite_plan_revisions(chapter_id, plan_revision DESC);
+                    CREATE TABLE IF NOT EXISTS chapter_rewrite_confirmations (
+                        confirmation_id TEXT PRIMARY KEY,
+                        receipt_hash TEXT NOT NULL UNIQUE,
+                        chapter_id TEXT NOT NULL,
+                        expected_chapter_revision INTEGER NOT NULL,
+                        plan_revision INTEGER NOT NULL,
+                        plan_hash TEXT NOT NULL,
+                        blueprint_hash TEXT NOT NULL,
+                        legacy_bid_index_hash TEXT NOT NULL,
+                        global_context_hash TEXT NOT NULL,
+                        chapter_context_hash TEXT NOT NULL,
+                        principal_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        UNIQUE(chapter_id, plan_revision, plan_hash)
+                    );
+                    CREATE TABLE IF NOT EXISTS chapter_rewrite_events (
+                        event_id TEXT PRIMARY KEY,
+                        chapter_id TEXT NOT NULL,
+                        plan_revision INTEGER NOT NULL DEFAULT 0,
+                        event_type TEXT NOT NULL,
+                        payload_json TEXT NOT NULL DEFAULT '{}',
+                        principal_id TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_events_chapter
+                        ON chapter_rewrite_events(chapter_id, created_at, event_id);
                     CREATE TABLE IF NOT EXISTS chapter_approval_receipts (
                         receipt_id TEXT PRIMARY KEY,
                         receipt_hash TEXT NOT NULL UNIQUE,
@@ -1222,6 +1269,53 @@ class ControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_match_head
                 ON chapter_rewrite_match_revisions(chapter_id, match_revision DESC);
+            CREATE TABLE IF NOT EXISTS chapter_rewrite_states (
+                chapter_id TEXT PRIMARY KEY,
+                status TEXT NOT NULL,
+                head_plan_revision INTEGER NOT NULL DEFAULT 0,
+                head_plan_hash TEXT NOT NULL DEFAULT '',
+                confirmed_plan_revision INTEGER NOT NULL DEFAULT 0,
+                confirmed_plan_hash TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS chapter_rewrite_plan_revisions (
+                chapter_id TEXT NOT NULL,
+                plan_revision INTEGER NOT NULL,
+                parent_plan_revision INTEGER,
+                plan_json TEXT NOT NULL,
+                plan_hash TEXT NOT NULL,
+                actor_json TEXT NOT NULL DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chapter_id, plan_revision)
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_plan_head
+                ON chapter_rewrite_plan_revisions(chapter_id, plan_revision DESC);
+            CREATE TABLE IF NOT EXISTS chapter_rewrite_confirmations (
+                confirmation_id TEXT PRIMARY KEY,
+                receipt_hash TEXT NOT NULL UNIQUE,
+                chapter_id TEXT NOT NULL,
+                expected_chapter_revision INTEGER NOT NULL,
+                plan_revision INTEGER NOT NULL,
+                plan_hash TEXT NOT NULL,
+                blueprint_hash TEXT NOT NULL,
+                legacy_bid_index_hash TEXT NOT NULL,
+                global_context_hash TEXT NOT NULL,
+                chapter_context_hash TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(chapter_id, plan_revision, plan_hash)
+            );
+            CREATE TABLE IF NOT EXISTS chapter_rewrite_events (
+                event_id TEXT PRIMARY KEY,
+                chapter_id TEXT NOT NULL,
+                plan_revision INTEGER NOT NULL DEFAULT 0,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}',
+                principal_id TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_chapter_rewrite_events_chapter
+                ON chapter_rewrite_events(chapter_id, created_at, event_id);
             CREATE TABLE IF NOT EXISTS chapter_approval_receipts (
                 receipt_id TEXT PRIMARY KEY,
                 receipt_hash TEXT NOT NULL UNIQUE,
@@ -6882,6 +6976,232 @@ class ControlStore:
         value["result"] = _decode(value.pop("result_json", None), {})
         return value
 
+    def chapter_rewrite_state(self, chapter_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM chapter_rewrite_states WHERE chapter_id = ?",
+                (str(chapter_id or ""),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def chapter_rewrite_plan_revision(
+        self, chapter_id: str, revision: int | None = None
+    ) -> dict[str, Any] | None:
+        query = "SELECT * FROM chapter_rewrite_plan_revisions WHERE chapter_id = ?"
+        values: list[Any] = [str(chapter_id or "")]
+        if revision is None:
+            query += " ORDER BY plan_revision DESC LIMIT 1"
+        else:
+            query += " AND plan_revision = ?"
+            values.append(int(revision))
+        with self._connection() as connection:
+            row = connection.execute(query, values).fetchone()
+        if not row:
+            return None
+        value = dict(row)
+        value["plan"] = _decode(value.pop("plan_json", None), {})
+        value["actor"] = _decode(value.pop("actor_json", None), {})
+        return value
+
+    def chapter_rewrite_plan_revisions(
+        self, chapter_id: str, *, limit: int = 100
+    ) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM chapter_rewrite_plan_revisions WHERE chapter_id = ? "
+                "ORDER BY plan_revision DESC LIMIT ?",
+                (str(chapter_id or ""), max(1, min(int(limit), 500))),
+            ).fetchall()
+        values: list[dict[str, Any]] = []
+        for row in rows:
+            value = dict(row)
+            value["plan"] = _decode(value.pop("plan_json", None), {})
+            value["actor"] = _decode(value.pop("actor_json", None), {})
+            values.append(value)
+        return values
+
+    def append_chapter_rewrite_plan_revision(
+        self,
+        *,
+        chapter_id: str,
+        expected_plan_revision: int,
+        plan: dict[str, Any],
+        plan_hash: str,
+        actor: dict[str, Any] | None = None,
+        event_type: str = "plan.updated",
+        event_payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = self._normalize_chapter_id(chapter_id)
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                row = connection.execute(
+                    "SELECT COALESCE(MAX(plan_revision), 0) AS revision "
+                    "FROM chapter_rewrite_plan_revisions WHERE chapter_id = ?",
+                    (normalized,),
+                ).fetchone()
+                current = int(row["revision"] or 0)
+                if current != int(expected_plan_revision):
+                    raise ControlPlaneError(
+                        "CHAPTER_REWRITE_PLAN_CONFLICT",
+                        "改写方案已被其他操作更新，请刷新后重试。",
+                        status_code=409,
+                        details={
+                            "expected_plan_revision": int(expected_plan_revision),
+                            "actual_plan_revision": current,
+                        },
+                    )
+                revision = current + 1
+                connection.execute(
+                    "INSERT INTO chapter_rewrite_plan_revisions("
+                    "chapter_id, plan_revision, parent_plan_revision, plan_json, "
+                    "plan_hash, actor_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        normalized,
+                        revision,
+                        current or None,
+                        _json(plan),
+                        str(plan_hash),
+                        _json(actor or {}),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO chapter_rewrite_states("
+                    "chapter_id, status, head_plan_revision, head_plan_hash, updated_at) "
+                    "VALUES (?, 'draft', ?, ?, ?) ON CONFLICT(chapter_id) DO UPDATE SET "
+                    "status='draft', head_plan_revision=excluded.head_plan_revision, "
+                    "head_plan_hash=excluded.head_plan_hash, updated_at=excluded.updated_at",
+                    (normalized, revision, str(plan_hash), now),
+                )
+                connection.execute(
+                    "INSERT INTO chapter_rewrite_events("
+                    "event_id, chapter_id, plan_revision, event_type, payload_json, "
+                    "principal_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        f"rewrite-event:{uuid.uuid4()}",
+                        normalized,
+                        revision,
+                        str(event_type),
+                        _json(event_payload or {}),
+                        str((actor or {}).get("id") or ""),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return self.chapter_rewrite_plan_revision(normalized, revision) or {}
+
+    def confirm_chapter_rewrite_plan(
+        self,
+        *,
+        confirmation: dict[str, Any],
+        receipt_hash: str,
+    ) -> dict[str, Any]:
+        chapter_id = self._normalize_chapter_id(str(confirmation.get("chapter_id") or ""))
+        now = _now()
+        with self._connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                state = connection.execute(
+                    "SELECT * FROM chapter_rewrite_states WHERE chapter_id = ?",
+                    (chapter_id,),
+                ).fetchone()
+                if (
+                    not state
+                    or int(state["head_plan_revision"] or 0)
+                    != int(confirmation.get("plan_revision") or 0)
+                    or str(state["head_plan_hash"] or "")
+                    != str(confirmation.get("plan_hash") or "")
+                ):
+                    raise ControlPlaneError(
+                        "CHAPTER_REWRITE_PLAN_CONFLICT",
+                        "改写方案版本已变化，请刷新后重新确认。",
+                        status_code=409,
+                    )
+                connection.execute(
+                    "INSERT INTO chapter_rewrite_confirmations("
+                    "confirmation_id, receipt_hash, chapter_id, expected_chapter_revision, "
+                    "plan_revision, plan_hash, blueprint_hash, legacy_bid_index_hash, "
+                    "global_context_hash, chapter_context_hash, principal_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        confirmation["confirmation_id"],
+                        str(receipt_hash),
+                        chapter_id,
+                        int(confirmation["expected_chapter_revision"]),
+                        int(confirmation["plan_revision"]),
+                        str(confirmation["plan_hash"]),
+                        str(confirmation["blueprint_hash"]),
+                        str(confirmation["legacy_bid_index_hash"]),
+                        str(confirmation["global_context_hash"]),
+                        str(confirmation["chapter_context_hash"]),
+                        str(confirmation["principal_id"]),
+                        now,
+                    ),
+                )
+                connection.execute(
+                    "UPDATE chapter_rewrite_states SET status='confirmed', "
+                    "confirmed_plan_revision=?, confirmed_plan_hash=?, updated_at=? "
+                    "WHERE chapter_id=?",
+                    (
+                        int(confirmation["plan_revision"]),
+                        str(confirmation["plan_hash"]),
+                        now,
+                        chapter_id,
+                    ),
+                )
+                connection.execute(
+                    "INSERT INTO chapter_rewrite_events("
+                    "event_id, chapter_id, plan_revision, event_type, payload_json, "
+                    "principal_id, created_at) VALUES (?, ?, ?, 'plan.confirmed', ?, ?, ?)",
+                    (
+                        f"rewrite-event:{uuid.uuid4()}",
+                        chapter_id,
+                        int(confirmation["plan_revision"]),
+                        _json({"confirmation_id": confirmation["confirmation_id"]}),
+                        str(confirmation["principal_id"]),
+                        now,
+                    ),
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return {
+            **confirmation,
+            "receipt_hash": str(receipt_hash),
+            "created_at": now,
+        }
+
+    def chapter_rewrite_confirmation(self, chapter_id: str) -> dict[str, Any] | None:
+        with self._connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM chapter_rewrite_confirmations WHERE chapter_id = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (str(chapter_id or ""),),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def chapter_rewrite_events(
+        self, chapter_id: str, *, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM chapter_rewrite_events WHERE chapter_id = ? "
+                "ORDER BY created_at DESC, event_id DESC LIMIT ?",
+                (str(chapter_id or ""), max(1, min(int(limit), 1000))),
+            ).fetchall()
+        values: list[dict[str, Any]] = []
+        for row in rows:
+            value = dict(row)
+            value["payload"] = _decode(value.pop("payload_json", None), {})
+            values.append(value)
+        return values
+
     def snapshot(self) -> dict[str, Any]:
         with self._connection() as connection:
             revision = self._revision(connection)
@@ -7017,6 +7337,8 @@ class CommandGateway:
                     "unchanged",
                     "batch_job",
                     "rewrite_match",
+                    "rewrite_plan",
+                    "rewrite_confirmation",
                 )
                 if key in result
             }

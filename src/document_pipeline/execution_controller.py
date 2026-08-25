@@ -8,6 +8,7 @@ from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, Work
 
 from .chapter_editing import ChapterEditingService
 from .chapter_rewrite_match import ChapterRewriteMatchService
+from .chapter_rewrite_plan import ChapterRewritePlanService
 from .chapter_workspace import ChapterWorkspaceService
 from .material_readiness import MaterialReadinessService
 from .rewrite_zero_pollution import audit_rewrite_zero_pollution
@@ -97,6 +98,11 @@ class V3ExecutionController:
             "chapter.approval.confirm": editing.handle_approval_confirm,
             "chapter.batch.generate": self.generate_chapter_batch,
             "bid_rewrite.match.generate": self.generate_rewrite_match,
+            "bid_rewrite.plan.generate": self.generate_rewrite_plan,
+            "bid_rewrite.plan.update": self.update_rewrite_plan,
+            "bid_rewrite.plan.search": self.search_rewrite_plan,
+            "bid_rewrite.plan.confirm": self.confirm_rewrite_plan,
+            "bid_rewrite.plan.reopen": self.reopen_rewrite_plan,
         }
 
     def generate_rewrite_match(
@@ -118,6 +124,75 @@ class V3ExecutionController:
             "message": "章节改写逻辑已生成。",
             "rewrite_match": rewrite_match,
         }
+
+    @staticmethod
+    def _rewrite_chapter_id(envelope: CommandEnvelope) -> str:
+        chapter_id = str(envelope.payload.get("chapter_id") or "").strip()
+        if not chapter_id:
+            raise ControlPlaneError("CHAPTER_ID_REQUIRED", "章节 ID 不能为空。", status_code=400)
+        return chapter_id
+
+    def generate_rewrite_plan(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        del operation_id
+        rewrite_plan = ChapterRewritePlanService(context).generate(
+            self._rewrite_chapter_id(envelope), actor=envelope.actor
+        )
+        return {"accepted": True, "operation_status": "succeeded", "message": "章节改写方案已生成。", "rewrite_plan": rewrite_plan}
+
+    def update_rewrite_plan(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        del operation_id
+        payload = envelope.payload
+        operations = payload.get("operations")
+        if not isinstance(operations, list):
+            raise ControlPlaneError("CHAPTER_REWRITE_EDIT_INVALID", "operations 必须是数组。", status_code=400)
+        rewrite_plan = ChapterRewritePlanService(context).update(
+            self._rewrite_chapter_id(envelope),
+            expected_plan_revision=int(payload.get("expected_plan_revision") or 0),
+            expected_plan_hash=str(payload.get("expected_plan_hash") or ""),
+            operations=operations,
+            actor=envelope.actor,
+        )
+        return {"accepted": True, "operation_status": "succeeded", "message": "章节改写方案已保存。", "rewrite_plan": rewrite_plan}
+
+    def search_rewrite_plan(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        del operation_id
+        payload = envelope.payload
+        rewrite_plan = ChapterRewritePlanService(context).search(
+            self._rewrite_chapter_id(envelope),
+            expected_plan_revision=int(payload.get("expected_plan_revision") or 0),
+            expected_plan_hash=str(payload.get("expected_plan_hash") or ""),
+            item_id=str(payload.get("item_id") or ""),
+            query=str(payload.get("query") or ""),
+            provider_id=str(payload.get("provider_id") or "") or None,
+            actor=envelope.actor,
+        )
+        return {"accepted": True, "operation_status": "succeeded", "message": "补充查询已绑定到改写方案。", "rewrite_plan": rewrite_plan}
+
+    def confirm_rewrite_plan(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        del operation_id
+        payload = envelope.payload
+        actor = envelope.actor if isinstance(envelope.actor, dict) else {}
+        if actor.get("type") != "user" or not str(actor.get("id") or ""):
+            raise ControlPlaneError("AUTH_REQUIRED", "确认改写方案需要认证用户。", status_code=401)
+        confirmation = ChapterRewritePlanService(context).confirm(
+            self._rewrite_chapter_id(envelope),
+            expected_chapter_revision=int(payload.get("expected_chapter_revision") or 0),
+            plan_revision=int(payload.get("plan_revision") or 0),
+            plan_hash=str(payload.get("plan_hash") or ""),
+            principal_id=str(actor["id"]),
+        )
+        return {"accepted": True, "operation_status": "succeeded", "message": "章节改写方案已确认。", "rewrite_confirmation": confirmation}
+
+    def reopen_rewrite_plan(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        del operation_id
+        payload = envelope.payload
+        rewrite_plan = ChapterRewritePlanService(context).reopen(
+            self._rewrite_chapter_id(envelope),
+            expected_plan_revision=int(payload.get("expected_plan_revision") or 0),
+            expected_plan_hash=str(payload.get("expected_plan_hash") or ""),
+            actor=envelope.actor,
+        )
+        return {"accepted": True, "operation_status": "succeeded", "message": "章节改写方案已重新打开。", "rewrite_plan": rewrite_plan}
 
     def generate_chapter_batch(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
         """Persist a batch job and start it only after this command releases its lease."""

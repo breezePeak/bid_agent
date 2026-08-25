@@ -534,25 +534,59 @@ class V3WorkspaceSnapshotBuilder:
                     )
                     if not row:
                         item["rewrite_match"] = None
-                        continue
-                    result = row.get("result") or {}
-                    item["rewrite_match"] = {
-                        "match_revision": int(row.get("match_revision") or 0),
-                        "result_hash": str(row.get("result_hash") or ""),
-                        "created_at": str(row.get("created_at") or ""),
-                        "summary": result.get("summary") or {},
-                        "recommendation": result.get("recommendation") or {},
-                        "stale": (
-                            int(row.get("blueprint_revision") or 0)
-                            != int(blueprint.get("revision") or 0)
-                            or str(row.get("blueprint_hash") or "")
-                            != str(blueprint.get("artifact_hash") or "")
-                            or int(row.get("legacy_index_revision") or 0)
-                            != int(legacy.get("revision") or 0)
-                            or str(row.get("legacy_index_hash") or "")
-                            != str(legacy.get("artifact_hash") or "")
-                        ),
-                    }
+                    else:
+                        result = row.get("result") or {}
+                        item["rewrite_match"] = {
+                            "match_revision": int(row.get("match_revision") or 0),
+                            "result_hash": str(row.get("result_hash") or ""),
+                            "created_at": str(row.get("created_at") or ""),
+                            "summary": result.get("summary") or {},
+                            "recommendation": result.get("recommendation") or {},
+                            "stale": (
+                                int(row.get("blueprint_revision") or 0)
+                                != int(blueprint.get("revision") or 0)
+                                or str(row.get("blueprint_hash") or "")
+                                != str(blueprint.get("artifact_hash") or "")
+                                or int(row.get("legacy_index_revision") or 0)
+                                != int(legacy.get("revision") or 0)
+                                or str(row.get("legacy_index_hash") or "")
+                                != str(legacy.get("artifact_hash") or "")
+                            ),
+                        }
+                    plan_row = control.chapter_rewrite_plan_revision(
+                        str(item.get("chapter_id") or "")
+                    )
+                    plan_state = control.chapter_rewrite_state(
+                        str(item.get("chapter_id") or "")
+                    ) or {}
+                    if plan_row:
+                        projected_status = str(plan_state.get("status") or "draft")
+                        stale_reasons: list[str] = []
+                        try:
+                            from .chapter_rewrite_plan import ChapterRewritePlanService
+
+                            projected_plan = ChapterRewritePlanService(
+                                self.context
+                            ).get(str(item.get("chapter_id") or ""))
+                            projected_status = str(projected_plan.get("status") or projected_status)
+                            stale_reasons = list(projected_plan.get("stale_reasons") or [])
+                        except ControlPlaneError:
+                            pass
+                        item["rewrite_plan"] = {
+                            "plan_revision": int(plan_row.get("plan_revision") or 0),
+                            "plan_hash": str(plan_row.get("plan_hash") or ""),
+                            "status": projected_status,
+                            "stale": bool(stale_reasons),
+                            "stale_reasons": stale_reasons,
+                            "strategy": str((plan_row.get("plan") or {}).get("strategy") or ""),
+                            "pollution_count": sum(
+                                1
+                                for finding in (plan_row.get("plan") or {}).get("pollution_findings") or []
+                                if isinstance(finding, dict) and finding.get("status") != "resolved"
+                            ),
+                        }
+                    else:
+                        item["rewrite_plan"] = None
             return snapshot
         except ControlPlaneError:
             materializations = control.chapter_workspaces(include_archived=True)
