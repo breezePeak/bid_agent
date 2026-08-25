@@ -38,9 +38,22 @@ class BidRewriteExecutionService:
         expected_chapter_revision: int,
         actor: dict[str, Any],
         overwrite_locked: bool = False,
+        plan_revision: int | None = None,
+        plan_hash: str = "",
     ) -> ChapterWritingRequest:
         self._require_mode()
-        plan = self.plan_service.get(chapter_id)
+        # Batches carry an immutable plan reference.  Never silently adopt a
+        # newer plan while a queued/recovered item is being executed.
+        plan = self.plan_service.get(chapter_id, plan_revision)
+        if plan_revision is not None and (
+            int(plan.get("plan_revision") or 0) != int(plan_revision)
+            or str(plan.get("plan_hash") or "") != str(plan_hash or "")
+        ):
+            raise ControlPlaneError(
+                "CHAPTER_REWRITE_PLAN_CONFLICT",
+                "批量任务冻结的改写方案已不存在或哈希不一致，不能改用新方案",
+                status_code=409,
+            )
         if plan.get("stale") or str(plan.get("status") or "") != "confirmed":
             raise ControlPlaneError(
                 "REWRITE_PLAN_INCOMPLETE",

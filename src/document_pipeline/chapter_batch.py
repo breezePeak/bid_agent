@@ -60,6 +60,33 @@ class ChapterBatchService:
 
         return ChapterWritingService(self.context)
 
+    def _is_bid_rewrite(self) -> bool:
+        return self.store.workspace_profile().get("project_mode") == "bid_rewrite"
+
+    def _rewrite_plan_ref(self, chapter_id: str) -> dict[str, Any]:
+        """Return the exact confirmed plan selected when the job is created."""
+        from .chapter_rewrite_plan import ChapterRewritePlanService
+
+        plan = ChapterRewritePlanService(self.context).get(chapter_id)
+        confirmation = plan.get("confirmation") or {}
+        if (
+            plan.get("stale")
+            or str(plan.get("status") or "") != "confirmed"
+            or int(confirmation.get("plan_revision") or 0) != int(plan.get("plan_revision") or 0)
+            or str(confirmation.get("plan_hash") or "") != str(plan.get("plan_hash") or "")
+        ):
+            raise ControlPlaneError(
+                "REWRITE_PLAN_INCOMPLETE",
+                "章节改写方案尚未确认或已过期，不能加入批量改写",
+                status_code=409,
+                details={"chapter_id": chapter_id},
+            )
+        return {
+            "plan_revision": int(plan["plan_revision"]),
+            "plan_hash": str(plan["plan_hash"]),
+            "strategy": str(plan.get("strategy") or "new_write"),
+        }
+
     def _resolve_leaf_chapters(self, requested_ids: list[str]) -> list[dict[str, Any]]:
         listing = self.chapters.list_chapters(include_archived=False)
         rows = [item for item in listing.get("items") or [] if isinstance(item, dict)]
@@ -169,11 +196,16 @@ class ChapterBatchService:
                     status_code=409,
                     details={"chapter_id": chapter_id, "chapter_title": chapter.get("title") or chapter_id},
                 )
+            context_ref = self._context_ref(chapter)
+            if self._is_bid_rewrite():
+                # Fail before creating any worker job: a batch may only ever
+                # contain confirmed, non-stale plans.
+                context_ref["rewrite_plan_ref"] = self._rewrite_plan_ref(chapter_id)
             prepared.append(
                 {
                     "chapter_id": chapter_id,
                     "chapter_title": str(chapter.get("title") or chapter_id),
-                    "context_ref": self._context_ref(chapter),
+                    "context_ref": context_ref,
                 }
             )
         # Stable caller keys return the existing durable job instead of duplicating work.
@@ -308,28 +340,48 @@ class ChapterBatchService:
                 self.store.update_batch_item(str(item["item_id"]), stage="drafting")
                 self._event(job_id, item, "draft_started", stage="drafting", status="running", message="章节 Agent 正在生成正文。")
 
-                from .chapter_writing_service import ChapterWritingRequest
+                actor = {
+                    "type": "user",
+                    "id": str(job.get("actor") or "chapter-batch-worker"),
+                    "role": "chapter-batch-worker",
+                }
+                if self._is_bid_rewrite():
+                    from .bid_rewrite_execution import BidRewriteExecutionService
 
-                request = ChapterWritingRequest(
-                    unit_id=f"chapter-{chapter_id}",
-                    node_ids=(chapter_id,),
-                    operation_id=f"chapter-batch:{job_id}:{item['item_id']}:{attempt}",
-                    operation=(
-                        "rewrite"
-                        if int(chapter.get("head_content_revision") or 0) > 0
-                        else "create"
-                    ),
-                    chapter_id=chapter_id,
-                    expected_chapter_revision=int(chapter.get("chapter_revision") or 0),
-                    actor={
-                        "type": "user",
-                        "id": str(job.get("actor") or "chapter-batch-worker"),
-                        "role": "chapter-batch-worker",
-                    },
-                    run_research=True,
-                    commit_drafts=True,
-                )
-                for service_event in self._writing_service().iter_events(request):
+                    frozen_plan = requested_ref.get("rewrite_plan_ref")
+                    if not isinstance(frozen_plan, dict):
+                        raise ControlPlaneError(
+                            "REWRITE_PLAN_INCOMPLETE",
+                            "批量任务缺少冻结的改写方案，不能继续执行",
+                            status_code=409,
+                        )
+                    rewrite_service = BidRewriteExecutionService(self.context)
+                    request = rewrite_service.build_request(
+                        chapter_id,
+                        operation_id=f"chapter-batch:{job_id}:{item['item_id']}:{attempt}",
+                        expected_workspace_revision=None,
+                        expected_chapter_revision=int(chapter.get("chapter_revision") or 0),
+                        actor=actor,
+                        plan_revision=int(frozen_plan.get("plan_revision") or 0),
+                        plan_hash=str(frozen_plan.get("plan_hash") or ""),
+                    )
+                    event_source = rewrite_service._writing_service(request).iter_events(request)
+                else:
+                    from .chapter_writing_service import ChapterWritingRequest
+
+                    request = ChapterWritingRequest(
+                        unit_id=f"chapter-{chapter_id}",
+                        node_ids=(chapter_id,),
+                        operation_id=f"chapter-batch:{job_id}:{item['item_id']}:{attempt}",
+                        operation=("rewrite" if int(chapter.get("head_content_revision") or 0) > 0 else "create"),
+                        chapter_id=chapter_id,
+                        expected_chapter_revision=int(chapter.get("chapter_revision") or 0),
+                        actor=actor,
+                        run_research=True,
+                        commit_drafts=True,
+                    )
+                    event_source = self._writing_service().iter_events(request)
+                for service_event in event_source:
                     self.store.assert_batch_fence(job_id, fencing_token)
                     event_type = str(service_event.get("type") or "")
                     if event_type == "research":

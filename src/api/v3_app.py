@@ -2033,6 +2033,9 @@ def export(workspace_id: str):
                 },
                 status_code=409,
             )
+        from document_pipeline.rewrite_delivery_audit import RewriteDeliveryAuditService
+
+        RewriteDeliveryAuditService(context).require_clean(composed, delivery_kind="final")
         DocumentPreviewService(context).build()
     except ControlPlaneError as exc:
         return _error(exc)
@@ -2048,7 +2051,15 @@ def export_current_word(workspace_id: str):
     try:
         from document_pipeline.current_word_export import build_current_word
 
-        artifact = build_current_word(_context(workspace_id))
+        context = _context(workspace_id)
+        from document_pipeline.chapter_editing import ChapterEditingService
+        from document_pipeline.rewrite_delivery_audit import RewriteDeliveryAuditService
+
+        RewriteDeliveryAuditService(context).require_clean(
+            ChapterEditingService(context).compose_current_document(),
+            delivery_kind="current_word",
+        )
+        artifact = build_current_word(context)
         return FileResponse(artifact, filename="标书当前稿.docx")
     except ControlPlaneError as exc:
         return _error(exc)

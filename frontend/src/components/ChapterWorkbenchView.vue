@@ -29,7 +29,7 @@
           :disabled="busy || !writableLeafChapters.length"
           @click="beginChapterSelection"
         >
-          选择章节编写
+          {{ isBidRewrite ? '选择章节改写' : '选择章节编写' }}
         </button>
         <button
           v-else
@@ -38,7 +38,7 @@
           :disabled="busy || !selectedWritingChapterIds.length"
           @click="writeSelectedChapters"
         >
-          编写 {{ selectedWritingChapterIds.length }} 章
+          {{ isBidRewrite ? '开始改写' : '编写' }} {{ selectedWritingChapterIds.length }} 章
         </button>
         <button
           v-if="isSelectingChapters"
@@ -60,7 +60,7 @@
         </button>
         <button v-if="isSelectingChapters" type="button" class="btn btn-sm" :disabled="busy" @click="cancelChapterSelection">取消选择</button>
         <button v-if="!isSelectingChapters" type="button" class="btn btn-sm btn-primary" :disabled="busy || !selectedIsLeaf" @click="writeCurrentChapter">
-          一键编写
+          {{ isBidRewrite ? '开始改写' : '一键编写' }}
         </button>
         <button type="button" class="btn btn-sm" :disabled="busy" @click="composeCheck">检查组装</button>
         <button type="button" class="btn btn-sm" :disabled="busy || !treeItems.length" @click="exportMarkdownOutline">
@@ -99,7 +99,7 @@
             class="tree-write-checkbox"
             type="checkbox"
             :checked="isChapterWritingSelected(item)"
-            :aria-label="`选择编写 ${item.title || item.chapter_id}`"
+            :aria-label="`选择${isBidRewrite ? '改写' : '编写'} ${item.title || item.chapter_id}`"
             @click.stop
             @change.stop="toggleChapterWritingSelection(item, $event)"
           />
@@ -218,7 +218,7 @@
       <div v-if="actionError" class="banner error">{{ actionError }}</div>
       <div v-if="actionMessage" class="banner ok">{{ actionMessage }}</div>
       <div v-if="batchWritingProgress" class="banner ok">
-        批量编写：正在处理《{{ batchWritingProgress.current_title || '准备选中章节' }}》
+        {{ isBidRewrite ? '批量改写' : '批量编写' }}：正在处理《{{ batchWritingProgress.current_title || '准备选中章节' }}》
         <span>；第 {{ batchWritingProgress.current_index || 1 }}/{{ batchWritingProgress.total }} 章</span>
         <span>；已完成 {{ batchWritingProgress.completed_count }} 章</span>
       </div>
