@@ -1759,6 +1759,22 @@ async def stream_chapter_draft(
         },
     )
 
+@app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/rewrite-match")
+def get_chapter_rewrite_match(
+    workspace_id: str,
+    chapter_id: str,
+) -> JSONResponse:
+    try:
+        from document_pipeline.chapter_rewrite_match import ChapterRewriteMatchService
+
+        rewrite_match = ChapterRewriteMatchService(_context(workspace_id)).latest(
+            chapter_id
+        )
+        return JSONResponse({"ok": True, "rewrite_match": rewrite_match})
+    except ControlPlaneError as exc:
+        return _error(exc)
+
+
 @app.get("/api/v3/workspaces/{workspace_id}/chapters/{chapter_id}/context/revisions")
 def list_chapter_context_revisions(
     workspace_id: str,

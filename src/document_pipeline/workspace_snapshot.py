@@ -520,9 +520,40 @@ class V3WorkspaceSnapshotBuilder:
         from .chapter_workspace import ChapterWorkspaceService
 
         try:
-            return ChapterWorkspaceService(self.context).list_chapters(
+            snapshot = ChapterWorkspaceService(self.context).list_chapters(
                 include_archived=True
             )
+            if control.workspace_profile().get("project_mode") == "bid_rewrite":
+                blueprint = control.v3_active_artifact("ChapterBlueprint") or {}
+                legacy = control.v3_active_artifact("LegacyBidIndex") or {}
+                for item in snapshot.get("items") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    row = control.chapter_rewrite_match_revision(
+                        str(item.get("chapter_id") or "")
+                    )
+                    if not row:
+                        item["rewrite_match"] = None
+                        continue
+                    result = row.get("result") or {}
+                    item["rewrite_match"] = {
+                        "match_revision": int(row.get("match_revision") or 0),
+                        "result_hash": str(row.get("result_hash") or ""),
+                        "created_at": str(row.get("created_at") or ""),
+                        "summary": result.get("summary") or {},
+                        "recommendation": result.get("recommendation") or {},
+                        "stale": (
+                            int(row.get("blueprint_revision") or 0)
+                            != int(blueprint.get("revision") or 0)
+                            or str(row.get("blueprint_hash") or "")
+                            != str(blueprint.get("artifact_hash") or "")
+                            or int(row.get("legacy_index_revision") or 0)
+                            != int(legacy.get("revision") or 0)
+                            or str(row.get("legacy_index_hash") or "")
+                            != str(legacy.get("artifact_hash") or "")
+                        ),
+                    }
+            return snapshot
         except ControlPlaneError:
             materializations = control.chapter_workspaces(include_archived=True)
             nodes = [

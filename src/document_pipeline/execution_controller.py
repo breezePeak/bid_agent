@@ -7,6 +7,7 @@ from typing import Any
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
 from .chapter_editing import ChapterEditingService
+from .chapter_rewrite_match import ChapterRewriteMatchService
 from .chapter_workspace import ChapterWorkspaceService
 from .material_readiness import MaterialReadinessService
 from .rewrite_zero_pollution import audit_rewrite_zero_pollution
@@ -95,6 +96,27 @@ class V3ExecutionController:
             "chapter.generate_draft": editing.handle_generate_draft,
             "chapter.approval.confirm": editing.handle_approval_confirm,
             "chapter.batch.generate": self.generate_chapter_batch,
+            "bid_rewrite.match.generate": self.generate_rewrite_match,
+        }
+
+    def generate_rewrite_match(
+        self,
+        context: WorkspaceContext,
+        envelope: CommandEnvelope,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        del operation_id
+        chapter_id = str(envelope.payload.get("chapter_id") or "").strip()
+        if not chapter_id:
+            raise ControlPlaneError(
+                "CHAPTER_ID_REQUIRED", "章节 ID 不能为空。", status_code=400
+            )
+        rewrite_match = ChapterRewriteMatchService(context).generate(chapter_id)
+        return {
+            "accepted": True,
+            "operation_status": "succeeded",
+            "message": "章节改写逻辑已生成。",
+            "rewrite_match": rewrite_match,
         }
 
     def generate_chapter_batch(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:

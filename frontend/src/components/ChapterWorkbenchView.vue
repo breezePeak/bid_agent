@@ -210,6 +210,11 @@
         </div>
       </header>
 
+      <div v-if="isBidRewrite" class="middle-tabs">
+        <button type="button" :class="{ active: middleTab === 'rewrite' }" @click="middleTab = 'rewrite'">改写逻辑</button>
+        <button type="button" :class="{ active: middleTab === 'body' }" @click="middleTab = 'body'">正文</button>
+      </div>
+
       <div v-if="actionError" class="banner error">{{ actionError }}</div>
       <div v-if="actionMessage" class="banner ok">{{ actionMessage }}</div>
       <div v-if="batchWritingProgress" class="banner ok">
@@ -218,7 +223,15 @@
         <span>；已完成 {{ batchWritingProgress.completed_count }} 章</span>
       </div>
 
-      <div ref="docBodyEl" class="chapter-doc-body">
+      <ChapterRewriteLogicPanel
+        v-if="isBidRewrite"
+        v-show="middleTab === 'rewrite'"
+        :match="rewriteMatch"
+        :loading="rewriteMatchLoading"
+        :error="rewriteMatchError"
+      />
+
+      <div ref="docBodyEl" v-show="!isBidRewrite || middleTab === 'body'" class="chapter-doc-body">
         <div class="document-stage">
           <article
             class="document-paper"
@@ -682,7 +695,10 @@ import {
   fetchCurrentChapterBatchJob,
   fetchChapterBatchJob,
   fetchChapterBatchEvents,
+  fetchChapterRewriteMatch,
+  generateChapterRewriteMatch,
 } from '../api'
+import { normalizeChapterRewriteMatch } from '../api/rewriteContracts.js'
 import {
   hydrateBatchChapterJob,
   initialBatchChapterJobState,
@@ -690,6 +706,7 @@ import {
 } from '../batchChapterJobReducer.js'
 import ContentBlockEditor from './ContentBlockEditor.vue'
 import ChapterRevisionDrawer from './ChapterRevisionDrawer.vue'
+import ChapterRewriteLogicPanel from './ChapterRewriteLogicPanel.vue'
 import { confirmDialog } from '../composables/appDialog.js'
 
 const props = defineProps({
@@ -757,6 +774,14 @@ const chapterDetail = ref(null)
 const revisions = ref([])
 const composeResult = ref(null)
 const workspaceRevision = ref(0)
+const projectMode = ref('full_write')
+const isBidRewrite = computed(() => projectMode.value === 'bid_rewrite')
+const middleTab = ref('body')
+const rewriteMatch = ref(null)
+const rewriteMatchLoading = ref(false)
+const rewriteMatchError = ref('')
+let rewriteMatchAbortController = null
+let rewriteModeInitialized = false
 const globalProjectContext = ref({})
 const chapterWriteJob = ref(null)
 const batchWritingProgress = ref(null)
@@ -1411,6 +1436,11 @@ async function refreshSnapshotRevision() {
   const snap = await fetchSnapshot(props.workspaceId)
   if (snap.data?.ok) {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
+    projectMode.value = String(snap.data.snapshot?.profile?.project_mode || 'full_write')
+    if (!rewriteModeInitialized) {
+      middleTab.value = projectMode.value === 'bid_rewrite' ? 'rewrite' : 'body'
+      rewriteModeInitialized = true
+    }
     globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
     const job = snap.data.snapshot?.chapter_write_job || null
     // Blocked and failed jobs are historical results.  Keeping them in this
@@ -1510,10 +1540,12 @@ async function loadChapterDetail(options = {}) {
 async function reloadAll() {
   busy.value = true
   try {
+    await refreshSnapshotRevision()
     await loadChapterList()
     await Promise.all([
       loadChapterDetail({ force: true }),
       selectedId.value ? loadChapterChat(selectedId.value, { force: true }) : Promise.resolve(),
+      selectedId.value ? loadRewriteMatch(selectedId.value) : Promise.resolve(),
     ])
   } finally {
     busy.value = false
@@ -1561,6 +1593,51 @@ function closeReadonlyView() {
   readonlyLoading.value = false
 }
 
+async function loadRewriteMatch(chapterId) {
+  rewriteMatchAbortController?.abort()
+  rewriteMatchAbortController = null
+  rewriteMatch.value = null
+  rewriteMatchError.value = ''
+  const item = items.value.find(row => row.chapter_id === chapterId)
+  const isLeaf = item && !items.value.some(row => row.parent_chapter_id === chapterId)
+  if (!isBidRewrite.value || !chapterId || !isLeaf) return
+  const controller = new AbortController()
+  rewriteMatchAbortController = controller
+  rewriteMatchLoading.value = true
+  try {
+    let response
+    try {
+      response = await fetchChapterRewriteMatch(props.workspaceId, chapterId, {
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) return
+      const status = Number(error?.response?.status || 0)
+      if (![404, 409].includes(status)) throw error
+      response = await generateChapterRewriteMatch(props.workspaceId, chapterId, {
+        signal: controller.signal,
+      })
+    }
+    if (controller.signal.aborted || selectedId.value !== chapterId) return
+    const data = response?.data || {}
+    if (!data.ok) {
+      throw new Error(data.receipt?.error?.message || data.message || '生成改写逻辑失败')
+    }
+    rewriteMatch.value = normalizeChapterRewriteMatch(data)
+  } catch (error) {
+    if (controller.signal.aborted || selectedId.value !== chapterId) return
+    rewriteMatchError.value = error?.response?.data?.message
+      || error?.response?.data?.error?.message
+      || error.message
+      || String(error)
+  } finally {
+    if (rewriteMatchAbortController === controller) {
+      rewriteMatchAbortController = null
+      rewriteMatchLoading.value = false
+    }
+  }
+}
+
 function selectChapter(chapterId) {
   if (selectedId.value === chapterId) return
   if (editorRef.value?.dirty) {
@@ -1568,6 +1645,7 @@ function selectChapter(chapterId) {
     return
   }
   if (draftAbortController) draftAbortController.abort()
+  rewriteMatchAbortController?.abort()
   draftAbortController = null
   streamingDraft.value = false
   busy.value = false
@@ -2495,6 +2573,7 @@ watch(
     await Promise.all([
       loadChapterDetail({ force: true }),
       loadChapterChat(id),
+      loadRewriteMatch(id),
     ])
   },
 )
@@ -2518,6 +2597,7 @@ onUnmounted(() => {
   closeWorkspaceStream?.()
   closeWorkspaceStream = null
   draftAbortController?.abort()
+  rewriteMatchAbortController?.abort()
 })
 </script>
 
@@ -2782,6 +2862,9 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
 }
+.middle-tabs { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; background: #fff; }
+.middle-tabs button { min-width: 96px; padding: 7px 14px; border: 1px solid transparent; border-radius: 8px; background: #f8fafc; color: #64748b; cursor: pointer; }
+.middle-tabs button.active { border-color: #bfdbfe; background: #dbeafe; color: #1d4ed8; font-weight: 700; }
 .chapter-doc-body {
   --word-page-width: 850px;
   --word-page-min-height: 1120px;

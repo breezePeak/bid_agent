@@ -122,8 +122,11 @@ function newCommandId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-export function fetchV3WorkspaceSnapshot(runId) {
-  return api.get(v3WorkspacePath(runId, 'snapshot'), { headers: { 'Cache-Control': 'no-cache' } })
+export function fetchV3WorkspaceSnapshot(runId, options = {}) {
+  return api.get(v3WorkspacePath(runId, 'snapshot'), {
+    headers: { 'Cache-Control': 'no-cache' },
+    ...options,
+  })
 }
 
 /** Subscribe to pushed workspace snapshots. Returns a function that closes the stream. */
@@ -410,7 +413,7 @@ export function fetchSnapshot(runId) {
   return fetchV3WorkspaceSnapshot(runId)
 }
 
-export function submitV3Command(runId, command) {
+export function submitV3Command(runId, command, options = {}) {
   const body = {
     command_id: command.command_id || newCommandId(),
     kind: command.kind,
@@ -418,7 +421,33 @@ export function submitV3Command(runId, command) {
     expected_revision: Number(command.expected_revision || 0),
     idempotency_key: command.idempotency_key || newCommandId(),
   }
-  return api.post(v3WorkspacePath(runId, 'commands'), body, { timeout: 300000 })
+  return api.post(v3WorkspacePath(runId, 'commands'), body, {
+    timeout: 300000,
+    ...options,
+  })
+}
+
+export function fetchChapterRewriteMatch(runId, chapterId, options = {}) {
+  const id = encodeURIComponent(String(chapterId || '').trim())
+  if (!id) throw new TypeError('chapterId is required')
+  return api.get(v3WorkspacePath(runId, `chapters/${id}/rewrite-match`), {
+    headers: { 'Cache-Control': 'no-cache' },
+    ...options,
+  })
+}
+
+export async function generateChapterRewriteMatch(runId, chapterId, options = {}) {
+  const id = String(chapterId || '').trim()
+  if (!id) throw new TypeError('chapterId is required')
+  const snapshot = await fetchV3WorkspaceSnapshot(runId, options)
+  const commandId = newCommandId()
+  return submitV3Command(runId, {
+    command_id: commandId,
+    kind: 'bid_rewrite.match.generate',
+    payload: { chapter_id: id },
+    expected_revision: workspaceRevisionFromV3Payload(snapshot?.data),
+    idempotency_key: `bid_rewrite.match.generate-${id}-${commandId}`,
+  }, options)
 }
 
 export function createChapterBatchJob(runId, chapterIds, idempotencyKey = '') {
