@@ -1035,10 +1035,10 @@ def test_deterministic_outline_groups_and_expands_concrete_quality_topics() -> N
         "技术部分（暗标，65分）",
     ]
     by_title = {node.title: node for node in candidate.nodes}
-    assert [
-        by_title[title].score_condition_ids
-        for title in ("项目任务背景", "工作必要性和可行性", "工作目标", "工作内容")
-    ] == [[f"SP-target-C{index}"] for index in range(1, 5)]
+    target_leaf = by_title[scores.points[2].outline_path[-1]]
+    assert target_leaf.score_condition_ids == [
+        f"SP-target-C{index}" for index in range(1, 5)
+    ]
 
     blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
         candidate,
@@ -1049,10 +1049,12 @@ def test_deterministic_outline_groups_and_expands_concrete_quality_topics() -> N
     assert audit_chapter_blueprint(blueprint, ledger, scores)["passed"] is True
     depths = _chapter_depths(blueprint)
     blueprint_by_title = {node.title: node for node in blueprint.nodes}
-    assert depths[blueprint_by_title["检查方法"].chapter_id] == 5
+    assert depths[
+        blueprint_by_title[scores.points[3].outline_path[-1]].chapter_id
+    ] == 5
 
 
-def test_target_task_golden_has_four_condition_bound_second_level_titles() -> None:
+def test_target_task_conditions_bind_to_score_factor_leaf() -> None:
     condition_texts = [
         "项目任务背景描述清楚",
         "工作必要性和可行性理由充分、逻辑清晰",
@@ -1115,20 +1117,13 @@ def test_target_task_golden_has_four_condition_bound_second_level_titles() -> No
         if node.parent_chapter_id == blueprint.nodes[0].chapter_id
     ]
 
-    assert blueprint.nodes[0].title == "目标任务"
-    assert [node.title for node in children] == [
-        "项目任务背景",
-        "工作必要性和可行性",
-        "工作目标",
-        "工作内容",
-    ]
-    assert [node.score_condition_ids for node in children] == [
-        [condition_id] for condition_id in condition_ids
-    ]
+    assert blueprint.nodes[0].title == scores.groups[0].title
+    assert [node.title for node in children] == [scores.points[0].title]
+    assert children[0].score_condition_ids == condition_ids
     assert {depths[node.chapter_id] for node in children} == {2}
 
 
-def test_technical_method_golden_preserves_four_heading_levels() -> None:
+def test_model_cannot_expand_conditions_beyond_score_table_path() -> None:
     condition_texts = [
         "核查准备工作全面细致",
         "数据接收内容全面、具体",
@@ -1195,17 +1190,78 @@ def test_technical_method_golden_preserves_four_heading_levels() -> None:
     depths = _chapter_depths(blueprint)
     by_title = {node.title: node for node in blueprint.nodes}
 
-    assert depths[by_title["技术方法（43分）"].chapter_id] == 1
-    assert depths[by_title["核查准备工作（6分）"].chapter_id] == 2
-    assert depths[by_title["数据接收内容与检查方法"].chapter_id] == 3
-    assert {
-        depths[by_title[title].chapter_id]
-        for title in ("核查准备工作", "数据接收内容", "检查方法")
-    } == {4}
-    assert [
-        by_title[title].score_condition_ids
-        for title in ("核查准备工作", "数据接收内容", "检查方法")
-    ] == [[condition_id] for condition_id in condition_ids]
+    assert depths[by_title[scores.groups[0].title].chapter_id] == 1
+    leaf = by_title[scores.points[0].title]
+    assert depths[leaf.chapter_id] == 2
+    assert leaf.score_condition_ids == condition_ids
+    assert len(blueprint.nodes) == 2
+
+
+def test_compiler_does_not_text_filter_score_model_path_levels() -> None:
+    scores, ledger, condition_ids = _score_direct_fixture(
+        score_point_id="SP-route",
+        point_title="技术路线",
+        group_title="技术部分（暗标，65分）",
+        condition_texts=["总体技术路线逻辑清晰"],
+        max_points=6,
+    )
+    path = [
+        "技术部分（暗标，65分）",
+        "包5到包9：",
+        "技术路线（6分）",
+    ]
+    point = scores.points[0]
+    scores = scores.model_copy(
+        update={
+            "points": [
+                point.model_copy(
+                    update={
+                        "outline_path": path,
+                        "response_units": [
+                            point.response_units[0].model_copy(
+                                update={"outline_path": path}
+                            )
+                        ],
+                    }
+                )
+            ]
+        }
+    )
+    blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
+        ChapterOutlineCandidate(
+            nodes=[
+                ChapterOutlineNodeCandidate(
+                    local_id="technical",
+                    order=0,
+                    title="技术部分（暗标，65分）",
+                    purpose="组织技术评分响应",
+                    confidence=1.0,
+                ),
+                ChapterOutlineNodeCandidate(
+                    local_id="route",
+                    parent_local_id="technical",
+                    order=1,
+                    title="技术路线（6分）",
+                    purpose="响应技术路线评分要求",
+                    primary_response_unit_ids=["SP-route-U01"],
+                    score_condition_ids=condition_ids,
+                    confidence=1.0,
+                ),
+            ]
+        ),
+        ledger,
+        scores,
+        revision=1,
+    )
+
+    audit = audit_chapter_blueprint(blueprint, ledger, scores)
+
+    assert audit["passed"] is True
+    assert path[1] in [node.title for node in blueprint.nodes]
+    assert not any(
+        finding["code"] == "OUTLINE_PATH_HIERARCHY_MISSING"
+        for finding in audit["findings"]
+    )
 
 
 def test_g2_requires_section_quality_condition_writing_objective() -> None:
@@ -1330,7 +1386,11 @@ def test_related_conditions_can_share_one_business_chapter() -> None:
         revision=1,
     )
 
-    chapter = next(node for node in blueprint.nodes if node.title == "核查样本影像分类与使用")
+    chapter = next(
+        node
+        for node in blueprint.nodes
+        if node.title == scores.points[0].title
+    )
     assert chapter.score_condition_ids == condition_ids
     assert audit_chapter_blueprint(blueprint, ledger, scores)["passed"] is True
 
@@ -1449,7 +1509,9 @@ def test_mixed_score_point_routes_only_document_unit_to_quality_gate() -> None:
     assert blueprint.planning_model == "score_direct"
     assert blueprint.assignments == []
     technical_plan = next(
-        node for node in blueprint.nodes if node.title == "技术方案"
+        node
+        for node in blueprint.nodes
+        if node.primary_response_unit_ids == ["SP-mixed-U-content"]
     )
     assert technical_plan.score_condition_ids == [
         content_condition.condition_id

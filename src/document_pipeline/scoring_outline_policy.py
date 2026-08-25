@@ -9,6 +9,7 @@ ResponseTopicGraph/ResponseDuty branch remains only for explicit legacy calls.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import defaultdict
 from typing import Any
 
@@ -25,7 +26,7 @@ from .contracts import (
 )
 
 
-SCORING_OUTLINE_POLICY_VERSION = "v3-scoring-outline-policy-5"
+SCORING_OUTLINE_POLICY_VERSION = "v3-scoring-outline-policy-6"
 
 _DOCUMENT_TERMS = ("投标文件", "响应文件", "技术文件", "技术标", "文件编制")
 _QUALITY_TERMS = (
@@ -307,6 +308,13 @@ def outline_subject(label: str) -> str:
 
     value = re.sub(r"[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]", "", label)
     return re.sub(r"[\s：:；;、，,。.\-—]", "", value)
+
+
+def outline_structure_key(label: str) -> str:
+    """Normalize extraction noise without erasing scoring-table semantics."""
+
+    value = unicodedata.normalize("NFKC", str(label or ""))
+    return re.sub(r"\s+", "", value).strip()
 
 
 def score_leaf_title(title: str, parent_label: str, fallback_index: int) -> str:
@@ -1120,28 +1128,6 @@ def _audit_chapter_blueprint_direct(
     condition_nodes: dict[str, list[str]] = defaultdict(list)
     covered_requirement_ids: set[str] = set()
     for node in blueprint.nodes:
-        if is_hollow_quality_heading(node.title):
-            findings.append(
-                _finding(
-                    "HOLLOW_QUALITY_HEADING",
-                    f"章节 {node.chapter_id} 标题仅包含空洞质量形容词: "
-                    f"{node.title}",
-                )
-            )
-        if blueprint.mode == "auto_outline" and is_evaluative_sentence_heading(node.title):
-            findings.append(
-                _finding(
-                    "EVALUATIVE_SENTENCE_HEADING",
-                    f"章节 {node.chapter_id} 标题包含评分式评价语: {node.title}",
-                )
-            )
-        if blueprint.mode == "auto_outline" and is_contextless_heading(node.title):
-            findings.append(
-                _finding(
-                    "MISSING_SUBJECT_HEADING",
-                    f"章节 {node.chapter_id} 标题缺少业务对象: {node.title}",
-                )
-            )
         bound_units = {
             *node.primary_response_unit_ids,
             *node.supporting_response_unit_ids,
@@ -1252,10 +1238,6 @@ def _audit_chapter_blueprint_direct(
                 current = parent_id
             return list(reversed(chain))
 
-        def group_subject(title: str) -> str:
-            value = re.sub(r"[（(][^）)]*(?:分|明标|暗标)[^）)]*[）)]", "", title)
-            return outline_subject(re.sub(r"(明标|暗标)", "", value))
-
         expected_groups = [
             group
             for group in score_model.groups
@@ -1322,24 +1304,33 @@ def _audit_chapter_blueprint_direct(
                 if len(primaries) != 1:
                     continue
                 point = points[unit_owner[unit_id]]
-                unit = units[unit_id]
                 expected_path = [
-                    title
-                    for title in (unit.outline_path or point.outline_path)
-                    if not is_evaluative_sentence_heading(str(title))
+                    str(title).strip()
+                    for title in point.outline_path
+                    if str(title).strip()
                 ]
-                if expected_path and group_subject(expected_path[0]) == group_subject(group.title):
+                if (
+                    expected_path
+                    and outline_structure_key(expected_path[0])
+                    == outline_structure_key(group.title)
+                ):
                     expected_path.pop(0)
                 compact_path: list[str] = []
                 for label in expected_path:
-                    if not compact_path or outline_subject(compact_path[-1]) != outline_subject(label):
+                    if (
+                        not compact_path
+                        or outline_structure_key(compact_path[-1])
+                        != outline_structure_key(label)
+                    ):
                         compact_path.append(label)
                 if not compact_path:
                     continue
                 actual_path = path_titles(primaries[0])[1:]
-                actual_subjects = [outline_subject(label) for label in actual_path]
-                expected_subjects = [outline_subject(label) for label in compact_path]
-                if actual_subjects[: len(expected_subjects)] != expected_subjects:
+                actual_keys = [outline_structure_key(label) for label in actual_path]
+                expected_keys = [
+                    outline_structure_key(label) for label in compact_path
+                ]
+                if actual_keys != expected_keys:
                     findings.append(
                         _finding(
                             "OUTLINE_PATH_HIERARCHY_MISSING",

@@ -2515,6 +2515,12 @@ function isContinueIntent(message) {
   )
 }
 
+function isRegenerateIntent(message) {
+  return /^(重新生成|重新生成目录|重生成|强制重新生成)[。！!]?$/u.test(
+    String(message || '').trim(),
+  )
+}
+
 function isSecondStageConfirmation(message) {
   return /^(继续第二阶段|开始第二阶段|确认进入第二阶段|确认|继续|是|好的|可以)[。！!]?$/u.test(
     String(message || '').trim(),
@@ -2528,7 +2534,7 @@ function confirmSecondStage() {
   return '收到确认，现进入第二阶段：解析评分点并生成章节目录。'
 }
 
-async function continueCurrentWorkflow() {
+async function continueCurrentWorkflow({ regenerate = false } = {}) {
   await refresh()
 
   if (outlineBusy.value || generationBusy.value) {
@@ -2555,8 +2561,17 @@ async function continueCurrentWorkflow() {
     outlineOperation?.status === 'failed'
     || (!planningReadyForReview.value && !hasOutline.value)
   )) {
-    void prepareOutline()
-    return '已从目录规划的失败阶段继续，已完成节点会直接复用。'
+    void prepareOutline(regenerate
+      ? {
+          regenerateCapabilities: [
+            'score.semantic_reconcile',
+            'planning.chapter_outline_split',
+          ],
+        }
+      : {})
+    return regenerate
+      ? '已丢弃失败的目录推理断点，正在重新生成章节目录。'
+      : '已从目录规划的失败阶段继续，已完成节点会直接复用。'
   }
 
   const generationStatus = String(generation.value.status || 'new')
@@ -2643,6 +2658,12 @@ async function sendInitialChat() {
     if (secondStageConfirmationNeeded.value && isSecondStageConfirmation(msg)) {
       assistantTurn.content = confirmSecondStage()
       assistantTurn.processDetail = '已记录阶段确认，并在后台启动目录规划；聊天输入保持可用。'
+      assistantTurn.processStatus = 'completed'
+      return
+    }
+    if (isRegenerateIntent(msg)) {
+      assistantTurn.content = await continueCurrentWorkflow({ regenerate: true })
+      assistantTurn.processDetail = '已检查失败节点并丢弃对应推理断点；目录重新生成已转入后台执行。'
       assistantTurn.processStatus = 'completed'
       return
     }
@@ -4135,7 +4156,7 @@ async function uploadRole(role) {
   }
 }
 
-async function prepareOutline() {
+async function prepareOutline(options = {}) {
   if (outlineBusy.value || (running.value && runningAction.value === 'outline')) {
     return
   }
@@ -4153,7 +4174,7 @@ async function prepareOutline() {
   waitingForOutlineCompletion.value = false
   message.value = ''
   try {
-    const { data } = await prepareV3Outline(props.runId)
+    const { data } = await prepareV3Outline(props.runId, options)
     assertCommandAccepted(data, '评分点解析与章节目录生成失败。')
     await refresh()
     if (!planningView.value.summary.score_point_count) {

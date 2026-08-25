@@ -796,11 +796,7 @@ def test_project_understanding_uses_one_score_independent_request() -> None:
     assert result.candidate.project_name is not None
 
 
-def test_missing_score_condition_fails_after_one_repair() -> None:
-    # Single-batch auto-outline paths now get one controlled repair attempt
-    # (repair_attempts=1, matching template_strict and single-point batches).
-    # The fake always returns the same invalid output, so both the initial call
-    # and the repair call are made before the provider raises the error.
+def test_missing_model_condition_is_restored_from_score_model() -> None:
     output = json.dumps(
         _outline_candidate(include_condition=False),
         ensure_ascii=False,
@@ -812,19 +808,16 @@ def test_missing_score_condition_fails_after_one_repair() -> None:
         calls += 1
         return output
 
-    with pytest.raises(
-        PlanningInferenceValidationError,
-        match="目录未精确覆盖可见评分条件",
-    ):
-        LLMOutlineDecompositionProvider(
-            chat_callable=fake,
-            model_fingerprint="fake-model:v1",
-        ).split(_outline_request())
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(_outline_request())
 
-    assert calls == 2
+    assert calls == 1
+    assert result.candidate.nodes[1].score_condition_ids == ["SP-1-C01"]
 
 
-def test_outline_duplicate_local_orders_are_normalized_depth_first() -> None:
+def test_model_added_nodes_and_orders_cannot_change_score_topology() -> None:
     candidate = _outline_candidate(include_condition=True)
     candidate["nodes"][0]["order"] = 1
     candidate["nodes"].extend(
@@ -864,17 +857,15 @@ def test_outline_duplicate_local_orders_are_normalized_depth_first() -> None:
         model_fingerprint="fake-model:v1",
     ).split(_outline_request())
 
-    assert {
-        node.local_id: node.order for node in result.candidate.nodes
-    } == {
-        "chapter-special": 0,
-        "grandchild": 2,
-        "child-a": 1,
-        "child-b": 3,
-    }
+    expected = _outline_request().score_model
+    assert [node.title for node in result.candidate.nodes] == [
+        expected["groups"][0]["title"],
+        expected["points"][0]["response_units"][0]["title"],
+    ]
+    assert [node.order for node in result.candidate.nodes] == [0, 1]
 
 
-def test_outline_valid_global_orders_are_not_rewritten() -> None:
+def test_model_orders_are_replaced_by_deterministic_score_order() -> None:
     candidate = _outline_candidate(include_condition=True)
     candidate["nodes"][0]["order"] = 4
     candidate["nodes"].append(
@@ -896,7 +887,7 @@ def test_outline_valid_global_orders_are_not_rewritten() -> None:
         model_fingerprint="fake-model:v1",
     ).split(_outline_request())
 
-    assert [node.order for node in result.candidate.nodes] == [4, 7]
+    assert [node.order for node in result.candidate.nodes] == [0, 1]
 
 
 def test_large_outline_is_batched_and_cached(tmp_path: Path) -> None:
@@ -1012,18 +1003,16 @@ def test_batched_outline_reuses_shared_factor_parent_across_fragments() -> None:
         if node.title == "技术方法（43分）"
     ]
     assert len(factor_nodes) == 1
-    factor_id = factor_nodes[0].local_id
     assert set(factor_nodes[0].primary_response_unit_ids) == {
         f"SP-{index:02d}-U01" for index in range(1, 10)
     }
-    assert all(
-        node.parent_local_id == factor_id
-        for node in result.candidate.nodes
-        if node.score_condition_ids
-    )
+    assert set(factor_nodes[0].score_condition_ids) == {
+        f"SP-{index:02d}-C01" for index in range(1, 10)
+    }
+    assert len(result.candidate.nodes) == 2
 
 
-def test_outline_normalizes_scope_heading_and_score_suffix_drift() -> None:
+def test_outline_does_not_guess_structure_from_package_wording() -> None:
     payload = _large_outline_request().model_dump(mode="json")
     for index, point in enumerate(payload["score_model"]["points"]):
         path = (
@@ -1035,22 +1024,98 @@ def test_outline_normalizes_scope_heading_and_score_suffix_drift() -> None:
         point["response_units"][0]["outline_path"] = path
     request = OutlineDecompositionInput.model_validate(payload)
 
-    normalized = LLMOutlineDecompositionProvider._normalize_auto_outline_request(
-        request
-    )
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        return _outline_fragment_for_messages(messages)
 
-    assert {
-        tuple(point["outline_path"])
-        for point in normalized.score_model["points"]
-    } == {("技术方法（43分）",)}
-    assert all(
-        unit["outline_path"] == ["技术方法（43分）"]
-        for point in normalized.score_model["points"]
-        for unit in point["response_units"]
-    )
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    assert [node.title for node in result.candidate.nodes[:4]] == [
+        request.score_model["groups"][0]["title"],
+        *request.score_model["points"][0]["outline_path"][1:],
+        request.score_model["points"][1]["outline_path"][0],
+    ]
 
 
-def test_outline_rejects_redundant_task_level_after_source_factor_path() -> None:
+def test_outline_keeps_controlled_input_snapshot() -> None:
+    payload = _outline_request().model_dump(mode="json")
+    payload["score_model"]["points"][0]["outline_path"] = ["包5到包9："]
+    payload["score_model"]["points"][0]["response_units"][0][
+        "outline_path"
+    ] = ["包5到包9："]
+    request = OutlineDecompositionInput.model_validate(payload)
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        return json.dumps(
+            _outline_candidate(include_condition=True),
+            ensure_ascii=False,
+        )
+
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    assert json.loads(result.input_snapshot) == request.model_dump(mode="json")
+
+
+def test_model_cannot_insert_applicability_scope_into_score_path() -> None:
+    payload = _outline_request().model_dump(mode="json")
+    point = payload["score_model"]["points"][0]
+    point["outline_path"] = ["技术路线（6分）"]
+    point["response_units"][0]["outline_path"] = ["技术路线（6分）"]
+    request = OutlineDecompositionInput.model_validate(payload)
+    candidate = {
+        "nodes": [
+            {
+                "local_id": "root",
+                "parent_local_id": None,
+                "order": 0,
+                "title": request.score_model["groups"][0]["title"],
+                "purpose": "组织评分响应",
+                "confidence": 1.0,
+            },
+            {
+                "local_id": "scope",
+                "parent_local_id": "root",
+                "order": 1,
+                "title": "包5到包9：",
+                "purpose": "模型误加的适用范围",
+                "confidence": 1.0,
+            },
+            {
+                "local_id": "route",
+                "parent_local_id": "scope",
+                "order": 2,
+                "title": "技术路线（6分）",
+                "purpose": "响应技术路线",
+                "primary_response_unit_ids": ["SP-1-U01"],
+                "score_condition_ids": ["SP-1-C01"],
+                "requirement_ids": ["R-1"],
+                "confidence": 1.0,
+            },
+        ],
+        "document_quality_response_unit_ids": [],
+        "review_status": "draft",
+    }
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        return json.dumps(candidate, ensure_ascii=False)
+
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    assert [node.title for node in result.candidate.nodes] == [
+        request.score_model["groups"][0]["title"],
+        "技术路线（6分）",
+    ]
+
+
+def test_outline_discards_redundant_model_task_level() -> None:
     request_payload = _outline_request().model_dump(mode="json")
     point = request_payload["score_model"]["points"][0]
     point["outline_path"] = ["核查准备工作（6分）"]
@@ -1101,14 +1166,18 @@ def test_outline_rejects_redundant_task_level_after_source_factor_path() -> None
     def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
         return json.dumps(candidate, ensure_ascii=False)
 
-    with pytest.raises(
-        PlanningInferenceValidationError,
-        match="未保留 outline_path",
-    ):
-        LLMOutlineDecompositionProvider(
-            chat_callable=fake,
-            model_fingerprint="fake-model:v1",
-        ).split(request)
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    assert [node.title for node in result.candidate.nodes] == [
+        request.score_model["groups"][0]["title"],
+        request.score_model["points"][0]["outline_path"][0],
+    ]
+    assert result.candidate.nodes[1].primary_response_unit_ids == [
+        "SP-1-U01"
+    ]
 
 
 def test_truncated_outline_batch_is_split_and_split_checkpoint_is_reused(
@@ -1232,27 +1301,28 @@ def test_document_unit_requirement_is_not_forced_into_visible_chapter() -> None:
         model_fingerprint="fake-model:v1",
     ).split(request)
 
-    assert result.candidate.nodes[0].requirement_ids == ["R-1"]
+    assert result.candidate.nodes[0].requirement_ids == []
+    assert result.candidate.nodes[1].requirement_ids == ["R-1"]
     assert result.candidate.document_quality_response_unit_ids == [
         "SP-1-U-document"
     ]
 
 
-def test_hollow_quality_adjective_heading_fails_closed() -> None:
+def test_model_cannot_replace_score_group_with_hollow_heading() -> None:
     candidate = _outline_candidate(include_condition=True)
     candidate["nodes"][0]["title"] = "完整性、合理性与针对性"
 
     def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
         return json.dumps(candidate, ensure_ascii=False)
 
-    with pytest.raises(
-        PlanningInferenceValidationError,
-        match="标题仅包含空洞质量形容词",
-    ):
-        LLMOutlineDecompositionProvider(
-            chat_callable=fake,
-            model_fingerprint="fake-model:v1",
-        ).split(_outline_request())
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(_outline_request())
+
+    assert result.candidate.nodes[0].title == (
+        _outline_request().score_model["groups"][0]["title"]
+    )
 
 
 def test_related_conditions_may_share_one_business_node() -> None:
@@ -1452,16 +1522,17 @@ def test_related_conditions_may_share_one_business_node() -> None:
     assert len(calls) == 1
     # 修复反馈中应包含节点共用修复指导
     # 最终结果应通过校验
-    node_ids = {node.local_id for node in result.candidate.nodes}
-    assert "org-node" in node_ids
+    assert [node.title for node in result.candidate.nodes] == [
+        "技术部分",
+        "组织结构及成员",
+        "技术方案",
+    ]
     # SP-01 的两个条件最终分布在不同节点上
     cond_nodes: dict[str, list[str]] = {}
     for node in result.candidate.nodes:
         for cid in node.score_condition_ids:
             cond_nodes.setdefault(cid, []).append(node.local_id)
-    assert (
-        cond_nodes.get("SP-01-C01"),
-        cond_nodes.get("SP-01-C02"),
-    ) == (["org-node"], ["org-node"]), (
+    assert cond_nodes["SP-01-C01"] == cond_nodes["SP-01-C02"]
+    _unused_failure_message = (
         "C01 和 C02 仍然共用了同一节点，修复未生效"
     )

@@ -46,10 +46,8 @@ from .scoring_outline_policy import (
     document_quality_check_items,
     document_quality_criteria,
     full_score_condition_heading,
-    is_contextless_heading,
-    is_evaluative_sentence_heading,
-    is_hollow_quality_heading,
     is_document_quality_score,
+    outline_structure_key,
     outline_subject,
     score_group_category,
     score_group_chapter_title,
@@ -219,6 +217,112 @@ def _anchors_for_refs(
 def _require_unique(values: list[str], *, owner: str) -> None:
     if len(values) != len(set(values)):
         raise PlanningCandidateCompilationError(f"{owner} 不允许重复 ID")
+
+
+def _project_auto_outline_annotations(
+    candidate: ChapterOutlineCandidate,
+    deterministic: ChapterOutlineCandidate,
+) -> ChapterOutlineCandidate:
+    """Keep model writing advice while making ScoreModel own all topology."""
+
+    by_unit: dict[str, list[object]] = defaultdict(list)
+    by_title: dict[str, list[object]] = defaultdict(list)
+    for node in candidate.nodes:
+        by_title[outline_structure_key(node.title)].append(node)
+        for unit_id in (
+            *node.primary_response_unit_ids,
+            *node.supporting_response_unit_ids,
+        ):
+            by_unit[unit_id].append(node)
+
+    def merged(nodes: list[object], field_name: str) -> list[str]:
+        return list(
+            dict.fromkeys(
+                value
+                for node in nodes
+                for value in getattr(node, field_name)
+                if str(value).strip()
+            )
+        )
+
+    projected_nodes = []
+    for node in deterministic.nodes:
+        selected: list[object] = []
+        seen: set[str] = set()
+        for unit_id in (
+            *node.primary_response_unit_ids,
+            *node.supporting_response_unit_ids,
+        ):
+            for annotation in by_unit.get(unit_id, []):
+                if annotation.local_id not in seen:
+                    seen.add(annotation.local_id)
+                    selected.append(annotation)
+        for annotation in by_title.get(outline_structure_key(node.title), []):
+            if annotation.local_id not in seen:
+                seen.add(annotation.local_id)
+                selected.append(annotation)
+        projected_nodes.append(
+            node.model_copy(
+                update={
+                    "purpose": next(
+                        (
+                            annotation.purpose
+                            for annotation in selected
+                            if annotation.purpose.strip()
+                        ),
+                        node.purpose,
+                    ),
+                    "writing_objectives": list(
+                        dict.fromkeys(
+                            [
+                                *node.writing_objectives,
+                                *merged(selected, "writing_objectives"),
+                            ]
+                        )
+                    ),
+                    "required_mentions": list(
+                        dict.fromkeys(
+                            [
+                                *node.required_mentions,
+                                *merged(selected, "required_mentions"),
+                            ]
+                        )
+                    ),
+                    "planned_tables": list(
+                        dict.fromkeys(
+                            [
+                                *node.planned_tables,
+                                *merged(selected, "planned_tables"),
+                            ]
+                        )
+                    ),
+                    "planned_figures": list(
+                        dict.fromkeys(
+                            [
+                                *node.planned_figures,
+                                *merged(selected, "planned_figures"),
+                            ]
+                        )
+                    ),
+                    "target_size": max(
+                        [node.target_size, *(item.target_size for item in selected)]
+                    ),
+                    "confidence": min(
+                        [node.confidence, *(item.confidence for item in selected)]
+                    ),
+                    "needs_human": (
+                        node.needs_human
+                        or any(item.needs_human for item in selected)
+                    ),
+                }
+            )
+        )
+    return deterministic.model_copy(
+        update={
+            "nodes": projected_nodes,
+            "review_status": candidate.review_status,
+        }
+    )
 
 
 class PlanningAgent:
@@ -1165,6 +1269,22 @@ class PlanningAgent:
             raise PlanningCandidateCompilationError(
                 "ChapterOutlineCandidate 已标记 blocked"
             )
+        if template_structure is None:
+            # The model contributes annotations only.  Rebuild the visible
+            # tree from ScoreModel at the final compiler boundary so custom
+            # providers, cached candidates and retries cannot alter topology.
+            from .deterministic_outline import (
+                build_deterministic_outline_candidate,
+            )
+
+            candidate = _project_auto_outline_annotations(
+                candidate,
+                build_deterministic_outline_candidate(
+                    ledger,
+                    scores,
+                    None,
+                ),
+            )
         source_hashes = _merged_source_hashes(
             ledger.source_hashes,
             scores.source_hashes,
@@ -1357,19 +1477,6 @@ class PlanningAgent:
         visible_condition_bindings: list[str] = []
         covered_requirement_ids: set[str] = set()
         for node in candidate.nodes:
-            if is_hollow_quality_heading(node.title):
-                raise PlanningCandidateCompilationError(
-                    f"章节 {node.local_id} 标题仅包含空洞质量形容词: "
-                    f"{node.title}"
-                )
-            if template_structure is None and is_evaluative_sentence_heading(node.title):
-                raise PlanningCandidateCompilationError(
-                    f"章节 {node.local_id} 标题包含评分式评价语: {node.title}"
-                )
-            if template_structure is None and is_contextless_heading(node.title):
-                raise PlanningCandidateCompilationError(
-                    f"章节 {node.local_id} 标题缺少业务对象: {node.title}"
-                )
             if (
                 node.parent_local_id is not None
                 and local_nodes[node.parent_local_id].order >= node.order

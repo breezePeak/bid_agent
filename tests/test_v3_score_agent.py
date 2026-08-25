@@ -307,7 +307,122 @@ class TestV3ScoreAgent(unittest.TestCase):
             ],
         )
 
-    def test_semantic_outline_keeps_table_hierarchy_and_drops_scope_headings(self) -> None:
+    def test_applicability_heading_does_not_replace_scoring_group(self) -> None:
+        blocks = [
+            SourceBlock(
+                block_id="scope-heading",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="heading",
+                ordinal=0,
+                content="第1至第3标段适用：",
+                source_anchor=self._anchor("scope-heading"),
+                content_hash="scope-heading",
+            ),
+            SourceBlock(
+                block_id="price-heading",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="heading",
+                ordinal=1,
+                content="价格部分（10分）",
+                source_anchor=self._anchor("price-heading"),
+                content_hash="price-heading",
+            ),
+        ]
+        for column, content in enumerate(("评分因素", "评分因素", "评分标准")):
+            block_id = f"header-{column}"
+            blocks.append(
+                SourceBlock(
+                    block_id=block_id,
+                    input_id="in-score",
+                    input_role=InputRole.SCORE,
+                    block_kind="table_cell",
+                    ordinal=2 + column,
+                    content=content,
+                    table_index=1,
+                    row_index=0,
+                    column_index=column,
+                    source_anchor=self._anchor(block_id),
+                    content_hash=block_id,
+                )
+            )
+        for column, content in enumerate(
+            (
+                "价格部分（10分）",
+                "投标报价（10分）",
+                "有效投标报价最低得10分，其他报价按公式计算。",
+            )
+        ):
+            block_id = f"price-row-{column}"
+            blocks.append(
+                SourceBlock(
+                    block_id=block_id,
+                    input_id="in-score",
+                    input_role=InputRole.SCORE,
+                    block_kind="table_cell",
+                    ordinal=5 + column,
+                    content=content,
+                    table_index=1,
+                    row_index=1,
+                    column_index=column,
+                    source_anchor=self._anchor(block_id),
+                    content_hash=block_id,
+                )
+            )
+
+        model = ScoreAgent(self.context).build_score_model(
+            blocks,
+            RequirementLedger(source_hashes={"in-score": "scorehash"}),
+            revision=1,
+            source_hashes={"in-score": "scorehash"},
+        )
+
+        self.assertEqual([group.title for group in model.groups], ["价格部分（10分）"])
+        self.assertEqual(model.points[0].outline_path, ["投标报价（10分）"])
+        self.assertNotIn("第1至第3标段适用：", model.points[0].outline_path)
+
+    def test_package_wording_is_preserved_when_it_is_a_table_factor(self) -> None:
+        row_blocks = [
+            SourceBlock(
+                block_id="factor",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="table_cell",
+                ordinal=0,
+                content="各标包实施方案（10分）",
+                table_index=1,
+                row_index=1,
+                column_index=0,
+                source_anchor=self._anchor("factor"),
+                content_hash="factor",
+            ),
+            SourceBlock(
+                block_id="criterion",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="table_cell",
+                ordinal=1,
+                content="各标包实施方案完整可行，得10分。",
+                table_index=1,
+                row_index=1,
+                column_index=1,
+                source_anchor=self._anchor("criterion"),
+                content_hash="criterion",
+            ),
+        ]
+
+        self.assertEqual(
+            ScoreAgent._row_outline_path(
+                row_blocks,
+                row_blocks[1],
+                "各标包实施方案",
+                group_title="技术部分（10分）",
+            ),
+            ["各标包实施方案（10分）"],
+        )
+
+    def test_semantic_outline_cannot_change_table_hierarchy(self) -> None:
         self.assertEqual(
             ScoreAgent._canonical_semantic_outline_path(
                 structural_path=[
@@ -326,7 +441,6 @@ class TestV3ScoreAgent(unittest.TestCase):
             [
                 "技术方法（43分）",
                 "年度全国国土变更调查成果国家级内、外业核查质量控制检查和成果复核（31分）",
-                "检查结果汇总分析与成果表达",
             ],
         )
 
@@ -663,6 +777,10 @@ class TestV3ScoreAgent(unittest.TestCase):
 
         self.assertEqual(len(model.points), 20)
         self.assertEqual(model.total_points, 100)
+        self.assertEqual(
+            [group.title for group in model.groups],
+            [title for title, _table_index, _row_points in group_specs],
+        )
         self.assertEqual(
             [(group.declared_points, sum(point.max_points or 0 for point in model.points if point.group_id == group.group_id)) for group in model.groups],
             [(10, 10), (25, 25), (65, 65)],

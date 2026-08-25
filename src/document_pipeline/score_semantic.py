@@ -24,8 +24,8 @@ from utils import read_json, write_json
 from .canonicalization import canonical_hash, canonical_json
 
 SCORE_SEMANTIC_CAPABILITY_ID = "score.semantic_reconcile"
-SCORE_SEMANTIC_CAPABILITY_VERSION = "2.1.0"
-SCORE_SEMANTIC_PROMPT_VERSION = "v3_score_semantic_v2.2"
+SCORE_SEMANTIC_CAPABILITY_VERSION = "3.0.0"
+SCORE_SEMANTIC_PROMPT_VERSION = "v3_score_semantic_v3.0"
 SCORE_SEMANTIC_SCHEMA_VERSION = "v3-score-semantic-candidate-5"
 SCORE_SEMANTIC_TEMPERATURE = 0.1
 # Character budgets intentionally mirror the model-context allocation contract:
@@ -95,10 +95,6 @@ _LEVEL_STRUCTURE_HEADING = re.compile(
     r"^\s*(?:\d+(?:\.\d+)?[.、．)]\s*)?"
     r"[^，,；;。.!！?？\r\n]{1,40}"
     r"[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]\s*$"
-)
-_PACKAGE_STRUCTURE_HEADING = re.compile(
-    r"^\s*[（(]?\d+[）)]?\s*包\s*\d+"
-    r"(?:\s*[-—~至到]\s*包?\s*\d+)?\s*[：:]\s*$"
 )
 _LEADING_SCORE_MECHANICS = re.compile(
     r"^\s*(?:累计计分\s*[，,；;。.]?\s*)?"
@@ -229,7 +225,6 @@ def substantive_score_level_text(value: str) -> str:
         line = lines[0]
         if (
             _LEVEL_STRUCTURE_HEADING.fullmatch(line)
-            or _PACKAGE_STRUCTURE_HEADING.fullmatch(line)
             or _LEADING_SCORE_MECHANICS.fullmatch(line)
         ):
             lines.pop(0)

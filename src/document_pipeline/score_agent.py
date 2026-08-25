@@ -43,7 +43,7 @@ from .scoring_outline_policy import (
     highest_score_conditions,
     is_document_quality_score,
     is_evaluative_sentence_heading,
-    outline_subject,
+    outline_structure_key,
 )
 
 
@@ -135,9 +135,45 @@ class ScoreAgent:
                 leader = min(canonical, key=lambda item: (item.ordinal, item.column_index or 0))
                 row_blocks_by_leader[leader.block_id] = canonical
 
+        # Bind each scoring table to the nearest preceding scored-group caption.
+        # This is a source-position/table-role relation: the caption text is
+        # never classified as an applicability label by wording.
+        group_caption_by_table: dict[
+            tuple[str, int | None, int], SourceBlock
+        ] = {}
+        for table_key in table_headers:
+            table_blocks = [
+                block
+                for block in source_blocks
+                if (
+                    block.input_id,
+                    block.page,
+                    block.table_index,
+                )
+                == table_key
+            ]
+            if not table_blocks:
+                continue
+            first_table_ordinal = min(block.ordinal for block in table_blocks)
+            captions = [
+                block
+                for block in source_blocks
+                if block.input_id == table_key[0]
+                and block.table_index is None
+                and block.ordinal < first_table_ordinal
+                and block.block_kind in {"heading", "paragraph"}
+                and self._is_group_label(block.content.strip())
+            ]
+            if captions:
+                group_caption_by_table[table_key] = max(
+                    captions,
+                    key=lambda item: item.ordinal,
+                )
+
         groups: list[ScoreGroup] = []
         points: list[ScorePoint] = []
         group_by_input: dict[str, ScoreGroup] = {}
+        group_by_table: dict[tuple[str, int | None, int], ScoreGroup] = {}
         current_group: ScoreGroup | None = None
         total_declared: float | None = None
 
@@ -146,14 +182,32 @@ class ScoreAgent:
                 row_blocks = row_blocks_by_leader.get(block.block_id)
                 if row_blocks is None:
                     continue
-                current_group = group_by_input.get(block.input_id) or current_group
+                table_key = (
+                    block.input_id,
+                    block.page,
+                    int(block.table_index or 0),
+                )
+                current_group = group_by_table.get(table_key)
+                if current_group is None:
+                    caption = group_caption_by_table.get(table_key)
+                    if caption is not None:
+                        current_group = self._group_for_heading(caption)
+                        group_by_input[block.input_id] = current_group
+                        if not any(
+                            group.group_id == current_group.group_id
+                            for group in groups
+                        ):
+                            groups.append(current_group)
+                    else:
+                        current_group = group_by_input.get(block.input_id)
                 if current_group is None:
                     current_group = self._default_group(block)
                     group_by_input[block.input_id] = current_group
                     groups.append(current_group)
+                group_by_table[table_key] = current_group
                 point = self._point_from_table_row(
                     row_blocks,
-                    current_group.group_id,
+                    current_group,
                     requirements_by_anchor,
                 )
                 if point is not None:
@@ -162,7 +216,7 @@ class ScoreAgent:
             if not self._is_scoring_block(block):
                 continue
             content = block.content.strip()
-            if block.block_kind == "heading":
+            if block.block_kind == "heading" and self._is_group_label(content):
                 current_group = self._group_for_heading(block)
                 group_by_input[block.input_id] = current_group
                 groups.append(current_group)
@@ -174,7 +228,7 @@ class ScoreAgent:
                 group_by_input[block.input_id] = current_group
                 groups.append(current_group)
                 continue
-            current_group = group_by_input.get(block.input_id) or current_group
+            current_group = group_by_input.get(block.input_id)
             if current_group is None or current_group.group_id.startswith("score-default-"):
                 current_group = self._default_group(block)
                 group_by_input[block.input_id] = current_group
@@ -1239,16 +1293,11 @@ class ScoreAgent:
             compiled_points.append(
                 point.model_copy(
                     update={
-                        "title": (
-                            units[0].title
-                            if single_unit is not None
-                            else point.title
-                        ),
-                        "outline_path": (
-                            units[0].outline_path
-                            if single_unit is not None and units[0].outline_path
-                            else point.outline_path
-                        ),
+                        # Table-derived titles and hierarchy remain authoritative.
+                        # Semantic inference may enrich response units and
+                        # conditions, but it must never rewrite the directory.
+                        "title": point.title,
+                        "outline_path": point.outline_path,
                         "response_scope": (
                             "document"
                             if interpretation.units
@@ -1299,48 +1348,24 @@ class ScoreAgent:
         semantic_path: list[str],
         group_title: str,
     ) -> list[str]:
-        """Keep scoring-table hierarchy authoritative and append only a semantic leaf."""
+        """Return only the deterministic scoring-table hierarchy."""
 
         def cleaned(values: list[str]) -> list[str]:
             return [
                 text
                 for value in values
                 if (text := re.sub(r"\s+", " ", str(value)).strip())
-                and not is_evaluative_sentence_heading(text)
             ]
 
         source = cleaned(structural_path)
-        semantic = cleaned(semantic_path)
-        group_key = outline_subject(group_title)
-        while source and group_key and outline_subject(source[0]) == group_key:
+        group_key = outline_structure_key(group_title)
+        while (
+            source
+            and group_key
+            and outline_structure_key(source[0]) == group_key
+        ):
             source.pop(0)
-        while semantic and group_key and outline_subject(semantic[0]) == group_key:
-            semantic.pop(0)
-
-        if not source:
-            return semantic
-
-        source_keys = [outline_subject(title) for title in source]
-        semantic_keys = [outline_subject(title) for title in semantic]
-        suffix_start: int | None = None
-        for start in range(len(semantic_keys) - len(source_keys) + 1):
-            if semantic_keys[start : start + len(source_keys)] == source_keys:
-                suffix_start = start + len(source_keys)
-                break
-        if suffix_start is None and source_keys[-1] in semantic_keys:
-            suffix_start = len(semantic_keys) - 1 - semantic_keys[::-1].index(
-                source_keys[-1]
-            ) + 1
-
-        suffix = semantic[suffix_start:] if suffix_start is not None else semantic
-        result = list(source)
-        seen = set(source_keys)
-        for title in suffix:
-            key = outline_subject(title)
-            if key and key not in seen:
-                result.append(title)
-                seen.add(key)
-        return result
+        return source
 
     def create_score_model_proposal(
         self,
@@ -1482,7 +1507,7 @@ class ScoreAgent:
     def _point_from_table_row(
         self,
         row_blocks: list[SourceBlock],
-        group_id: str,
+        group: ScoreGroup,
         requirements_by_anchor: dict[tuple[str, str], list[_RequirementCandidate]],
     ) -> ScorePoint | None:
         criterion_block = self._criterion_block(row_blocks)
@@ -1545,14 +1570,19 @@ class ScoreAgent:
         levels = self._scoring_levels(criterion)
         return ScorePoint(
             score_point_id=f"SP-{token}",
-            group_id=group_id,
+            group_id=group.group_id,
             title=title,
             criterion=criterion,
             max_points=max_points,
             scoring_levels=levels,
             disqualifying=disqualifying,
             response_scope="document" if is_document_quality_score(title, criterion) else "section",
-            outline_path=self._row_outline_path(row_blocks, criterion_block, title),
+            outline_path=self._row_outline_path(
+                row_blocks,
+                criterion_block,
+                title,
+                group_title=group.title,
+            ),
             full_score_conditions=highest_score_conditions(criterion, levels, max_points),
             response_expectation=self._response_expectation(max_points, disqualifying),
             response_depth=self._response_depth(max_points, disqualifying),
@@ -1606,6 +1636,8 @@ class ScoreAgent:
         row_blocks: list[SourceBlock],
         criterion_block: SourceBlock,
         fallback_title: str,
+        *,
+        group_title: str = "",
     ) -> list[str]:
         """Preserve scoring-factor hierarchy instead of flattening every row."""
 
@@ -1624,7 +1656,16 @@ class ScoreAgent:
             label = re.sub(r"\s+(?=[（(])", "", label)
             if label and label not in path:
                 path.append(label[:80])
-        return path or [fallback_title]
+        if not path:
+            path.append(fallback_title)
+        if (
+            path
+            and group_title
+            and outline_structure_key(path[0])
+            == outline_structure_key(group_title)
+        ):
+            path.pop(0)
+        return path
 
     @staticmethod
     def _row_title(text: str) -> str:

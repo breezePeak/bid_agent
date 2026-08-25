@@ -13,7 +13,7 @@ import json
 import os
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Generic, Literal, Mapping, Protocol, TypeVar
 
@@ -21,11 +21,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from .canonicalization import canonical_hash
 from .scoring_outline_policy import (
-    is_contextless_heading,
-    is_evaluative_sentence_heading,
-    is_hollow_quality_heading,
     is_sectionable_quality_condition,
-    outline_subject,
+    outline_structure_key,
 )
 
 PROJECT_PROMPT_FILE = "v3_planning_agent_project.md"
@@ -34,11 +31,11 @@ OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
 
 PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v2.0"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
-OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v3.1"
+OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v4.0"
 
 PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
-OUTLINE_CAPABILITY_VERSION = "3.1.0"
+OUTLINE_CAPABILITY_VERSION = "4.0.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
@@ -2256,7 +2253,7 @@ class LLMOutlineDecompositionProvider(
             }
             return result
 
-        request = self._normalize_auto_outline_request(request)
+        controlled_request = request
         specs = self._build_batch_specs(request)
         if len(specs) <= 1:
             result = self._invoke(
@@ -2272,7 +2269,12 @@ class LLMOutlineDecompositionProvider(
                 "outline_batch_generated_count": 1,
                 "outline_batch_reused_count": 0,
             }
-            return result
+            # Receipts and durable checkpoints remain bound to the exact
+            # caller-controlled ScoreModel snapshot used for topology.
+            return replace(
+                result,
+                input_snapshot=_canonical_json(controlled_request),
+            )
 
         pending = list(specs)
         completed: list[
@@ -2345,7 +2347,7 @@ class LLMOutlineDecompositionProvider(
                 for _, result in completed
                 if result.reasoning.strip()
             ),
-            input_snapshot=_canonical_json(request),
+            input_snapshot=_canonical_json(controlled_request),
             attempt_count=attempts,
             capability_id=self.capability_id,
             prompt_version=self.prompt_version,
@@ -2355,99 +2357,6 @@ class LLMOutlineDecompositionProvider(
             model_fingerprint=self.model_fingerprint,
             temperature=self.temperature,
         )
-
-    @staticmethod
-    def _normalize_auto_outline_request(
-        request: OutlineDecompositionInput,
-    ) -> OutlineDecompositionInput:
-        """Remove non-factor scope headings and reconcile score-suffix drift."""
-
-        score_model = dict(request.score_model)
-        groups = [dict(group) for group in score_model.get("groups", [])]
-        group_titles = {
-            str(group.get("group_id") or ""): str(group.get("title") or "")
-            for group in groups
-        }
-        points = [dict(point) for point in score_model.get("points", [])]
-
-        def is_scope_heading(title: str) -> bool:
-            compact = re.sub(r"\s+", "", title)
-            return bool(
-                re.fullmatch(
-                    r"包\d+(?:(?:到|至|[-—~～])包?\d+)?[：:]",
-                    compact,
-                )
-            )
-
-        def relative_path(path: Any, group_title: str) -> list[str]:
-            values = [
-                text
-                for value in (path if isinstance(path, list) else [])
-                if (text := re.sub(r"\s+", " ", str(value)).strip())
-                and not is_evaluative_sentence_heading(text)
-            ]
-            group_key = outline_subject(group_title)
-            while values and group_key and outline_subject(values[0]) == group_key:
-                values.pop(0)
-            return [title for title in values if not is_scope_heading(title)]
-
-        representatives: dict[tuple[str, str], str] = {}
-        for point in points:
-            group_id = str(point.get("group_id") or "")
-            group_title = group_titles.get(group_id, "")
-            paths = [
-                point.get("outline_path"),
-                *(
-                    unit.get("outline_path")
-                    for unit in point.get("response_units", [])
-                    if isinstance(unit, dict)
-                ),
-            ]
-            for path in paths:
-                for title in relative_path(path, group_title):
-                    key = (group_id, outline_subject(title))
-                    current = representatives.get(key)
-                    title_has_points = bool(
-                        re.search(r"[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]", title)
-                    )
-                    current_has_points = bool(
-                        current
-                        and re.search(
-                            r"[（(]\s*\d+(?:\.\d+)?\s*分\s*[）)]",
-                            current,
-                        )
-                    )
-                    if current is None or (title_has_points and not current_has_points):
-                        representatives[key] = title
-
-        normalized_points: list[dict[str, Any]] = []
-        for point in points:
-            group_id = str(point.get("group_id") or "")
-            group_title = group_titles.get(group_id, "")
-
-            def normalized_path(path: Any) -> list[str]:
-                return [
-                    representatives.get((group_id, outline_subject(title)), title)
-                    for title in relative_path(path, group_title)
-                ]
-
-            normalized_point = dict(point)
-            normalized_point["outline_path"] = normalized_path(
-                point.get("outline_path")
-            )
-            normalized_point["response_units"] = [
-                {
-                    **unit,
-                    "outline_path": normalized_path(unit.get("outline_path")),
-                }
-                for unit in point.get("response_units", [])
-                if isinstance(unit, dict)
-            ]
-            normalized_points.append(normalized_point)
-
-        score_model["groups"] = groups
-        score_model["points"] = normalized_points
-        return request.model_copy(update={"score_model": score_model})
 
     def _cache_key(self, spec: OutlineBatchSpec) -> str:
         return canonical_hash(
@@ -2718,10 +2627,9 @@ class LLMOutlineDecompositionProvider(
             ]
             for outline_path in outline_paths:
                 outline_titles_by_group[group_id].update(
-                    outline_subject(str(title))
+                    outline_structure_key(str(title))
                     for title in outline_path
                     if str(title).strip()
-                    and not is_evaluative_sentence_heading(str(title))
                 )
         statuses: list[str] = []
 
@@ -2809,7 +2717,7 @@ class LLMOutlineDecompositionProvider(
                     else canonical_root
                 )
                 normalized_title = re.sub(r"\s+", " ", node.title).strip()
-                normalized_title_key = outline_subject(normalized_title)
+                normalized_title_key = outline_structure_key(normalized_title)
                 shared_key = (str(parent_id or ""), normalized_title_key)
                 existing_id = (
                     shared_node_id_by_group_path[spec.group_id].get(shared_key)
@@ -3167,16 +3075,326 @@ class LLMOutlineDecompositionProvider(
         candidate: ChapterOutlineCandidate,
         request: BaseModel,
     ) -> ChapterOutlineCandidate:
-        """Preserve the model candidate for strict objective validation.
+        """Project model annotations onto the deterministic scoring-table tree."""
 
-        Missing units, conditions, and requirement bindings must fail this
-        outline attempt.  Creating generic chapters or moving IDs here would
-        hide precisely the semantic omissions this stage is meant to expose.
-        """
-
-        if not isinstance(request, OutlineDecompositionInput):
+        if (
+            not isinstance(request, OutlineDecompositionInput)
+            or request.document_mode != "auto_outline"
+        ):
             return candidate
-        return candidate
+
+        catalog = self._direct_catalog(request)
+        section_unit_ids = set(catalog["section_unit_ids"])
+        active_condition_ids = set(catalog["visible_condition_ids"])
+
+        annotations_by_unit: dict[
+            str, list[ChapterOutlineNodeCandidate]
+        ] = defaultdict(list)
+        annotations_by_title: dict[
+            str, list[ChapterOutlineNodeCandidate]
+        ] = defaultdict(list)
+        for node in candidate.nodes:
+            annotations_by_title[outline_structure_key(node.title)].append(node)
+            for unit_id in (
+                *node.primary_response_unit_ids,
+                *node.supporting_response_unit_ids,
+            ):
+                if unit_id in section_unit_ids:
+                    annotations_by_unit[unit_id].append(node)
+
+        def annotations(
+            title: str,
+            unit_ids: list[str],
+        ) -> list[ChapterOutlineNodeCandidate]:
+            selected: list[ChapterOutlineNodeCandidate] = []
+            seen: set[str] = set()
+            for unit_id in unit_ids:
+                for node in annotations_by_unit.get(unit_id, []):
+                    if node.local_id not in seen:
+                        seen.add(node.local_id)
+                        selected.append(node)
+            for node in annotations_by_title.get(
+                outline_structure_key(title),
+                [],
+            ):
+                if node.local_id not in seen:
+                    seen.add(node.local_id)
+                    selected.append(node)
+            return selected
+
+        def merged_strings(
+            selected: list[ChapterOutlineNodeCandidate],
+            field_name: str,
+        ) -> list[str]:
+            return list(
+                dict.fromkeys(
+                    value
+                    for node in selected
+                    for value in getattr(node, field_name)
+                    if str(value).strip()
+                )
+            )
+
+        groups = [
+            group
+            for group in request.score_model.get("groups", [])
+            if any(
+                catalog["points"][catalog["unit_owner"][unit_id]].get(
+                    "group_id"
+                )
+                == group.get("group_id")
+                for unit_id in section_unit_ids
+            )
+        ]
+        points = request.score_model.get("points", [])
+        points_by_group: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for point in points:
+            points_by_group[str(point.get("group_id") or "")].append(point)
+
+        nodes: list[ChapterOutlineNodeCandidate] = []
+        node_index_by_path: dict[tuple[str, tuple[str, ...]], int] = {}
+
+        for group in groups:
+            group_id = str(group.get("group_id") or "")
+            group_title = str(group.get("title") or "").strip()
+            root_id = f"group-{canonical_hash(group_id)[:16]}"
+            root_annotations = annotations(group_title, [])
+            nodes.append(
+                ChapterOutlineNodeCandidate(
+                    local_id=root_id,
+                    parent_local_id=None,
+                    order=len(nodes),
+                    title=group_title,
+                    purpose=(
+                        next(
+                            (
+                                node.purpose
+                                for node in root_annotations
+                                if node.purpose.strip()
+                            ),
+                            f"完整响应{group_title}评分要求",
+                        )
+                    ),
+                    writing_objectives=merged_strings(
+                        root_annotations,
+                        "writing_objectives",
+                    ),
+                    required_mentions=merged_strings(
+                        root_annotations,
+                        "required_mentions",
+                    ),
+                    planned_tables=merged_strings(
+                        root_annotations,
+                        "planned_tables",
+                    ),
+                    planned_figures=merged_strings(
+                        root_annotations,
+                        "planned_figures",
+                    ),
+                    target_size=max(
+                        [800, *(node.target_size for node in root_annotations)]
+                    ),
+                    confidence=min(
+                        [1.0, *(node.confidence for node in root_annotations)]
+                    ),
+                    needs_human=any(
+                        node.needs_human for node in root_annotations
+                    ),
+                )
+            )
+            node_index_by_path[(group_id, ())] = len(nodes) - 1
+
+            for point in points_by_group.get(group_id, []):
+                point_id = str(point.get("score_point_id") or "")
+                point_units = [
+                    unit
+                    for unit in point.get("response_units", [])
+                    if str(unit.get("unit_id") or "") in section_unit_ids
+                ]
+                if not point_units:
+                    continue
+                unit_ids = [str(unit["unit_id"]) for unit in point_units]
+                raw_path = [
+                    str(value).strip()
+                    for value in point.get("outline_path", [])
+                    if str(value).strip()
+                ]
+                if (
+                    raw_path
+                    and outline_structure_key(raw_path[0])
+                    == outline_structure_key(group_title)
+                ):
+                    raw_path.pop(0)
+                if not raw_path:
+                    fallback_title = str(point.get("title") or "").strip()
+                    if not fallback_title and point_units:
+                        fallback_title = str(
+                            point_units[0].get("title") or ""
+                        ).strip()
+                    if fallback_title:
+                        raw_path.append(fallback_title)
+
+                parent_id = root_id
+                path_keys: list[str] = []
+                for title in raw_path:
+                    path_keys.append(outline_structure_key(title))
+                    path_key = (group_id, tuple(path_keys))
+                    existing_index = node_index_by_path.get(path_key)
+                    if existing_index is not None:
+                        parent_id = nodes[existing_index].local_id
+                        continue
+                    selected = annotations(title, unit_ids)
+                    local_id = "factor-" + canonical_hash(
+                        {"group_id": group_id, "path": path_keys}
+                    )[:16]
+                    nodes.append(
+                        ChapterOutlineNodeCandidate(
+                            local_id=local_id,
+                            parent_local_id=parent_id,
+                            order=len(nodes),
+                            title=title,
+                            purpose=(
+                                next(
+                                    (
+                                        node.purpose
+                                        for node in selected
+                                        if node.purpose.strip()
+                                    ),
+                                    f"完整响应评分因素“{title}”",
+                                )
+                            ),
+                            writing_objectives=merged_strings(
+                                selected,
+                                "writing_objectives",
+                            ),
+                            required_mentions=merged_strings(
+                                selected,
+                                "required_mentions",
+                            ),
+                            planned_tables=merged_strings(
+                                selected,
+                                "planned_tables",
+                            ),
+                            planned_figures=merged_strings(
+                                selected,
+                                "planned_figures",
+                            ),
+                            target_size=max(
+                                [800, *(node.target_size for node in selected)]
+                            ),
+                            confidence=min(
+                                [1.0, *(node.confidence for node in selected)]
+                            ),
+                            needs_human=any(node.needs_human for node in selected),
+                        )
+                    )
+                    node_index_by_path[path_key] = len(nodes) - 1
+                    parent_id = local_id
+
+                leaf_index = node_index_by_path[(group_id, tuple(path_keys))]
+                leaf = nodes[leaf_index]
+                selected = annotations(leaf.title, unit_ids)
+                condition_ids = list(
+                    dict.fromkeys(
+                        str(condition_id)
+                        for unit in point_units
+                        for condition_id in unit.get("condition_ids", [])
+                        if str(condition_id) in active_condition_ids
+                    )
+                )
+                requirement_ids = list(
+                    dict.fromkeys(
+                        str(requirement_id)
+                        for unit in point_units
+                        for requirement_id in unit.get(
+                            "linked_requirement_ids",
+                            [],
+                        )
+                        if str(requirement_id)
+                        in catalog["active_requirement_ids"]
+                    )
+                )
+                objectives = list(leaf.writing_objectives)
+                for condition_id in condition_ids:
+                    condition = catalog["conditions"][condition_id]
+                    objective = str(
+                        condition.get("response_intent")
+                        or condition.get("normalized_condition")
+                        or condition.get("text")
+                        or ""
+                    ).strip()
+                    if objective and objective not in objectives:
+                        objectives.append(objective)
+                for unit in point_units:
+                    expectation = str(
+                        unit.get("response_expectation") or ""
+                    ).strip()
+                    if expectation and expectation not in objectives:
+                        objectives.append(expectation)
+                nodes[leaf_index] = leaf.model_copy(
+                    update={
+                        "writing_objectives": objectives,
+                        "primary_response_unit_ids": list(
+                            dict.fromkeys(
+                                [*leaf.primary_response_unit_ids, *unit_ids]
+                            )
+                        ),
+                        "score_condition_ids": list(
+                            dict.fromkeys(
+                                [*leaf.score_condition_ids, *condition_ids]
+                            )
+                        ),
+                        "requirement_ids": list(
+                            dict.fromkeys(
+                                [*leaf.requirement_ids, *requirement_ids]
+                            )
+                        ),
+                        "required_mentions": list(
+                            dict.fromkeys(
+                                [
+                                    *leaf.required_mentions,
+                                    *merged_strings(selected, "required_mentions"),
+                                    point_id,
+                                    *requirement_ids,
+                                ]
+                            )
+                        ),
+                        "planned_tables": list(
+                            dict.fromkeys(
+                                [
+                                    *leaf.planned_tables,
+                                    *merged_strings(selected, "planned_tables"),
+                                ]
+                            )
+                        ),
+                        "planned_figures": list(
+                            dict.fromkeys(
+                                [
+                                    *leaf.planned_figures,
+                                    *merged_strings(selected, "planned_figures"),
+                                ]
+                            )
+                        ),
+                        "target_size": max(
+                            [leaf.target_size, *(node.target_size for node in selected)]
+                        ),
+                        "confidence": min(
+                            [leaf.confidence, *(node.confidence for node in selected)]
+                        ),
+                        "needs_human": (
+                            leaf.needs_human
+                            or any(node.needs_human for node in selected)
+                        ),
+                    }
+                )
+
+        return ChapterOutlineCandidate(
+            nodes=nodes,
+            document_quality_response_unit_ids=sorted(
+                catalog["document_unit_ids"]
+            ),
+            review_status=candidate.review_status,
+        )
 
     def _validate_candidate(
         self,
@@ -3291,19 +3509,6 @@ class LLMOutlineDecompositionProvider(
         node_by_id = {node.local_id: node for node in candidate.nodes}
         visible_unit_ids: set[str] = set()
         for node in candidate.nodes:
-            if is_hollow_quality_heading(node.title):
-                raise ValueError(
-                    f"章节 {node.local_id} 标题仅包含空洞质量形容词: "
-                    f"{node.title}"
-                )
-            if request.document_mode == "auto_outline" and is_evaluative_sentence_heading(node.title):
-                raise ValueError(
-                    f"章节 {node.local_id} 标题包含评分式评价语: {node.title}"
-                )
-            if request.document_mode == "auto_outline" and is_contextless_heading(node.title):
-                raise ValueError(
-                    f"章节 {node.local_id} 标题缺少业务对象: {node.title}"
-                )
             referenced_units = (
                 *node.primary_response_unit_ids,
                 *node.supporting_response_unit_ids,
@@ -3440,18 +3645,15 @@ class LLMOutlineDecompositionProvider(
                     if primary_id is None:
                         continue
                     point = catalog["points"][catalog["unit_owner"][unit_id]]
-                    unit = catalog["units"][unit_id]
                     expected_path = [
-                        title
-                        for title in (
-                            unit.get("outline_path")
-                            or point.get("outline_path")
-                            or []
-                        )
-                        if not is_evaluative_sentence_heading(str(title))
+                        str(title).strip()
+                        for title in (point.get("outline_path") or [])
+                        if str(title).strip()
                     ]
-                    if expected_path and group_subject(expected_path[0]) == group_subject(
-                        str(group.get("title") or "")
+                    if (
+                        expected_path
+                        and outline_structure_key(expected_path[0])
+                        == outline_structure_key(str(group.get("title") or ""))
                     ):
                         expected_path.pop(0)
                     compact_path: list[str] = []
@@ -3459,7 +3661,8 @@ class LLMOutlineDecompositionProvider(
                         text = str(label).strip()
                         if text and (
                             not compact_path
-                            or group_subject(compact_path[-1]) != group_subject(text)
+                            or outline_structure_key(compact_path[-1])
+                            != outline_structure_key(text)
                         ):
                             compact_path.append(text)
                     if not compact_path:
@@ -3473,8 +3676,8 @@ class LLMOutlineDecompositionProvider(
                             break
                         cursor = parent_id
                     actual_path = list(reversed(chain))[1:]
-                    if [group_subject(title) for title in actual_path] != [
-                        group_subject(title) for title in compact_path
+                    if [outline_structure_key(title) for title in actual_path] != [
+                        outline_structure_key(title) for title in compact_path
                     ]:
                         raise ValueError(
                             f"ScoreResponseUnit {unit_id} 未保留 outline_path: {compact_path}"
