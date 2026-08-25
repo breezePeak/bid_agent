@@ -238,6 +238,7 @@
         @update="updateRewritePlan"
         @search="searchRewritePlan"
         @confirm="confirmRewritePlan"
+        @execute="executeRewritePlan"
         @reopen="reopenRewritePlan"
         @reload="loadRewriteMatch(selectedId)"
         @history="loadRewritePlanHistory"
@@ -1752,6 +1753,12 @@ function confirmRewritePlan() {
     Number(chapterDetail.value?.chapter_revision || current?.dependencies?.chapter_revision || 0),
     { signal },
   ))
+}
+
+async function executeRewritePlan() {
+  if (!rewritePlan.value || rewritePlan.value.status !== 'confirmed' || rewritePlan.value.stale) return
+  await generateDraft({ instruction: rewritePlan.value.instruction || '' })
+  if (!actionError.value) middleTab.value = 'body'
 }
 
 function reopenRewritePlan() {

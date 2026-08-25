@@ -1664,6 +1664,7 @@ async def stream_chapter_draft(
             expected_chapter_revision = int(
                 body.get("expected_chapter_revision")
             )
+            is_rewrite = ControlStore(context).workspace_profile().get("project_mode") == "bid_rewrite"
             write_request = ChapterWritingRequest(
                 unit_id=f"chapter-{normalized_chapter_id}",
                 node_ids=(normalized_chapter_id,),
@@ -1679,10 +1680,23 @@ async def stream_chapter_draft(
                 expected_workspace_revision=expected_workspace_revision,
                 expected_chapter_revision=expected_chapter_revision,
                 actor=dict(principal),
-                run_research=True,
+                run_research=not is_rewrite,
                 commit_drafts=True,
             )
-            for event in ChapterWritingService(context).iter_events(write_request):
+            if is_rewrite:
+                from document_pipeline.bid_rewrite_execution import BidRewriteExecutionService
+
+                events = BidRewriteExecutionService(context).iter_events(
+                    chapter_id=normalized_chapter_id,
+                    operation_id=operation_id,
+                    expected_workspace_revision=expected_workspace_revision,
+                    expected_chapter_revision=expected_chapter_revision,
+                    actor=dict(principal),
+                    overwrite_locked=bool(body.get("overwrite_locked")),
+                )
+            else:
+                events = ChapterWritingService(context).iter_events(write_request)
+            for event in events:
                 payload = dict(event)
                 event_type = str(payload.pop("type", "message"))
                 yield _ndjson_event(event_type, **payload)

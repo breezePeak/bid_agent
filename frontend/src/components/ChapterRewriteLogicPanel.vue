@@ -48,7 +48,7 @@
               <strong>{{ finding.type }}</strong><p>{{ finding.source_text }}</p><small v-if="finding.status === 'resolved'">已替换：{{ finding.replacement_text }}</small>
               <select v-else :disabled="busy || plan.status === 'confirmed'" @change="resolveFinding(finding, $event.target.value)"><option value="">选择已确认事实或新招标原文</option><option v-for="fact in confirmedFacts" :key="fact.fact_id" :value="`fact:${fact.fact_id}`">事实：{{ fact.statement }}</option><option v-for="requirement in plan.target?.requirements || []" :key="requirement.requirement_id" :value="`requirement:${requirement.requirement_id}`">招标：{{ requirement.text || requirement.normalized_requirement }}</option></select>
             </article>
-            <div class="plan-actions"><button type="button" :disabled="busy || plan.status === 'confirmed'" @click="saveDraft">保存草稿<span v-if="pendingOps.length">（{{ pendingOps.length }}）</span></button><button v-if="plan.status === 'confirmed'" type="button" :disabled="busy" @click="$emit('reopen')">重新打开</button><button v-else type="button" class="primary" :disabled="busy || pendingOps.length > 0 || plan.stale || unresolvedCount > 0" @click="$emit('confirm')">确认当前方案</button></div>
+            <div class="plan-actions"><button type="button" :disabled="busy || plan.status === 'confirmed'" @click="saveDraft">保存草稿<span v-if="pendingOps.length">（{{ pendingOps.length }}）</span></button><template v-if="plan.status === 'confirmed'"><button type="button" class="primary" :disabled="busy || plan.stale || unresolvedCount > 0" @click="$emit('execute')">开始改写</button><button type="button" :disabled="busy" @click="$emit('reopen')">重新打开</button></template><button v-else type="button" class="primary" :disabled="busy || pendingOps.length > 0 || plan.stale || unresolvedCount > 0" @click="$emit('confirm')">确认当前方案</button></div>
           </template>
           <template v-else><h4>建议策略</h4><div class="strategy">{{ strategyLabel(match.recommendation?.strategy) }}</div><p>{{ match.recommendation?.reason }}</p></template>
         </section>
@@ -64,7 +64,7 @@ import { computed, ref, watch } from 'vue'
 import LegacyBlockPreviewDrawer from './LegacyBlockPreviewDrawer.vue'
 import LegacySectionCard from './LegacySectionCard.vue'
 const props = defineProps({ match: { type: Object, default: null }, plan: { type: Object, default: null }, loading: Boolean, busy: Boolean, error: { type: String, default: '' }, conflict: Boolean, confirmedFacts: { type: Array, default: () => [] }, history: { type: Array, default: () => [] }, showHistory: Boolean })
-const emit = defineEmits(['update', 'search', 'confirm', 'reopen', 'reload', 'history', 'close-history'])
+const emit = defineEmits(['update', 'search', 'confirm', 'execute', 'reopen', 'reload', 'history', 'close-history'])
 const preview = ref(null); const pendingOps = ref([]); const pendingBlockState = ref({}); const pendingUsage = ref({}); const draftStrategy = ref('new_write'); const draftInstruction = ref(''); const newInstruction = ref(''); const searchQueries = ref({})
 const unresolvedCount = computed(() => (props.plan?.pollution_findings || []).filter(item => item.status !== 'resolved').length)
 watch(() => props.plan?.plan_revision, () => { pendingOps.value = []; pendingBlockState.value = {}; pendingUsage.value = {}; draftStrategy.value = props.plan?.strategy || 'new_write'; draftInstruction.value = props.plan?.instruction || '' })

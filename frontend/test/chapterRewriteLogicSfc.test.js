@@ -55,7 +55,7 @@ test('rewrite workbench remains mode-gated, CAS editable, and preserves the body
   assert.match(source, /rewriteMatchAbortController\?\.abort\(\)/)
   assert.match(source, /updateChapterRewritePlan/)
   assert.match(source, /CHAPTER_REWRITE_PLAN_CONFLICT/)
-  assert.doesNotMatch(source, /开始改写|执行正文/)
+  assert.match(source, /executeRewritePlan/)
 })
 
 test('rewrite panel emits only structured operations and exposes recovery controls', () => {
@@ -72,5 +72,6 @@ test('rewrite panel emits only structured operations and exposes recovery contro
   assert.match(source, /保存草稿/)
   assert.match(source, /补充查询/)
   assert.match(source, /确认当前方案/)
-  assert.doesNotMatch(source, /开始改写/)
+  assert.match(source, /开始改写/)
+  assert.match(source, /\$emit\('execute'\)/)
 })
