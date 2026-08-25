@@ -1,11 +1,20 @@
 <template>
   <section class="v3-workspace" :aria-busy="running || uploading">
-    <LegacyBidUploadPanel
-      v-if="projectMode === 'bid_rewrite'"
-      :run-id="runId"
-      :summary="legacyBidSummary"
-      @uploaded="refresh"
-    />
+    <Teleport to="body">
+      <div v-if="legacyPreviewOpen" class="legacy-preview-overlay" @click.self="closeLegacyPreview">
+        <section class="legacy-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="legacy-preview-title">
+          <header>
+            <h3 id="legacy-preview-title">{{ legacyPreviewFilename }}</h3>
+            <button type="button" @click="closeLegacyPreview">返回工作台</button>
+          </header>
+          <div class="legacy-preview-body">
+            <p v-if="legacyPreviewLoading">正在读取拆解结果…</p>
+            <p v-else-if="legacyPreviewError" class="legacy-preview-error" role="alert">{{ legacyPreviewError }}</p>
+            <LegacyBidIndexPreview v-else :index="legacyPreviewIndex" />
+          </div>
+        </section>
+      </div>
+    </Teleport>
 
     <!-- 步骤细节诊断 Drawer 抽屉/弹窗 -->
     <div v-if="selectedDrawerStage" class="stage-drawer-overlay" @click.self="closeStageDrawer">
@@ -554,7 +563,7 @@
               <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3 6h7l2 2h9v11H3z" /></svg>
               公司资料 {{ companyInputs.length }} 份
             </span>
-            <span v-else class="stat-tag">旧投标书 {{ hasLegacyBid ? '已解析' : '待解析' }}</span>
+            <span v-else class="stat-tag">旧投标书 {{ legacyBidItems.length ? `${legacyBidItems.length} 份${hasLegacyBid ? '已解析' : '解析中'}` : '待上传' }}</span>
           </div>
         </header>
 
@@ -580,7 +589,7 @@
             </div>
           </div>
 
-          <div v-if="!initialMaterialsReady && !loading" class="chat-msg bot-msg timeline-step-msg upload-start-msg">
+          <div v-if="!secondStageConfirmed && !hasOutline && !loading" class="chat-msg bot-msg timeline-step-msg upload-start-msg">
             <div class="msg-avatar material-avatar" aria-hidden="true">
               <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M12 10v7M8.5 13.5h7" /></svg>
             </div>
@@ -617,23 +626,29 @@
           </div>
 
           <!-- 步骤 1.1：已登记材料卡片消息（Cursor 风格文件变动卡片） -->
-          <div v-if="activeInputs.length" class="chat-msg bot-msg">
+          <div v-if="displayInputs.length" class="chat-msg bot-msg">
             <div class="file-changes-card" style="width: 100%; max-width: 640px;">
               <div class="file-changes-list">
-                <div v-for="item in activeInputs" :key="item.input_id" class="file-change-item">
+                <div v-for="item in displayInputs" :key="item.input_id" class="file-change-item">
                   <span class="file-path">
                     <span class="dir">{{ roleLabel(item.role) }} / </span>
                     <span class="name">{{ item.filename }}</span>
                   </span>
                   <div class="file-diff-stats">
-                    <span class="diff-tag add">✓ {{ sourceStatusLabel(item) }}</span>
+                    <span class="diff-tag add">✓ {{ displayInputStatusLabel(item) }}</span>
+                    <button
+                      v-if="item.role === 'legacy_bid' && item.status === 'ready'"
+                      class="legacy-preview-trigger"
+                      type="button"
+                      @click="openLegacyPreview(item)"
+                    >查看拆解</button>
                   </div>
                 </div>
               </div>
             </div>
           </div>
 
-          <div v-if="initialMaterialsReady && !secondStageConfirmed && !hasOutline && !outlineBusy && !planningReadyForReview" class="chat-msg bot-msg timeline-step-msg highlight-msg">
+          <div v-if="initialMaterialsReady && !uploading && !secondStageConfirmed && !hasOutline && !outlineBusy && !planningReadyForReview" class="chat-msg bot-msg timeline-step-msg highlight-msg">
             <div class="msg-avatar step-avatar" aria-hidden="true">?</div>
             <div class="msg-bubble action-launch-bubble">
               <header class="workflow-step-header">
@@ -670,7 +685,7 @@
           </div>
 
           <!-- 阶段 2 从开始、失败到完成始终只占一条 AI 消息。 -->
-          <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
+          <div v-if="initialMaterialsReady && secondStageConfirmed" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
             <div class="msg-avatar outline-avatar" aria-hidden="true">2</div>
             <div class="msg-bubble outline-card-bubble">
               <header class="card-title-row">
@@ -737,7 +752,7 @@
           </div>
 
           <!-- 阶段 3 也只保留一条消息，详情按需展开。 -->
-          <div v-if="initialMaterialsReady" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
+          <div v-if="planningStatus === 'confirmed'" class="chat-msg bot-msg timeline-step-msg generation-stage-msg">
             <div class="msg-avatar generation-avatar" aria-hidden="true">3</div>
             <div class="msg-bubble generation-stage-bubble">
               <header class="workflow-step-header">
@@ -854,6 +869,15 @@
                   :disabled="uploading || running"
                   @change="handleQuickUpload('company', $event)"
                 />
+                <input
+                  id="quick-upload-legacy-bid"
+                  class="visually-hidden"
+                  type="file"
+                  accept=".pdf,.docx,.md,.txt"
+                  multiple
+                  :disabled="uploading || running"
+                  @change="handleQuickUpload('legacy_bid', $event)"
+                />
                 <div class="toolbar-attachment-menu">
                   <button
                     class="attachment-trigger"
@@ -870,14 +894,17 @@
                     <label class="quick-upload-option" for="quick-upload-tender" role="menuitem" @click="showQuickUploadMenu = false">
                       上传招标文件 <span class="tag-req">必传</span>
                     </label>
-                    <label class="quick-upload-option" for="quick-upload-company" role="menuitem" @click="showQuickUploadMenu = false">
+                    <label v-if="projectMode === 'full_write'" class="quick-upload-option" for="quick-upload-company" role="menuitem" @click="showQuickUploadMenu = false">
                       上传公司资料
+                    </label>
+                    <label v-else class="quick-upload-option" for="quick-upload-legacy-bid" role="menuitem" @click="showQuickUploadMenu = false">
+                      上传旧投标书 <span class="tag-req">必传</span>
                     </label>
                   </div>
                 </div>
 
                 <span v-if="uploadingRole" class="uploading-state-hint">
-                  <span class="spinner" /> 正在上传 {{ roleLabel(uploadingRole) }}…
+                  <span class="spinner" /> 正在上传并解析 {{ roleLabel(uploadingRole) }}…
                 </span>
               </div>
 
@@ -1869,7 +1896,7 @@ defineOptions({ name: 'V3WorkspaceView' })
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import AiProcessDisclosure from './AiProcessDisclosure.vue'
-import LegacyBidUploadPanel from './LegacyBidUploadPanel.vue'
+import LegacyBidIndexPreview from './LegacyBidIndexPreview.vue'
 import { confirmDialog } from '../composables/appDialog.js'
 import {
   chatV3,
@@ -1879,10 +1906,12 @@ import {
   fetchV3DocumentPreview,
   fetchV3GenerationStage,
   fetchV3WorkspaceSnapshot,
+  fetchLegacyBidIndex,
   prepareV3Outline,
   resolveV3Research,
   runV3Pipeline,
   subscribeV3Workspace,
+  uploadLegacyBid,
   uploadV3Input,
 } from '../api'
 import {
@@ -1909,7 +1938,12 @@ const uploadZones = computed(() => [
     title: '公司资质/参考资料',
     description: '企业资质、案例、人员、产品说明和证明文件。',
     required: true,
-  }] : []),
+  }] : [{
+    role: 'legacy_bid',
+    title: '旧投标书',
+    description: '可一次选择多份旧投标书，上传后逐份自动解析。',
+    required: true,
+  }]),
 ])
 const pipelineSummaryLabels = {
   input_count: '输入文件',
@@ -1982,6 +2016,11 @@ const initialPendingCount = ref(0)
 const initialAsking = computed(() => initialPendingCount.value > 0)
 const assistantClockNow = ref(Date.now())
 const studioChatBody = ref(null)
+const legacyPreviewOpen = ref(false)
+const legacyPreviewLoading = ref(false)
+const legacyPreviewIndex = ref(null)
+const legacyPreviewFilename = ref('')
+const legacyPreviewError = ref('')
 let shouldAutoFollowChat = true
 
 function updateChatFollowState() {
@@ -2005,7 +2044,7 @@ async function scrollChatToLatest(force = false) {
 async function handleQuickUpload(role, event) {
   const files = Array.from(event.target.files || [])
   if (!files.length) return
-  const existingNames = new Set(activeInputs.value.map(item => canonicalInputFilename(item.filename)))
+  const existingNames = new Set(displayInputs.value.map(item => canonicalInputFilename(item.filename)))
   const queuedNames = new Set()
   const accepted = files.filter((file) => {
     const key = canonicalInputFilename(file.name)
@@ -2025,7 +2064,8 @@ async function handleQuickUpload(role, event) {
   let count = 0
   for (const file of accepted) {
     try {
-      await uploadV3Input(props.runId, role, file)
+      if (role === 'legacy_bid') await uploadLegacyBid(props.runId, file)
+      else await uploadV3Input(props.runId, role, file)
       count += 1
     } catch (e) {
       reportError(e, `上传 ${file.name} 失败`)
@@ -2268,6 +2308,10 @@ function closeStageDrawer() {
 
 function handleWorkspaceKeydown(event) {
   if (event.key !== 'Escape') return
+  if (legacyPreviewOpen.value) {
+    closeLegacyPreview()
+    return
+  }
   if (showLlmModal.value) {
     showLlmModal.value = false
     return
@@ -2306,6 +2350,8 @@ const activeInputs = computed(() => {
     return true
   })
 })
+const legacyBidItems = computed(() => legacyBidSummary.value.items || [])
+const displayInputs = computed(() => [...activeInputs.value, ...legacyBidItems.value])
 const tenderInputs = computed(() => activeInputs.value.filter(item => item.role === 'tender'))
 const companyInputs = computed(() => activeInputs.value.filter(item => item.role === 'company'))
 const hasTender = computed(() => tenderInputs.value.length > 0)
@@ -2314,7 +2360,7 @@ const hasLegacyBid = computed(() => legacyBidSummary.value.status === 'ready')
 const materialReadiness = computed(() => snapshot.value.material_readiness || {})
 const materialReadinessDescription = computed(() => (
   projectMode.value === 'bid_rewrite'
-    ? '请上传新招标书，并在旧投标书区域上传待改写文档。旧投标书单独解析，不参与新目录生成；公司资料可选。'
+    ? '请上传新招标书和一份或多份旧投标书。每个文件上传后自动解析；旧投标书不参与新目录生成。'
     : '请上传招标文件和公司资质/参考资料。两类材料都登记完成后，我会先询问您是否进入第二阶段。'
 ))
 const initialMaterialsReady = computed(() => (
@@ -3186,7 +3232,36 @@ const workflowSteps = computed(() => [
 ])
 
 function inputsForRole(role) {
-  return activeInputs.value.filter(item => item.role === role)
+  return displayInputs.value.filter(item => item.role === role)
+}
+
+function displayInputStatusLabel(item) {
+  if (item.role === 'legacy_bid') {
+    return { parsing: '解析中', ready: '解析完成', failed: '解析失败' }[item.status] || '待解析'
+  }
+  return sourceStatusLabel(item)
+}
+
+async function openLegacyPreview(item) {
+  legacyPreviewOpen.value = true
+  legacyPreviewLoading.value = true
+  legacyPreviewIndex.value = null
+  legacyPreviewFilename.value = item.filename
+  legacyPreviewError.value = ''
+  try {
+    const { data } = await fetchLegacyBidIndex(props.runId, item.legacy_bid_id || item.input_id)
+    legacyPreviewIndex.value = data?.index || null
+  } catch (cause) {
+    legacyPreviewError.value = cause?.response?.data?.message || '拆解结果读取失败'
+  } finally {
+    legacyPreviewLoading.value = false
+  }
+}
+
+function closeLegacyPreview() {
+  legacyPreviewOpen.value = false
+  legacyPreviewIndex.value = null
+  legacyPreviewError.value = ''
 }
 
 function selectFiles(role, event) {
@@ -4227,7 +4302,7 @@ function formatBytes(value) {
 }
 
 function roleLabel(role) {
-  return { tender: '招标', score: '评分', company: '公司资料', company_fact: '公司资料' }[role] || ''
+  return { tender: '招标', legacy_bid: '旧投标书', score: '评分', company: '公司资料', company_fact: '公司资料' }[role] || ''
 }
 
 function sourceStatus(item) {
@@ -9371,5 +9446,55 @@ onUnmounted(() => {
     animation: none;
     transition: none;
   }
+}
+
+.legacy-preview-overlay {
+  position: fixed;
+  z-index: 1000;
+  inset: 0;
+  padding: 24px;
+  background: rgb(15 23 42 / 52%);
+}
+.legacy-preview-dialog {
+  display: flex;
+  width: min(1440px, 100%);
+  height: 100%;
+  min-height: 0;
+  margin: 0 auto;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 16px;
+  background: #fff;
+  box-shadow: 0 24px 70px rgb(15 23 42 / 28%);
+}
+.legacy-preview-dialog > header {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 16px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid #dbe4f0;
+}
+.legacy-preview-dialog > header h3 { margin: 0; color: #172554; font-size: 16px; }
+.legacy-preview-dialog > header button,
+.legacy-preview-trigger {
+  min-height: 36px;
+  padding: 0 12px;
+  border: 1px solid #c7d2fe;
+  border-radius: 8px;
+  color: #3730a3;
+  background: #eef2ff;
+  cursor: pointer;
+  font-weight: 700;
+}
+.legacy-preview-dialog > header button { min-height: 44px; }
+.legacy-preview-body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 20px 28px; }
+.legacy-preview-error { color: #b91c1c; }
+.file-diff-stats { align-items: center; gap: 8px; }
+
+@media (max-width: 720px) {
+  .legacy-preview-overlay { padding: 0; }
+  .legacy-preview-dialog { border-radius: 0; }
 }
 </style>

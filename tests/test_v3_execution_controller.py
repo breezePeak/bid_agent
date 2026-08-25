@@ -382,6 +382,12 @@ class V3ExecutionControllerTests(unittest.TestCase):
     self.assertEqual(tender_response.status_code,201)
     self.assertEqual(company_response.status_code,201)
     before=client.get(f'/api/v3/workspaces/{workspace_id}/snapshot').json()['snapshot']
+    parsed_statuses={
+     item['input_id']:item['status']
+     for item in before['analysis']['source_index']['input_status']
+    }
+    self.assertEqual(parsed_statuses[tender_response.json()['input']['input_id']],'processed')
+    self.assertEqual(parsed_statuses[company_response.json()['input']['input_id']],'processed')
     command=client.post(
      f'/api/v3/workspaces/{workspace_id}/commands',
      json={

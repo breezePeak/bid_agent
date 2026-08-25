@@ -77,15 +77,12 @@ class MaterialReadinessService:
         if not manifest or not index:
             return False
         sources = (manifest.get("payload") or {}).get("sources") or []
-        active = next(
-            (item for item in sources if isinstance(item, dict) and item.get("active")),
-            None,
-        )
+        active = [item for item in sources if isinstance(item, dict) and item.get("active")]
         payload = index.get("payload") or {}
         return bool(
             active
-            and str(payload.get("legacy_bid_id") or "")
-            == str(active.get("legacy_bid_id") or "")
+            and set(payload.get("source_hashes") or {})
+            == {str(item.get("legacy_bid_id") or "") for item in active}
             and int(payload.get("source_manifest_revision") or 0)
             == int(manifest.get("revision") or 0)
         )

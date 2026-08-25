@@ -283,6 +283,16 @@ class V3WorkspaceSnapshotBuilder:
                 "status": legacy_status,
                 "active_id": str((active_legacy_sources[0] if active_legacy_sources else {}).get("legacy_bid_id") or ""),
                 "filename": str((active_legacy_sources[0] if active_legacy_sources else {}).get("filename") or ""),
+                "items": [
+                    {
+                        "input_id": str(item.get("legacy_bid_id") or ""),
+                        "legacy_bid_id": str(item.get("legacy_bid_id") or ""),
+                        "role": "legacy_bid",
+                        "filename": str(item.get("filename") or ""),
+                        "status": "ready" if legacy_current else legacy_status,
+                    }
+                    for item in active_legacy_sources
+                ],
                 "section_count": len((legacy_index or {}).get("sections") or []) if legacy_current else 0,
                 "block_count": len((legacy_index or {}).get("blocks") or []) if legacy_current else 0,
                 "needs_review_count": len((legacy_index or {}).get("needs_review") or []) if legacy_current else 0,

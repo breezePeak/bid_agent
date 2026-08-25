@@ -57,19 +57,19 @@ const selectedBlocks = computed(() => {
 </script>
 
 <style scoped>
-.legacy-preview { display: grid; gap: 12px; }
+.legacy-preview { display: grid; min-height: 0; gap: 12px; }
 .legacy-metrics { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
 .legacy-metrics div { padding: 10px; border-radius: 9px; background: #f1f5f9; }
 .legacy-metrics dt { color: #64748b; font-size: 11px; }
 .legacy-metrics dd { margin: 3px 0 0; color: #1e293b; font-size: 18px; font-weight: 800; }
 .review-note { margin: 0; color: #b45309; font-size: 12px; }
-.legacy-browser { display: grid; grid-template-columns: minmax(180px, 30%) 1fr; min-height: 240px; border: 1px solid #dbe4f0; border-radius: 10px; overflow: hidden; }
-.legacy-browser nav { display: grid; align-content: start; border-right: 1px solid #dbe4f0; background: #f8fafc; }
+.legacy-browser { display: grid; grid-template-columns: minmax(180px, 30%) 1fr; height: min(68vh, 760px); min-height: 320px; border: 1px solid #dbe4f0; border-radius: 10px; overflow: hidden; }
+.legacy-browser nav { display: grid; min-height: 0; align-content: start; overflow-y: auto; border-right: 1px solid #dbe4f0; background: #f8fafc; }
 .legacy-browser nav button { min-height: 38px; border: 0; background: transparent; text-align: left; cursor: pointer; }
 .legacy-browser nav button.active { color: #3730a3; background: #e0e7ff; font-weight: 700; }
-.legacy-blocks { padding: 13px; overflow: auto; }
+.legacy-blocks { min-height: 0; padding: 13px; overflow: auto; }
 .legacy-blocks h4 { margin: 0 0 10px; }
 .legacy-block { display: grid; width: 100%; gap: 5px; padding: 10px 0; border: 0; border-bottom: 1px solid #e2e8f0; background: transparent; text-align: left; cursor: pointer; }
 .legacy-block small { color: #64748b; font-family: ui-monospace, Consolas, monospace; }
-@media (max-width: 720px) { .legacy-browser { grid-template-columns: 1fr; } .legacy-browser nav { border-right: 0; border-bottom: 1px solid #dbe4f0; } }
+@media (max-width: 720px) { .legacy-browser { height: auto; min-height: 0; grid-template-columns: 1fr; } .legacy-browser nav { max-height: 32vh; border-right: 0; border-bottom: 1px solid #dbe4f0; } .legacy-blocks { max-height: 50vh; } }
 </style>

@@ -76,7 +76,7 @@ class V3LegacyBidRewriteTests(unittest.TestCase):
             rebuilt = LegacyBidIndexService(context).build(source)
             self.assertEqual([block.block_id for block in rebuilt.blocks], original_ids)
 
-    def test_replacement_advances_manifest_and_rebuilds_index(self) -> None:
+    def test_multiple_old_bids_remain_active_and_previewable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
             context = self.context(base)
@@ -91,15 +91,20 @@ class V3LegacyBidRewriteTests(unittest.TestCase):
             new_index = service.index(new.legacy_bid_id)
 
             manifest = service.manifest()
-            self.assertEqual(sum(1 for item in manifest.sources if item.active), 1)
-            self.assertFalse(next(item for item in manifest.sources if item.legacy_bid_id == old.legacy_bid_id).active)
+            self.assertEqual(sum(1 for item in manifest.sources if item.active), 2)
+            self.assertTrue(next(item for item in manifest.sources if item.legacy_bid_id == old.legacy_bid_id).active)
             self.assertGreater(new_index.source_manifest_revision, old_index.source_manifest_revision)
             self.assertNotEqual(new_index.file_hash, old_index.file_hash)
+            self.assertEqual(service.index(old.legacy_bid_id).sections[0].title, "旧目录")
+            self.assertEqual(service.index(new.legacy_bid_id).sections[0].title, "新目录")
+            snapshot = V3WorkspaceSnapshotBuilder(context).build()
+            self.assertEqual(len(snapshot["legacy_bid"]["items"]), 2)
+            self.assertTrue(all(item["status"] == "ready" for item in snapshot["legacy_bid"]["items"]))
 
             restored = service.register_local_file(first, first.name)
             self.assertEqual(restored.legacy_bid_id, old.legacy_bid_id)
             self.assertEqual(len({item.legacy_bid_id for item in service.manifest().sources}), 2)
-            self.assertEqual(sum(1 for item in service.manifest().sources if item.active), 1)
+            self.assertEqual(sum(1 for item in service.manifest().sources if item.active), 2)
 
     def test_full_write_and_generic_upload_reject_legacy_bid(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

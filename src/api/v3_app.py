@@ -30,7 +30,7 @@ from document_pipeline.document_preview import DocumentPreviewService
 from document_pipeline.input_manifest import InputManifestService, V3_ROOT
 from document_pipeline.legacy_bid_source import LegacyBidSourceService
 from document_pipeline.renderers.render_verifier import RENDER_OUTPUT_PATH, RENDER_QUALITY_PATH
-from document_pipeline.source_normalizer import NORMALIZABLE_EXTENSIONS
+from document_pipeline.source_normalizer import NORMALIZABLE_EXTENSIONS, SourceNormalizer
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder
 from utils import read_json
 
@@ -760,7 +760,19 @@ async def upload(workspace_id: str, role: str = Form(...), file: UploadFile = Fi
         )
         temporary.unlink()
         temporary = None
-        return JSONResponse({"ok": True, "input": registration.item.model_dump(mode="json")}, status_code=201)
+        # Keep every upload path consistent: once the file is safely registered,
+        # immediately parse all active inputs and promote the refreshed source
+        # index.  Downstream planning can still run later, but the UI can report
+        # the real per-file parse result as soon as uploading finishes.
+        source_index = await run_in_threadpool(SourceNormalizer(context).normalize_active_inputs)
+        return JSONResponse(
+            {
+                "ok": True,
+                "input": registration.item.model_dump(mode="json"),
+                "source_index": source_index,
+            },
+            status_code=201,
+        )
     except ControlPlaneError as exc:
         return _error(exc)
     except ValueError as exc:

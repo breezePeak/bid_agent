@@ -46,8 +46,9 @@ class LegacyBidSourceService:
             )
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         current = self.manifest()
-        active_source = next((item for item in current.sources if item.active), None)
-        if active_source is not None and active_source.sha256 == digest:
+        active_sources = [item for item in current.sources if item.active]
+        active_source = next((item for item in active_sources if item.sha256 == digest), None)
+        if active_source is not None:
             active_index = self.store.v3_active_artifact("LegacyBidIndex")
             active_manifest = self.store.v3_active_artifact("LegacyBidSourceManifest")
             index_payload = (active_index or {}).get("payload") or {}
@@ -62,7 +63,7 @@ class LegacyBidSourceService:
                     "parsing", active_id=active_source.legacy_bid_id
                 )
                 try:
-                    LegacyBidIndexService(self.context).build(active_source)
+                    LegacyBidIndexService(self.context).build_many(active_sources)
                 except Exception as exc:
                     self.store.update_legacy_bid_state(
                         "failed",
@@ -74,7 +75,7 @@ class LegacyBidSourceService:
                     "ready", active_id=active_source.legacy_bid_id
                 )
             return active_source
-        version = (active_source.version + 1) if active_source else 1
+        version = max((item.version for item in current.sources), default=0) + 1
         matching_source = next(
             (item for item in current.sources if item.sha256 == digest),
             None,
@@ -98,17 +99,14 @@ class LegacyBidSourceService:
             active=True,
             stored_path=relative.as_posix(),
         )
-        sources = [
-            item.model_copy(update={"active": False})
-            for item in current.sources
-            if item.legacy_bid_id != legacy_bid_id
-        ]
+        sources = [item for item in current.sources if item.legacy_bid_id != legacy_bid_id]
         sources.append(source)
+        active_sources = [item for item in sources if item.active]
         active_manifest = self.store.v3_active_artifact("LegacyBidSourceManifest")
         revision = int(active_manifest["revision"]) + 1 if active_manifest else 1
         manifest = LegacyBidSourceManifest(
             revision=revision,
-            source_hashes={source.legacy_bid_id: source.sha256},
+            source_hashes={item.legacy_bid_id: item.sha256 for item in active_sources},
             sources=sources,
         )
         promote_source_artifact(
@@ -120,7 +118,7 @@ class LegacyBidSourceService:
         )
         self.store.update_legacy_bid_state("parsing", active_id=legacy_bid_id)
         try:
-            LegacyBidIndexService(self.context).build(source)
+            LegacyBidIndexService(self.context).build_many(active_sources)
         except Exception as exc:
             self.store.update_legacy_bid_state(
                 "failed", active_id=legacy_bid_id, error=str(exc)
@@ -143,7 +141,11 @@ class LegacyBidSourceService:
                 status_code=404,
             )
         payload = active.get("payload") or {}
-        if str(payload.get("legacy_bid_id") or "") != str(legacy_bid_id):
+        source = next(
+            (item for item in self.manifest().sources if item.active and item.legacy_bid_id == legacy_bid_id),
+            None,
+        )
+        if source is None or legacy_bid_id not in (payload.get("source_hashes") or {}):
             raise ControlPlaneError(
                 "LEGACY_BID_INDEX_NOT_FOUND",
                 "旧投标书索引不存在或已被替换。",
@@ -151,4 +153,26 @@ class LegacyBidSourceService:
             )
         from .contracts import LegacyBidIndex
 
-        return LegacyBidIndex.model_validate(payload)
+        combined = LegacyBidIndex.model_validate(payload)
+        block_ids = {
+            block.block_id for block in combined.blocks if block.input_id == legacy_bid_id
+        }
+        return combined.model_copy(
+            update={
+                "legacy_bid_id": source.legacy_bid_id,
+                "filename": source.filename,
+                "file_hash": source.sha256,
+                "source_hashes": {source.legacy_bid_id: source.sha256},
+                "sections": [
+                    section for section in combined.sections
+                    if section.heading_block_id in block_ids
+                ],
+                "blocks": [block for block in combined.blocks if block.block_id in block_ids],
+                "structure_gaps": [
+                    gap for gap in combined.structure_gaps if gap.input_id == legacy_bid_id
+                ],
+                "needs_review": [
+                    entry for entry in combined.needs_review if entry.startswith(f"{source.filename}：")
+                ],
+            }
+        )

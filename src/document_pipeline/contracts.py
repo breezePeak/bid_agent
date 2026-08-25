@@ -239,12 +239,10 @@ class LegacyBidSourceManifest(ContractModel):
     sources: list[LegacyBidSource] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def one_active_source(self) -> "LegacyBidSourceManifest":
+    def unique_sources(self) -> "LegacyBidSourceManifest":
         ids = [item.legacy_bid_id for item in self.sources]
         if len(ids) != len(set(ids)):
             raise ValueError("LegacyBidSourceManifest 不允许重复 legacy_bid_id")
-        if sum(1 for item in self.sources if item.active) > 1:
-            raise ValueError("同一工作空间只允许一份活动旧投标书")
         return self
 
 

@@ -25,6 +25,15 @@ class LegacyBidIndexService:
         self.store = ControlStore(context)
 
     def build(self, source: LegacyBidSource) -> LegacyBidIndex:
+        return self.build_many([source])
+
+    def build_many(self, sources: list[LegacyBidSource]) -> LegacyBidIndex:
+        if not sources:
+            raise ControlPlaneError(
+                "LEGACY_BID_SOURCE_MISSING",
+                "没有可解析的旧投标书。",
+                status_code=409,
+            )
         manifest_artifact = self.store.v3_active_artifact("LegacyBidSourceManifest")
         if manifest_artifact is None:
             raise ControlPlaneError(
@@ -32,34 +41,47 @@ class LegacyBidIndexService:
                 "旧投标书来源清单尚未晋级。",
                 status_code=409,
             )
-        path = self.context.root / Path(source.stored_path)
-        if not path.is_file():
-            raise ControlPlaneError(
-                "LEGACY_BID_FILE_MISSING",
-                "旧投标书原文件不存在。",
-                status_code=409,
+        blocks = []
+        sections = []
+        gaps = []
+        review = []
+        for source in sources:
+            path = self.context.root / Path(source.stored_path)
+            if not path.is_file():
+                raise ControlPlaneError(
+                    "LEGACY_BID_FILE_MISSING",
+                    f"旧投标书原文件不存在：{source.filename}",
+                    status_code=409,
+                )
+            item = InputItem(
+                input_id=source.legacy_bid_id,
+                role=InputRole.LEGACY_BID,
+                filename=source.filename,
+                mime_type=source.mime_type,
+                sha256=source.sha256,
+                version=source.version,
             )
-        item = InputItem(
-            input_id=source.legacy_bid_id,
-            role=InputRole.LEGACY_BID,
-            filename=source.filename,
-            mime_type=source.mime_type,
-            sha256=source.sha256,
-            version=source.version,
-        )
-        blocks, coverage = SourceNormalizer(self.context).parse_frozen_file(item, path)
-        sections, review = self._sections(blocks)
-        gaps = [item for item in coverage if item.status == "structure_gap"]
-        if gaps:
-            review.append(f"{len(gaps)} 个结构缺口需要复核")
+            source_blocks, coverage = SourceNormalizer(self.context).parse_frozen_file(item, path)
+            source_sections, source_review = self._sections(source_blocks)
+            source_gaps = [entry for entry in coverage if entry.status == "structure_gap"]
+            if source_gaps:
+                source_review.append(f"{len(source_gaps)} 个结构缺口需要复核")
+            blocks.extend(source_blocks)
+            sections.extend(source_sections)
+            gaps.extend(source_gaps)
+            review.extend(f"{source.filename}：{entry}" for entry in source_review)
+        primary = sources[0]
+        combined_hash = sources[0].sha256 if len(sources) == 1 else hashlib.sha256(
+            "|".join(source.sha256 for source in sources).encode("utf-8")
+        ).hexdigest()
         active = self.store.v3_active_artifact("LegacyBidIndex")
         revision = int(active["revision"]) + 1 if active else 1
         index = LegacyBidIndex(
             revision=revision,
-            source_hashes={source.legacy_bid_id: source.sha256},
-            legacy_bid_id=source.legacy_bid_id,
-            filename=source.filename,
-            file_hash=source.sha256,
+            source_hashes={source.legacy_bid_id: source.sha256 for source in sources},
+            legacy_bid_id=primary.legacy_bid_id,
+            filename=primary.filename if len(sources) == 1 else f"{len(sources)} 份旧投标书",
+            file_hash=combined_hash,
             parser_version=SOURCE_PARSER_VERSION,
             source_manifest_revision=int(manifest_artifact["revision"]),
             source_manifest_artifact_hash=str(manifest_artifact["artifact_hash"]),
@@ -73,7 +95,7 @@ class LegacyBidIndexService:
             artifact_kind="LegacyBidIndex",
             payload=index.model_dump(mode="json"),
             operation_id=(
-                f"legacy-bid-index:{source.legacy_bid_id}:"
+                f"legacy-bid-index:{primary.legacy_bid_id}:"
                 f"{manifest_artifact['revision']}:{SOURCE_PARSER_VERSION}:{revision}"
             ),
             gate_id="G0_LEGACY_BID_STRUCTURE",
