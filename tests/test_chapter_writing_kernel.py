@@ -75,6 +75,30 @@ def test_writer_receives_target_size_and_substantive_body_rules() -> None:
     assert 'assert that an objective is "clear"' in messages[0]["content"]
 
 
+def test_rewrite_context_reaches_the_shared_writer_prompt() -> None:
+    request = _request(title="章节", operation="rewrite")
+    request = ChapterWritingRequest(
+        **{
+            **request.__dict__,
+            "writing_plan": {
+                "blocks": [{"must_answer": "说明迁移方案", "write_as": "说明"}],
+                "rewrite_context": {
+                    "rewrite_schema": "v1",
+                    "rewrite_strategy": "light_edit",
+                    "selected_legacy_sources": [{"content": "已确认旧文"}],
+                },
+            },
+        }
+    )
+
+    spec = compile_chapter_writing_spec(request)
+    message = compile_chapter_writing_messages(spec)[1]["content"]
+
+    assert spec.writing_outline["rewrite_context"]["rewrite_strategy"] == "light_edit"
+    assert '"selected_legacy_sources"' in message
+    assert '"user_rewrite_instruction"' in message
+
+
 def test_scope_contract_is_the_same_boundary_without_runtime_chat_state() -> None:
     spec = compile_chapter_writing_spec(_request(title="工作必要性与可行性"))
     contract = compile_chapter_scope_contract(spec)

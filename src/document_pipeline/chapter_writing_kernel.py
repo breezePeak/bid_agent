@@ -514,6 +514,8 @@ def compile_chapter_writing_spec(
             "blocks": deepcopy(list(supplied_plan.get("blocks") or [])),
             "block_count": len(list(supplied_plan.get("blocks") or [])),
         }
+        if isinstance(supplied_plan.get("rewrite_context"), dict):
+            outline["rewrite_context"] = deepcopy(supplied_plan["rewrite_context"])
     bound = _bound_requirements(
         node, tender, scoring, _dump(req.binding_requirements), outline
     )
@@ -581,8 +583,21 @@ def compile_chapter_writing_messages(spec: ChapterWritingSpec) -> list[dict[str,
         raise TypeError("spec must be ChapterWritingSpec")
     payload = spec.payload(include_hash=True)
     payload["mode"] = spec.operation
+    rewrite_context = (
+        spec.writing_outline.get("rewrite_context")
+        if isinstance(spec.writing_outline, dict)
+        else None
+    )
+    if isinstance(rewrite_context, dict):
+        payload["rewrite_context"] = deepcopy(rewrite_context)
+        payload["rewrite_instruction"] = (
+            "When rewrite_context is present, use only its approved legacy sources, "
+            "replacement map, selected evidence and the current writing blocks. "
+            "Apply every replacement before drafting. Do not retain or invent old "
+            "project facts, and do not search for new sources."
+        )
     if spec.operation == "rewrite":
-        payload["rewrite_instruction"] = spec.user_instruction
+        payload["user_rewrite_instruction"] = spec.user_instruction
     elif spec.operation == "repair":
         payload["repair_errors"] = list(spec.validation_errors)
     return [

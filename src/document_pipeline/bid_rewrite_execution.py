@@ -7,6 +7,8 @@ from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 
 from .chapter_rewrite_plan import ChapterRewritePlanService
 from .chapter_writing_service import ChapterWritingRequest, ChapterWritingService
+from .content_gate import WriterBundleContentGate
+from .contracts import ContentBlock
 
 
 class BidRewriteExecutionService:
@@ -17,9 +19,15 @@ class BidRewriteExecutionService:
     ``ChapterWritingService`` so rewrite mode never gains a second writer.
     """
 
-    def __init__(self, context: WorkspaceContext) -> None:
+    def __init__(
+        self,
+        context: WorkspaceContext,
+        *,
+        plan_service: ChapterRewritePlanService | None = None,
+    ) -> None:
         self.context = context
         self.store = ControlStore(context)
+        self.plan_service = plan_service or ChapterRewritePlanService(context)
 
     def build_request(
         self,
@@ -32,7 +40,7 @@ class BidRewriteExecutionService:
         overwrite_locked: bool = False,
     ) -> ChapterWritingRequest:
         self._require_mode()
-        plan = ChapterRewritePlanService(self.context).get(chapter_id)
+        plan = self.plan_service.get(chapter_id)
         if plan.get("stale") or str(plan.get("status") or "") != "confirmed":
             raise ControlPlaneError(
                 "REWRITE_PLAN_INCOMPLETE",
@@ -89,7 +97,25 @@ class BidRewriteExecutionService:
 
     def iter_events(self, **kwargs: Any) -> Iterator[dict[str, Any]]:
         request = self.build_request(**kwargs)
-        yield from ChapterWritingService(self.context).iter_events(request)
+        yield from self._writing_service(request).iter_events(request)
+
+    def execute(self, **kwargs: Any) -> Any:
+        """Non-streaming command entry; returns the ordinary WriterResult."""
+        request = self.build_request(**kwargs)
+        return self._writing_service(request).write(request)
+
+    def _writing_service(self, request: ChapterWritingRequest) -> ChapterWritingService:
+        rewrite_context = dict(request.chapter_writing_plan.get("rewrite_context") or {})
+        writer = (
+            _CopyWriter(rewrite_context)
+            if rewrite_context.get("rewrite_strategy") == "copy"
+            else None
+        )
+        return ChapterWritingService(
+            self.context,
+            writer=writer,
+            quality_gate=_RewriteQualityGate(rewrite_context),
+        )
 
     def _rewrite_context(self, plan: dict[str, Any]) -> dict[str, Any]:
         artifact = self.store.v3_active_artifact("LegacyBidIndex") or {}
@@ -155,3 +181,93 @@ class BidRewriteExecutionService:
 
 
 __all__ = ["BidRewriteExecutionService"]
+
+
+class _CopyWriter:
+    """A deterministic adapter for exact approved legacy reuse.
+
+    It is passed to the existing writing service, therefore the same bundle
+    quality gate and draft commit path still apply while no model call occurs.
+    """
+
+    def __init__(self, rewrite_context: dict[str, Any]) -> None:
+        self.rewrite_context = rewrite_context
+
+    def stream_bundle(self, bundle: Any, *, operation_id: str = "") -> list[ContentBlock]:
+        del operation_id
+        replacements = {
+            str(item.get("source_text") or ""): str(item.get("replacement_text") or "")
+            for item in self.rewrite_context.get("replacement_map") or []
+            if isinstance(item, dict)
+        }
+        paragraphs: list[str] = []
+        for item in self.rewrite_context.get("selected_legacy_sources") or []:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "")
+            for source, replacement in replacements.items():
+                if source:
+                    content = content.replace(source, replacement)
+            if content.strip():
+                paragraphs.append(content.strip())
+        if not paragraphs:
+            raise ControlPlaneError(
+                "REWRITE_PLAN_INCOMPLETE",
+                "直接复用方案没有可写入的已确认旧文块。",
+                status_code=409,
+            )
+        remaining = [
+            source
+            for source in replacements
+            if source and any(source in paragraph for paragraph in paragraphs)
+        ]
+        if remaining:
+            raise ControlPlaneError(
+                "CHAPTER_REWRITE_POLLUTION_UNRESOLVED",
+                "旧项目污染替换未完全生效，已阻止草稿写入。",
+                status_code=409,
+                details={"source_texts": remaining},
+            )
+        target = str((bundle.document_target_constraints or [{}])[0].get("output_target") or bundle.chapter_id or "")
+        return [
+            ContentBlock(
+                block_id=f"{bundle.bundle_id}-{target}-copy",
+                target_node_id=target,
+                type="paragraph",
+                content="\n\n".join(paragraphs),
+                confidence=1.0,
+                source_bundle_hash=bundle.bundle_hash,
+                source="AI_GENERATED",
+                created_by="rewrite-copy",
+                updated_by="rewrite-copy",
+            )
+        ]
+
+
+class _RewriteQualityGate:
+    """Keep the ordinary content gate, then reject surviving old-project text."""
+
+    def __init__(self, rewrite_context: dict[str, Any]) -> None:
+        self.base = WriterBundleContentGate()
+        self.forbidden = {
+            str(item.get("source_text") or "").strip()
+            for item in rewrite_context.get("replacement_map") or []
+            if isinstance(item, dict)
+        }
+        self.forbidden.discard("")
+
+    def validate(self, bundle: Any, blocks: list[ContentBlock]) -> Any:
+        proposal = self.base.validate(bundle, blocks)
+        surviving = sorted(
+            text
+            for text in self.forbidden
+            if any(text in str(block.content or "") for block in blocks)
+        )
+        if surviving:
+            raise ControlPlaneError(
+                "CHAPTER_REWRITE_POLLUTION_UNRESOLVED",
+                "生成正文仍包含旧项目污染内容，已阻止草稿写入。",
+                status_code=409,
+                details={"source_texts": surviving},
+            )
+        return proposal

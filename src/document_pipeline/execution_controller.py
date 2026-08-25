@@ -103,6 +103,7 @@ class V3ExecutionController:
             "bid_rewrite.plan.search": self.search_rewrite_plan,
             "bid_rewrite.plan.confirm": self.confirm_rewrite_plan,
             "bid_rewrite.plan.reopen": self.reopen_rewrite_plan,
+            "bid_rewrite.chapter.execute": self.execute_rewrite_chapter,
         }
 
     def generate_rewrite_match(
@@ -193,6 +194,29 @@ class V3ExecutionController:
             actor=envelope.actor,
         )
         return {"accepted": True, "operation_status": "succeeded", "message": "章节改写方案已重新打开。", "rewrite_plan": rewrite_plan}
+
+    def execute_rewrite_chapter(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
+        """Command counterpart for integrations that do not consume NDJSON streams."""
+        from .bid_rewrite_execution import BidRewriteExecutionService
+
+        chapter_id = self._rewrite_chapter_id(envelope)
+        payload = envelope.payload
+        result = BidRewriteExecutionService(context).execute(
+            chapter_id=chapter_id,
+            operation_id=operation_id,
+            expected_workspace_revision=envelope.expected_revision,
+            expected_chapter_revision=int(payload.get("expected_chapter_revision") or 0),
+            actor=envelope.actor if isinstance(envelope.actor, dict) else {},
+            overwrite_locked=bool(payload.get("overwrite_locked")),
+        )
+        return {
+            "accepted": True,
+            "operation_status": "succeeded",
+            "message": "章节改写草稿已生成。",
+            "draft_revisions": result.draft_revisions,
+            "bundle_id": result.bundle.bundle_id,
+            "bundle_hash": result.bundle.bundle_hash,
+        }
 
     def generate_chapter_batch(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
         """Persist a batch job and start it only after this command releases its lease."""
