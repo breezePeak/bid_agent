@@ -1035,7 +1035,12 @@
             <h2 id="generation-heading">完整标书生成进度</h2>
             <p>{{ generationHeadline }}</p>
           </div>
-          <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
+          <button class="btn btn-outline" type="button" @click="activeTab = 'upload'">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 5px; vertical-align: -2px;">
+              <path d="m15 18-6-6 6-6M9 12h10" />
+            </svg>
+            返回聊天助手
+          </button>
         </div>
 
         <section class="writer-workspace" aria-label="标书实时写作工作区">
@@ -1396,7 +1401,12 @@
             <span class="pipeline-state" :class="`pipeline-state-${pipelineStatus}`">
               {{ pipelineStatusLabel }}
             </span>
-            <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
+            <button class="btn btn-outline" type="button" @click="activeTab = 'upload'">
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 5px; vertical-align: -2px;">
+                <path d="m15 18-6-6 6-6M9 12h10" />
+              </svg>
+              返回聊天助手
+            </button>
           </div>
         </div>
 
@@ -1587,7 +1597,12 @@
         </div>
 
         <div class="sticky-bar-actions">
-          <button class="btn" type="button" @click="activeTab = 'upload'">返回助手</button>
+          <button class="btn-back-assistant" type="button" @click="activeTab = 'upload'">
+            <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 5px; vertical-align: -2px;">
+              <path d="m15 18-6-6 6-6M9 12h10" />
+            </svg>
+            返回聊天助手
+          </button>
           <button
             v-if="!hasOutline && initialMaterialsReady && secondStageConfirmed"
             class="btn btn-primary"
@@ -1629,13 +1644,21 @@
               章节直接绑定评分响应任务、满分条件和招标需求，可逐项核验目录覆盖。
             </p>
           </div>
-          <div v-if="hasScorePoints" class="planning-metrics" aria-label="目录覆盖指标">
-            <span><strong>{{ formatPoints(planningView.summary.total_points) }}</strong> 总分</span>
-            <span><strong>{{ planningView.summary.score_point_count }}</strong> 评分点</span>
-            <span><strong>{{ planningView.summary.covered_response_unit_count }}</strong> 响应任务已覆盖</span>
-            <span :class="{ danger: planningView.summary.uncovered_response_unit_count > 0 }">
-              <strong>{{ planningView.summary.uncovered_response_unit_count }}</strong> 响应任务未覆盖
-            </span>
+          <div class="planning-heading-right">
+            <div v-if="hasScorePoints" class="planning-metrics" aria-label="目录覆盖指标">
+              <span><strong>{{ formatPoints(planningView.summary.total_points) }}</strong> 总分</span>
+              <span><strong>{{ planningView.summary.score_point_count }}</strong> 评分点</span>
+              <span><strong>{{ planningView.summary.covered_response_unit_count }}</strong> 响应任务已覆盖</span>
+              <span :class="{ danger: planningView.summary.uncovered_response_unit_count > 0 }">
+                <strong>{{ planningView.summary.uncovered_response_unit_count }}</strong> 响应任务未覆盖
+              </span>
+            </div>
+            <button class="btn-back-assistant" type="button" @click="activeTab = 'upload'">
+              <svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="margin-right: 5px; vertical-align: -2px;">
+                <path d="m15 18-6-6 6-6M9 12h10" />
+              </svg>
+              返回聊天助手
+            </button>
           </div>
         </div>
 
@@ -5312,9 +5335,10 @@ onUnmounted(() => {
 
 <style scoped>
 .v3-workspace {
-  max-width: 1500px;
+  width: 100%;
+  max-width: 100%;
   margin: 0 auto;
-  padding: 28px clamp(18px, 3vw, 40px) 56px;
+  padding: 0;
   color: var(--color-text);
 }
 
@@ -6231,10 +6255,11 @@ onUnmounted(() => {
   padding: 12px 18px;
   border: 1px solid rgba(226, 232, 240, 0.8);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.95);
   backdrop-filter: blur(12px);
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
   box-sizing: border-box;
+  width: 100%;
 }
 
 .sticky-bar-info {
@@ -6242,6 +6267,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 16px;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .sticky-stats {
@@ -6270,6 +6296,30 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.btn-back-assistant {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: 8px;
+  border: 1px solid #cbd5e1;
+  background: #ffffff;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+
+.btn-back-assistant:hover {
+  background: #f1f5f9;
+  border-color: #94a3b8;
+  color: #0f172a;
 }
 
 .btn-success {
@@ -7363,6 +7413,13 @@ onUnmounted(() => {
   overflow-wrap: anywhere;
 }
 .planning-heading { align-items: flex-end; }
+.planning-heading-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
 .planning-metrics { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .planning-metrics span {
   min-width: 70px;
