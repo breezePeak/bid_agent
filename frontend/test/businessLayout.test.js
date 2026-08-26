@@ -90,9 +90,9 @@ test('only long-running workflow phases show expandable processing details', () 
   assert.match(workspaceView, /:status="generationProcessStatus"[\s\S]*?:seconds="generationElapsedSeconds"/)
   assert.match(aiProcessDisclosure, /<details class="ai-process-disclosure"/)
   assert.match(aiProcessDisclosure, /<summary>/)
-  assert.match(aiProcessDisclosure, /processing: `正在处理 .*durationLabel/)
-  assert.match(aiProcessDisclosure, /completed: `已处理 .*durationLabel/)
-  assert.match(aiProcessDisclosure, /failed: `处理失败 .*durationLabel/)
+  assert.match(aiProcessDisclosure, /normalizedStatus\.value === 'processing'[\s\S]*?正在处理 · 已用/)
+  assert.match(aiProcessDisclosure, /normalizedStatus\.value === 'completed'[\s\S]*?已处理 · 耗时/)
+  assert.match(aiProcessDisclosure, /normalizedStatus\.value === 'failed'[\s\S]*?处理失败 · 耗时/)
   assert.match(aiProcessDisclosure, /width: 100%[\s\S]*?background: #f8fafc;/)
   assert.doesNotMatch(aiProcessDisclosure, /background:\s*#(?:000|0f172a|111827)/i)
 })
@@ -112,8 +112,8 @@ test('planning UI exposes condition traceability without relying on raw JSON', (
   assert.match(workspaceView, /condition\.source_location\.label/)
   assert.match(workspaceView, /condition\.response_units/)
   assert.match(workspaceView, /condition\.destinations/)
-  assert.match(workspaceView, /chapter\.score_conditions/)
-  assert.match(workspaceView, /chapter\.requirements/)
+  assert.match(workspaceView, /currentOutlineChapter\.score_conditions/)
+  assert.match(workspaceView, /currentOutlineChapter\.requirements/)
   assert.match(workspaceView, /planningView\.quality_gates/)
   assert.match(workspaceView, /document_quality_gate/)
 })
@@ -352,7 +352,7 @@ test('chat flow avoids duplicate hydration notices and keeps outline work in cha
     workspaceView,
     /async function prepareOutline\(\)[\s\S]*?activeTab\.value = 'planning'[\s\S]*?clearError\(\)/,
   )
-  assert.match(workspaceView, /@click="activeTab = 'upload'">返回助手/)
+  assert.match(workspaceView, /@click="activeTab = 'upload'"[\s\S]*?返回聊天助手/)
 })
 
 test('planning does not become reviewable merely because a historical generation exists', () => {
@@ -402,9 +402,9 @@ test('first stage applies mode-specific material readiness before phase 2', () =
   assert.doesNotMatch(workspaceView, /handleQuickUpload\('company_fact', \$event\)/)
 })
 
-test('user chat avatar follows the message on the right', () => {
-  assert.match(workspaceView, /\.chat-msg\.user-msg \{ align-self: flex-end; flex-direction: row-reverse; \}/)
-  assert.match(workspaceView, /\.legacy-chat-stream > \.chat-msg\.user-msg \.msg-avatar \{ order: initial; \}/)
+test('user chat messages stay right-aligned without a duplicate avatar', () => {
+  assert.match(workspaceView, /\.chat-msg\.user-msg\s*\{[\s\S]*?justify-content:\s*flex-end;[\s\S]*?align-self:\s*flex-end;/)
+  assert.match(workspaceView, /\.legacy-chat-stream > \.chat-msg\.user-msg \.msg-avatar \{ display:\s*none; \}/)
 })
 
 test('every workspace view has a scroll owner while the chat keeps its own scroll', () => {
@@ -413,9 +413,9 @@ test('every workspace view has a scroll owner while the chat keeps its own scrol
     workspaceView,
     /\.workspace-tab-view\.tab-upload\s*\{[\s\S]*?overflow:\s*hidden;/,
   )
-  assert.match(workspaceView, /\.studio-chat-body\s*\{[\s\S]*?overflow-x:\s*hidden;/)
-  assert.match(workspaceView, /\.initial-chat-studio\s*\{[\s\S]*?width:\s*60vw;[\s\S]*?max-width:\s*60vw;/)
-  assert.match(workspaceView, /\.chat-msg\s*\{\s*width:\s*100%;\s*max-width:\s*100%;/)
+  assert.match(workspaceView, /\.studio-chat-body\s*\{[\s\S]*?overflow-y:\s*auto;/)
+  assert.match(workspaceView, /\.initial-chat-studio\s*\{[\s\S]*?width:\s*50vw;[\s\S]*?max-width:\s*50vw;/)
+  assert.match(workspaceView, /\.chat-msg\s*\{[\s\S]*?width:\s*100%;[\s\S]*?max-width:\s*100%;/)
   assert.match(workspaceView, /distanceFromBottom\s*<\s*96/)
 })
 

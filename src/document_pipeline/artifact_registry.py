@@ -24,7 +24,7 @@ from .contracts import (
     TemplateStructureContract,
 )
 
-ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-10"
+ARTIFACT_REGISTRY_VERSION = "v3-artifact-registry-11"
 
 
 @dataclass(frozen=True)

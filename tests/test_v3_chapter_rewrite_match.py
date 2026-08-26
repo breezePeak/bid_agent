@@ -11,25 +11,15 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext  # noqa: E402
 from document_pipeline.artifact_promotion import HumanGateService  # noqa: E402
-from document_pipeline.chapter_rewrite_match import ChapterRewriteMatchService, recommend_rewrite_strategy  # noqa: E402
+from document_pipeline.chapter_rewrite_match import (  # noqa: E402
+    ChapterRewriteMatchService,
+    project_rewrite_coverage,
+)
 from document_pipeline.contracts import InputRole  # noqa: E402
 from document_pipeline.execution_controller import V3ExecutionController  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.legacy_bid_source import LegacyBidSourceService  # noqa: E402
 from document_pipeline.workspace_snapshot import V3WorkspaceSnapshotBuilder  # noqa: E402
-
-
-class _ForgedReranker:
-    provider_id = "test.forged"
-
-    def rerank(self, query, candidates, *, limit=12):
-        del query, candidates, limit
-        return [{
-            "section_id": "unknown-section",
-            "block_id": "unknown-block",
-            "content_hash": "unknown-hash",
-            "content": "实施方案",
-        }]
 
 
 class V3ChapterRewriteMatchTests(unittest.TestCase):
@@ -157,7 +147,7 @@ class V3ChapterRewriteMatchTests(unittest.TestCase):
                 service.latest(leaf)
             self.assertEqual(stale.exception.code, "CHAPTER_REWRITE_MATCH_STALE")
 
-    def test_reranker_cannot_forge_legacy_references(self) -> None:
+    def test_match_uses_only_blueprint_legacy_references(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context, _ = self.prepare(Path(temporary))
             store = ControlStore(context)
@@ -169,15 +159,41 @@ class V3ChapterRewriteMatchTests(unittest.TestCase):
                 submitted_snapshot=gate.planning_snapshot(),
                 nonce="rewrite-match-forged-h1",
             )
-            result = ChapterRewriteMatchService(context, reranker=_ForgedReranker()).generate(leaf)
+            result = ChapterRewriteMatchService(context).generate(leaf)
             self.assertEqual(result["reranker"]["provider_id"], "planning.rewrite_outline_merge")
-            self.assertNotIn("forged-block", {item["block_id"] for item in result["matches"]})
+            blueprint = store.v3_active_artifact("ChapterBlueprint")["payload"]
+            node = next(item for item in blueprint["nodes"] if item["chapter_id"] == leaf)
+            self.assertEqual(
+                {item["block_id"] for item in result["matches"]},
+                {item["block_id"] for item in node["legacy_sources"]},
+            )
 
-    def test_strategy_mapping(self) -> None:
-        self.assertEqual(recommend_rewrite_strategy([], [])["strategy"], "new_write")
-        self.assertEqual(recommend_rewrite_strategy([{"status": "fully_covered"}], [{}])["strategy"], "copy")
-        self.assertEqual(recommend_rewrite_strategy([{"status": "partially_covered"}], [{}])["strategy"], "light_edit")
-        self.assertEqual(recommend_rewrite_strategy([{"status": "conflicted"}], [{}])["strategy"], "restructure")
+    def test_strategy_projects_coverage_without_similarity_thresholds(self) -> None:
+        writing_plan = {
+            "blocks": [
+                {"block_id": "W1", "heading": "方案", "must_answer": "实施"},
+                {"block_id": "W2", "heading": "保障", "must_answer": "服务"},
+            ]
+        }
+        sources = [{"block_id": "B1"}, {"block_id": "B2"}]
+        expected = {
+            "copy": "fully_covered",
+            "light_edit": "partially_covered",
+            "restructure": "partially_covered",
+            "new_write": "not_covered",
+        }
+        for strategy, status in expected.items():
+            coverage = project_rewrite_coverage(
+                writing_plan,
+                strategy,
+                sources,
+                ["按新要求修改"],
+            )
+            self.assertEqual({item["status"] for item in coverage}, {status})
+            expected_ids = [] if strategy == "new_write" else ["B1", "B2"]
+            self.assertTrue(
+                all(item["matched_block_ids"] == expected_ids for item in coverage)
+            )
 
 
 if __name__ == "__main__":

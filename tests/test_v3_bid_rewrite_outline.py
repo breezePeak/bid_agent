@@ -16,6 +16,21 @@ from document_pipeline.contracts import InputRole  # noqa: E402
 from document_pipeline.execution_controller import V3ExecutionController  # noqa: E402
 from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.legacy_bid_source import LegacyBidSourceService  # noqa: E402
+from document_pipeline.canonicalization import canonical_json  # noqa: E402
+from document_pipeline.planning_inference import (  # noqa: E402
+    REWRITE_OUTLINE_CAPABILITY_VERSION,
+    REWRITE_OUTLINE_PROMPT_FILE,
+    REWRITE_OUTLINE_PROMPT_VERSION,
+    REWRITE_OUTLINE_SCHEMA_VERSION,
+    REWRITE_OUTLINE_SKILL_ID,
+    StructuredInferenceResult,
+    planning_prompt_hash,
+)
+from document_pipeline.rewrite_outline_merge_skill import (  # noqa: E402
+    RewriteOutlineAlignment,
+    RewriteOutlineMergeCandidate,
+)
+from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 from document_pipeline.rewrite_zero_pollution import (  # noqa: E402
     CORE_ARTIFACT_KINDS,
     audit_rewrite_zero_pollution,
@@ -176,6 +191,137 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             readiness = V3WorkspaceSnapshotBuilder(context).build()["material_readiness"]
             self.assertTrue(readiness["ready"])
             self.assertEqual(readiness["required"], ["tender", "company"])
+
+    def test_feedback_and_explicit_regeneration_call_merge_provider(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            base = Path(temporary)
+            context = self.context(base)
+            tender = base / "new-tender.md"
+            tender.write_text(
+                "# 项目需求\n投标人须提供云平台实施方案、迁移计划和服务保障。\n\n"
+                "# 评分办法\n云平台实施方案完整、迁移步骤明确、服务保障可执行，满分20分。",
+                encoding="utf-8",
+            )
+            old_bid = base / "old-bid.md"
+            old_bid.write_text(
+                "# 云平台实施方案\n本项目采用分阶段实施，包含现状调研、平台部署和上线验证。\n\n"
+                "## 迁移计划\n迁移工作包括数据盘点、试迁移、正式迁移和回退验证。",
+                encoding="utf-8",
+            )
+            InputManifestService(context).register_local_file(tender, InputRole.TENDER)
+            LegacyBidSourceService(context).register_local_file(old_bid, old_bid.name)
+            initial = self.command(context, "rewrite-outline-provider-seed")
+            self.assertEqual(initial.status, "accepted", initial.message)
+
+            store = ControlStore(context)
+            class Provider:
+                skill_id = REWRITE_OUTLINE_SKILL_ID
+                capability_version = REWRITE_OUTLINE_CAPABILITY_VERSION
+                prompt_version = REWRITE_OUTLINE_PROMPT_VERSION
+                prompt_hash = planning_prompt_hash(REWRITE_OUTLINE_PROMPT_FILE)
+                schema_version = REWRITE_OUTLINE_SCHEMA_VERSION
+                provider_fingerprint = "test-rewrite-provider-v2"
+                model_fingerprint = "test-rewrite-model-v2"
+                temperature = 0.1
+
+                def __init__(self):
+                    self.requests = []
+
+                def merge(self, request):
+                    self.requests.append(request)
+                    targets = {item.node_id: item for item in request.initial_outline}
+                    used_targets = set()
+                    alignments = []
+                    for section in request.legacy_sections:
+                        target = targets[section.candidate_target_ids[0]]
+                        response_ids = (
+                            target.direct_response_unit_ids
+                            or target.subtree_response_unit_ids[:1]
+                        )
+                        condition_ids = (
+                            target.direct_condition_ids
+                            or target.subtree_condition_ids[:1]
+                        )
+                        requirement_ids = (
+                            target.direct_requirement_ids
+                            or target.subtree_requirement_ids[:1]
+                        )
+                        if not (response_ids or condition_ids or requirement_ids):
+                            alignments.append(RewriteOutlineAlignment(
+                                legacy_section_id=section.section_id,
+                                placement="ignore",
+                                confidence=1.0,
+                            ))
+                            continue
+                        placement = (
+                            "child_detail"
+                            if target.node_id in used_targets
+                            else "same_scope"
+                        )
+                        used_targets.add(target.node_id)
+                        sources = [
+                            {
+                                "section_id": section.section_id,
+                                "block_id": block.block_id,
+                                "content_hash": block.content_hash,
+                            }
+                            for block in section.blocks
+                        ]
+                        alignments.append(RewriteOutlineAlignment(
+                            legacy_section_id=section.section_id,
+                            target_node_id=target.node_id,
+                            placement=placement,
+                            matched_response_unit_ids=response_ids,
+                            matched_condition_ids=condition_ids,
+                            matched_requirement_ids=requirement_ids,
+                            rewrite_mode="light_edit" if sources else "new_write",
+                            legacy_sources=sources,
+                            reason="测试 Provider",
+                            required_changes=["按新要求修改"] if sources else [],
+                            confidence=1.0,
+                        ))
+                    candidate = RewriteOutlineMergeCandidate(
+                        alignments=alignments,
+                        review_status="draft",
+                    )
+                    normalized = canonical_json(candidate.model_dump(mode="json"))
+                    return StructuredInferenceResult(
+                        candidate=candidate,
+                        raw_output=normalized,
+                        normalized_output=normalized,
+                        input_snapshot=canonical_json(request.model_dump(mode="json")),
+                        attempt_count=1,
+                        capability_id=self.skill_id,
+                        prompt_version=self.prompt_version,
+                        prompt_hash=self.prompt_hash,
+                        schema_version=self.schema_version,
+                        provider_fingerprint=self.provider_fingerprint,
+                        model_fingerprint=self.model_fingerprint,
+                        temperature=self.temperature,
+                        reasoning="",
+                        normalized_reference_count=0,
+                        validation_errors=(),
+                    )
+
+            provider = Provider()
+            runner = V3StageRunner.for_deterministic_tests(
+                context,
+                rewrite_outline_merge_provider=provider,
+            )
+            feedback = "不要采用旧标书中的培训章节"
+            runner.request_outline_revision(feedback)
+            runner.run("compile_chapter_blueprint", operation_id="feedback-run")
+            self.assertEqual(provider.requests[-1].review_feedback, feedback)
+            self.assertEqual(
+                store.v3_active_artifact("ChapterBlueprint")["payload"]["review_feedback"],
+                feedback,
+            )
+
+            runner.run("compile_chapter_blueprint", operation_id="reuse-run")
+            self.assertEqual(len(provider.requests), 1)
+            runner.request_inference_regeneration([REWRITE_OUTLINE_SKILL_ID])
+            runner.run("compile_chapter_blueprint", operation_id="regenerate-run")
+            self.assertEqual(len(provider.requests), 2)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
             requirement_ledger={},
             score_model={},
             project_model={},
-            legacy_bid_index={},
+            review_feedback="不要采用旧标书中的培训章节",
             initial_outline=[
                 InitialOutlineCard(
                     node_id="root",
@@ -172,6 +172,24 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
         broken.alignments[1].matched_condition_ids = ["C2"]
         with self.assertRaisesRegex(ValueError, "目标分支外"):
             validate_rewrite_outline_merge(self.request(), broken)
+
+    def test_multiple_same_scope_alignments_for_one_target_are_rejected(self) -> None:
+        candidate = self.candidate()
+        broken = candidate.model_copy(deep=True)
+        broken.alignments[1].placement = "same_scope"
+        with self.assertRaisesRegex(ValueError, "最多只能有一个 same_scope"):
+            validate_rewrite_outline_merge(self.request(), broken)
+
+    def test_same_scope_with_child_detail_is_valid(self) -> None:
+        validate_rewrite_outline_merge(self.request(), self.candidate())
+
+    def test_input_has_feedback_without_full_legacy_index(self) -> None:
+        payload = self.request().model_dump(mode="json")
+        self.assertEqual(
+            payload["review_feedback"],
+            "不要采用旧标书中的培训章节",
+        )
+        self.assertNotIn("legacy_bid_index", payload)
 
 
 if __name__ == "__main__":

@@ -277,8 +277,8 @@ class RegistryTests(unittest.TestCase):
             ARTIFACT_REGISTRY.get("NotARealKind")
 
     def test_registry_versions_are_frozen(self) -> None:
-        self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-9")
-        self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-3")
+        self.assertEqual(ARTIFACT_REGISTRY_VERSION, "v3-artifact-registry-11")
+        self.assertEqual(GATE_POLICY_REGISTRY_VERSION, "v3-gate-policy-4")
         self.assertEqual(len(GATE_POLICY_REGISTRY.registry_fingerprint()), 64)
 
 

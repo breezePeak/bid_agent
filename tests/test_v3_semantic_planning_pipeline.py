@@ -183,7 +183,7 @@ class _FakeScoreProvider:
                         source_span_start=source_start,
                         source_span_end=source_start + len(condition_source),
                         source_level_id=source_level_id,
-                        semantic_subject=rule.title,
+                        semantic_subject="响应方案",
                         response_intent="完整说明评分要求",
                         confidence=0.99,
                     )

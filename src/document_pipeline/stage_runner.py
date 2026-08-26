@@ -94,6 +94,7 @@ from .rewrite_outline_merge_skill import (
     RewriteOutlineMergeCandidate,
     apply_rewrite_outline_merge,
     build_rewrite_outline_merge_input,
+    validate_rewrite_outline_merge,
 )
 from .pipeline_policy import (
     configured_validation_failure_blocks,
@@ -531,6 +532,9 @@ class V3StageRunner:
             template_structure,
             annotations=None,
         )
+        review_feedback = str(
+            getattr(self, "_outline_review_feedback", "") or ""
+        ).strip()
         merge_request = build_rewrite_outline_merge_input(
             initial_outline,
             ledger,
@@ -538,6 +542,7 @@ class V3StageRunner:
             project,
             legacy_index,
             template_structure,
+            review_feedback,
         )
         registration = get_planning_skill(
             REWRITE_OUTLINE_SKILL_ID,
@@ -552,12 +557,16 @@ class V3StageRunner:
         )
         checkpoint_service = InferenceCheckpointService(self.context)
         checkpoint_hit = None
+        force_regenerate = (
+            REWRITE_OUTLINE_SKILL_ID in self._regenerate_capabilities
+        )
         if (
             self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
             and self._rewrite_outline_merge_provider is None
         ):
             target_by_id = {item.node_id: item for item in merge_request.initial_outline}
             alignments = []
+            same_scope_targets: set[str] = set()
             for section in merge_request.legacy_sections:
                 target = target_by_id[section.candidate_target_ids[0]]
                 response_ids = target.direct_response_unit_ids or target.subtree_response_unit_ids[:1]
@@ -578,10 +587,22 @@ class V3StageRunner:
                     }
                     for block in section.blocks
                 ]
+                placement = "same_scope"
+                if target.node_id in same_scope_targets:
+                    if merge_request.document_mode == "template_strict":
+                        alignments.append(RewriteOutlineAlignment(
+                            legacy_section_id=section.section_id,
+                            placement="ignore",
+                            confidence=1.0,
+                        ))
+                        continue
+                    placement = "child_detail"
+                else:
+                    same_scope_targets.add(target.node_id)
                 alignments.append(RewriteOutlineAlignment(
                     legacy_section_id=section.section_id,
                     target_node_id=target.node_id,
-                    placement="same_scope",
+                    placement=placement,
                     matched_response_unit_ids=response_ids,
                     matched_condition_ids=condition_ids,
                     matched_requirement_ids=requirement_ids,
@@ -627,7 +648,7 @@ class V3StageRunner:
                 temperature=provider.temperature,
                 optional_kinds=optional_dependencies,
             )
-            if current:
+            if current and not force_regenerate and not review_feedback:
                 return load_promoted_chapter_blueprint(self.context)
             cache_key = self._checkpoint_key(
                 provider,
@@ -635,8 +656,7 @@ class V3StageRunner:
                 registration.version,
                 merge_request,
             )
-            force = REWRITE_OUTLINE_SKILL_ID in self._regenerate_capabilities
-            if not force:
+            if not force_regenerate:
                 checkpoint_hit = checkpoint_service.load(
                     cache_key=cache_key,
                     candidate_model=RewriteOutlineMergeCandidate,
@@ -668,9 +688,8 @@ class V3StageRunner:
                         operation_id=str(operation_id or ""),
                         result=merge_result,
                         capability_version=registration.version,
-                        supersede_existing=force,
+                        supersede_existing=force_regenerate,
                     )
-                    self._regenerate_capabilities.discard(REWRITE_OUTLINE_SKILL_ID)
             except PlanningInferenceValidationError as exc:
                 raise ControlPlaneError(
                     "REWRITE_OUTLINE_MERGE_INVALID",
@@ -679,6 +698,7 @@ class V3StageRunner:
                     details={"cause": self._outline_warning_detail(exc.__cause__ or exc)},
                 ) from exc
 
+        validate_rewrite_outline_merge(merge_request, merge_result.candidate)
         merged_outline = apply_rewrite_outline_merge(
             initial_outline,
             merge_result.candidate,
@@ -691,6 +711,7 @@ class V3StageRunner:
             revision=base_revision + 1,
             template_structure=template_structure,
             planning_model="rewrite_merge",
+            review_feedback=review_feedback,
         )
         blueprint_audit = audit_chapter_blueprint(
             blueprint,
@@ -723,6 +744,8 @@ class V3StageRunner:
             gate_id="G2_BLUEPRINT_INTEGRITY",
         )
         promoted = load_promoted_chapter_blueprint(self.context)
+        self._regenerate_capabilities.discard(REWRITE_OUTLINE_SKILL_ID)
+        self._outline_review_feedback = ""
         self._record_stage_output(
             operation_id,
             "compile_chapter_blueprint",
@@ -792,13 +815,35 @@ class V3StageRunner:
             == canonical_payload_hash(active.get("payload") or {})
         )
 
+    def _chapter_blueprint_capability(
+        self, planning_model: str | None = None
+    ) -> str:
+        model = str(planning_model or "").strip()
+        if not model:
+            project_mode = str(
+                ControlStore(self.context)
+                .workspace_profile()
+                .get("project_mode")
+                or "full_write"
+            )
+            model = (
+                "rewrite_merge"
+                if project_mode == "bid_rewrite"
+                else "score_direct"
+            )
+        return (
+            REWRITE_OUTLINE_SKILL_ID
+            if model == "rewrite_merge"
+            else OUTLINE_SKILL_ID
+        )
+
     def can_reuse_stage(self, stage: str) -> bool:
         """Return whether an outline stage can be skipped before execution."""
 
         stage_capability = {
             "analyze_scores": SCORE_SEMANTIC_CAPABILITY_ID,
             "plan_response": _PROJECT_CAPABILITY_ID,
-            "compile_chapter_blueprint": OUTLINE_SKILL_ID,
+            "compile_chapter_blueprint": self._chapter_blueprint_capability(),
         }.get(stage)
         if stage_capability in self._regenerate_capabilities:
             return False
@@ -898,20 +943,76 @@ class V3StageRunner:
                 temperature=temperature,
             )
         if stage == "compile_chapter_blueprint":
+            if str(
+                getattr(self, "_outline_review_feedback", "") or ""
+            ).strip():
+                return False
             if not self._active_artifact_dependencies_are_current(
                 "ChapterBlueprint"
             ):
                 return False
             template_structure = self._template_structure()
+            blueprint_capability = self._chapter_blueprint_capability()
             optional_dependencies = (
-                ("TemplateStructureContract",)
-                if template_structure is not None
-                else ()
+                (
+                    "ProjectModel",
+                    "LegacyBidIndex",
+                    *(
+                        ("TemplateStructureContract",)
+                        if template_structure is not None
+                        else ()
+                    ),
+                )
+                if blueprint_capability == REWRITE_OUTLINE_SKILL_ID
+                else (
+                    ("TemplateStructureContract",)
+                    if template_structure is not None
+                    else ()
+                )
             )
             registration = get_planning_skill(
-                OUTLINE_SKILL_ID,
+                blueprint_capability,
                 caller_role="planning_agent",
             )
+            if blueprint_capability == REWRITE_OUTLINE_SKILL_ID:
+                if self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST:
+                    prompt_version = (
+                        f"{REWRITE_OUTLINE_SKILL_ID}.deterministic_test.v1"
+                    )
+                    prompt_hash = canonical_hash(
+                        {
+                            "mode": "deterministic_test",
+                            "version": prompt_version,
+                        }
+                    )
+                    provider_fingerprint = (
+                        self._deterministic_provider_fingerprint(
+                            REWRITE_OUTLINE_SKILL_ID
+                        )
+                    )
+                    model_fingerprint = (
+                        f"deterministic_test:{REWRITE_OUTLINE_SKILL_ID}:v1"
+                    )
+                    temperature = 0.0
+                else:
+                    provider = self._rewrite_merge_provider()
+                    prompt_version = provider.prompt_version
+                    prompt_hash = provider.prompt_hash
+                    provider_fingerprint = provider.provider_fingerprint
+                    model_fingerprint = provider.model_fingerprint
+                    temperature = provider.temperature
+                return self._active_inference_artifact_is_current(
+                    "ChapterBlueprint",
+                    capability_id=blueprint_capability,
+                    capability_version=registration.version,
+                    prompt_version=prompt_version,
+                    prompt_hash=prompt_hash,
+                    output_schema_version=registration.schema_version,
+                    provider_fingerprint=provider_fingerprint,
+                    model_fingerprint=model_fingerprint,
+                    temperature=temperature,
+                    optional_kinds=optional_dependencies,
+                )
             if self._uses_deterministic_outline:
                 prompt_version = (
                     f"{OUTLINE_SKILL_ID}.deterministic_test.v1"
@@ -1345,7 +1446,14 @@ class V3StageRunner:
             artifact_kind,
             InferenceRuntimeMetadata(
                 runtime_mode=self.inference_mode,
-                capability_id=capability_id or _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind],
+                capability_id=(
+                    capability_id
+                    or (
+                        self._chapter_blueprint_capability()
+                        if artifact_kind == "ChapterBlueprint"
+                        else _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind]
+                    )
+                ),
                 capability_version=capability_version,
                 prompt_version=prompt_version,
                 prompt_hash=prompt_hash,
@@ -1382,7 +1490,14 @@ class V3StageRunner:
             and str(receipt.get("receipt_hash") or "")
             == str(ref.get("receipt_hash") or "")
             and str(receipt.get("capability_id") or "")
-            == (capability_id or _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind])
+            == (
+                capability_id
+                or (
+                    self._chapter_blueprint_capability()
+                    if artifact_kind == "ChapterBlueprint"
+                    else _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind]
+                )
+            )
             and str(receipt.get("capability_version") or "")
             == capability_version
             and str(receipt.get("prompt_version") or "") == prompt_version
@@ -1408,6 +1523,20 @@ class V3StageRunner:
                 f"缺少已晋级推理 Artifact: {artifact_kind}",
                 status_code=409,
             )
+        if (
+            artifact_kind == "ChapterBlueprint"
+            and self._chapter_blueprint_capability()
+            == REWRITE_OUTLINE_SKILL_ID
+            and str(
+                (active.get("payload") or {}).get("planning_model") or ""
+            )
+            != "rewrite_merge"
+        ):
+            raise ControlPlaneError(
+                "REWRITE_OUTLINE_REGENERATE_REQUIRED",
+                "旧版改写目录缺少目录融合决策，请重新生成目录。",
+                status_code=409,
+            )
         proposal = store.v3_proposal(str(active.get("proposal_id") or ""))
         refs = (proposal or {}).get("inference_receipt_refs") or []
         if len(refs) != 1:
@@ -1418,7 +1547,11 @@ class V3StageRunner:
             )
         ref = refs[0]
         receipt = store.v3_inference_receipt(str(ref.get("receipt_id") or ""))
-        expected_capability = _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind]
+        expected_capability = (
+            self._chapter_blueprint_capability()
+            if artifact_kind == "ChapterBlueprint"
+            else _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind]
+        )
         if (
             receipt is None
             or str(receipt.get("receipt_hash") or "")
@@ -2332,6 +2465,7 @@ class V3StageRunner:
             scores,
             revision=base_revision + 1,
             template_structure=template_structure,
+            review_feedback=outline_request.review_feedback,
         )
         fallback_audit = audit_chapter_blueprint(
             blueprint,
@@ -3481,6 +3615,7 @@ class V3StageRunner:
                     scores,
                     revision=base_revision + 1,
                     template_structure=template_structure,
+                    review_feedback=outline_feedback,
                 )
                 outline_result = self._deterministic_result(
                     capability_id=OUTLINE_SKILL_ID,
@@ -3593,6 +3728,7 @@ class V3StageRunner:
                         scores,
                         revision=base_revision + 1,
                         template_structure=template_structure,
+                        review_feedback=outline_feedback,
                     )
                     batch_summary = getattr(
                         outline_provider,

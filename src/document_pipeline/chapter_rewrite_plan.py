@@ -10,7 +10,10 @@ from typing import Any
 from control_plane import ControlPlaneError, ControlStore, WorkspaceContext
 
 from .canonicalization import canonical_hash
-from .chapter_rewrite_match import ChapterRewriteMatchService
+from .chapter_rewrite_match import (
+    ChapterRewriteMatchService,
+    project_rewrite_coverage,
+)
 from .chapter_workspace import ChapterWorkspaceService
 from .global_project_context import GlobalProjectContextService
 from .input_manifest import V3_ROOT
@@ -100,6 +103,10 @@ class ChapterRewritePlanService:
                 str((match.get("recommendation") or {}).get("reason") or ""),
                 *(str(item) for item in (match.get("recommendation") or {}).get("required_changes") or []),
             ])),
+            "required_changes": list(
+                (match.get("recommendation") or {}).get("required_changes")
+                or []
+            ),
             "selected_legacy_blocks": selected,
             "new_content_items": [
                 {
@@ -434,7 +441,51 @@ class ChapterRewritePlanService:
                     details={"block_id": block_id},
                 )
             ranked.append({**source, "section_id": sections_by_block[block_id]})
-        plan["coverage"] = ChapterRewriteMatchService._coverage(plan.get("writing_plan") or {}, ranked)
+        strategy = self._strategy(plan.get("strategy"))
+        if strategy == "new_write":
+            plan["selected_legacy_blocks"] = []
+            ranked = []
+        plan["coverage"] = project_rewrite_coverage(
+            plan.get("writing_plan") or {},
+            strategy,
+            ranked,
+            list(plan.get("required_changes") or []),
+        )
+        if strategy == "new_write":
+            existing = {
+                str(item.get("writing_block_id") or ""): item
+                for item in plan.get("new_content_items") or []
+                if isinstance(item, dict)
+            }
+            plan["new_content_items"] = [
+                {
+                    "item_id": str(
+                        (existing.get(str(block.get("block_id") or "")) or {}).get(
+                            "item_id"
+                        )
+                        or f"new:{block.get('block_id')}"
+                    ),
+                    "writing_block_id": str(block.get("block_id") or ""),
+                    "instruction": str(
+                        (existing.get(str(block.get("block_id") or "")) or {}).get(
+                            "instruction"
+                        )
+                        or block.get("must_answer")
+                        or block.get("heading")
+                        or ""
+                    ),
+                    "evidence_ids": list(
+                        (existing.get(str(block.get("block_id") or "")) or {}).get(
+                            "evidence_ids"
+                        )
+                        or []
+                    ),
+                }
+                for block in (plan.get("writing_plan") or {}).get("blocks") or []
+                if isinstance(block, dict)
+            ]
+        else:
+            plan["new_content_items"] = []
         plan["pollution_findings"] = self._scan_pollution(plan, blocks)
 
     def _scan_pollution(self, plan: dict[str, Any], blocks: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:

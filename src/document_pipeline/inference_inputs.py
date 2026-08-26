@@ -799,6 +799,7 @@ def reconstruct_inference_input_snapshot(
                     ProjectModel.model_validate(dependency_payloads["ProjectModel"]),
                     LegacyBidIndex.model_validate(dependency_payloads["LegacyBidIndex"]),
                     template,
+                    str(proposal_payload.get("review_feedback") or ""),
                 )
             else:
                 request = build_outline_decomposition_input(
@@ -806,6 +807,13 @@ def reconstruct_inference_input_snapshot(
                     scores,
                     template,
                 )
+                review_feedback = str(
+                    proposal_payload.get("review_feedback") or ""
+                ).strip()
+                if review_feedback:
+                    request = request.model_copy(
+                        update={"review_feedback": review_feedback}
+                    )
         else:
             raise ValueError(
                 f"{artifact_kind} 不属于受控推理 Artifact"

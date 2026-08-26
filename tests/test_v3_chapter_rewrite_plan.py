@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sys
 import tempfile
 import unittest
@@ -21,7 +20,7 @@ from document_pipeline.chapter_workspace import ChapterWorkspaceService  # noqa:
 from document_pipeline.contracts import InputRole  # noqa: E402
 from document_pipeline.execution_controller import V3ExecutionController  # noqa: E402
 from document_pipeline.global_project_context import GlobalProjectContextService  # noqa: E402
-from document_pipeline.input_manifest import InputManifestService, V3_ROOT  # noqa: E402
+from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.legacy_bid_source import LegacyBidSourceService  # noqa: E402
 
 
@@ -212,29 +211,11 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
                     {"op": "update_instruction", "block_id": selected["block_id"], "instruction": "删除旧项目信息后重组"},
                     {"op": "update_instruction", "instruction": "优先满足新招标要求"},
                     {"op": "set_strategy", "strategy": "restructure"},
-                    {"op": "add_new_content_item", "item_id": "new-manual", "instruction": "补写最新标准"},
                 ],
             )
             self.assertEqual(plan["strategy"], "restructure")
             self.assertEqual(plan["instruction"], "优先满足新招标要求")
-
-            batch_dir = context.root / V3_ROOT / "evidence" / "batches"
-            batch_dir.mkdir(parents=True, exist_ok=True)
-            (batch_dir / "EB-manual.json").write_text(
-                json.dumps({"status": "published", "items": [{"evidence_id": "E-manual"}]}),
-                encoding="utf-8",
-            )
-            plan = self.update(
-                service,
-                plan,
-                [{"op": "bind_evidence", "item_id": "new-manual", "evidence_id": "E-manual"}],
-            )
-            self.assertFalse(plan["stale"], "无关 EvidenceBatch 变化不应使方案 stale")
-            plan = self.update(
-                service,
-                plan,
-                [{"op": "unbind_evidence", "item_id": "new-manual", "evidence_id": "E-manual"}],
-            )
+            self.assertEqual(plan["new_content_items"], [])
 
             unresolved = [item for item in plan["pollution_findings"] if item["status"] != "resolved"]
             self.assertTrue(unresolved)
@@ -291,7 +272,6 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
                 actor={"type": "user", "id": "owner"},
             )
             self.assertEqual(plan["status"], "draft")
-            plan = self.update(service, plan, [{"op": "remove_new_content_item", "item_id": "new-manual"}])
             chapter = ChapterWorkspaceService(context).get_chapter(leaf)
             items = list((chapter.get("context") or {}).get("items") or [])
             items.append({"item_id": "user:rewrite-stale", "kind": "GOAL", "title": "新增要求", "body": "增加验收说明", "order": len(items), "source": "USER", "origin_ref": None})
@@ -314,14 +294,15 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
             plan = self.update(
                 service,
                 plan,
-                [{"op": "add_new_content_item", "item_id": "search-item", "instruction": "补写公开标准"}],
+                [{"op": "set_strategy", "strategy": "new_write"}],
             )
+            search_item_id = plan["new_content_items"][0]["item_id"]
             with self.assertRaises(ControlPlaneError) as forbidden:
                 service.search(
                     leaf,
                     expected_plan_revision=plan["plan_revision"],
                     expected_plan_hash=plan["plan_hash"],
-                    item_id="search-item",
+                    item_id=search_item_id,
                     query="搜索本公司人员业绩承诺",
                 )
             self.assertEqual(forbidden.exception.code, "CHAPTER_REWRITE_SEARCH_FORBIDDEN")
@@ -331,11 +312,11 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
                 leaf,
                 expected_plan_revision=plan["plan_revision"],
                 expected_plan_hash=plan["plan_hash"],
-                item_id="search-item",
+                item_id=search_item_id,
                 query="查询云平台数据迁移国家标准",
                 actor={"type": "user", "id": "owner"},
             )
-            item = next(value for value in success["new_content_items"] if value["item_id"] == "search-item")
+            item = next(value for value in success["new_content_items"] if value["item_id"] == search_item_id)
             self.assertIn("E-search-1", item["evidence_ids"])
             before_revision = success["plan_revision"]
             with self.assertRaises(ControlPlaneError) as failed:
@@ -343,7 +324,7 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
                     leaf,
                     expected_plan_revision=success["plan_revision"],
                     expected_plan_hash=success["plan_hash"],
-                    item_id="search-item",
+                    item_id=search_item_id,
                     query="查询另一个公开技术标准",
                 )
             self.assertEqual(failed.exception.code, "CHAPTER_REWRITE_SEARCH_FAILED")

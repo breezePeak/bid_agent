@@ -10,20 +10,52 @@ from .canonicalization import canonical_hash
 from .chapter_semantics import project_chapter_semantic_requirements
 from .chapter_workspace import ChapterWorkspaceService
 from .chapter_writing_outline import compile_chapter_writing_plan
-from .legacy_bid_semantic import (
-    LegacyBidSemanticReranker,
-    semantic_similarity,
-    semantic_terms,
-)
-
-
 _COVERAGE_STATES = {
     "fully_covered",
     "partially_covered",
     "not_covered",
-    "conflicted",
 }
-_NEGATIVE_CUES = ("不得", "禁止", "不支持", "不可", "无需", "不提供")
+
+
+def project_rewrite_coverage(
+    writing_plan: dict[str, Any],
+    rewrite_mode: str,
+    legacy_sources: list[dict[str, Any]],
+    required_changes: list[str],
+) -> list[dict[str, Any]]:
+    if rewrite_mode not in {"copy", "light_edit", "restructure", "new_write"}:
+        raise ValueError(f"未知 rewrite_mode: {rewrite_mode}")
+    matched_block_ids = list(dict.fromkeys(
+        str(item.get("block_id") or "")
+        for item in legacy_sources
+        if isinstance(item, dict) and item.get("block_id")
+    ))
+    status = {
+        "copy": "fully_covered",
+        "light_edit": "partially_covered",
+        "restructure": "partially_covered",
+        "new_write": "not_covered",
+    }[rewrite_mode]
+    risk = (
+        "；".join(str(item) for item in required_changes if str(item).strip())
+        if rewrite_mode in {"light_edit", "restructure"}
+        else ("未引用旧文，需要按当前写作计划新写。" if rewrite_mode == "new_write" else "")
+    )
+    return [
+        {
+            "writing_block_id": str(block.get("block_id") or ""),
+            "heading": str(block.get("heading") or ""),
+            "must_answer": str(block.get("must_answer") or ""),
+            "status": status,
+            "best_score": 1.0 if rewrite_mode == "copy" else 0.0,
+            "matched_block_ids": (
+                [] if rewrite_mode == "new_write" else matched_block_ids
+            ),
+            "risk": risk,
+        }
+        for block in writing_plan.get("blocks") or []
+        if isinstance(block, dict)
+    ]
 
 
 class ChapterRewriteMatchService:
@@ -32,12 +64,9 @@ class ChapterRewriteMatchService:
     def __init__(
         self,
         context: WorkspaceContext,
-        *,
-        reranker: LegacyBidSemanticReranker | None = None,
     ) -> None:
         self.context = context
         self.store = ControlStore(context)
-        self.reranker = reranker or LegacyBidSemanticReranker()
 
     def generate(self, chapter_id: str) -> dict[str, Any]:
         self._require_rewrite_mode()
@@ -84,7 +113,12 @@ class ChapterRewriteMatchService:
                 "semantic_score": 1.0,
             })
         self._validate_refs(selected, legacy)
-        coverage = self._coverage(writing_plan, selected)
+        coverage = project_rewrite_coverage(
+            writing_plan,
+            rewrite_mode,
+            selected,
+            list(node.get("required_changes") or []),
+        )
         matches = self._matches(selected, coverage, legacy)
         strategy = {
             "strategy": rewrite_mode,
@@ -132,7 +166,6 @@ class ChapterRewriteMatchService:
             "result_hash": str(stored.get("result_hash") or ""),
             "created_at": str(stored.get("created_at") or ""),
         }
-
     def latest(self, chapter_id: str) -> dict[str, Any]:
         self._require_rewrite_mode()
         row = self.store.chapter_rewrite_match_revision(chapter_id)
@@ -274,68 +307,6 @@ class ChapterRewriteMatchService:
         }
 
     @staticmethod
-    def _recall(target: dict[str, Any], legacy: dict[str, Any]) -> list[dict[str, Any]]:
-        blocks = [item for item in legacy.get("blocks") or [] if isinstance(item, dict)]
-        blocks_by_id = {str(item.get("block_id") or ""): item for item in blocks}
-        scored_sections: list[tuple[float, dict[str, Any]]] = []
-        for section in legacy.get("sections") or []:
-            if not isinstance(section, dict):
-                continue
-            ids = [section.get("heading_block_id"), *(section.get("content_block_ids") or [])]
-            text = "\n".join(
-                str((blocks_by_id.get(str(block_id)) or {}).get("content") or "")
-                for block_id in ids
-            )
-            title_score = semantic_similarity(target["title"], section.get("title"))
-            semantic_score = semantic_similarity(target["query"], text)
-            level_bonus = 0.03 / max(1, int(section.get("level") or 1))
-            scored_sections.append(
-                (max(title_score * 1.15, semantic_score) + level_bonus, section)
-            )
-        scored_sections.sort(
-            key=lambda item: (-item[0], int(item[1].get("order") or 0))
-        )
-        recalled_ids = {
-            str(block_id)
-            for score, section in scored_sections[:8]
-            if score > 0.03
-            for block_id in [
-                section.get("heading_block_id"),
-                *(section.get("content_block_ids") or []),
-            ]
-            if block_id
-        }
-        section_by_block: dict[str, dict[str, Any]] = {}
-        for section in legacy.get("sections") or []:
-            if not isinstance(section, dict):
-                continue
-            for block_id in [
-                section.get("heading_block_id"),
-                *(section.get("content_block_ids") or []),
-            ]:
-                if block_id:
-                    section_by_block[str(block_id)] = section
-        return [
-            {
-                **block,
-                "section_id": str(
-                    (section_by_block.get(str(block.get("block_id") or "")) or {}).get(
-                        "section_id"
-                    )
-                    or ""
-                ),
-                "section_title": str(
-                    (section_by_block.get(str(block.get("block_id") or "")) or {}).get(
-                        "title"
-                    )
-                    or ""
-                ),
-            }
-            for block in blocks
-            if str(block.get("block_id") or "") in recalled_ids
-        ]
-
-    @staticmethod
     def _validate_refs(ranked: list[dict[str, Any]], legacy: dict[str, Any]) -> None:
         block_ids = {
             str(item.get("block_id") or "")
@@ -371,58 +342,6 @@ class ChapterRewriteMatchService:
                     "匹配结果引用了未知旧章节、段落或内容哈希。",
                     status_code=409,
                 )
-
-    @staticmethod
-    def _coverage(
-        writing_plan: dict[str, Any], ranked: list[dict[str, Any]]
-    ) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        for block in writing_plan.get("blocks") or []:
-            if not isinstance(block, dict):
-                continue
-            query = f"{block.get('heading') or ''} {block.get('must_answer') or ''}"
-            best = max(
-                ranked,
-                key=lambda item: semantic_similarity(query, item.get("content")),
-                default=None,
-            )
-            score = semantic_similarity(query, (best or {}).get("content"))
-            conflicted = bool(best and _text_conflicts(query, str(best.get("content") or "")))
-            if conflicted:
-                status = "conflicted"
-            elif score >= 0.66:
-                status = "fully_covered"
-            elif score >= 0.20:
-                status = "partially_covered"
-            else:
-                status = "not_covered"
-            rows.append(
-                {
-                    "writing_block_id": str(block.get("block_id") or ""),
-                    "heading": str(block.get("heading") or ""),
-                    "must_answer": str(block.get("must_answer") or ""),
-                    "status": status,
-                    "best_score": round(score, 6),
-                    "matched_block_ids": (
-                        [str(best.get("block_id") or "")] if best and score >= 0.20 else []
-                    ),
-                    "risk": (
-                        "旧文表述与新要求存在方向冲突，禁止直接复用。"
-                        if conflicted
-                        else (
-                            "旧文仅覆盖部分要求，需要补写。"
-                            if status == "partially_covered"
-                            else (
-                                "未找到可复用旧文，需要新写。"
-                                if status == "not_covered"
-                                else ""
-                            )
-                        )
-                    ),
-                }
-            )
-        assert all(item["status"] in _COVERAGE_STATES for item in rows)
-        return rows
 
     @staticmethod
     def _matches(
@@ -482,32 +401,3 @@ class ChapterRewriteMatchService:
             "covered_count": counts["fully_covered"] + counts["partially_covered"],
             "missing_count": counts["not_covered"],
         }
-
-
-def recommend_rewrite_strategy(
-    coverage: list[dict[str, Any]], matches: list[dict[str, Any]]
-) -> dict[str, Any]:
-    statuses = [str(item.get("status") or "not_covered") for item in coverage]
-    if not matches or not statuses or all(item == "not_covered" for item in statuses):
-        strategy = "new_write"
-        reason = "没有找到能够覆盖新写作块的旧文。"
-    elif "conflicted" in statuses:
-        strategy = "restructure"
-        reason = "旧文与新要求存在冲突，必须重组结构并重新表述。"
-    elif all(item == "fully_covered" for item in statuses):
-        strategy = "copy"
-        reason = "旧文完整覆盖全部写作块，可作为原文级复用候选。"
-    elif all(item in {"fully_covered", "partially_covered"} for item in statuses):
-        strategy = "light_edit"
-        reason = "旧文覆盖主体要求，但仍需按新招标补充或轻量调整。"
-    else:
-        strategy = "restructure"
-        reason = "仅部分写作块存在旧文，需要重组并新增缺失内容。"
-    return {"strategy": strategy, "reason": reason, "suggestion_only": True}
-
-
-def _text_conflicts(new_text: str, old_text: str) -> bool:
-    new_negative = any(cue in new_text for cue in _NEGATIVE_CUES)
-    old_negative = any(cue in old_text for cue in _NEGATIVE_CUES)
-    overlap = semantic_terms(new_text) & semantic_terms(old_text)
-    return bool(overlap and new_negative != old_negative)

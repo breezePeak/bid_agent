@@ -1077,6 +1077,16 @@ class BlueprintNode(BaseModel):
         for field_name, values in binding_groups.items():
             if len(values) != len(set(values)):
                 raise ValueError(f"BlueprintNode 不允许重复 {field_name}")
+        if len(self.legacy_section_ids) != len(set(self.legacy_section_ids)):
+            raise ValueError("BlueprintNode 不允许重复 legacy_section_ids")
+        source_keys = [
+            (item.section_id, item.block_id, item.content_hash)
+            for item in self.legacy_sources
+        ]
+        if len(source_keys) != len(set(source_keys)):
+            raise ValueError("BlueprintNode 不允许重复 legacy_sources")
+        if unknown := {item.section_id for item in self.legacy_sources} - set(self.legacy_section_ids):
+            raise ValueError(f"legacy_sources 引用了未声明的 legacy_section_ids: {sorted(unknown)}")
         overlap = set(self.primary_response_unit_ids) & set(
             self.supporting_response_unit_ids
         )
@@ -1154,6 +1164,7 @@ class ChapterBlueprint(ContractModel):
     document_quality_gates: list[DocumentQualityGate] = Field(default_factory=list)
     coverage_summary: dict[str, Any] = Field(default_factory=dict)
     review_status: Literal["draft", "confirmed", "blocked"] = "draft"
+    review_feedback: str = ""
 
     @model_validator(mode="after")
     def primary_duties_are_complete(self) -> "ChapterBlueprint":

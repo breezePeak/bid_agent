@@ -1158,6 +1158,7 @@ class PlanningAgent:
         revision: int,
         template_structure: TemplateStructureContract | None = None,
         planning_model: Literal["score_direct", "rewrite_merge"] = "score_direct",
+        review_feedback: str = "",
     ) -> ChapterBlueprint:
         """Compile a direct ScoreModel outline using stable catalog IDs only."""
 
@@ -1877,6 +1878,7 @@ class PlanningAgent:
                 else "auto_outline"
             ),
             planning_model=planning_model,
+            review_feedback=str(review_feedback or "").strip(),
             requirement_ledger_revision=ledger.revision,
             score_model_revision=scores.revision,
             template_structure_revision=(

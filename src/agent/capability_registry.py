@@ -38,6 +38,7 @@ class CapabilityRegistry:
                     "planning.project_understanding",
                     "planning.topic_duty_plan",
                     "planning.chapter_outline_split",
+                    "planning.rewrite_outline_merge",
                 }
             ),
         ),

@@ -53,6 +53,7 @@ def test_draft_stream_delegates_to_the_single_chapter_writing_service() -> None:
     with (
         mock.patch.object(v3_app, "_principal", return_value={"id": "tester", "type": "user"}),
         mock.patch.object(v3_app, "_context", return_value=object()),
+        mock.patch.object(v3_app, "ControlStore") as store_class,
         mock.patch(
             "document_pipeline.chapter_workspace.ChapterWorkspaceService",
             return_value=workspace_service,
@@ -62,6 +63,9 @@ def test_draft_stream_delegates_to_the_single_chapter_writing_service() -> None:
             return_value=writing_service,
         ),
     ):
+        store_class.return_value.workspace_profile.return_value = {
+            "project_mode": "full_write"
+        }
         response = asyncio.run(
             v3_app.stream_chapter_draft(
                 "alpha",
@@ -113,6 +117,7 @@ def test_draft_stream_preserves_research_failure_details() -> None:
     with (
         mock.patch.object(v3_app, "_principal", return_value={"id": "tester", "type": "user"}),
         mock.patch.object(v3_app, "_context", return_value=object()),
+        mock.patch.object(v3_app, "ControlStore") as store_class,
         mock.patch(
             "document_pipeline.chapter_workspace.ChapterWorkspaceService",
             return_value=workspace_service,
@@ -122,6 +127,9 @@ def test_draft_stream_preserves_research_failure_details() -> None:
             return_value=writing_service,
         ),
     ):
+        store_class.return_value.workspace_profile.return_value = {
+            "project_mode": "full_write"
+        }
         response = asyncio.run(
             v3_app.stream_chapter_draft(
                 "alpha",

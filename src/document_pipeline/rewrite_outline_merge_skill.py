@@ -79,11 +79,11 @@ class RewriteOutlineMergeInput(StrictPlanningModel):
     requirement_ledger: dict[str, Any]
     score_model: dict[str, Any]
     project_model: dict[str, Any]
-    legacy_bid_index: dict[str, Any]
     template_structure: dict[str, Any] | None = None
     document_mode: Literal["auto_outline", "template_strict"] = "auto_outline"
     initial_outline: list[InitialOutlineCard] = Field(min_length=1)
     legacy_sections: list[LegacySectionCard] = Field(min_length=1)
+    review_feedback: str = ""
 
 
 class RewriteLegacySource(StrictPlanningModel):
@@ -324,17 +324,18 @@ def build_rewrite_outline_merge_input(
     project_model: Any,
     legacy_index: LegacyBidIndex,
     template_structure: Any | None = None,
+    review_feedback: str = "",
 ) -> RewriteOutlineMergeInput:
     targets = _initial_cards(initial_outline, ledger, scores)
     return RewriteOutlineMergeInput(
         requirement_ledger=ledger.model_dump(mode="json"),
         score_model=scores.model_dump(mode="json"),
         project_model=project_model.model_dump(mode="json"),
-        legacy_bid_index=legacy_index.model_dump(mode="json"),
         template_structure=(template_structure.model_dump(mode="json") if template_structure else None),
         document_mode="template_strict" if template_structure else "auto_outline",
         initial_outline=targets,
         legacy_sections=_legacy_cards(legacy_index, targets),
+        review_feedback=str(review_feedback or "").strip(),
     )
 
 
@@ -350,6 +351,13 @@ def validate_rewrite_outline_merge(
     sections = {item.section_id: item for item in request.legacy_sections}
     parent_by_target = {item.node_id: item.parent_node_id for item in request.initial_outline}
     alignment_by_section = {item.legacy_section_id: item for item in candidate.alignments}
+    same_scope_targets = [
+        str(item.target_node_id)
+        for item in candidate.alignments
+        if item.placement == "same_scope"
+    ]
+    if len(same_scope_targets) != len(set(same_scope_targets)):
+        raise ValueError("同一个 target_node_id 最多只能有一个 same_scope 对齐")
 
     def target_is_within(node_id: str, ancestor_id: str) -> bool:
         cursor: str | None = node_id
@@ -377,6 +385,12 @@ def validate_rewrite_outline_merge(
             if unknown := set(values) - set(allowed):
                 raise ValueError(f"{section.section_id} 引用了目标分支外的 {label}: {sorted(unknown)}")
         allowed_sources = {item.block_id: item.content_hash for item in section.blocks}
+        source_keys = [
+            (source.section_id, source.block_id, source.content_hash)
+            for source in alignment.legacy_sources
+        ]
+        if len(source_keys) != len(set(source_keys)):
+            raise ValueError(f"{section.section_id} 不允许重复 legacy_sources")
         for source in alignment.legacy_sources:
             if source.section_id != section.section_id or allowed_sources.get(source.block_id) != source.content_hash:
                 raise ValueError(f"{section.section_id} 引用了未知或过期的旧正文来源")
@@ -408,26 +422,17 @@ def apply_rewrite_outline_merge(
 
     def merge_metadata(node: ChapterOutlineNodeCandidate, alignment: RewriteOutlineAlignment) -> ChapterOutlineNodeCandidate:
         sources = [item.model_dump(mode="json") for item in alignment.legacy_sources]
-        modes = [node.rewrite_mode, alignment.rewrite_mode]
-        if sources or node.legacy_sources:
-            priority = {"copy": 1, "light_edit": 2, "restructure": 3}
-            mode = max((value for value in modes if value in priority), key=lambda value: priority[value], default="copy")
-        else:
-            mode = "new_write"
         return node.model_copy(update={
-            "rewrite_mode": mode,
-            "legacy_section_ids": list(dict.fromkeys([*node.legacy_section_ids, alignment.legacy_section_id])),
-            "legacy_sources": list({
-                (item["section_id"], item["block_id"], item["content_hash"]): item
-                for item in [*node.legacy_sources, *sources]
-            }.values()),
+            "rewrite_mode": alignment.rewrite_mode,
+            "legacy_section_ids": [alignment.legacy_section_id],
+            "legacy_sources": sources,
             "rewrite_basis": {
-                "response_unit_ids": list(dict.fromkeys([*(node.rewrite_basis.get("response_unit_ids", [])), *alignment.matched_response_unit_ids])),
-                "condition_ids": list(dict.fromkeys([*(node.rewrite_basis.get("condition_ids", [])), *alignment.matched_condition_ids])),
-                "requirement_ids": list(dict.fromkeys([*(node.rewrite_basis.get("requirement_ids", [])), *alignment.matched_requirement_ids])),
+                "response_unit_ids": alignment.matched_response_unit_ids,
+                "condition_ids": alignment.matched_condition_ids,
+                "requirement_ids": alignment.matched_requirement_ids,
             },
-            "rewrite_reason": "；".join(filter(None, [node.rewrite_reason, alignment.reason])),
-            "required_changes": list(dict.fromkeys([*node.required_changes, *alignment.required_changes])),
+            "rewrite_reason": alignment.reason,
+            "required_changes": alignment.required_changes,
         })
 
     for alignment in alignments:
