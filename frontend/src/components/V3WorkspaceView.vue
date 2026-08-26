@@ -1684,7 +1684,7 @@
 
         <div v-else class="planning-word-layout">
           <!-- 左侧：Word 风格目录导航窗格 -->
-          <aside class="planning-nav-pane" aria-label="目录导航窗格">
+          <aside class="planning-nav-pane" aria-label="目录导航窗格" :style="{ width: `${planningNavWidth}px` }">
             <div class="nav-pane-header">
               <div class="nav-search-bar">
                 <span class="nav-search-icon" aria-hidden="true">🔍</span>
@@ -1876,6 +1876,17 @@
               </button>
             </footer>
           </aside>
+
+          <!-- 中间：左右可拖拽调整宽度分割线 -->
+          <div
+            class="planning-resizer"
+            :class="{ 'is-active': isResizingNav }"
+            title="按住左右拖拽调整目录宽度"
+            @mousedown="startResizingNav"
+            @touchstart.passive="startResizingNav"
+          >
+            <div class="resizer-handle" aria-hidden="true"></div>
+          </div>
 
           <!-- 右侧：选中章节关联信息与编辑面板 -->
           <main class="planning-detail-pane" aria-label="章节关联信息与编辑">
@@ -2413,6 +2424,49 @@ const selectedScoreId = ref('')
 const selectedPipelineProductKind = ref('')
 const expandedChapterIds = ref(new Set())
 const selectedOutlineChapterId = ref('')
+const savedNavWidth = typeof window !== 'undefined' ? Number(localStorage.getItem('bid_agent_planning_nav_width')) : 320
+const planningNavWidth = ref(savedNavWidth >= 200 && savedNavWidth <= 800 ? savedNavWidth : 320)
+const isResizingNav = ref(false)
+let resizeStartX = 0
+let resizeStartWidth = 0
+
+function startResizingNav(e) {
+  isResizingNav.value = true
+  resizeStartX = e.clientX ?? (e.touches && e.touches[0] ? e.touches[0].clientX : 0) ?? 0
+  resizeStartWidth = planningNavWidth.value
+  window.addEventListener('mousemove', onResizingNav)
+  window.addEventListener('mouseup', stopResizingNav)
+  window.addEventListener('touchmove', onResizingNav)
+  window.addEventListener('touchend', stopResizingNav)
+  if (document?.body) {
+    document.body.style.userSelect = 'none'
+    document.body.style.cursor = 'col-resize'
+  }
+}
+
+function onResizingNav(e) {
+  if (!isResizingNav.value) return
+  const clientX = e.clientX ?? (e.touches && e.touches[0] ? e.touches[0].clientX : 0) ?? 0
+  const deltaX = clientX - resizeStartX
+  const newWidth = Math.max(200, Math.min(750, resizeStartWidth + deltaX))
+  planningNavWidth.value = newWidth
+}
+
+function stopResizingNav() {
+  if (!isResizingNav.value) return
+  isResizingNav.value = false
+  try {
+    localStorage.setItem('bid_agent_planning_nav_width', String(planningNavWidth.value))
+  } catch {}
+  window.removeEventListener('mousemove', onResizingNav)
+  window.removeEventListener('mouseup', stopResizingNav)
+  window.removeEventListener('touchmove', onResizingNav)
+  window.removeEventListener('touchend', stopResizingNav)
+  if (document?.body) {
+    document.body.style.userSelect = ''
+    document.body.style.cursor = ''
+  }
+}
 const outlineSearchQuery = ref('')
 const inlineEditingChapterId = ref('')
 const inlineEditingTitle = ref('')
@@ -5245,6 +5299,14 @@ onUnmounted(() => {
   if (runningTimer) window.clearInterval(runningTimer)
   if (assistantClockTimer) window.clearInterval(assistantClockTimer)
   window.removeEventListener('keydown', handleWorkspaceKeydown)
+  window.removeEventListener('mousemove', onResizingNav)
+  window.removeEventListener('mouseup', stopResizingNav)
+  window.removeEventListener('touchmove', onResizingNav)
+  window.removeEventListener('touchend', stopResizingNav)
+  if (document?.body) {
+    document.body.style.userSelect = ''
+    document.body.style.cursor = ''
+  }
 })
 </script>
 
@@ -6129,8 +6191,8 @@ onUnmounted(() => {
 }
 
 .workspace-tab-view.tab-planning {
-  width: min(65vw, 1320px);
-  max-width: 95vw;
+  width: 80vw;
+  max-width: 80vw;
   min-width: 0;
   margin-inline: auto;
   box-sizing: border-box;
@@ -7359,9 +7421,9 @@ onUnmounted(() => {
 .planning-word-layout {
   flex: 1;
   min-height: 0;
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 16px;
+  display: flex;
+  flex-direction: row;
+  gap: 0;
   margin-top: 14px;
   align-items: stretch;
   width: 100%;
@@ -7369,6 +7431,7 @@ onUnmounted(() => {
   box-sizing: border-box;
   overflow: hidden;
   padding-bottom: 16px;
+  position: relative;
 }
 
 /* 左侧：Word 风格目录导航窗格 */
@@ -7382,11 +7445,70 @@ onUnmounted(() => {
   border: 1px solid #dbe3ee;
   border-radius: 12px;
   overflow: hidden;
-  width: 240px;
-  min-width: 240px;
-  max-width: 240px;
+  min-width: 200px;
+  max-width: 750px;
   box-sizing: border-box;
   flex-shrink: 0;
+}
+
+/* 中间：左右可拖拽分割线 */
+.planning-resizer {
+  width: 16px;
+  margin: 0 -3px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: col-resize;
+  user-select: none;
+  flex-shrink: 0;
+  z-index: 10;
+  transition: background-color 0.15s ease;
+}
+
+.planning-resizer .resizer-handle {
+  width: 2px;
+  height: 48px;
+  border-radius: 2px;
+  background: #cbd5e1;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+}
+
+.planning-resizer .resizer-handle::before,
+.planning-resizer .resizer-handle::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 12px;
+  transform: translateY(-50%);
+  background: #cbd5e1;
+  border-radius: 2px;
+  opacity: 0;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.planning-resizer .resizer-handle::before {
+  left: -4px;
+}
+
+.planning-resizer .resizer-handle::after {
+  right: -4px;
+}
+
+.planning-resizer:hover .resizer-handle,
+.planning-resizer.is-active .resizer-handle {
+  height: 80px;
+  background: #3b82f6;
+  box-shadow: 0 0 8px rgba(59, 130, 246, 0.5);
+}
+
+.planning-resizer:hover .resizer-handle::before,
+.planning-resizer:hover .resizer-handle::after,
+.planning-resizer.is-active .resizer-handle::before,
+.planning-resizer.is-active .resizer-handle::after {
+  opacity: 1;
+  background: #3b82f6;
 }
 
 .nav-pane-header {
@@ -7693,6 +7815,7 @@ onUnmounted(() => {
   gap: 14px;
   overflow-y: auto;
   overflow-x: hidden;
+  padding-left: 10px;
   padding-right: 8px;
   padding-bottom: 24px;
   box-sizing: border-box;
@@ -9428,9 +9551,10 @@ onUnmounted(() => {
     padding: 44px 36px;
   }
   .zone-heading { min-height: 0; }
-  .planning-word-layout { grid-template-columns: 1fr; height: auto; min-height: 0; }
-  .planning-nav-pane { position: static; height: 380px; max-height: 380px; }
-  .planning-detail-pane { height: auto; max-height: none; overflow-y: visible; padding-bottom: 24px; }
+  .planning-word-layout { flex-direction: column; height: auto; min-height: 0; }
+  .planning-resizer { display: none; }
+  .planning-nav-pane { width: 100% !important; max-width: 100%; position: static; height: 380px; max-height: 380px; }
+  .planning-detail-pane { height: auto; max-height: none; overflow-y: visible; padding-left: 0; padding-bottom: 24px; }
   .detail-header-card { flex-direction: column; }
   .detail-form-grid { grid-template-columns: 1fr; }
   .planning-content { grid-template-columns: 1fr; }
