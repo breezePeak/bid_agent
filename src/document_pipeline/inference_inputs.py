@@ -781,11 +781,31 @@ def reconstruct_inference_input_snapshot(
                 if template_payload is not None
                 else None
             )
-            request = build_outline_decomposition_input(
-                ledger,
-                scores,
-                template,
-            )
+            if proposal_payload.get("planning_model") == "rewrite_merge":
+                from .chapter_outline_skill import build_chapter_outline
+                from .contracts import LegacyBidIndex
+                from .rewrite_outline_merge_skill import build_rewrite_outline_merge_input
+
+                initial = build_chapter_outline(
+                    ledger,
+                    scores,
+                    template,
+                    annotations=None,
+                )
+                request = build_rewrite_outline_merge_input(
+                    initial,
+                    ledger,
+                    scores,
+                    ProjectModel.model_validate(dependency_payloads["ProjectModel"]),
+                    LegacyBidIndex.model_validate(dependency_payloads["LegacyBidIndex"]),
+                    template,
+                )
+            else:
+                request = build_outline_decomposition_input(
+                    ledger,
+                    scores,
+                    template,
+                )
         else:
             raise ValueError(
                 f"{artifact_kind} 不属于受控推理 Artifact"

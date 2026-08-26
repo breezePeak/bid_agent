@@ -96,7 +96,10 @@ class ChapterRewritePlanService:
             "match_revision": int(match.get("match_revision") or 0),
             "match_hash": str(match.get("result_hash") or ""),
             "strategy": str((match.get("recommendation") or {}).get("strategy") or "new_write"),
-            "instruction": "",
+            "instruction": "；".join(filter(None, [
+                str((match.get("recommendation") or {}).get("reason") or ""),
+                *(str(item) for item in (match.get("recommendation") or {}).get("required_changes") or []),
+            ])),
             "selected_legacy_blocks": selected,
             "new_content_items": [
                 {

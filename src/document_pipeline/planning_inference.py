@@ -29,20 +29,25 @@ from .scoring_outline_policy import (
 PROJECT_PROMPT_FILE = "v3_planning_agent_project.md"
 TOPIC_PROMPT_FILE = "v3_planning_agent_topics.md"
 OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
+REWRITE_OUTLINE_PROMPT_FILE = "v3_rewrite_outline_merge.md"
 
 PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v2.0"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
 OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v5.0"
+REWRITE_OUTLINE_PROMPT_VERSION = "v3_rewrite_outline_merge_v1.0"
 
 PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
 OUTLINE_CAPABILITY_VERSION = "5.0.0"
+REWRITE_OUTLINE_CAPABILITY_VERSION = "1.0.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
 OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_candidate.v3"
+REWRITE_OUTLINE_SCHEMA_VERSION = "v3.rewrite_outline_merge_candidate.v1"
 
 OUTLINE_SKILL_ID = "planning.chapter_outline_split"
+REWRITE_OUTLINE_SKILL_ID = "planning.rewrite_outline_merge"
 DEFAULT_TEMPERATURE = 0.1
 MAX_REPAIR_ATTEMPTS = 1
 OUTLINE_BATCH_MAX_ITEMS = 8
@@ -393,6 +398,13 @@ class ChapterOutlineNodeCandidate(StrictPlanningModel):
     template_slot_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
     needs_human: bool = False
+    structure_origin: Literal["tender_initial", "legacy_enriched"] = "tender_initial"
+    rewrite_mode: Literal["copy", "light_edit", "restructure", "new_write"] | None = None
+    legacy_section_ids: list[str] = Field(default_factory=list)
+    legacy_sources: list[dict[str, str]] = Field(default_factory=list)
+    rewrite_basis: dict[str, list[str]] = Field(default_factory=dict)
+    rewrite_reason: str = ""
+    required_changes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def direct_bindings_are_unique(self) -> "ChapterOutlineNodeCandidate":

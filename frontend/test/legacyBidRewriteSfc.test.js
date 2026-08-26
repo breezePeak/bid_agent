@@ -25,6 +25,9 @@ test('bid rewrite UI components parse and remain mode-gated', () => {
     assert.match(workspace, new RegExp(label))
   }
   assert.match(workspace, /const rawPipelineStages = computed/)
+  for (const label of ['直接复用', '修改复用', '重组复用', '重新编写', '旧目录细化', '来源旧章节']) {
+    assert.match(workspace, new RegExp(label))
+  }
 })
 
 test('workspace normalization defaults old workspaces and preserves legacy status', () => {

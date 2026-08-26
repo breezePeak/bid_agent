@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections import defaultdict
+from typing import Literal
 
 from control_plane import ControlStore, WorkspaceContext
 
@@ -1156,6 +1157,7 @@ class PlanningAgent:
         *,
         revision: int,
         template_structure: TemplateStructureContract | None = None,
+        planning_model: Literal["score_direct", "rewrite_merge"] = "score_direct",
     ) -> ChapterBlueprint:
         """Compile a direct ScoreModel outline using stable catalog IDs only."""
 
@@ -1795,6 +1797,17 @@ class PlanningAgent:
                         if template_node is not None
                         else None
                     ),
+                    structure_origin=node.structure_origin,
+                    rewrite_mode=node.rewrite_mode,
+                    legacy_section_ids=node.legacy_section_ids,
+                    legacy_sources=node.legacy_sources,
+                    rewrite_basis=node.rewrite_basis or {
+                        "response_unit_ids": [],
+                        "condition_ids": [],
+                        "requirement_ids": [],
+                    },
+                    rewrite_reason=node.rewrite_reason,
+                    required_changes=node.required_changes,
                 )
             )
 
@@ -1863,7 +1876,7 @@ class PlanningAgent:
                 if template_structure is not None
                 else "auto_outline"
             ),
-            planning_model="score_direct",
+            planning_model=planning_model,
             requirement_ledger_revision=ledger.revision,
             score_model_revision=scores.revision,
             template_structure_revision=(

@@ -893,11 +893,11 @@ def _audit_chapter_blueprint_direct(
     """G2 direct mode: exact ID, tree and coverage checks only."""
 
     findings: list[dict[str, str]] = []
-    if blueprint.planning_model != "score_direct":
+    if blueprint.planning_model not in {"score_direct", "rewrite_merge"}:
         findings.append(
             _finding(
                 "BLUEPRINT_PLANNING_MODEL_MISMATCH",
-                "RequirementLedger + ScoreModel G2 要求 planning_model=score_direct",
+                "RequirementLedger + ScoreModel G2 要求 score_direct 或 rewrite_merge 规划模型",
             )
         )
     if blueprint.requirement_ledger_revision != ledger.revision:

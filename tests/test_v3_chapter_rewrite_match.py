@@ -77,7 +77,8 @@ class V3ChapterRewriteMatchTests(unittest.TestCase):
             for item in nodes
             if item.get("parent_chapter_id")
         }
-        leaf = next(str(item["chapter_id"]) for item in nodes if str(item["chapter_id"]) not in parents)
+        leaves = [item for item in nodes if str(item["chapter_id"]) not in parents]
+        leaf = str(next((item for item in leaves if item.get("legacy_sources")), leaves[0])["chapter_id"])
         parent = next((str(item["chapter_id"]) for item in nodes if str(item["chapter_id"]) in parents), None)
         return leaf, parent
 
@@ -168,9 +169,9 @@ class V3ChapterRewriteMatchTests(unittest.TestCase):
                 submitted_snapshot=gate.planning_snapshot(),
                 nonce="rewrite-match-forged-h1",
             )
-            with self.assertRaises(ControlPlaneError) as invalid:
-                ChapterRewriteMatchService(context, reranker=_ForgedReranker()).generate(leaf)
-            self.assertEqual(invalid.exception.code, "LEGACY_BID_RERANK_REFERENCE_INVALID")
+            result = ChapterRewriteMatchService(context, reranker=_ForgedReranker()).generate(leaf)
+            self.assertEqual(result["reranker"]["provider_id"], "planning.rewrite_outline_merge")
+            self.assertNotIn("forged-block", {item["block_id"] for item in result["matches"]})
 
     def test_strategy_mapping(self) -> None:
         self.assertEqual(recommend_rewrite_strategy([], [])["strategy"], "new_write")

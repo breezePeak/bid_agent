@@ -25,6 +25,7 @@ from .chapter_blueprint import (
 from .contracts import (
     ChapterBlueprint,
     InputRole,
+    LegacyBidIndex,
     ProjectModel,
     RequirementLedger,
     ResponseTopicGraph,
@@ -39,6 +40,7 @@ from .contracts import (
 from .document_contract import DocumentContractCompiler
 from .document_planner import DocumentPlanner
 from .deterministic_outline import build_deterministic_outline_candidate
+from .chapter_outline_skill import build_chapter_outline
 from .inference_receipts import InferenceReceiptService
 from .inference_inputs import (
     build_outline_decomposition_input,
@@ -69,6 +71,7 @@ from .planning_inference import (
     LLMProjectUnderstandingProvider,
     LLMTopicDutyPlanningProvider,
     OUTLINE_SKILL_ID,
+    REWRITE_OUTLINE_SKILL_ID,
     OutlineDecompositionInput,
     OutlineDecompositionProvider,
     PlanningInferenceValidationError,
@@ -85,6 +88,13 @@ from .planning_inference import (
     merge_project_understanding_candidates,
 )
 from .planning_skill_registry import get_planning_skill
+from .rewrite_outline_merge_skill import (
+    LLMRewriteOutlineMergeProvider,
+    RewriteOutlineAlignment,
+    RewriteOutlineMergeCandidate,
+    apply_rewrite_outline_merge,
+    build_rewrite_outline_merge_input,
+)
 from .pipeline_policy import (
     configured_validation_failure_blocks,
     validation_policy_scope,
@@ -188,6 +198,7 @@ class V3StageRunner:
         project_understanding_provider: ProjectUnderstandingProvider | None = None,
         topic_duty_planning_provider: TopicDutyPlanningProvider | None = None,
         outline_decomposition_provider: OutlineDecompositionProvider | None = None,
+        rewrite_outline_merge_provider: Any | None = None,
         _deterministic_test_authority: object | None = None,
     ) -> None:
         self.context = context
@@ -214,6 +225,7 @@ class V3StageRunner:
         self._project_understanding_provider = project_understanding_provider
         self._topic_duty_planning_provider = topic_duty_planning_provider
         self._outline_decomposition_provider = outline_decomposition_provider
+        self._rewrite_outline_merge_provider = rewrite_outline_merge_provider
         self.validation_failure_blocks_pipeline = (
             configured_validation_failure_blocks()
         )
@@ -231,6 +243,7 @@ class V3StageRunner:
             _PROJECT_CAPABILITY_ID,
             _TOPIC_CAPABILITY_ID,
             OUTLINE_SKILL_ID,
+            REWRITE_OUTLINE_SKILL_ID,
         }
         unknown = sorted(requested - allowed)
         if unknown:
@@ -407,6 +420,7 @@ class V3StageRunner:
         project_understanding_provider: ProjectUnderstandingProvider | None = None,
         topic_duty_planning_provider: TopicDutyPlanningProvider | None = None,
         outline_decomposition_provider: OutlineDecompositionProvider | None = None,
+        rewrite_outline_merge_provider: Any | None = None,
     ) -> Self:
         """Construct the non-production deterministic harness explicitly."""
 
@@ -416,6 +430,7 @@ class V3StageRunner:
             project_understanding_provider=project_understanding_provider,
             topic_duty_planning_provider=topic_duty_planning_provider,
             outline_decomposition_provider=outline_decomposition_provider,
+            rewrite_outline_merge_provider=rewrite_outline_merge_provider,
             _deterministic_test_authority=_DETERMINISTIC_TEST_AUTHORITY,
         )
 
@@ -482,6 +497,239 @@ class V3StageRunner:
                 )
             )
         return self._outline_decomposition_provider
+
+    def _rewrite_merge_provider(self) -> Any:
+        if self._rewrite_outline_merge_provider is None:
+            self._rewrite_outline_merge_provider = LLMRewriteOutlineMergeProvider()
+        return self._rewrite_outline_merge_provider
+
+    def _compile_rewrite_blueprint_stage(
+        self,
+        *,
+        operation_id: str | None,
+        ledger: RequirementLedger,
+        scores: ScoreModel,
+        template_structure: TemplateStructureContract | None,
+        base_revision: int,
+    ) -> ChapterBlueprint:
+        from control_plane import ControlPlaneError
+        from .llm_telemetry import llm_stage_context
+
+        store = ControlStore(self.context)
+        project = load_promoted_project_model(self.context)
+        legacy_artifact = store.v3_active_artifact("LegacyBidIndex")
+        if legacy_artifact is None:
+            raise ControlPlaneError(
+                "REWRITE_LEGACY_BID_REQUIRED",
+                "标书改写目录融合需要已晋级的 LegacyBidIndex。",
+                status_code=409,
+            )
+        legacy_index = LegacyBidIndex.model_validate(legacy_artifact["payload"])
+        initial_outline = build_chapter_outline(
+            ledger,
+            scores,
+            template_structure,
+            annotations=None,
+        )
+        merge_request = build_rewrite_outline_merge_input(
+            initial_outline,
+            ledger,
+            scores,
+            project,
+            legacy_index,
+            template_structure,
+        )
+        registration = get_planning_skill(
+            REWRITE_OUTLINE_SKILL_ID,
+            caller_role="planning_agent",
+        )
+        optional_dependencies = tuple(
+            [
+                "ProjectModel",
+                "LegacyBidIndex",
+                *(["TemplateStructureContract"] if template_structure else []),
+            ]
+        )
+        checkpoint_service = InferenceCheckpointService(self.context)
+        checkpoint_hit = None
+        if (
+            self.inference_mode == _INFERENCE_MODE_DETERMINISTIC_TEST
+            and self._rewrite_outline_merge_provider is None
+        ):
+            target_by_id = {item.node_id: item for item in merge_request.initial_outline}
+            alignments = []
+            for section in merge_request.legacy_sections:
+                target = target_by_id[section.candidate_target_ids[0]]
+                response_ids = target.direct_response_unit_ids or target.subtree_response_unit_ids[:1]
+                condition_ids = target.direct_condition_ids or target.subtree_condition_ids[:1]
+                requirement_ids = target.direct_requirement_ids or target.subtree_requirement_ids[:1]
+                if not (response_ids or condition_ids or requirement_ids):
+                    alignments.append(RewriteOutlineAlignment(
+                        legacy_section_id=section.section_id,
+                        placement="ignore",
+                        confidence=1.0,
+                    ))
+                    continue
+                sources = [
+                    {
+                        "section_id": section.section_id,
+                        "block_id": block.block_id,
+                        "content_hash": block.content_hash,
+                    }
+                    for block in section.blocks
+                ]
+                alignments.append(RewriteOutlineAlignment(
+                    legacy_section_id=section.section_id,
+                    target_node_id=target.node_id,
+                    placement="same_scope",
+                    matched_response_unit_ids=response_ids,
+                    matched_condition_ids=condition_ids,
+                    matched_requirement_ids=requirement_ids,
+                    rewrite_mode="light_edit" if sources else "new_write",
+                    legacy_sources=sources,
+                    reason="deterministic_test 责任卡片召回",
+                    required_changes=["按新招标责任核对并更新"] if sources else [],
+                    confidence=1.0,
+                ))
+            merge_candidate = RewriteOutlineMergeCandidate(
+                alignments=alignments,
+                review_status="draft",
+            )
+            merge_result = self._deterministic_result(
+                capability_id=REWRITE_OUTLINE_SKILL_ID,
+                capability_version=registration.version,
+                schema_version=registration.schema_version,
+                candidate=merge_candidate,
+                input_value=merge_request,
+            )
+        else:
+            provider = self._rewrite_merge_provider()
+            if (
+                provider.skill_id != registration.skill_id
+                or provider.capability_version != registration.version
+                or provider.prompt_hash != registration.prompt_hash
+                or provider.schema_version != registration.schema_version
+            ):
+                raise ControlPlaneError(
+                    "V3_INTERNAL_SKILL_MISMATCH",
+                    "RewriteOutlineMergeProvider 未绑定固定版本、Prompt 和 Schema。",
+                    status_code=409,
+                )
+            current = self._active_inference_artifact_is_current(
+                "ChapterBlueprint",
+                capability_id=REWRITE_OUTLINE_SKILL_ID,
+                capability_version=registration.version,
+                prompt_version=provider.prompt_version,
+                prompt_hash=provider.prompt_hash,
+                output_schema_version=provider.schema_version,
+                provider_fingerprint=provider.provider_fingerprint,
+                model_fingerprint=provider.model_fingerprint,
+                temperature=provider.temperature,
+                optional_kinds=optional_dependencies,
+            )
+            if current:
+                return load_promoted_chapter_blueprint(self.context)
+            cache_key = self._checkpoint_key(
+                provider,
+                REWRITE_OUTLINE_SKILL_ID,
+                registration.version,
+                merge_request,
+            )
+            force = REWRITE_OUTLINE_SKILL_ID in self._regenerate_capabilities
+            if not force:
+                checkpoint_hit = checkpoint_service.load(
+                    cache_key=cache_key,
+                    candidate_model=RewriteOutlineMergeCandidate,
+                    expected_input_snapshot=merge_request,
+                )
+            try:
+                if checkpoint_hit is not None:
+                    merge_result = self._checkpoint_result(checkpoint_hit, structured=True)
+                    self._note_checkpoint_reuse("compile_chapter_blueprint", checkpoint_hit)
+                else:
+                    with llm_stage_context(
+                        self.context,
+                        operation_id,
+                        "compile_chapter_blueprint",
+                        capability_id=REWRITE_OUTLINE_SKILL_ID,
+                        prompt_version=provider.prompt_version,
+                        schema_version=provider.schema_version,
+                        model=provider.model_fingerprint,
+                        temperature=provider.temperature,
+                    ):
+                        merge_result = provider.merge(merge_request)
+                    self._validate_checkpoint_runtime(
+                        merge_result,
+                        provider,
+                        REWRITE_OUTLINE_SKILL_ID,
+                    )
+                    checkpoint_service.save(
+                        cache_key=cache_key,
+                        operation_id=str(operation_id or ""),
+                        result=merge_result,
+                        capability_version=registration.version,
+                        supersede_existing=force,
+                    )
+                    self._regenerate_capabilities.discard(REWRITE_OUTLINE_SKILL_ID)
+            except PlanningInferenceValidationError as exc:
+                raise ControlPlaneError(
+                    "REWRITE_OUTLINE_MERGE_INVALID",
+                    "旧目录融合结果未通过校验，已停止等待修复后重试。",
+                    status_code=409,
+                    details={"cause": self._outline_warning_detail(exc.__cause__ or exc)},
+                ) from exc
+
+        merged_outline = apply_rewrite_outline_merge(
+            initial_outline,
+            merge_result.candidate,
+            legacy_index,
+        )
+        blueprint = PlanningAgent(self.context).compile_outline_candidate(
+            merged_outline,
+            ledger,
+            scores,
+            revision=base_revision + 1,
+            template_structure=template_structure,
+            planning_model="rewrite_merge",
+        )
+        blueprint_audit = audit_chapter_blueprint(
+            blueprint,
+            ledger,
+            score_model=scores,
+            template_structure=template_structure,
+        )
+        if not bool(blueprint_audit.get("passed")):
+            raise ControlPlaneError(
+                "REWRITE_OUTLINE_BLUEPRINT_AUDIT_FAILED",
+                "融合后的章节目录未通过完整性校验："
+                f"{self._outline_warning_detail(blueprint_audit.get('findings'))}",
+                status_code=409,
+                details={"blueprint_audit": blueprint_audit},
+            )
+        proposal = self._proposal_from_inference(
+            artifact_kind="ChapterBlueprint",
+            producer_role="planning_agent",
+            payload=blueprint,
+            base_revision=base_revision,
+            operation_id=operation_id or f"rewrite-blueprint:{ledger.revision}:{scores.revision}",
+            result=merge_result,
+            input_snapshot=merge_request,
+            optional_dependency_kinds=optional_dependencies,
+            capability_version=registration.version,
+        )
+        self._validate_gate_promote(
+            proposal,
+            producer_role="planning_agent",
+            gate_id="G2_BLUEPRINT_INTEGRITY",
+        )
+        promoted = load_promoted_chapter_blueprint(self.context)
+        self._record_stage_output(
+            operation_id,
+            "compile_chapter_blueprint",
+            phase="completed",
+            products=[self._blueprint_product(promoted)],
+        )
+        return promoted
 
     def _record_stage_output(
         self,
@@ -1090,13 +1338,14 @@ class V3StageRunner:
         model_fingerprint: str,
         temperature: float,
         optional_kinds: tuple[str, ...] = (),
+        capability_id: str | None = None,
     ) -> bool:
         INFERENCE_RUNTIME_REGISTRY.publish(
             self.context,
             artifact_kind,
             InferenceRuntimeMetadata(
                 runtime_mode=self.inference_mode,
-                capability_id=_INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind],
+                capability_id=capability_id or _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind],
                 capability_version=capability_version,
                 prompt_version=prompt_version,
                 prompt_hash=prompt_hash,
@@ -1133,7 +1382,7 @@ class V3StageRunner:
             and str(receipt.get("receipt_hash") or "")
             == str(ref.get("receipt_hash") or "")
             and str(receipt.get("capability_id") or "")
-            == _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind]
+            == (capability_id or _INFERENCE_CAPABILITY_BY_ARTIFACT[artifact_kind])
             and str(receipt.get("capability_version") or "")
             == capability_version
             and str(receipt.get("prompt_version") or "") == prompt_version
@@ -3089,6 +3338,15 @@ class V3StageRunner:
             store = ControlStore(self.context)
             active = store.v3_active_artifact("ChapterBlueprint")
             base_revision = int(active["revision"]) if active is not None else 0
+
+            if store.workspace_profile().get("project_mode") == "bid_rewrite":
+                return self._compile_rewrite_blueprint_stage(
+                    operation_id=operation_id,
+                    ledger=ledger,
+                    scores=scores,
+                    template_structure=template_structure,
+                    base_revision=base_revision,
+                )
 
             outline_request = build_outline_decomposition_input(
                 ledger,

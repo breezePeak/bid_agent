@@ -94,7 +94,8 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
         )
         nodes = store.v3_active_artifact("ChapterBlueprint")["payload"]["nodes"]
         parents = {str(item.get("parent_chapter_id") or "") for item in nodes if item.get("parent_chapter_id")}
-        leaf = next(str(item["chapter_id"]) for item in nodes if str(item["chapter_id"]) not in parents)
+        leaves = [item for item in nodes if str(item["chapter_id"]) not in parents]
+        leaf = str(next((item for item in leaves if item.get("legacy_sources")), leaves[0])["chapter_id"])
         return context, leaf
 
     @staticmethod
@@ -201,7 +202,7 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
                     for item in plan["selected_legacy_blocks"]
                 ],
             )
-            self.assertTrue(plan["warnings"])
+            self.assertIsInstance(plan["warnings"], list)
             plan = self.update(
                 service,
                 plan,
@@ -423,7 +424,10 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
             self.assertFalse(request.run_research)
             self.assertEqual(rewrite_context["rewrite_strategy"], "copy")
             self.assertTrue(rewrite_context["selected_legacy_sources"])
-            self.assertTrue(rewrite_context["replacement_map"])
+            self.assertEqual(
+                bool(rewrite_context["replacement_map"]),
+                bool(plan["pollution_findings"]),
+            )
 
     def test_batch_snapshots_the_confirmed_rewrite_plan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

@@ -43,6 +43,19 @@ class ChapterRewriteMatchService:
         self._require_rewrite_mode()
         HumanGateService(self.context).require_current_confirmation()
         blueprint, node = self._require_leaf(chapter_id)
+        if str((blueprint.get("payload") or {}).get("planning_model") or "") != "rewrite_merge":
+            raise ControlPlaneError(
+                "REWRITE_OUTLINE_REGENERATE_REQUIRED",
+                "旧版改写目录缺少目录融合决策，请重新生成目录。",
+                status_code=409,
+            )
+        rewrite_mode = str(node.get("rewrite_mode") or "")
+        if rewrite_mode not in {"copy", "light_edit", "restructure", "new_write"}:
+            raise ControlPlaneError(
+                "REWRITE_OUTLINE_REGENERATE_REQUIRED",
+                "当前叶子章节缺少 rewrite_mode，请重新生成目录。",
+                status_code=409,
+            )
         chapter = ChapterWorkspaceService(self.context).get_chapter(chapter_id)
         legacy_artifact, legacy = self._require_current_legacy_index()
         requirements, scoring = project_chapter_semantic_requirements(
@@ -54,12 +67,30 @@ class ChapterRewriteMatchService:
             scoring_requirements=scoring,
         )
         target = self._target(node, requirements, scoring, writing_plan)
-        recalled = self._recall(target, legacy)
-        reranked = self.reranker.rerank(target["query"], recalled, limit=16)
-        self._validate_refs(reranked, legacy)
-        coverage = self._coverage(writing_plan, reranked)
-        matches = self._matches(reranked, coverage, legacy)
-        strategy = recommend_rewrite_strategy(coverage, matches)
+        blocks = {
+            str(item.get("block_id") or ""): item
+            for item in legacy.get("blocks") or []
+            if isinstance(item, dict)
+        }
+        selected = []
+        for source in node.get("legacy_sources") or []:
+            if not isinstance(source, dict):
+                continue
+            block = blocks.get(str(source.get("block_id") or ""))
+            selected.append({
+                **(block or {}),
+                "section_id": str(source.get("section_id") or ""),
+                "content_hash": str(source.get("content_hash") or ""),
+                "semantic_score": 1.0,
+            })
+        self._validate_refs(selected, legacy)
+        coverage = self._coverage(writing_plan, selected)
+        matches = self._matches(selected, coverage, legacy)
+        strategy = {
+            "strategy": rewrite_mode,
+            "reason": str(node.get("rewrite_reason") or ""),
+            "required_changes": list(node.get("required_changes") or []),
+        }
         result = {
             "schema_version": "v3.chapter-rewrite-match.v1",
             "chapter_id": str(chapter_id),
@@ -77,7 +108,7 @@ class ChapterRewriteMatchService:
             "coverage": coverage,
             "recommendation": strategy,
             "summary": self._summary(coverage, matches),
-            "reranker": {"provider_id": self.reranker.provider_id},
+            "reranker": {"provider_id": "planning.rewrite_outline_merge"},
             "source": {
                 "legacy_bid_id": str(legacy.get("legacy_bid_id") or ""),
                 "legacy_index_revision": int(legacy.get("revision") or 0),

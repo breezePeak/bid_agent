@@ -10,7 +10,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from control_plane import CommandEnvelope, CommandGateway, ControlStore, WorkspaceContext  # noqa: E402
+from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext  # noqa: E402
 from document_pipeline.artifact_promotion import HumanGateService  # noqa: E402
 from document_pipeline.contracts import InputRole  # noqa: E402
 from document_pipeline.execution_controller import V3ExecutionController  # noqa: E402
@@ -63,7 +63,7 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             self.assertEqual(receipt.status, "rejected")
             self.assertEqual(receipt.error["code"], "REWRITE_LEGACY_BID_REQUIRED")
 
-    def test_new_outline_is_zero_pollution_and_legacy_replacement_does_not_stale_it(self) -> None:
+    def test_new_outline_is_zero_pollution_and_legacy_replacement_stales_blueprint_h1(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             base = Path(temporary)
             context = self.context(base)
@@ -114,6 +114,15 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             )
             self.assertTrue(all(value not in serialized for value in forbidden))
 
+            store.grant_workspace_access("owner")
+            gate = HumanGateService(context)
+            confirmed = gate.confirm_planning(
+                principal_id="owner",
+                submitted_snapshot=gate.planning_snapshot(),
+                nonce="rewrite-h1-confirmation",
+            )
+            self.assertEqual(confirmed.verdict, "pass")
+
             replacement = base / "replacement-old-bid.md"
             replacement.write_text(
                 "# 另一份旧目录\nSECOND_LEGACY_ONLY_MARKER_66318",
@@ -121,7 +130,11 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             )
             legacy_service.register_local_file(replacement, replacement.name)
             after = V3WorkspaceSnapshotBuilder(context).build()
-            self.assertFalse(after["analysis"]["stale"])
+            self.assertTrue(after["analysis"]["stale"])
+            self.assertEqual(after["planning"]["status"], "outdated")
+            with self.assertRaises(ControlPlaneError) as stale_h1:
+                gate.require_current_confirmation()
+            self.assertEqual(stale_h1.exception.code, "PLANNING_CONFIRM_STALE")
             self.assertEqual(
                 core_before,
                 {
@@ -132,15 +145,6 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
                     for kind in CORE_ARTIFACT_KINDS
                 },
             )
-
-            store.grant_workspace_access("owner")
-            gate = HumanGateService(context)
-            confirmed = gate.confirm_planning(
-                principal_id="owner",
-                submitted_snapshot=gate.planning_snapshot(),
-                nonce="rewrite-h1-confirmation",
-            )
-            self.assertEqual(confirmed.verdict, "pass")
 
             updated_tender = base / "updated-tender.md"
             updated_tender.write_text(

@@ -12,6 +12,10 @@ from .planning_inference import (
     OUTLINE_PROMPT_VERSION,
     OUTLINE_SCHEMA_VERSION,
     OUTLINE_SKILL_ID,
+    REWRITE_OUTLINE_CAPABILITY_VERSION,
+    REWRITE_OUTLINE_PROMPT_FILE,
+    REWRITE_OUTLINE_SCHEMA_VERSION,
+    REWRITE_OUTLINE_SKILL_ID,
     planning_prompt_hash,
 )
 
@@ -47,8 +51,24 @@ CHAPTER_OUTLINE_SPLIT_SKILL = PlanningSkillRegistration(
     allows_database_writes=False,
 )
 
+REWRITE_OUTLINE_MERGE_SKILL = PlanningSkillRegistration(
+    skill_id=REWRITE_OUTLINE_SKILL_ID,
+    version=REWRITE_OUTLINE_CAPABILITY_VERSION,
+    prompt_file=REWRITE_OUTLINE_PROMPT_FILE,
+    prompt_hash=planning_prompt_hash(REWRITE_OUTLINE_PROMPT_FILE),
+    schema_version=REWRITE_OUTLINE_SCHEMA_VERSION,
+    allowed_roles=frozenset({"planning_agent"}),
+    execution_mode="structured_llm",
+    allows_dynamic_scripts=False,
+    allows_filesystem_access=False,
+    allows_database_writes=False,
+)
+
 PLANNING_SKILL_REGISTRY = MappingProxyType(
-    {CHAPTER_OUTLINE_SPLIT_SKILL.skill_id: CHAPTER_OUTLINE_SPLIT_SKILL}
+    {
+        CHAPTER_OUTLINE_SPLIT_SKILL.skill_id: CHAPTER_OUTLINE_SPLIT_SKILL,
+        REWRITE_OUTLINE_MERGE_SKILL.skill_id: REWRITE_OUTLINE_MERGE_SKILL,
+    }
 )
 
 

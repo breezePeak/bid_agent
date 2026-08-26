@@ -360,6 +360,11 @@ class ProposalValidator:
             "ResponseTopicGraph": "planning.topic_duty_plan",
             "ChapterBlueprint": "planning.chapter_outline_split",
         }.get(proposal.artifact_kind)
+        if (
+            proposal.artifact_kind == "ChapterBlueprint"
+            and proposal.payload.get("planning_model") == "rewrite_merge"
+        ):
+            required_capability = "planning.rewrite_outline_merge"
         if required_capability is None:
             if proposal.inference_receipt_refs:
                 findings.append(
@@ -383,6 +388,7 @@ class ProposalValidator:
         from .planning_inference import (
             OUTLINE_CAPABILITY_VERSION,
             PROJECT_CAPABILITY_VERSION,
+            REWRITE_OUTLINE_CAPABILITY_VERSION,
             TOPIC_CAPABILITY_VERSION,
         )
         from .proposals import InferenceReceipt
@@ -394,6 +400,8 @@ class ProposalValidator:
             "ResponseTopicGraph": TOPIC_CAPABILITY_VERSION,
             "ChapterBlueprint": OUTLINE_CAPABILITY_VERSION,
         }[proposal.artifact_kind]
+        if required_capability == "planning.rewrite_outline_merge":
+            required_capability_version = REWRITE_OUTLINE_CAPABILITY_VERSION
 
         ref = proposal.inference_receipt_refs[0]
         stored = self.store.v3_inference_receipt(ref.receipt_id)
@@ -752,7 +760,7 @@ class ProposalValidator:
                 score_model = ScoreModel.model_validate(
                     score_artifact["payload"]
                 )
-                if blueprint.planning_model == "score_direct":
+                if blueprint.planning_model in {"score_direct", "rewrite_merge"}:
                     if ledger_artifact is None:
                         raise ValueError(
                             "score_direct ChapterBlueprint 领域校验缺少已晋级 "
@@ -1047,6 +1055,16 @@ class HumanGateService:
         "ResponseTopicGraph",
         "ChapterBlueprint",
     )
+    _REWRITE_MERGE_PLANNING_DEPENDENCIES = (
+        "InputManifest",
+        "SourceIndex",
+        "RequirementLedger",
+        "ScoreModel",
+        "ProjectModel",
+        "LegacyBidSourceManifest",
+        "LegacyBidIndex",
+        "ChapterBlueprint",
+    )
 
     def __init__(self, context: WorkspaceContext) -> None:
         self.context = context
@@ -1086,9 +1104,13 @@ class HumanGateService:
                     status_code=409,
                 )
         dependency_kinds = (
-            self._SCORE_DIRECT_PLANNING_DEPENDENCIES
-            if planning_model == "score_direct"
-            else self._LEGACY_PLANNING_DEPENDENCIES
+            self._REWRITE_MERGE_PLANNING_DEPENDENCIES
+            if planning_model == "rewrite_merge"
+            else (
+                self._SCORE_DIRECT_PLANNING_DEPENDENCIES
+                if planning_model == "score_direct"
+                else self._LEGACY_PLANNING_DEPENDENCIES
+            )
         )
         dependencies: dict[str, dict[str, Any]] = {}
         for kind in dependency_kinds:
@@ -1138,14 +1160,16 @@ class HumanGateService:
         expected_runtime = self._current_inference_metadata(planning_model)
         trace: list[dict[str, Any]] = []
         artifact_kinds = (
-            ("ScoreModel", "ChapterBlueprint")
+            ("ScoreModel", "ProjectModel", "ChapterBlueprint")
+            if planning_model == "rewrite_merge"
+            else (("ScoreModel", "ChapterBlueprint")
             if planning_model == "score_direct"
             else (
                 "ScoreModel",
                 "ProjectModel",
                 "ResponseTopicGraph",
                 "ChapterBlueprint",
-            )
+            ))
         )
         for artifact_kind in artifact_kinds:
             artifact = self.store.v3_active_artifact(artifact_kind)
@@ -1245,14 +1269,16 @@ class HumanGateService:
             .lower()
         )
         required_kinds = (
-            {"ScoreModel", "ChapterBlueprint"}
+            {"ScoreModel", "ProjectModel", "ChapterBlueprint"}
+            if planning_model == "rewrite_merge"
+            else ({"ScoreModel", "ChapterBlueprint"}
             if planning_model == "score_direct"
             else {
                 "ScoreModel",
                 "ProjectModel",
                 "ResponseTopicGraph",
                 "ChapterBlueprint",
-            }
+            })
         )
         registered = INFERENCE_RUNTIME_REGISTRY.snapshot(self.context)
         if required_kinds.issubset(registered):
@@ -1279,7 +1305,13 @@ class HumanGateService:
                 "ScoreModel": LLMScoreSemanticProvider(),
                 "ChapterBlueprint": LLMOutlineDecompositionProvider(),
             }
-            if planning_model != "score_direct":
+            if planning_model == "rewrite_merge":
+                from .rewrite_outline_merge_skill import LLMRewriteOutlineMergeProvider
+                from .planning_inference import LLMProjectUnderstandingProvider
+
+                providers["ChapterBlueprint"] = LLMRewriteOutlineMergeProvider()
+                providers["ProjectModel"] = LLMProjectUnderstandingProvider()
+            if planning_model not in {"score_direct", "rewrite_merge"}:
                 from .planning_inference import (
                     LLMProjectUnderstandingProvider,
                     LLMTopicDutyPlanningProvider,
@@ -1423,14 +1455,14 @@ class HumanGateService:
                     "无法确认旧目录的规划模式，请重新生成目录",
                     status_code=409,
                 )
-        if planning_model == "score_direct":
+        if planning_model in {"score_direct", "rewrite_merge"}:
             nodes = [
                 item
                 for item in blueprint.get("nodes", [])
                 if isinstance(item, dict)
             ]
             return {
-                "planning_model": "score_direct",
+                "planning_model": planning_model,
                 "blocking_requirements": blocking_requirements,
                 "blocking_scores": blocking_scores,
                 "chapter_tree": nodes,

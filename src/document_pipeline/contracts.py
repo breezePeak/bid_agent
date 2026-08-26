@@ -1016,6 +1016,20 @@ class ResponseTopicGraph(ContractModel):
         return self
 
 
+class BlueprintLegacySource(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    section_id: str = Field(min_length=1)
+    block_id: str = Field(min_length=1)
+    content_hash: str = Field(min_length=1)
+
+
+class BlueprintRewriteBasis(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    response_unit_ids: list[str] = Field(default_factory=list)
+    condition_ids: list[str] = Field(default_factory=list)
+    requirement_ids: list[str] = Field(default_factory=list)
+
+
 class BlueprintNode(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     chapter_id: str = Field(min_length=1)
@@ -1043,6 +1057,13 @@ class BlueprintNode(BaseModel):
     template_numbering: str | None = None
     template_slot_ids: list[str] = Field(default_factory=list)
     template_target: str | None = None
+    structure_origin: Literal["tender_initial", "legacy_enriched"] = "tender_initial"
+    rewrite_mode: Literal["copy", "light_edit", "restructure", "new_write"] | None = None
+    legacy_section_ids: list[str] = Field(default_factory=list)
+    legacy_sources: list[BlueprintLegacySource] = Field(default_factory=list)
+    rewrite_basis: BlueprintRewriteBasis = Field(default_factory=BlueprintRewriteBasis)
+    rewrite_reason: str = ""
+    required_changes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def direct_bindings_are_unique(self) -> "BlueprintNode":
@@ -1123,7 +1144,7 @@ class DocumentQualityGate(BaseModel):
 class ChapterBlueprint(ContractModel):
     blueprint_id: str = Field(min_length=1)
     mode: DocumentMode
-    planning_model: Literal["topic_graph", "score_direct"] = "topic_graph"
+    planning_model: Literal["topic_graph", "score_direct", "rewrite_merge"] = "topic_graph"
     requirement_ledger_revision: int | None = Field(default=None, ge=1)
     score_model_revision: int | None = Field(default=None, ge=1)
     topic_graph_revision: int | None = Field(default=None, ge=1)
@@ -1140,7 +1161,7 @@ class ChapterBlueprint(ContractModel):
             raise ValueError(
                 "topic_graph 规划模型必须声明 topic_graph_revision"
             )
-        if self.planning_model == "score_direct" and (
+        if self.planning_model in {"score_direct", "rewrite_merge"} and (
             self.requirement_ledger_revision is None
             or self.score_model_revision is None
         ):
@@ -1192,6 +1213,25 @@ class ChapterBlueprint(ContractModel):
                 "response unit 不能同时绑定章节与全文质量门: "
                 f"{sorted(overlap)}"
             )
+        if self.planning_model == "rewrite_merge":
+            parent_ids = {
+                node.parent_chapter_id
+                for node in self.nodes
+                if node.parent_chapter_id is not None
+            }
+            for node in self.nodes:
+                is_leaf = node.chapter_id not in parent_ids
+                if is_leaf != (node.rewrite_mode is not None):
+                    raise ValueError("rewrite_merge 中父章节 rewrite_mode 必须为空，叶子章节必须声明唯一 rewrite_mode")
+                sources = node.legacy_sources
+                if node.rewrite_mode in {"copy", "light_edit", "restructure"} and not sources:
+                    raise ValueError(f"{node.rewrite_mode} 叶子章节必须声明 legacy_sources")
+                if node.rewrite_mode == "copy" and node.required_changes:
+                    raise ValueError("copy 叶子章节 required_changes 必须为空")
+                if node.rewrite_mode in {"light_edit", "restructure"} and not node.required_changes:
+                    raise ValueError(f"{node.rewrite_mode} 叶子章节必须声明 required_changes")
+                if node.rewrite_mode == "new_write" and sources:
+                    raise ValueError("new_write 叶子章节不得声明 legacy_sources")
         return self
 
 

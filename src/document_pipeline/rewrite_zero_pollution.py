@@ -10,7 +10,6 @@ CORE_ARTIFACT_KINDS = (
     "RequirementLedger",
     "ScoreModel",
     "ProjectModel",
-    "ChapterBlueprint",
 )
 
 

@@ -150,6 +150,7 @@ class ArtifactKindRegistry:
                     "ProjectModel",
                     "ResponseTopicGraph",
                     "TemplateStructureContract",
+                    "LegacyBidIndex",
                 ),
                 enabled=True,
                 promotable=True,

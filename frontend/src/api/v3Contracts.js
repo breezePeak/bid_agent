@@ -513,7 +513,7 @@ export function projectV3Planning(payload) {
     }
   }
 
-  if (String(blueprint.planning_model || 'topic_graph') === 'score_direct') {
+  if (['score_direct', 'rewrite_merge'].includes(String(blueprint.planning_model || 'topic_graph'))) {
     for (const node of nodes) {
       const chapterId = String(node?.chapter_id || '')
       if (!chapterId) continue
@@ -732,7 +732,7 @@ export function projectV3Planning(payload) {
     [...directScoreIdsByChapter.values()].flatMap(value => value),
   )
   const allResponseUnits = [...responseUnitsById.values()]
-  if (String(blueprint.planning_model || 'topic_graph') !== 'score_direct') {
+  if (!['score_direct', 'rewrite_merge'].includes(String(blueprint.planning_model || 'topic_graph'))) {
     for (const [unitId, scoreId] of responseUnitOwners.entries()) {
       if (explicitCoveredScoreIds.has(scoreId)) coveredResponseUnitIds.add(unitId)
     }

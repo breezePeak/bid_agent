@@ -809,6 +809,16 @@
                       <div class="node-content">
                         <strong class="node-title">{{ node.title }}</strong>
                         <small v-if="node.purpose">{{ node.purpose }}</small>
+                        <span v-if="projectMode === 'bid_rewrite' && node.rewrite_mode" class="rewrite-mode-pill">
+                          {{ rewriteModeLabel(node.rewrite_mode) }}
+                        </span>
+                        <span v-if="node.structure_origin === 'legacy_enriched'" class="legacy-origin-pill">旧目录细化</span>
+                        <details v-if="projectMode === 'bid_rewrite' && (node.legacy_section_ids?.length || node.rewrite_reason || node.required_changes?.length)" class="rewrite-outline-detail">
+                          <summary>改写依据</summary>
+                          <small v-if="node.legacy_section_ids?.length">来源旧章节：{{ node.legacy_section_ids.join('、') }}</small>
+                          <small v-if="node.rewrite_reason">{{ node.rewrite_reason }}</small>
+                          <small v-for="change in node.required_changes || []" :key="change">需修改：{{ change }}</small>
+                        </details>
                       </div>
                       <span v-if="node.score_point_ids?.length" class="node-coverage">
                         覆盖 {{ node.score_point_ids.length }} 项
@@ -2788,6 +2798,15 @@ function markdownTable(rows) {
 
 const uploading = computed(() => Boolean(uploadingRole.value))
 const projectMode = computed(() => snapshot.value.profile?.project_mode || 'full_write')
+const rewriteModeLabels = {
+  copy: '直接复用',
+  light_edit: '修改复用',
+  restructure: '重组复用',
+  new_write: '重新编写',
+}
+function rewriteModeLabel(value) {
+  return rewriteModeLabels[String(value || '')] || String(value || '')
+}
 const legacyBidSummary = computed(() => snapshot.value.legacy_bid || {})
 const workspaceName = computed(() => {
   const matched = props.runId.match(/^(.+?)_(\d{8}_\d{6})(?:_\d+)?$/)
@@ -4822,6 +4841,7 @@ function llmRequestPurpose(request) {
   ).trim()
   const initialPurpose = {
     'planning.chapter_outline_split': '根据已提取的招标要求和评分项，生成可用于编写投标文件的章节目录及评分覆盖关系。',
+    'planning.rewrite_outline_merge': '将旧投标书章节对齐到新招标目录，并确定每个叶子章节的复用方式。',
     'score.semantic_reconcile': '核对评分项、响应内容和证据之间的对应关系，补全可追溯的评分模型。',
     'planning.project_understanding': '归纳项目背景、建设目标、范围和关键约束，形成项目理解。',
     'planning.topic_duty_plan': '把招标要求拆分为编写主题、责任范围和所需材料。',
