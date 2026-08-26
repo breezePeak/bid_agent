@@ -814,7 +814,73 @@ def test_missing_model_condition_is_restored_from_score_model() -> None:
     ).split(_outline_request())
 
     assert calls == 1
-    assert result.candidate.nodes[1].score_condition_ids == ["SP-1-C01"]
+    condition_nodes = [
+        node
+        for node in result.candidate.nodes
+        if node.score_condition_ids == ["SP-1-C01"]
+    ]
+    assert len(condition_nodes) == 1
+    assert condition_nodes[0].parent_local_id == result.candidate.nodes[1].local_id
+    assert condition_nodes[0].supporting_response_unit_ids == ["SP-1-U01"]
+
+
+def test_full_score_business_objects_become_condition_leaves() -> None:
+    payload = _outline_request().model_dump(mode="json")
+    point = payload["score_model"]["points"][0]
+    point["title"] = "目标任务（4分）"
+    point["outline_path"] = ["目标任务（4分）"]
+    point["response_units"][0]["title"] = "目标任务（4分）"
+    point["response_units"][0]["outline_path"] = ["目标任务（4分）"]
+    conditions = [
+        ("C01", "项目任务背景描述清楚", "项目任务背景"),
+        ("C02", "工作必要性和可行性理由充分", "工作必要性和可行性"),
+        ("C03", "工作目标明确、可行", "工作目标"),
+        ("C04", "工作内容具体、翔实", "工作内容"),
+    ]
+    point["score_conditions"] = [
+        {
+            "condition_id": f"SP-1-{suffix}",
+            "text": text,
+            "normalized_condition": text,
+            "condition_role": "content",
+            "subject": expected_title,
+            "response_intent": text,
+        }
+        for suffix, text, expected_title in conditions
+    ] + [
+        {
+            "condition_id": "SP-1-C05",
+            "text": "方案完整、合理、可行",
+            "normalized_condition": "方案完整、合理、可行",
+            "condition_role": "quality",
+            "subject": "方案质量",
+            "response_intent": "保证方案完整、合理、可行",
+        }
+    ]
+    point["response_units"][0]["condition_ids"] = [
+        condition["condition_id"] for condition in point["score_conditions"]
+    ]
+    request = OutlineDecompositionInput.model_validate(payload)
+
+    def fake(messages: list[dict[str, str]], *, temperature: float) -> str:
+        return json.dumps(_outline_candidate(include_condition=False), ensure_ascii=False)
+
+    result = LLMOutlineDecompositionProvider(
+        chat_callable=fake,
+        model_fingerprint="fake-model:v1",
+    ).split(request)
+
+    factor = result.candidate.nodes[1]
+    children = [
+        node
+        for node in result.candidate.nodes
+        if node.parent_local_id == factor.local_id
+    ]
+    assert [node.title for node in children] == [
+        expected_title for _, _, expected_title in conditions
+    ]
+    assert factor.score_condition_ids == ["SP-1-C05"]
+    assert all(node.supporting_response_unit_ids == ["SP-1-U01"] for node in children)
 
 
 def test_model_added_nodes_and_orders_cannot_change_score_topology() -> None:
@@ -858,11 +924,13 @@ def test_model_added_nodes_and_orders_cannot_change_score_topology() -> None:
     ).split(_outline_request())
 
     expected = _outline_request().score_model
-    assert [node.title for node in result.candidate.nodes] == [
+    assert [node.title for node in result.candidate.nodes[:2]] == [
         expected["groups"][0]["title"],
         expected["points"][0]["response_units"][0]["title"],
     ]
-    assert [node.order for node in result.candidate.nodes] == [0, 1]
+    assert len(result.candidate.nodes) == 3
+    assert result.candidate.nodes[2].score_condition_ids == ["SP-1-C01"]
+    assert [node.order for node in result.candidate.nodes] == [0, 1, 2]
 
 
 def test_model_orders_are_replaced_by_deterministic_score_order() -> None:
@@ -887,7 +955,7 @@ def test_model_orders_are_replaced_by_deterministic_score_order() -> None:
         model_fingerprint="fake-model:v1",
     ).split(_outline_request())
 
-    assert [node.order for node in result.candidate.nodes] == [0, 1]
+    assert [node.order for node in result.candidate.nodes] == [0, 1, 2]
 
 
 def test_large_outline_is_batched_and_cached(tmp_path: Path) -> None:
@@ -908,7 +976,7 @@ def test_large_outline_is_batched_and_cached(tmp_path: Path) -> None:
 
     assert len(calls) == 2
     assert all(len(call[1]["content"]) <= 12_500 for call in calls)
-    assert len(first.candidate.nodes) == 10
+    assert len(first.candidate.nodes) == 19
     assert provider.last_batch_summary == {
         "outline_batch_count": 2,
         "outline_batch_generated_count": 2,
@@ -1006,13 +1074,21 @@ def test_batched_outline_reuses_shared_factor_parent_across_fragments() -> None:
     assert set(factor_nodes[0].primary_response_unit_ids) == {
         f"SP-{index:02d}-U01" for index in range(1, 10)
     }
-    assert set(factor_nodes[0].score_condition_ids) == {
+    assert factor_nodes[0].score_condition_ids == []
+    condition_nodes = [
+        node for node in result.candidate.nodes if node.score_condition_ids
+    ]
+    assert {
+        condition_id
+        for node in condition_nodes
+        for condition_id in node.score_condition_ids
+    } == {
         f"SP-{index:02d}-C01" for index in range(1, 10)
     }
-    assert len(result.candidate.nodes) == 2
+    assert len(result.candidate.nodes) == 11
 
 
-def test_outline_does_not_guess_structure_from_package_wording() -> None:
+def test_outline_excludes_applicability_scope_from_score_structure() -> None:
     payload = _large_outline_request().model_dump(mode="json")
     for index, point in enumerate(payload["score_model"]["points"]):
         path = (
@@ -1032,11 +1108,17 @@ def test_outline_does_not_guess_structure_from_package_wording() -> None:
         model_fingerprint="fake-model:v1",
     ).split(request)
 
-    assert [node.title for node in result.candidate.nodes[:4]] == [
+    skeleton = [
+        node.title
+        for node in result.candidate.nodes
+        if not node.supporting_response_unit_ids
+    ]
+    assert skeleton[:3] == [
         request.score_model["groups"][0]["title"],
-        *request.score_model["points"][0]["outline_path"][1:],
+        request.score_model["points"][0]["outline_path"][-1],
         request.score_model["points"][1]["outline_path"][0],
     ]
+    assert "包5到包9" not in skeleton
 
 
 def test_outline_keeps_controlled_input_snapshot() -> None:
@@ -1109,10 +1191,11 @@ def test_model_cannot_insert_applicability_scope_into_score_path() -> None:
         model_fingerprint="fake-model:v1",
     ).split(request)
 
-    assert [node.title for node in result.candidate.nodes] == [
+    assert [node.title for node in result.candidate.nodes[:2]] == [
         request.score_model["groups"][0]["title"],
         "技术路线（6分）",
     ]
+    assert result.candidate.nodes[2].score_condition_ids == ["SP-1-C01"]
 
 
 def test_outline_discards_redundant_model_task_level() -> None:
@@ -1171,7 +1254,7 @@ def test_outline_discards_redundant_model_task_level() -> None:
         model_fingerprint="fake-model:v1",
     ).split(request)
 
-    assert [node.title for node in result.candidate.nodes] == [
+    assert [node.title for node in result.candidate.nodes[:2]] == [
         request.score_model["groups"][0]["title"],
         request.score_model["points"][0]["outline_path"][0],
     ]
@@ -1221,7 +1304,7 @@ def test_truncated_outline_batch_is_split_and_split_checkpoint_is_reused(
     first = provider.split(request)
 
     assert [len(batch) for batch in calls] == [8, 4, 4, 1]
-    assert len(first.candidate.nodes) == 10
+    assert len(first.candidate.nodes) == 19
 
     calls.clear()
     second_provider = LLMOutlineDecompositionProvider(
@@ -1522,17 +1605,14 @@ def test_related_conditions_may_share_one_business_node() -> None:
     assert len(calls) == 1
     # 修复反馈中应包含节点共用修复指导
     # 最终结果应通过校验
-    assert [node.title for node in result.candidate.nodes] == [
-        "技术部分",
-        "组织结构及成员",
-        "技术方案",
-    ]
+    assert result.candidate.nodes[0].parent_local_id is None
+    assert len(result.candidate.nodes) == 6
     # SP-01 的两个条件最终分布在不同节点上
     cond_nodes: dict[str, list[str]] = {}
     for node in result.candidate.nodes:
         for cid in node.score_condition_ids:
             cond_nodes.setdefault(cid, []).append(node.local_id)
-    assert cond_nodes["SP-01-C01"] == cond_nodes["SP-01-C02"]
+    assert cond_nodes["SP-01-C01"] != cond_nodes["SP-01-C02"]
     _unused_failure_message = (
         "C01 和 C02 仍然共用了同一节点，修复未生效"
     )

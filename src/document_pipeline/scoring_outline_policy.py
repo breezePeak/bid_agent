@@ -317,6 +317,25 @@ def outline_structure_key(label: str) -> str:
     return re.sub(r"\s+", "", value).strip()
 
 
+def is_applicability_scope_heading(label: str) -> bool:
+    """Return whether a path label describes bid-lot applicability, not a score factor."""
+
+    value = outline_structure_key(label).strip("：:；;")
+    if not value:
+        return False
+    if re.search(r"(?:适用范围|适用于|适用包|适用标段)", value):
+        return True
+    number = r"[0-9一二三四五六七八九十百]+"
+    return bool(
+        re.fullmatch(
+            rf"(?:(?:第?{number})(?:包|标包|标段)|(?:包|标包|标段)第?{number})"
+            rf"(?:至|到|[-~—–])"
+            rf"(?:(?:第?{number})(?:包|标包|标段)|(?:包|标包|标段)第?{number})",
+            value,
+        )
+    )
+
+
 def score_leaf_title(title: str, parent_label: str, fallback_index: int) -> str:
     """Remove a repeated scoring-factor prefix once that factor is a parent node."""
 
@@ -1317,6 +1336,8 @@ def _audit_chapter_blueprint_direct(
                     expected_path.pop(0)
                 compact_path: list[str] = []
                 for label in expected_path:
+                    if is_applicability_scope_heading(label):
+                        continue
                     if (
                         not compact_path
                         or outline_structure_key(compact_path[-1])

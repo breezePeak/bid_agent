@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from .canonicalization import canonical_hash
 from .scoring_outline_policy import (
+    is_applicability_scope_heading,
     is_sectionable_quality_condition,
     outline_structure_key,
 )
@@ -31,15 +32,15 @@ OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
 
 PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v2.0"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
-OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v4.0"
+OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v5.0"
 
 PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
-OUTLINE_CAPABILITY_VERSION = "4.0.0"
+OUTLINE_CAPABILITY_VERSION = "5.0.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
-OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_candidate.v2"
+OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_candidate.v3"
 
 OUTLINE_SKILL_ID = "planning.chapter_outline_split"
 DEFAULT_TEMPERATURE = 0.1
@@ -476,6 +477,65 @@ class ChapterOutlineCandidate(StrictPlanningModel):
                 "document_quality_response_unit_ids 不允许重复 ID"
             )
         return self
+
+
+class ChapterOutlineNodeAnnotationCandidate(StrictPlanningModel):
+    """Non-structural model contribution consumed by the outline Skill."""
+
+    target_node_id: str = ""
+    target_title: str = Field(min_length=1)
+    response_unit_ids: list[str] = Field(default_factory=list)
+    condition_ids: list[str] = Field(default_factory=list)
+    purpose: str = Field(min_length=1)
+    writing_objectives: list[str] = Field(default_factory=list)
+    required_mentions: list[str] = Field(default_factory=list)
+    planned_tables: list[str] = Field(default_factory=list)
+    planned_figures: list[str] = Field(default_factory=list)
+    target_size: int = Field(default=800, ge=1)
+    confidence: float = Field(ge=0, le=1)
+    needs_human: bool = False
+
+
+class ChapterOutlineAnnotationCandidate(StrictPlanningModel):
+    """Annotation-only boundary; it carries no parent, order or title authority."""
+
+    annotations: list[ChapterOutlineNodeAnnotationCandidate] = Field(
+        default_factory=list
+    )
+    review_status: Literal["draft", "needs_review", "blocked"] = "draft"
+
+    @classmethod
+    def from_outline_candidate(
+        cls,
+        candidate: ChapterOutlineCandidate,
+    ) -> "ChapterOutlineAnnotationCandidate":
+        return cls(
+            annotations=[
+                ChapterOutlineNodeAnnotationCandidate(
+                    target_node_id=node.local_id,
+                    target_title=node.title,
+                    response_unit_ids=list(
+                        dict.fromkeys(
+                            [
+                                *node.primary_response_unit_ids,
+                                *node.supporting_response_unit_ids,
+                            ]
+                        )
+                    ),
+                    condition_ids=list(node.score_condition_ids),
+                    purpose=node.purpose,
+                    writing_objectives=list(node.writing_objectives),
+                    required_mentions=list(node.required_mentions),
+                    planned_tables=list(node.planned_tables),
+                    planned_figures=list(node.planned_figures),
+                    target_size=node.target_size,
+                    confidence=node.confidence,
+                    needs_human=node.needs_human,
+                )
+                for node in candidate.nodes
+            ],
+            review_status=candidate.review_status,
+        )
 
 
 CandidateT = TypeVar("CandidateT", bound=BaseModel)
@@ -3077,6 +3137,18 @@ class LLMOutlineDecompositionProvider(
     ) -> ChapterOutlineCandidate:
         """Project model annotations onto the deterministic scoring-table tree."""
 
+        if isinstance(request, OutlineDecompositionInput):
+            from .chapter_outline_skill import build_chapter_outline_from_payload
+
+            return build_chapter_outline_from_payload(
+                request.requirement_ledger,
+                request.score_model,
+                request.template_structure,
+                annotations=ChapterOutlineAnnotationCandidate.from_outline_candidate(
+                    candidate
+                ),
+            )
+
         if (
             not isinstance(request, OutlineDecompositionInput)
             or request.document_mode != "auto_outline"
@@ -3659,6 +3731,8 @@ class LLMOutlineDecompositionProvider(
                     compact_path: list[str] = []
                     for label in expected_path:
                         text = str(label).strip()
+                        if is_applicability_scope_heading(text):
+                            continue
                         if text and (
                             not compact_path
                             or outline_structure_key(compact_path[-1])

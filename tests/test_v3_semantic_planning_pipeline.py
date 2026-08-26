@@ -19,6 +19,9 @@ from document_pipeline.canonicalization import (  # noqa: E402
     canonical_hash,
     canonical_json,
 )
+from document_pipeline.chapter_outline_skill import (  # noqa: E402
+    build_chapter_outline_from_payload,
+)
 from document_pipeline.contracts import (  # noqa: E402
     RequirementItem,
     RequirementKind,
@@ -40,6 +43,7 @@ from document_pipeline.planning_inference import (  # noqa: E402
     OUTLINE_PROMPT_VERSION,
     OUTLINE_SCHEMA_VERSION,
     OUTLINE_SKILL_ID,
+    ChapterOutlineAnnotationCandidate,
     ChapterOutlineCandidate,
     ChapterOutlineNodeCandidate,
     PlanningInferenceValidationError,
@@ -253,113 +257,10 @@ class _FakeOutlineProvider:
 
     def split(self, request):
         self.calls.append("outline")
-        score_model = request.score_model
-        active_requirement_ids = {
-            item["requirement_id"]
-            for item in request.requirement_ledger["requirements"]
-            if item["status"] not in {"blocked", "waived"}
-        }
-        nodes = []
-        document_quality_response_unit_ids = []
-        next_order = 0
-        group_parent_ids = {}
-        section_group_ids = {
-            point["group_id"]
-            for point in score_model["points"]
-            if any(
-                unit["review_status"] != "blocked"
-                and unit["response_scope"] == "section"
-                for unit in point["response_units"]
-            )
-        }
-        for group in score_model.get("groups", []):
-            if group["group_id"] not in section_group_ids:
-                continue
-            group_parent_ids[group["group_id"]] = f"group-{group['group_id']}"
-            nodes.append(
-                ChapterOutlineNodeCandidate(
-                    local_id=group_parent_ids[group["group_id"]],
-                    order=next_order,
-                    title=group["title"],
-                    purpose="组织该评分组的独立得分任务",
-                    confidence=0.99,
-                )
-            )
-            next_order += 1
-        for point in score_model["points"]:
-            conditions = {
-                condition["condition_id"]: condition
-                for condition in point["score_conditions"]
-                if condition["review_status"] != "blocked"
-            }
-            for unit in point["response_units"]:
-                if unit["review_status"] == "blocked":
-                    continue
-                if unit["response_scope"] == "document":
-                    document_quality_response_unit_ids.append(
-                        unit["unit_id"]
-                    )
-                    continue
-
-                unit_condition_ids = [
-                    condition_id
-                    for condition_id in unit["condition_ids"]
-                    if condition_id in conditions
-                ]
-                primary_condition_ids = []
-                child_condition_ids = []
-                substantive_count = 0
-                for condition_id in unit_condition_ids:
-                    role = conditions[condition_id]["condition_role"]
-                    if role in {"content", "evidence"}:
-                        substantive_count += 1
-                        if substantive_count > 1:
-                            child_condition_ids.append(condition_id)
-                            continue
-                    primary_condition_ids.append(condition_id)
-
-                primary_local_id = f"unit-{unit['unit_id']}"
-                nodes.append(
-                    ChapterOutlineNodeCandidate(
-                        local_id=primary_local_id,
-                        parent_local_id=group_parent_ids[point["group_id"]],
-                        order=next_order,
-                        title=unit["title"],
-                        purpose="证明最终目录来自章节拆分 Skill",
-                        primary_response_unit_ids=[unit["unit_id"]],
-                        score_condition_ids=primary_condition_ids,
-                        requirement_ids=[
-                            requirement_id
-                            for requirement_id in unit[
-                                "linked_requirement_ids"
-                            ]
-                            if requirement_id in active_requirement_ids
-                        ],
-                        confidence=0.99,
-                    )
-                )
-                next_order += 1
-                for condition_id in child_condition_ids:
-                    nodes.append(
-                        ChapterOutlineNodeCandidate(
-                            local_id=f"condition-{condition_id}",
-                            parent_local_id=primary_local_id,
-                            order=next_order,
-                            title=conditions[condition_id][
-                                "normalized_condition"
-                            ],
-                            purpose="逐项覆盖满分条件",
-                            score_condition_ids=[condition_id],
-                            confidence=0.99,
-                        )
-                    )
-                    next_order += 1
-        candidate = ChapterOutlineCandidate(
-            nodes=nodes,
-            document_quality_response_unit_ids=(
-                document_quality_response_unit_ids
-            ),
-            review_status="draft",
+        candidate = build_chapter_outline_from_payload(
+            request.requirement_ledger,
+            request.score_model,
+            request.template_structure,
         )
         return _planning_result(
             candidate,
@@ -1035,9 +936,20 @@ def test_deterministic_outline_groups_and_expands_concrete_quality_topics() -> N
         "技术部分（暗标，65分）",
     ]
     by_title = {node.title: node for node in candidate.nodes}
-    target_leaf = by_title[scores.points[2].outline_path[-1]]
-    assert target_leaf.score_condition_ids == [
-        f"SP-target-C{index}" for index in range(1, 5)
+    target_factor = by_title[scores.points[2].outline_path[-1]]
+    target_children = [
+        node
+        for node in candidate.nodes
+        if node.parent_local_id == target_factor.local_id
+    ]
+    assert [node.title for node in target_children] == [
+        "项目任务背景",
+        "工作必要性和可行性",
+        "工作目标",
+        "工作内容",
+    ]
+    assert [node.score_condition_ids for node in target_children] == [
+        [f"SP-target-C{index}"] for index in range(1, 5)
     ]
 
     blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
@@ -1068,42 +980,7 @@ def test_target_task_conditions_bind_to_score_factor_leaf() -> None:
         condition_texts=condition_texts,
         max_points=4,
     )
-    candidate = ChapterOutlineCandidate(
-        nodes=[
-            ChapterOutlineNodeCandidate(
-                local_id="target",
-                order=0,
-                title="目标任务",
-                purpose="完整响应目标任务评分点",
-                primary_response_unit_ids=["SP-target-U01"],
-                confidence=1.0,
-            ),
-            *[
-                ChapterOutlineNodeCandidate(
-                    local_id=f"condition-{index}",
-                    parent_local_id="target",
-                    order=index,
-                    title=title,
-                    purpose="逐项覆盖满分条件",
-                    score_condition_ids=[condition_id],
-                    confidence=1.0,
-                )
-                for index, (title, condition_id) in enumerate(
-                    zip(
-                        (
-                            "项目任务背景",
-                            "工作必要性和可行性",
-                            "工作目标",
-                            "工作内容",
-                        ),
-                        condition_ids,
-                        strict=True,
-                    ),
-                    start=1,
-                )
-            ],
-        ]
-    )
+    candidate = build_deterministic_outline_candidate(ledger, scores, None)
     blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
         candidate,
         ledger,
@@ -1111,16 +988,24 @@ def test_target_task_conditions_bind_to_score_factor_leaf() -> None:
         revision=1,
     )
     depths = _chapter_depths(blueprint)
-    children = [
+    factors = [
         node
         for node in blueprint.nodes
         if node.parent_chapter_id == blueprint.nodes[0].chapter_id
     ]
+    condition_leaves = [
+        node
+        for node in blueprint.nodes
+        if node.parent_chapter_id == factors[0].chapter_id
+    ]
 
     assert blueprint.nodes[0].title == scores.groups[0].title
-    assert [node.title for node in children] == [scores.points[0].title]
-    assert children[0].score_condition_ids == condition_ids
-    assert {depths[node.chapter_id] for node in children} == {2}
+    assert [node.title for node in factors] == [scores.points[0].title]
+    assert factors[0].primary_response_unit_ids == ["SP-target-U01"]
+    assert [node.score_condition_ids for node in condition_leaves] == [
+        [condition_id] for condition_id in condition_ids
+    ]
+    assert {depths[node.chapter_id] for node in condition_leaves} == {3}
 
 
 def test_model_cannot_expand_conditions_beyond_score_table_path() -> None:
@@ -1181,8 +1066,17 @@ def test_model_cannot_expand_conditions_beyond_score_table_path() -> None:
             start=1,
         )
     )
+    model_candidate = ChapterOutlineCandidate(nodes=nodes)
+    candidate = build_chapter_outline_from_payload(
+        ledger.model_dump(mode="json"),
+        scores.model_dump(mode="json"),
+        None,
+        annotations=ChapterOutlineAnnotationCandidate.from_outline_candidate(
+            model_candidate
+        ),
+    )
     blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
-        ChapterOutlineCandidate(nodes=nodes),
+        candidate,
         ledger,
         scores,
         revision=1,
@@ -1191,14 +1085,22 @@ def test_model_cannot_expand_conditions_beyond_score_table_path() -> None:
     by_title = {node.title: node for node in blueprint.nodes}
 
     assert depths[by_title[scores.groups[0].title].chapter_id] == 1
-    leaf = by_title[scores.points[0].title]
-    assert depths[leaf.chapter_id] == 2
-    assert leaf.score_condition_ids == condition_ids
-    assert len(blueprint.nodes) == 2
+    factor = by_title[scores.points[0].title]
+    assert depths[factor.chapter_id] == 2
+    condition_leaves = [
+        node
+        for node in blueprint.nodes
+        if node.parent_chapter_id == factor.chapter_id
+    ]
+    assert [node.score_condition_ids for node in condition_leaves] == [
+        [condition_id] for condition_id in condition_ids
+    ]
+    assert "核查准备工作（6分）" not in by_title
+    assert len(blueprint.nodes) == 5
 
 
-def test_compiler_does_not_text_filter_score_model_path_levels() -> None:
-    scores, ledger, condition_ids = _score_direct_fixture(
+def test_scope_path_label_is_not_emitted_as_a_directory() -> None:
+    scores, ledger, _condition_ids = _score_direct_fixture(
         score_point_id="SP-route",
         point_title="技术路线",
         group_title="技术部分（暗标，65分）",
@@ -1227,28 +1129,9 @@ def test_compiler_does_not_text_filter_score_model_path_levels() -> None:
             ]
         }
     )
+    candidate = build_deterministic_outline_candidate(ledger, scores, None)
     blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
-        ChapterOutlineCandidate(
-            nodes=[
-                ChapterOutlineNodeCandidate(
-                    local_id="technical",
-                    order=0,
-                    title="技术部分（暗标，65分）",
-                    purpose="组织技术评分响应",
-                    confidence=1.0,
-                ),
-                ChapterOutlineNodeCandidate(
-                    local_id="route",
-                    parent_local_id="technical",
-                    order=1,
-                    title="技术路线（6分）",
-                    purpose="响应技术路线评分要求",
-                    primary_response_unit_ids=["SP-route-U01"],
-                    score_condition_ids=condition_ids,
-                    confidence=1.0,
-                ),
-            ]
-        ),
+        candidate,
         ledger,
         scores,
         revision=1,
@@ -1257,7 +1140,7 @@ def test_compiler_does_not_text_filter_score_model_path_levels() -> None:
     audit = audit_chapter_blueprint(blueprint, ledger, scores)
 
     assert audit["passed"] is True
-    assert path[1] in [node.title for node in blueprint.nodes]
+    assert path[1] not in [node.title for node in blueprint.nodes]
     assert not any(
         finding["code"] == "OUTLINE_PATH_HIERARCHY_MISSING"
         for finding in audit["findings"]
@@ -1339,7 +1222,7 @@ def test_g2_requires_section_quality_condition_writing_objective() -> None:
     } >= {"QUALITY_CONDITION_OBJECTIVE_MISSING"}
 
 
-def test_related_conditions_can_share_one_business_chapter() -> None:
+def test_related_content_conditions_remain_independently_traceable() -> None:
     scores, ledger, condition_ids = _score_direct_fixture(
         score_point_id="SP-shared-topic",
         point_title="样本影像",
@@ -1347,37 +1230,7 @@ def test_related_conditions_can_share_one_business_chapter() -> None:
         condition_texts=["核查样本影像分类方法合理", "核查样本影像使用说明细致"],
         max_points=4,
     )
-    candidate = ChapterOutlineCandidate(
-        nodes=[
-            ChapterOutlineNodeCandidate(
-                local_id="technical-group",
-                order=0,
-                title="技术部分",
-                purpose="组织技术评分响应",
-                confidence=1.0,
-            ),
-            ChapterOutlineNodeCandidate(
-                local_id="topic",
-                parent_local_id="technical-group",
-                order=1,
-                title="样本影像",
-                purpose="响应样本影像评分任务",
-                primary_response_unit_ids=["SP-shared-topic-U01"],
-                confidence=1.0,
-            ),
-            ChapterOutlineNodeCandidate(
-                local_id="classification-and-use",
-                parent_local_id="topic",
-                order=2,
-                title="核查样本影像分类与使用",
-                purpose="说明分类方法和使用方式",
-                supporting_response_unit_ids=["SP-shared-topic-U01"],
-                score_condition_ids=condition_ids,
-                writing_objectives=["分类方法合理", "使用说明细致"],
-                confidence=1.0,
-            ),
-        ]
-    )
+    candidate = build_deterministic_outline_candidate(ledger, scores, None)
 
     blueprint = object.__new__(PlanningAgent).compile_outline_candidate(
         candidate,
@@ -1386,12 +1239,19 @@ def test_related_conditions_can_share_one_business_chapter() -> None:
         revision=1,
     )
 
-    chapter = next(
+    factor = next(
         node
         for node in blueprint.nodes
         if node.title == scores.points[0].title
     )
-    assert chapter.score_condition_ids == condition_ids
+    condition_leaves = [
+        node
+        for node in blueprint.nodes
+        if node.parent_chapter_id == factor.chapter_id
+    ]
+    assert [node.score_condition_ids for node in condition_leaves] == [
+        [condition_id] for condition_id in condition_ids
+    ]
     assert audit_chapter_blueprint(blueprint, ledger, scores)["passed"] is True
 
 
