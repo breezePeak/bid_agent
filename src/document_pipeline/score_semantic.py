@@ -18,15 +18,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from utils import read_json, write_json
 
 from .canonicalization import canonical_hash, canonical_json
 
 SCORE_SEMANTIC_CAPABILITY_ID = "score.semantic_reconcile"
-SCORE_SEMANTIC_CAPABILITY_VERSION = "3.0.0"
-SCORE_SEMANTIC_PROMPT_VERSION = "v3_score_semantic_v3.0"
-SCORE_SEMANTIC_SCHEMA_VERSION = "v3-score-semantic-candidate-5"
+SCORE_SEMANTIC_CAPABILITY_VERSION = "3.1.0"
+SCORE_SEMANTIC_PROMPT_VERSION = "v3_score_semantic_v3.1"
+SCORE_SEMANTIC_SCHEMA_VERSION = "v3-score-semantic-candidate-6"
 SCORE_SEMANTIC_TEMPERATURE = 0.1
 # Character budgets intentionally mirror the model-context allocation contract:
 # 45% frozen semantic input, 35% structured output and 20% prompt/repair margin.
@@ -141,6 +141,26 @@ _CONSTRAINT_ROLE_SIGNAL = re.compile(
 _QUALITY_ROLE_SIGNAL = re.compile(
     r"全面|完整|科学|合理|可行|清晰|准确|具体|详尽|"
     r"充分|规范|严谨|先进|针对性|一致性|符合实际|优良"
+)
+
+_SEMANTIC_SUBJECT_SENTENCE_PUNCTUATION = re.compile(r"[。；;！？!?\r\n]")
+_SEMANTIC_SUBJECT_SCORE_SIGNAL = re.compile(
+    r"(?:得分|计分|评分|满分|分值|获(?:得)?满分)|"
+    r"\d+(?:\.\d+)?\s*分(?!钟)"
+)
+_SEMANTIC_SUBJECT_EVALUATIVE_END = re.compile(
+    r"(?:描述|说明|阐述)?"
+    r"(?:清楚|清晰|完整|全面|具体|翔实|详实|充分|合理|科学|可行|"
+    r"准确|正确|规范|明确|重点突出|逻辑清晰|条理清楚|"
+    r"可操作性强|针对性强)"
+    r"(?:[、，,和及且并]*(?:清楚|清晰|完整|全面|具体|翔实|详实|"
+    r"充分|合理|科学|可行|准确|正确|规范|明确|重点突出|"
+    r"逻辑清晰|条理清楚|可操作性强|针对性强))*$"
+)
+_SEMANTIC_SUBJECT_SENTENCE_CUE = re.compile(
+    r"(?:应当|应|须|需|必须|不得|禁止|能够|可以|提供|提交|说明|"
+    r"描述|阐述|满足|符合|达到|完成|确保|保证|制定|建立|采用|"
+    r"包括|包含|涵盖)"
 )
 _LAYOUT_CHARACTER_EQUIVALENTS = {
     "，": ",",
@@ -795,7 +815,7 @@ class DeterministicScoreRuleInput(_StrictModel):
 class ScoreSemanticInput(_StrictModel):
     """Exact, content-addressed input to the semantic provider."""
 
-    schema_version: Literal["v3-score-semantic-candidate-5"] = SCORE_SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal["v3-score-semantic-candidate-6"] = SCORE_SEMANTIC_SCHEMA_VERSION
     source_snapshot_hash: str = Field(min_length=1)
     deterministic_structure_hash: str = Field(min_length=1)
     total_points: float = Field(ge=0)
@@ -955,6 +975,42 @@ class ScoreConditionCandidate(_StrictModel):
     required_evidence_types: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
 
+    @field_validator("semantic_subject", mode="before")
+    @classmethod
+    def strip_semantic_subject(cls, value: Any) -> Any:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def semantic_subject_is_outline_ready(self) -> "ScoreConditionCandidate":
+        subject = self.semantic_subject.strip()
+        compact_subject = re.sub(r"\s+", "", subject)
+        if _SEMANTIC_SUBJECT_SENTENCE_PUNCTUATION.search(subject):
+            raise ValueError(
+                f"满分条件 {self.condition_key} 的 semantic_subject "
+                "必须是业务对象，不能包含完整句标点"
+            )
+        if _SEMANTIC_SUBJECT_SCORE_SIGNAL.search(compact_subject):
+            raise ValueError(
+                f"满分条件 {self.condition_key} 的 semantic_subject "
+                "不能包含分值或评分表达"
+            )
+        if _SEMANTIC_SUBJECT_EVALUATIVE_END.search(compact_subject):
+            raise ValueError(
+                f"满分条件 {self.condition_key} 的 semantic_subject "
+                "不能以评分评价谓语结尾"
+            )
+        for full_text in (self.normalized_condition, self.source_excerpt):
+            compact_full_text = re.sub(r"\s+", "", full_text)
+            if (
+                compact_subject == compact_full_text
+                and _SEMANTIC_SUBJECT_SENTENCE_CUE.search(compact_full_text)
+            ):
+                raise ValueError(
+                    f"满分条件 {self.condition_key} 的 semantic_subject "
+                    "不能复制完整条件句"
+                )
+        return self
+
     @model_validator(mode="after")
     def evidence_condition_has_type(self) -> "ScoreConditionCandidate":
         if (
@@ -1065,7 +1121,7 @@ class ScoreRuleSemanticCandidate(_StrictModel):
 class ScoreSemanticCandidate(_StrictModel):
     """Strict, non-canonical semantic candidate emitted by a provider."""
 
-    schema_version: Literal["v3-score-semantic-candidate-5"] = SCORE_SEMANTIC_SCHEMA_VERSION
+    schema_version: Literal["v3-score-semantic-candidate-6"] = SCORE_SEMANTIC_SCHEMA_VERSION
     interpretations: list[ScoreRuleSemanticCandidate] = Field(min_length=1)
 
     @model_validator(mode="after")

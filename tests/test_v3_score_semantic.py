@@ -168,6 +168,7 @@ def _enumerated_condition(
     key: str,
     excerpt: str,
     role: str,
+    subject: str,
 ) -> dict:
     return {
         "condition_key": key,
@@ -177,7 +178,7 @@ def _enumerated_condition(
         "source_excerpt": excerpt,
         **_enumerated_source_ref(excerpt),
         "source_level_id": "SL-ENUM-FULL",
-        "semantic_subject": excerpt,
+        "semantic_subject": subject,
         "response_intent": f"响应{excerpt}",
         "required_evidence_types": [],
         "confidence": 0.98,
@@ -193,6 +194,7 @@ def _enumerated_candidate(*, collapsed: bool) -> dict:
                     "方案内容包括项目背景、工作目标、工作内容、技术方法、质量控制"
                 ),
                 role="content",
+                subject="方案内容",
             )
         ]
     else:
@@ -201,26 +203,31 @@ def _enumerated_candidate(*, collapsed: bool) -> dict:
                 key="SR-ENUM-C1",
                 excerpt="方案内容包括项目背景",
                 role="content",
+                subject="项目背景",
             ),
             _enumerated_condition(
                 key="SR-ENUM-C2",
                 excerpt="工作目标",
                 role="content",
+                subject="工作目标",
             ),
             _enumerated_condition(
                 key="SR-ENUM-C3",
                 excerpt="工作内容",
                 role="content",
+                subject="工作内容",
             ),
             _enumerated_condition(
                 key="SR-ENUM-C4",
                 excerpt="技术方法",
                 role="content",
+                subject="技术方法",
             ),
             _enumerated_condition(
                 key="SR-ENUM-C5",
                 excerpt="质量控制",
                 role="content",
+                subject="质量控制",
             ),
         ]
     quality_key = "SR-ENUM-C2" if collapsed else "SR-ENUM-C6"
@@ -230,10 +237,11 @@ def _enumerated_candidate(*, collapsed: bool) -> dict:
             key=quality_key,
             excerpt="方案内容完整、合理、可行、针对性强",
             role="quality",
+            subject="方案质量",
         ),
     ]
     return {
-        "schema_version": "v3-score-semantic-candidate-5",
+        "schema_version": "v3-score-semantic-candidate-6",
         "interpretations": [
             {
                 "rule_id": "SR-ENUM",
@@ -272,7 +280,7 @@ def _enumerated_candidate(*, collapsed: bool) -> dict:
 
 def _valid_candidate() -> dict:
     return {
-        "schema_version": "v3-score-semantic-candidate-5",
+        "schema_version": "v3-score-semantic-candidate-6",
         "interpretations": [
             {
                 "rule_id": "SR-1",
@@ -384,7 +392,7 @@ def _multi_rule_candidate() -> dict:
     first = _candidate_for_rule("SR-1")
     second = _candidate_for_rule("SR-2")
     return {
-        "schema_version": "v3-score-semantic-candidate-5",
+        "schema_version": "v3-score-semantic-candidate-6",
         "interpretations": [
             first["interpretations"][0],
             second["interpretations"][0],
@@ -409,6 +417,34 @@ def test_strict_candidate_is_returned_without_repair() -> None:
     assert result.candidate.interpretations[0].units[0].title == "核查准备内容与检查方法"
     assert provider.prompt_hash
     assert provider.model_fingerprint == "fake-model:v1"
+
+
+def test_semantic_subject_quality_has_no_length_limit() -> None:
+    condition = json.loads(json.dumps(
+        _valid_candidate()["interpretations"][0]["units"][0][
+            "full_score_conditions"
+        ][0],
+        ensure_ascii=False,
+    ))
+    long_subject = "跨区域多源异构时空数据治理与成果一致性检查实施方案专题"
+    condition["semantic_subject"] = f"  {long_subject}  "
+    assert (
+        ScoreConditionCandidate.model_validate(condition).semantic_subject
+        == long_subject
+    )
+    condition["semantic_subject"] = "可行性分析"
+    assert ScoreConditionCandidate.model_validate(
+        condition
+    ).semantic_subject == "可行性分析"
+
+    for invalid_subject in (
+        "业务对象。",
+        "业务对象得2分",
+        "业务对象描述清楚",
+    ):
+        condition["semantic_subject"] = invalid_subject
+        with pytest.raises(ValueError, match="semantic_subject"):
+            ScoreConditionCandidate.model_validate(condition)
 
 
 def test_repeated_quote_is_grounded_by_level_and_score_heading_is_not_a_condition() -> None:
@@ -497,7 +533,7 @@ def test_repeated_quote_is_grounded_by_level_and_score_heading_is_not_a_conditio
         }
 
     candidate = {
-        "schema_version": "v3-score-semantic-candidate-5",
+        "schema_version": "v3-score-semantic-candidate-6",
         "interpretations": [
             {
                 "rule_id": "SR-LEAD",
@@ -774,11 +810,11 @@ def test_partial_repair_reuses_independently_valid_rules_and_repairs_only_reject
     assert json.loads(result.raw_output)["repair_rule_ids"] == ["SR-2"]
 
 
-def test_schema_invalid_nested_rule_repairs_only_that_rule() -> None:
+def test_invalid_subject_repairs_only_that_rule() -> None:
     initial = _multi_rule_candidate()
-    del initial["interpretations"][1]["units"][0][
+    initial["interpretations"][1]["units"][0][
         "full_score_conditions"
-    ][0]["normalized_condition"]
+    ][0]["semantic_subject"] = "核查准备工作全面"
     repaired = _candidate_for_rule("SR-2")
     calls: list[list[dict[str, str]]] = []
     outputs = iter(
@@ -805,7 +841,7 @@ def test_schema_invalid_nested_rule_repairs_only_that_rule() -> None:
     repair_prompt = calls[1][1]["content"]
     assert "[SR-2]" in repair_prompt
     assert "SR-1" not in repair_prompt
-    assert "normalized_condition" in repair_prompt
+    assert "semantic_subject" in repair_prompt
     assert json.loads(result.raw_output)["repair_rule_ids"] == ["SR-2"]
 
 
@@ -835,7 +871,7 @@ def test_empty_conditions_after_repair_warns_without_blocking() -> None:
     repaired["interpretations"][0]["units"][0]["full_score_conditions"] = []
     outputs = iter(
         [
-            '{"schema_version":"v3-score-semantic-candidate-5"',
+            '{"schema_version":"v3-score-semantic-candidate-6"',
             json.dumps(repaired, ensure_ascii=False),
         ]
     )
@@ -1688,7 +1724,7 @@ def _qualification_semantic_case(
             )
         )
     candidate = {
-        "schema_version": "v3-score-semantic-candidate-5",
+        "schema_version": "v3-score-semantic-candidate-6",
         "interpretations": [
             {
                 "rule_id": "SR-Q",
@@ -1847,6 +1883,11 @@ def test_missing_common_evidence_warns_and_condition_join_is_persisted() -> None
         result.candidate,
     )
     assert compiled.points[0].response_units[0].condition_join == "mixed"
+    assert (
+        compiled.points[0].score_conditions[0].subject
+        == result.candidate.interpretations[0].units[0]
+        .full_score_conditions[0].semantic_subject
+    )
     assert len(compiled.points[0].scoring_levels) == 2
     warned_compiled = ScoreAgent.apply_semantic_candidate(
         structural,

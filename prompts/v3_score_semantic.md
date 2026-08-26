@@ -20,6 +20,7 @@
 9. 每个非否决性 `unit.full_score_conditions` 都必须是非空数组，禁止用 `[]`、省略字段或只给概括来占位。输入规则较多时应压缩 `shared_context`、`semantic_summary`、`response_expectation` 等解释文字，但不得牺牲满分条件、来源片段和来源 span；输出仍必须是完整且合法的单个 JSON 对象。
 10. 每个原子满分条件都必须填写：
     - `normalized_condition`：对原文条件做简洁、忠实、可写作的规范化表达；保留主语、对象、动作、范围、数量、时限、否定和情态强度，不得补充新事实；
+    - `semantic_subject`：只填写可直接作为目录标题的业务对象或可独立编写的主题名词短语。不得复制整条评分条件，不得包含分值、得分等评分表达，不得以通用评价谓语结尾。合法专业业务对象不设字符长度上限，禁止截断或为缩短输出而改写；完整动作、范围、质量和验收要求必须保留在 `normalized_condition` 中；
     - `condition_role`：只能取 `content`（应写的实质内容/方法/成果）、`evidence`（需提交或引用的证明材料）、`constraint`（强制边界、阈值、时限或禁止事项）、`quality`（没有明确业务对象的完整性、科学性、合理性、可行性等纯质量标准）、`document`（全文格式、一致性、目录、页码、排版或整体表达）之一。带具体写作对象的质量描述应优先使用 `content`，保留质量要求在 `normalized_condition` 和 `response_intent` 中。
 11. `document_map` 是整份标书的标题级轻量地图：`heading_id`、`heading_path`、`title`、边界 `block_ids`、`block_count` 和 `content_type` 只用于定位章节，不代表发送了标题下的全部正文。`linked_requirements` 只包含本批评分规则定向检索到的少量采购需求原文。二者可帮助消歧，但都不能替代评分原文、扩大评分条件或成为虚构事实的依据；最高档逐字来源仍是唯一权威。
 12. 每个 `unit` 必须显式输出 `linked_requirement_ids`，并按该独立得分任务从 `ALLOWED_REQUIREMENT_IDS_BY_RULE` 中本 `rule_id` 对应的唯一白名单选择精确子集。不得引用兄弟规则、旧输出或模型自行推断的 ID；白名单为空时必须输出 `[]`。其中本规则的 `linked_requirement_ids` 是明确绑定，必须由至少一个相关 unit 选择；`context_requirement_ids` 只是定向检索候选，可以一个都不选。一个需求可以被多个确实相关的 unit 共享，但禁止为了覆盖 ID 或省事把全部检索候选机械复制给每个 unit。

@@ -102,6 +102,7 @@ def _outline_request() -> OutlineDecompositionInput:
                     "score_conditions": [
                         {
                             "condition_id": "SP-1-C01",
+                            "subject": "评分条件",
                             "condition_role": "content",
                             "response_intent": "完整说明评分条件",
                         }
@@ -177,6 +178,7 @@ def _large_outline_request(point_count: int = 9) -> OutlineDecompositionInput:
                 "score_conditions": [
                     {
                         "condition_id": condition_id,
+                        "subject": f"评分条件 {suffix}",
                         "condition_role": "content",
                         "response_intent": f"完整说明评分条件 {suffix}",
                     }
@@ -1431,11 +1433,13 @@ def test_related_conditions_may_share_one_business_node() -> None:
                     "score_conditions": [
                         {
                             "condition_id": "SP-01-C01",
+                            "subject": "组织职责 A",
                             "condition_role": "content",
                             "response_intent": "说明 A",
                         },
                         {
                             "condition_id": "SP-01-C02",
+                            "subject": "组织职责 B",
                             "condition_role": "content",
                             "response_intent": "说明 B",
                         },
@@ -1458,6 +1462,7 @@ def test_related_conditions_may_share_one_business_node() -> None:
                     "score_conditions": [
                         {
                             "condition_id": "SP-02-C01",
+                            "subject": "方法设计",
                             "condition_role": "content",
                             "response_intent": "说明 C",
                         }

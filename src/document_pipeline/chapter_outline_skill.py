@@ -20,10 +20,10 @@ from .planning_inference import (
     ChapterOutlineNodeCandidate,
 )
 from .scoring_outline_policy import (
-    full_score_condition_heading,
     is_applicability_scope_heading,
     is_hollow_quality_heading,
     is_sectionable_quality_condition,
+    outline_subject,
     outline_structure_key,
 )
 
@@ -57,14 +57,14 @@ def _compact_path(point: object, unit: object, group_title: str) -> list[str]:
 
 
 def _condition_is_leaf(condition: object) -> bool:
+    subject = str(getattr(condition, "subject", "") or "").strip()
+    normalized_subject = re.sub(r"\s+", "", subject)
+    if not normalized_subject or is_hollow_quality_heading(normalized_subject):
+        return False
     role = str(getattr(condition, "condition_role", "content") or "content")
     if role in {"content", "evidence", "constraint"}:
         return True
     if role != "quality" or not is_sectionable_quality_condition(condition):
-        return False
-    subject = str(getattr(condition, "subject", "") or "").strip()
-    normalized_subject = re.sub(r"\s+", "", subject)
-    if is_hollow_quality_heading(normalized_subject):
         return False
     return not bool(
         re.fullmatch(
@@ -74,13 +74,24 @@ def _condition_is_leaf(condition: object) -> bool:
     )
 
 
-def _condition_title(condition: object, index: int) -> str:
-    source = str(
-        getattr(condition, "normalized_condition", "")
+def _condition_subject(condition: object) -> str:
+    """Return the structured business object supplied by ScoreModel."""
+
+    return str(getattr(condition, "subject", "") or "").strip()
+
+
+def _business_object_key(value: str) -> str:
+    """Normalize formatting only; never infer a title from criterion prose."""
+
+    return outline_structure_key(outline_subject(value))
+
+
+def _condition_objective(condition: object) -> str:
+    return str(
+        getattr(condition, "response_intent", "")
+        or getattr(condition, "normalized_condition", "")
         or getattr(condition, "text", "")
-        or getattr(condition, "response_intent", "")
     ).strip()
-    return full_score_condition_heading(source, index)
 
 
 def _annotation_index(
@@ -383,7 +394,7 @@ class ChapterOutlineSplitSkill:
                 )
             )
             path_nodes: dict[tuple[str, ...], str] = {}
-            duplicate_condition_titles: dict[tuple[str, str], int] = defaultdict(int)
+            topic_node_indexes: dict[tuple[str, str], int] = {}
             for point, unit in group_units:
                 path = _compact_path(point, unit, group.title)
                 parent_id = root_id
@@ -422,21 +433,22 @@ class ChapterOutlineSplitSkill:
                     for condition_id in unit.condition_ids
                     if condition_id in conditions
                 ]
-                leaf_condition_ids = [
-                    condition_id
-                    for condition_id in unit_condition_ids
-                    if _condition_is_leaf(conditions[condition_id])
-                ]
-                parent_condition_ids = [
-                    condition_id
-                    for condition_id in unit_condition_ids
-                    if condition_id not in leaf_condition_ids
-                ]
-                if len(leaf_condition_ids) == 1:
-                    only_title = _condition_title(conditions[leaf_condition_ids[0]], 1)
-                    if outline_structure_key(only_title) == outline_structure_key(primary.title):
-                        parent_condition_ids.extend(leaf_condition_ids)
-                        leaf_condition_ids = []
+                leaf_condition_ids: list[str] = []
+                parent_condition_ids: list[str] = []
+                parent_subject_key = _business_object_key(primary.title)
+                for condition_id in unit_condition_ids:
+                    condition = conditions[condition_id]
+                    subject_key = _business_object_key(
+                        _condition_subject(condition)
+                    )
+                    if (
+                        not subject_key
+                        or not _condition_is_leaf(condition)
+                        or subject_key == parent_subject_key
+                    ):
+                        parent_condition_ids.append(condition_id)
+                    else:
+                        leaf_condition_ids.append(condition_id)
 
                 response_expectation = str(
                     getattr(unit, "response_expectation", "")
@@ -445,11 +457,7 @@ class ChapterOutlineSplitSkill:
                 ).strip()
                 objectives = [response_expectation]
                 objectives.extend(
-                    str(
-                        getattr(conditions[condition_id], "response_intent", "")
-                        or getattr(conditions[condition_id], "normalized_condition", "")
-                        or getattr(conditions[condition_id], "text", "")
-                    ).strip()
+                    _condition_objective(conditions[condition_id])
                     for condition_id in parent_condition_ids
                 )
                 nodes[primary_index] = primary.model_copy(
@@ -483,26 +491,65 @@ class ChapterOutlineSplitSkill:
                             primary.confidence,
                             float(getattr(unit, "confidence", 1.0)),
                         ),
+                        "needs_human": primary.needs_human or any(
+                            not _business_object_key(
+                                _condition_subject(conditions[condition_id])
+                            )
+                            for condition_id in parent_condition_ids
+                        ),
                     }
                 )
 
-                for condition_index, condition_id in enumerate(
-                    leaf_condition_ids, start=1
-                ):
+                for condition_id in leaf_condition_ids:
                     condition = conditions[condition_id]
-                    title = _condition_title(condition, condition_index)
-                    title_key = (parent_id, outline_structure_key(title))
-                    duplicate_condition_titles[title_key] += 1
-                    if duplicate_condition_titles[title_key] > 1:
-                        title = f"{title}（{duplicate_condition_titles[title_key]}）"
-                    objective = str(
-                        getattr(condition, "response_intent", "")
-                        or getattr(condition, "normalized_condition", "")
-                        or getattr(condition, "text", "")
-                    ).strip()
+                    title = _condition_subject(condition)
+                    subject_key = _business_object_key(title)
+                    topic_key = (parent_id, subject_key)
+                    objective = _condition_objective(condition)
+                    existing_index = topic_node_indexes.get(topic_key)
+                    if existing_index is not None:
+                        existing = nodes[existing_index]
+                        nodes[existing_index] = existing.model_copy(
+                            update={
+                                "writing_objectives": list(
+                                    dict.fromkeys(
+                                        [
+                                            *existing.writing_objectives,
+                                            *([objective] if objective else []),
+                                        ]
+                                    )
+                                ),
+                                "supporting_response_unit_ids": list(
+                                    dict.fromkeys(
+                                        [
+                                            *existing.supporting_response_unit_ids,
+                                            unit.unit_id,
+                                        ]
+                                    )
+                                ),
+                                "score_condition_ids": list(
+                                    dict.fromkeys(
+                                        [*existing.score_condition_ids, condition_id]
+                                    )
+                                ),
+                                "required_mentions": list(
+                                    dict.fromkeys(
+                                        [*existing.required_mentions, point.score_point_id]
+                                    )
+                                ),
+                                "confidence": min(
+                                    existing.confidence,
+                                    float(getattr(unit, "confidence", 1.0)),
+                                ),
+                            }
+                        )
+                        continue
                     child = _annotated_node(
                         local_id=_stable_id(
-                            "condition", unit.unit_id, condition_id
+                            "subject",
+                            group.group_id,
+                            *keys,
+                            subject_key,
                         ),
                         parent_local_id=parent_id,
                         order=len(nodes),
@@ -532,6 +579,7 @@ class ChapterOutlineSplitSkill:
                         }
                     )
                     nodes.append(child)
+                    topic_node_indexes[topic_key] = len(nodes) - 1
 
         if not nodes:
             nodes.append(
@@ -550,7 +598,11 @@ class ChapterOutlineSplitSkill:
         return ChapterOutlineCandidate(
             nodes=nodes,
             document_quality_response_unit_ids=quality_units,
-            review_status=(annotations.review_status if annotations else "draft"),
+            review_status=(
+                "needs_review"
+                if any(node.needs_human for node in nodes)
+                else (annotations.review_status if annotations else "draft")
+            ),
         )
 
 

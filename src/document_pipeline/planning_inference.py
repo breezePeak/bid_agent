@@ -33,17 +33,17 @@ REWRITE_OUTLINE_PROMPT_FILE = "v3_rewrite_outline_merge.md"
 
 PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v2.0"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
-OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v5.0"
+OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v6.0"
 REWRITE_OUTLINE_PROMPT_VERSION = "v3_rewrite_outline_merge_v1.0"
 
 PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
-OUTLINE_CAPABILITY_VERSION = "5.0.0"
+OUTLINE_CAPABILITY_VERSION = "6.0.0"
 REWRITE_OUTLINE_CAPABILITY_VERSION = "1.0.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
-OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_candidate.v3"
+OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_annotation_candidate.v1"
 REWRITE_OUTLINE_SCHEMA_VERSION = "v3.rewrite_outline_merge_candidate.v1"
 
 OUTLINE_SKILL_ID = "planning.chapter_outline_split"
@@ -2243,7 +2243,7 @@ class FileOutlineFragmentCache:
 
 
 class LLMOutlineDecompositionProvider(
-    _StructuredLLMProvider[ChapterOutlineCandidate]
+    _StructuredLLMProvider[ChapterOutlineAnnotationCandidate]
 ):
     skill_id = OUTLINE_SKILL_ID
     capability_id = OUTLINE_SKILL_ID
@@ -2251,7 +2251,7 @@ class LLMOutlineDecompositionProvider(
     prompt_file = OUTLINE_PROMPT_FILE
     prompt_version = OUTLINE_PROMPT_VERSION
     schema_version = OUTLINE_SCHEMA_VERSION
-    candidate_model = ChapterOutlineCandidate
+    candidate_model = ChapterOutlineAnnotationCandidate
     # All code paths inside split() pass repair_attempts=1 explicitly.
     # The class-level value aligns with MAX_REPAIR_ATTEMPTS so that any
     # future code path that forgets to pass the argument also gets one
@@ -2849,6 +2849,48 @@ class LLMOutlineDecompositionProvider(
         payload: Any,
         request: BaseModel,
     ) -> Any:
+        if isinstance(payload, dict) and isinstance(
+            payload.get("annotations"), list
+        ):
+            return payload
+        if isinstance(payload, dict) and isinstance(payload.get("nodes"), list):
+            # Read legacy full-tree output as annotations only. Parent, order,
+            # title and all binding authority are deliberately discarded by
+            # the deterministic Skill.
+            return {
+                "annotations": [
+                    {
+                        "target_node_id": str(node.get("local_id") or ""),
+                        "target_title": str(node.get("title") or ""),
+                        "response_unit_ids": list(
+                            dict.fromkeys(
+                                [
+                                    *node.get("primary_response_unit_ids", []),
+                                    *node.get("supporting_response_unit_ids", []),
+                                ]
+                            )
+                        ),
+                        "condition_ids": list(
+                            node.get("score_condition_ids", [])
+                        ),
+                        "purpose": str(node.get("purpose") or ""),
+                        "writing_objectives": list(
+                            node.get("writing_objectives", [])
+                        ),
+                        "required_mentions": list(
+                            node.get("required_mentions", [])
+                        ),
+                        "planned_tables": list(node.get("planned_tables", [])),
+                        "planned_figures": list(node.get("planned_figures", [])),
+                        "target_size": int(node.get("target_size", 800)),
+                        "confidence": float(node.get("confidence", 1.0)),
+                        "needs_human": bool(node.get("needs_human", False)),
+                    }
+                    for node in payload["nodes"]
+                    if isinstance(node, dict)
+                ],
+                "review_status": str(payload.get("review_status") or "draft"),
+            }
         if (
             isinstance(request, OutlineDecompositionInput)
             and request.document_mode == "template_strict"
@@ -3144,7 +3186,7 @@ class LLMOutlineDecompositionProvider(
 
     def _prepare_candidate(
         self,
-        candidate: ChapterOutlineCandidate,
+        candidate: ChapterOutlineAnnotationCandidate,
         request: BaseModel,
     ) -> ChapterOutlineCandidate:
         """Project model annotations onto the deterministic scoring-table tree."""
@@ -3156,9 +3198,7 @@ class LLMOutlineDecompositionProvider(
                 request.requirement_ledger,
                 request.score_model,
                 request.template_structure,
-                annotations=ChapterOutlineAnnotationCandidate.from_outline_candidate(
-                    candidate
-                ),
+                annotations=candidate,
             )
 
         if (
