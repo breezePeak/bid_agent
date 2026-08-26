@@ -43,22 +43,11 @@ test('project chat renders the API reply instead of a fixed acknowledgement', ()
   assert.match(apiClient, /chatV3[\s\S]*?timeout:\s*120000/)
 })
 
-test('continue commands resume the failed workflow without another chat-model call', () => {
-  assert.match(workspaceView, /function isContinueIntent\(message\)/)
-  assert.match(workspaceView, /void prepareOutline\(\)/)
-  assert.match(workspaceView, /void runDocument\(\)/)
-  assert.match(workspaceView, /:disabled="!initialChatInput\.trim\(\)"/)
-  return
-  assert.match(workspaceView, /function isContinueIntent\(message\)/)
-  assert.match(workspaceView, /正在思考，正在检查可复用节点并恢复处理，请稍候/)
-  assert.match(
-    workspaceView,
-    /if \(isContinueIntent\(msg\)\) \{[\s\S]*?await nextTick\(\)[\s\S]*?await scrollChatToLatest\(true\)[\s\S]*?await continueCurrentWorkflow\(\)/,
-  )
-  assert.match(workspaceView, /outlineOperation\?\.status === 'failed'/)
-  assert.match(workspaceView, /void prepareOutline\(\)/)
-  assert.match(workspaceView, /generation\.value\.status === 'failed'/)
-  assert.match(workspaceView, /void runDocument\(\)/)
+test('workspace chat sends every natural-language command to the main agent', () => {
+  assert.doesNotMatch(workspaceView, /function isContinueIntent\(message\)/)
+  assert.doesNotMatch(workspaceView, /function isRegenerateIntent\(message\)/)
+  assert.match(workspaceView, /const \{ data \} = await chatV3\(props\.runId, msg\)/)
+  assert.match(workspaceView, /if \(data\?\.command\)/)
   assert.match(workspaceView, /:disabled="!initialChatInput\.trim\(\)"/)
 })
 
@@ -396,7 +385,8 @@ test('first stage applies mode-specific material readiness before phase 2', () =
   assert.match(workspaceView, /回复“继续第二阶段”/)
   assert.match(workspaceView, /const secondStageConfirmed = ref\(false\)/)
   assert.match(workspaceView, /!secondStageConfirmed\.value/)
-  assert.match(workspaceView, /void prepareOutline\(\)/)
+  assert.match(workspaceView, /sendPresetChat\('继续第二阶段'\)/)
+  assert.doesNotMatch(workspaceView, /function isSecondStageConfirmation\(message\)/)
   assert.doesNotMatch(workspaceView, />生成编写计划</)
   assert.match(workspaceView, /@change="handleQuickUpload\('company', \$event\)"/)
   assert.doesNotMatch(workspaceView, /handleQuickUpload\('company_fact', \$event\)/)

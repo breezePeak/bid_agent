@@ -2596,97 +2596,6 @@ function canonicalInputFilename(filename) {
     .toLocaleLowerCase()
 }
 
-function isContinueIntent(message) {
-  return /^(继续|继续执行|继续处理|继续整个流程|重试|再试一次)[。！!]?$/u.test(
-    String(message || '').trim(),
-  )
-}
-
-function isRegenerateIntent(message) {
-  return /^(重新生成|重新生成目录|重生成|强制重新生成)[。！!]?$/u.test(
-    String(message || '').trim(),
-  )
-}
-
-function isSecondStageConfirmation(message) {
-  return /^(继续第二阶段|开始第二阶段|确认进入第二阶段|确认|继续|是|好的|可以)[。！!]?$/u.test(
-    String(message || '').trim(),
-  )
-}
-
-function confirmSecondStage() {
-  secondStageConfirmed.value = true
-  // 长流程只在后台启动，不能占用聊天输入状态。
-  void prepareOutline()
-  return '收到确认，现进入第二阶段：解析评分点并生成章节目录。'
-}
-
-async function continueCurrentWorkflow({ regenerate = false } = {}) {
-  await refresh()
-
-  if (outlineBusy.value || generationBusy.value) {
-    return '当前阶段仍在执行，我会继续等待并刷新进度，不会重复提交。'
-  }
-
-  if (!initialMaterialsReady.value) {
-    if (projectMode.value === 'bid_rewrite') {
-      return hasTender.value
-        ? '还需要上传并完成解析旧投标书，之后才能进入第二阶段。'
-        : '请先上传新招标书和旧投标书，再继续执行。'
-    }
-    return hasTender.value
-      ? '还需要上传公司资质或参考资料；两类材料齐全后，我会询问是否进入第二阶段。'
-      : '请先上传招标文件和公司资质/参考资料，再继续执行。'
-  }
-
-  if (!secondStageConfirmed.value && !hasOutline.value && !planningReadyForReview.value) {
-    return confirmSecondStage()
-  }
-
-  const outlineOperation = latestOutlineOperation()
-  if (initialMaterialsReady.value && secondStageConfirmed.value && (
-    outlineOperation?.status === 'failed'
-    || (!planningReadyForReview.value && !hasOutline.value)
-  )) {
-    void prepareOutline(regenerate
-      ? {
-          regenerateCapabilities: [
-            'score.semantic_reconcile',
-            'planning.chapter_outline_split',
-          ],
-        }
-      : {})
-    return regenerate
-      ? '已丢弃失败的目录推理断点，正在重新生成章节目录。'
-      : '已从目录规划的失败阶段继续，已完成节点会直接复用。'
-  }
-
-  const generationStatus = String(generation.value.status || 'new')
-  if (
-    planningStatus.value === 'confirmed'
-    && ['new', 'not_started', 'failed', 'cancelled'].includes(generationStatus)
-  ) {
-    void runDocument()
-    return generationStatus === 'failed'
-      ? '已从完整标书生成的失败阶段继续。'
-      : '目录已确认，正在继续生成完整标书。'
-  }
-
-  let content = '当前没有可继续的失败任务。'
-  if (!initialMaterialsReady.value) {
-    content = hasTender.value
-      ? '请补充公司资质或参考资料，再继续执行。'
-      : '请先上传招标文件和公司资质/参考资料，再继续执行。'
-  } else if (planningReadyForReview.value && planningStatus.value !== 'confirmed') {
-    content = '目录已经生成，请先审阅并确认目录；确认后即可继续生成完整标书。'
-  } else if (['blocked', 'blocked_human'].includes(generationStatus)) {
-    content = '当前生成任务正在等待人工处理；请先按页面提示处理阻断项，再继续执行。'
-  } else if (generation.value.status === 'succeeded') {
-    content = '完整标书已经生成完成，可进入写作工作台继续审阅和修改。'
-  }
-  return content
-}
-
 function dismissPlanningReviewPrompt() {
   dismissedPlanningReviewOperationId.value = planningReviewOperationId.value
 }
@@ -2742,28 +2651,16 @@ async function sendInitialChat() {
   await nextTick()
   await scrollChatToLatest(true)
   try {
-    if (secondStageConfirmationNeeded.value && isSecondStageConfirmation(msg)) {
-      assistantTurn.content = confirmSecondStage()
-      assistantTurn.processDetail = '已记录阶段确认，并在后台启动目录规划；聊天输入保持可用。'
-      assistantTurn.processStatus = 'completed'
-      return
-    }
-    if (isRegenerateIntent(msg)) {
-      assistantTurn.content = await continueCurrentWorkflow({ regenerate: true })
-      assistantTurn.processDetail = '已检查失败节点并丢弃对应推理断点；目录重新生成已转入后台执行。'
-      assistantTurn.processStatus = 'completed'
-      return
-    }
-    if (isContinueIntent(msg)) {
-      assistantTurn.content = await continueCurrentWorkflow()
-      assistantTurn.processDetail = '已检查当前任务和可复用节点；需要继续时，长流程已转入后台执行。'
-      assistantTurn.processStatus = 'completed'
-      return
-    }
     const { data } = await chatV3(props.runId, msg)
     const answer = String(data?.reply || data?.answer || data?.message || '').trim()
     assistantTurn.content = answer || '暂未收到可显示的回复，请稍后重试。'
-    assistantTurn.processDetail = '服务端回复已返回并显示在当前对话。'
+    if (data?.command) {
+      secondStageConfirmed.value = true
+      assistantTurn.processDetail = '主 Agent 已理解请求并启动对应工作流。'
+      void refresh()
+    } else {
+      assistantTurn.processDetail = '主 Agent 已完成理解并返回回复。'
+    }
     assistantTurn.processStatus = 'completed'
   } catch (e) {
     const detail = e?.response?.data?.message || e?.message || String(e)

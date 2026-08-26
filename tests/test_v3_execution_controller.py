@@ -130,17 +130,20 @@ class V3ExecutionControllerTests(unittest.TestCase):
    ) as resumed_run:
     second=gateway.submit(CommandEnvelope.from_mapping({
      'kind':'document.prepare_outline',
+     'payload':{
+      'regenerate_capabilities':['planning.chapter_outline_split'],
+     },
      'expected_revision':store.revision(),
      'idempotency_key':'v3-outline-only-resume',
     },workspace_id='alpha'))
-   self.assertEqual(second.status,'accepted',second.message)
+   self.assertEqual(second.status,'accepted',str(second.as_dict()))
    resumed_commands=[
     item.args[0] for item in resumed_run.call_args_list
    ]
    self.assertNotIn('build_requirement_ledger',resumed_commands)
    self.assertNotIn('analyze_scores',resumed_commands)
    self.assertNotIn('plan_response',resumed_commands)
-   self.assertNotIn('compile_chapter_blueprint',resumed_commands)
+   self.assertIn('compile_chapter_blueprint',resumed_commands)
    second_stages={
     item['stage_command']:item['status']
     for item in store.stage_runs(str(second.operation_id))

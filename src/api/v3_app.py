@@ -981,7 +981,18 @@ async def chat_turn(workspace_id: str, request: Request) -> JSONResponse:
     if not message: return JSONResponse({"ok": False, "message": "请输入要处理的问题。"}, status_code=400)
     from document_pipeline.workspace_chat import WorkspaceChatService
 
-    result = WorkspaceChatService(_context(workspace_id)).answer(message)
+    actor = {"type": "user", "id": str(_principal(request).get("id") or "")}
+    try:
+        result = await run_in_threadpool(
+            WorkspaceChatService(_context(workspace_id)).answer,
+            message,
+            actor=actor,
+        )
+    except RuntimeError as exc:
+        return JSONResponse(
+            {"ok": False, "message": str(exc), "error": {"code": "WORKSPACE_AGENT_LLM_FAILED"}},
+            status_code=502,
+        )
     return JSONResponse({"ok": True, **result})
 
 @app.get("/api/v3/workspaces/{workspace_id}/snapshot")
