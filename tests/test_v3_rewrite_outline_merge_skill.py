@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -22,6 +23,7 @@ from document_pipeline.rewrite_outline_merge_skill import (  # noqa: E402
     RewriteOutlineAlignment,
     RewriteOutlineMergeCandidate,
     RewriteOutlineMergeInput,
+    LLMRewriteOutlineMergeProvider,
     apply_rewrite_outline_merge,
     validate_rewrite_outline_merge,
 )
@@ -113,6 +115,7 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
                     legacy_section_id="inventory",
                     target_node_id="migration",
                     placement="child_detail",
+                    matched_response_unit_ids=["U1"],
                     matched_condition_ids=["C1"],
                     purpose="完成迁移前的数据盘点",
                     writing_objectives=["形成盘点清单"],
@@ -157,11 +160,16 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
         self.assertEqual(inventory.title, "数据盘点")
         self.assertEqual(inventory.rewrite_mode, "copy")
         self.assertEqual(service.rewrite_mode, "new_write")
+        self.assertEqual(
+            [item.local_id for item in first.nodes],
+            ["root", "migration", inventory.local_id, "service"],
+        )
 
     def test_candidate_target_and_old_parent_branch_are_enforced(self) -> None:
         candidate = self.candidate()
         broken = candidate.model_copy(deep=True)
         broken.alignments[1].target_node_id = "service"
+        broken.alignments[1].matched_response_unit_ids = ["U2"]
         broken.alignments[1].matched_condition_ids = ["C2"]
         with self.assertRaisesRegex(ValueError, "旧父章节目标之外"):
             validate_rewrite_outline_merge(self.request(), broken)
@@ -190,6 +198,74 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
             "不要采用旧标书中的培训章节",
         )
         self.assertNotIn("legacy_bid_index", payload)
+
+    def test_provider_matches_full_structure_before_leaf_content(self) -> None:
+        calls = []
+
+        def chat(messages, *, temperature):
+            del temperature
+            payload_text = messages[-1]["content"]
+            payload = json.loads(payload_text[payload_text.index("{"):])
+            calls.append(payload)
+            if "legacy_outline" in payload:
+                return json.dumps({
+                    "alignments": [
+                        {
+                            "legacy_section_id": "old-migration",
+                            "target_node_id": "migration",
+                            "placement": "same_scope",
+                            "matched_response_unit_ids": ["U1"],
+                            "reason": "目录职责一致",
+                            "confidence": 0.95,
+                        },
+                        {
+                            "legacy_section_id": "inventory",
+                            "target_node_id": "migration",
+                            "placement": "child_detail",
+                            "matched_response_unit_ids": ["U1"],
+                            "matched_condition_ids": ["C1"],
+                            "purpose": "完成数据盘点",
+                            "writing_objectives": ["形成盘点清单"],
+                            "reason": "属于迁移方案的细化子目录",
+                            "confidence": 0.9,
+                        },
+                    ],
+                    "supplemental_nodes": [],
+                    "review_status": "draft",
+                }, ensure_ascii=False)
+            source = payload["blocks"][0]
+            return json.dumps({
+                "target_node_id": payload["target_node_id"],
+                "rewrite_mode": "light_edit",
+                "legacy_sources": [{
+                    "section_id": source["section_id"],
+                    "block_id": source["block_id"],
+                    "content_hash": source["content_hash"],
+                }],
+                "covered_condition_ids": ["C1"],
+                "required_changes": ["按新项目更新盘点范围"],
+                "reason": "旧正文主体可复用",
+                "confidence": 0.9,
+            }, ensure_ascii=False)
+
+        provider = LLMRewriteOutlineMergeProvider(
+            chat_callable=chat,
+            model_fingerprint="test-model",
+            provider_fingerprint="test-provider",
+        )
+        result = provider.merge(self.request())
+
+        self.assertEqual(len(calls), 2)
+        structure_json = json.dumps(calls[0], ensure_ascii=False)
+        self.assertIn("legacy_outline", calls[0])
+        self.assertNotIn("direct_content", structure_json)
+        self.assertNotIn("blocks", structure_json)
+        self.assertEqual(calls[1]["allowed_legacy_section_ids"], ["inventory", "old-migration"])
+        inventory = next(
+            item for item in result.candidate.alignments
+            if item.legacy_section_id == "inventory"
+        )
+        self.assertEqual(inventory.rewrite_mode, "light_edit")
 
 
 if __name__ == "__main__":

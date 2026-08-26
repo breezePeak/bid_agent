@@ -85,12 +85,39 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
         )
         self.assertEqual(receipt.status, "accepted", receipt.message)
         store.grant_workspace_access("owner")
-        gate = HumanGateService(context)
-        gate.confirm_planning(
-            principal_id="owner",
-            submitted_snapshot=gate.planning_snapshot(),
-            nonce="rewrite-plan-h1",
+        gateway = CommandGateway(context, controller.handlers())
+        source_confirmation = gateway.submit(
+            CommandEnvelope.from_mapping(
+                {
+                    "kind": "document.confirm_planning",
+                    "payload": {
+                        "decision": "confirm",
+                        "planning_snapshot": HumanGateService(context).planning_snapshot(),
+                    },
+                    "actor": {"type": "user", "id": "owner"},
+                    "expected_revision": store.revision(),
+                    "idempotency_key": "rewrite-plan-source-confirmation",
+                },
+                workspace_id=context.workspace_id,
+            )
         )
+        self.assertEqual(source_confirmation.status, "accepted", source_confirmation.message)
+        final_confirmation = gateway.submit(
+            CommandEnvelope.from_mapping(
+                {
+                    "kind": "document.confirm_planning",
+                    "payload": {
+                        "decision": "confirm",
+                        "planning_snapshot": HumanGateService(context).planning_snapshot(),
+                    },
+                    "actor": {"type": "user", "id": "owner"},
+                    "expected_revision": store.revision(),
+                    "idempotency_key": "rewrite-plan-final-confirmation",
+                },
+                workspace_id=context.workspace_id,
+            )
+        )
+        self.assertEqual(final_confirmation.status, "accepted", final_confirmation.message)
         nodes = store.v3_active_artifact("ChapterBlueprint")["payload"]["nodes"]
         parents = {str(item.get("parent_chapter_id") or "") for item in nodes if item.get("parent_chapter_id")}
         leaves = [item for item in nodes if str(item["chapter_id"]) not in parents]

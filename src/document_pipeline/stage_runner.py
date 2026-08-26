@@ -665,12 +665,12 @@ class V3StageRunner:
             try:
                 if checkpoint_hit is not None:
                     merge_result = self._checkpoint_result(checkpoint_hit, structured=True)
-                    self._note_checkpoint_reuse("compile_chapter_blueprint", checkpoint_hit)
+                    self._note_checkpoint_reuse("merge_rewrite_outline", checkpoint_hit)
                 else:
                     with llm_stage_context(
                         self.context,
                         operation_id,
-                        "compile_chapter_blueprint",
+                        "merge_rewrite_outline",
                         capability_id=REWRITE_OUTLINE_SKILL_ID,
                         prompt_version=provider.prompt_version,
                         schema_version=provider.schema_version,
@@ -820,17 +820,9 @@ class V3StageRunner:
     ) -> str:
         model = str(planning_model or "").strip()
         if not model:
-            project_mode = str(
-                ControlStore(self.context)
-                .workspace_profile()
-                .get("project_mode")
-                or "full_write"
-            )
-            model = (
-                "rewrite_merge"
-                if project_mode == "bid_rewrite"
-                else "score_direct"
-            )
+            model = "rewrite_merge" if (
+                REWRITE_OUTLINE_SKILL_ID in self._regenerate_capabilities
+            ) else "score_direct"
         return (
             REWRITE_OUTLINE_SKILL_ID
             if model == "rewrite_merge"
@@ -3473,7 +3465,10 @@ class V3StageRunner:
             active = store.v3_active_artifact("ChapterBlueprint")
             base_revision = int(active["revision"]) if active is not None else 0
 
-            if store.workspace_profile().get("project_mode") == "bid_rewrite":
+            if (
+                store.workspace_profile().get("project_mode") == "bid_rewrite"
+                and REWRITE_OUTLINE_SKILL_ID in self._regenerate_capabilities
+            ):
                 return self._compile_rewrite_blueprint_stage(
                     operation_id=operation_id,
                     ledger=ledger,

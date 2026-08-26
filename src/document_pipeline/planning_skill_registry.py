@@ -17,6 +17,7 @@ from .planning_inference import (
     REWRITE_OUTLINE_SCHEMA_VERSION,
     REWRITE_OUTLINE_SKILL_ID,
     planning_prompt_hash,
+    rewrite_outline_prompt_hash,
 )
 
 
@@ -55,7 +56,7 @@ REWRITE_OUTLINE_MERGE_SKILL = PlanningSkillRegistration(
     skill_id=REWRITE_OUTLINE_SKILL_ID,
     version=REWRITE_OUTLINE_CAPABILITY_VERSION,
     prompt_file=REWRITE_OUTLINE_PROMPT_FILE,
-    prompt_hash=planning_prompt_hash(REWRITE_OUTLINE_PROMPT_FILE),
+    prompt_hash=rewrite_outline_prompt_hash(),
     schema_version=REWRITE_OUTLINE_SCHEMA_VERSION,
     allowed_roles=frozenset({"planning_agent"}),
     execution_mode="structured_llm",

@@ -127,7 +127,11 @@ class V3ExecutionControllerTests(unittest.TestCase):
     controller.runner,
     'run',
     wraps=controller.runner.run,
-   ) as resumed_run:
+   ) as resumed_run, mock.patch.object(
+    controller.runner,
+    'can_reuse_stage',
+    return_value=False,
+   ):
     second=gateway.submit(CommandEnvelope.from_mapping({
      'kind':'document.prepare_outline',
      'payload':{

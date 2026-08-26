@@ -45,6 +45,9 @@ class V3WorkspaceSnapshotBuilder:
         "project_understanding": "项目整体理解（历史）",
         "topic_duty_planning": "响应主题规划（历史）",
         "compile_chapter_blueprint": "评分目录生成与覆盖校验",
+        "compile_source_outline": "根据招标文件生成原始目录",
+        "confirm_source_outline": "确认原始目录",
+        "merge_rewrite_outline": "检查并合并旧目录",
         "confirm_planning": "人工确认",
     }
     _GENERATION_STAGE_LABELS = {
@@ -1981,11 +1984,21 @@ class V3WorkspaceSnapshotBuilder:
 
         def status_for(stage: str) -> str:
             item = runs_by_stage.get(stage)
-            return (
-                str(item.get("status") or "pending")
-                if item
-                else "pending"
-            )
+            if item:
+                return str(item.get("status") or "pending")
+            artifact_by_stage = {
+                "normalize_sources": "SourceIndex",
+                "build_requirement_ledger": "RequirementLedger",
+                "score_structure": "ScoreModel",
+                "score_semantic": "ScoreModel",
+                "analyze_scores": "ScoreModel",
+                "plan_response": "ProjectModel",
+                "compile_chapter_blueprint": "ChapterBlueprint",
+            }
+            artifact_kind = artifact_by_stage.get(stage)
+            if artifact_kind and artifact_states.get(artifact_kind) is True:
+                return "succeeded"
+            return "pending"
 
         analyze_run = runs_by_stage.get("analyze_scores") or {}
         score_structure_run = runs_by_stage.get("score_structure") or {}
@@ -2036,7 +2049,7 @@ class V3WorkspaceSnapshotBuilder:
         else:
             score_semantic_status = analyze_status
 
-        stage_rows = [
+        common_stage_rows = [
             self._pipeline_stage(
                 "normalize_sources",
                 status_for("normalize_sources"),
@@ -2067,19 +2080,78 @@ class V3WorkspaceSnapshotBuilder:
                 runs_by_stage.get("plan_response"),
                 llm_requests_by_stage,
             ),
-            self._pipeline_stage(
-                "compile_chapter_blueprint",
-                status_for("compile_chapter_blueprint"),
-                runs_by_stage.get("compile_chapter_blueprint"),
-                llm_requests_by_stage,
-            ),
-            self._pipeline_stage(
-                "confirm_planning",
-                status_for("confirm_planning"),
-                runs_by_stage.get("confirm_planning"),
-                llm_requests_by_stage,
-            ),
         ]
+        project_mode = str(control.workspace_profile().get("project_mode") or "full_write")
+        if project_mode == "bid_rewrite":
+            blueprint_payload = (
+                (artifacts.get("ChapterBlueprint") or {}).get("payload") or {}
+            )
+            planning_model = str(blueprint_payload.get("planning_model") or "")
+            has_blueprint = bool(blueprint_payload)
+            source_status = status_for("compile_chapter_blueprint")
+            if has_blueprint and source_status == "pending":
+                source_status = "succeeded"
+            source_confirm_status = status_for("confirm_source_outline")
+            merge_status = status_for("merge_rewrite_outline")
+            final_confirm_status = status_for("confirm_planning")
+            if planning_model == "rewrite_merge":
+                if source_confirm_status == "pending":
+                    source_confirm_status = "succeeded"
+                if merge_status == "pending":
+                    merge_status = "succeeded"
+                if not planning_confirmed and final_confirm_status == "pending":
+                    final_confirm_status = "blocked_human"
+            elif has_blueprint and planning_status == "needs_human":
+                source_confirm_status = "blocked_human"
+                merge_status = "pending"
+                final_confirm_status = "pending"
+            llm_requests_by_stage.setdefault(
+                "compile_source_outline",
+                llm_requests_by_stage.get("compile_chapter_blueprint", []),
+            )
+            stage_rows = [
+                *common_stage_rows,
+                self._pipeline_stage(
+                    "compile_source_outline",
+                    source_status,
+                    runs_by_stage.get("compile_chapter_blueprint"),
+                    llm_requests_by_stage,
+                ),
+                self._pipeline_stage(
+                    "confirm_source_outline",
+                    source_confirm_status,
+                    runs_by_stage.get("confirm_source_outline"),
+                    llm_requests_by_stage,
+                ),
+                self._pipeline_stage(
+                    "merge_rewrite_outline",
+                    merge_status,
+                    runs_by_stage.get("merge_rewrite_outline"),
+                    llm_requests_by_stage,
+                ),
+                self._pipeline_stage(
+                    "confirm_planning",
+                    final_confirm_status,
+                    runs_by_stage.get("confirm_planning"),
+                    llm_requests_by_stage,
+                ),
+            ]
+        else:
+            stage_rows = [
+                *common_stage_rows,
+                self._pipeline_stage(
+                    "compile_chapter_blueprint",
+                    status_for("compile_chapter_blueprint"),
+                    runs_by_stage.get("compile_chapter_blueprint"),
+                    llm_requests_by_stage,
+                ),
+                self._pipeline_stage(
+                    "confirm_planning",
+                    status_for("confirm_planning"),
+                    runs_by_stage.get("confirm_planning"),
+                    llm_requests_by_stage,
+                ),
+            ]
         products = self._pipeline_products(
             artifacts,
             artifact_states,

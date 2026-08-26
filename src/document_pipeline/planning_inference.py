@@ -30,21 +30,23 @@ PROJECT_PROMPT_FILE = "v3_planning_agent_project.md"
 TOPIC_PROMPT_FILE = "v3_planning_agent_topics.md"
 OUTLINE_PROMPT_FILE = "v3_planning_agent_blueprint.md"
 REWRITE_OUTLINE_PROMPT_FILE = "v3_rewrite_outline_merge.md"
+REWRITE_OUTLINE_STRUCTURE_PROMPT_FILE = "v3_rewrite_outline_structure_match.md"
+REWRITE_CHAPTER_CONTENT_PROMPT_FILE = "v3_rewrite_chapter_content_assessment.md"
 
 PROJECT_PROMPT_VERSION = "v3_planning_project_understanding_v2.0"
 TOPIC_PROMPT_VERSION = "v3_planning_topic_duty_v1.1"
 OUTLINE_PROMPT_VERSION = "v3_planning_chapter_outline_split_v6.0"
-REWRITE_OUTLINE_PROMPT_VERSION = "v3_rewrite_outline_merge_v1.1"
+REWRITE_OUTLINE_PROMPT_VERSION = "v3_rewrite_outline_merge_v2.0"
 
 PROJECT_CAPABILITY_VERSION = "1.9.0"
 TOPIC_CAPABILITY_VERSION = "1.1.0"
 OUTLINE_CAPABILITY_VERSION = "6.0.0"
-REWRITE_OUTLINE_CAPABILITY_VERSION = "2.0.0"
+REWRITE_OUTLINE_CAPABILITY_VERSION = "3.0.0"
 
 PROJECT_SCHEMA_VERSION = "v3.project_understanding_candidate.v6"
 TOPIC_SCHEMA_VERSION = "v3.topic_duty_candidate.v2"
 OUTLINE_SCHEMA_VERSION = "v3.chapter_outline_annotation_candidate.v1"
-REWRITE_OUTLINE_SCHEMA_VERSION = "v3.rewrite_outline_merge_candidate.v2"
+REWRITE_OUTLINE_SCHEMA_VERSION = "v3.rewrite_outline_merge_candidate.v3"
 
 OUTLINE_SKILL_ID = "planning.chapter_outline_split"
 REWRITE_OUTLINE_SKILL_ID = "planning.rewrite_outline_merge"
@@ -398,7 +400,9 @@ class ChapterOutlineNodeCandidate(StrictPlanningModel):
     template_slot_ids: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0, le=1)
     needs_human: bool = False
-    structure_origin: Literal["tender_initial", "legacy_enriched"] = "tender_initial"
+    structure_origin: Literal[
+        "tender_initial", "legacy_enriched", "tender_supplement"
+    ] = "tender_initial"
     rewrite_mode: Literal["copy", "light_edit", "restructure", "new_write"] | None = None
     legacy_section_ids: list[str] = Field(default_factory=list)
     legacy_sources: list[dict[str, str]] = Field(default_factory=list)
@@ -696,6 +700,18 @@ def load_planning_prompt(filename: str) -> str:
 
 def planning_prompt_hash(filename: str) -> str:
     return hashlib.sha256(load_planning_prompt(filename).encode("utf-8")).hexdigest()
+
+
+def rewrite_outline_prompt_hash() -> str:
+    payload = "\n\0\n".join(
+        load_planning_prompt(filename)
+        for filename in (
+            REWRITE_OUTLINE_PROMPT_FILE,
+            REWRITE_OUTLINE_STRUCTURE_PROMPT_FILE,
+            REWRITE_CHAPTER_CONTENT_PROMPT_FILE,
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _default_chat(messages: list[dict[str, str]], *, temperature: float) -> ChatResponse:

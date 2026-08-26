@@ -57,6 +57,24 @@ class V3ChapterRewriteMatchTests(unittest.TestCase):
             )
         )
         self.assertEqual(receipt.status, "accepted", receipt.message)
+        store.grant_workspace_access("owner")
+        source_confirmation = CommandGateway(context, controller.handlers()).submit(
+            CommandEnvelope.from_mapping(
+                {
+                    "kind": "document.confirm_planning",
+                    "payload": {
+                        "decision": "confirm",
+                        "planning_snapshot": HumanGateService(context).planning_snapshot(),
+                    },
+                    "actor": {"type": "user", "id": "owner"},
+                    "expected_revision": store.revision(),
+                    "idempotency_key": "confirm-rewrite-source-outline",
+                },
+                workspace_id=context.workspace_id,
+            )
+        )
+        self.assertEqual(source_confirmation.status, "accepted", source_confirmation.message)
+        self.assertEqual(source_confirmation.result["operation_status"], "blocked_human")
         return context, legacy
 
     @staticmethod

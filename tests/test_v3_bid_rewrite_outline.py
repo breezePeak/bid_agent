@@ -25,9 +25,15 @@ from document_pipeline.planning_inference import (  # noqa: E402
     REWRITE_OUTLINE_SKILL_ID,
     StructuredInferenceResult,
     planning_prompt_hash,
+    rewrite_outline_prompt_hash,
 )
 from document_pipeline.rewrite_outline_merge_skill import (  # noqa: E402
+    InitialOutlineCard,
+    LegacyBlockCard,
+    LegacySectionCard,
+    LLMRewriteOutlineMergeProvider,
     RewriteOutlineAlignment,
+    RewriteOutlineMergeInput,
     RewriteOutlineMergeCandidate,
 )
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
@@ -103,6 +109,17 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             receipt = self.command(context, "rewrite-outline")
             self.assertEqual(receipt.status, "accepted", receipt.message)
             self.assertEqual(receipt.result["operation_status"], "blocked_human")
+            initial_stages = {
+                item["stage_id"]: item
+                for item in V3WorkspaceSnapshotBuilder(context).build()["analysis"]["pipeline"]["stages"]
+            }
+            self.assertEqual(
+                initial_stages["compile_source_outline"]["label"],
+                "根据招标文件生成原始目录",
+            )
+            self.assertEqual(initial_stages["confirm_source_outline"]["status"], "blocked_human")
+            self.assertEqual(initial_stages["merge_rewrite_outline"]["status"], "pending")
+            self.assertEqual(initial_stages["confirm_planning"]["status"], "pending")
             self.assertEqual(audit_rewrite_zero_pollution(context)["status"], "pass")
 
             store = ControlStore(context)
@@ -131,12 +148,68 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
 
             store.grant_workspace_access("owner")
             gate = HumanGateService(context)
-            confirmed = gate.confirm_planning(
-                principal_id="owner",
-                submitted_snapshot=gate.planning_snapshot(),
-                nonce="rewrite-h1-confirmation",
+            confirmation_controller = V3ExecutionController.for_deterministic_tests(context)
+            confirmation_gateway = CommandGateway(
+                context,
+                confirmation_controller.handlers(),
             )
-            self.assertEqual(confirmed.verdict, "pass")
+            source_confirmation = confirmation_gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "document.confirm_planning",
+                        "payload": {
+                            "decision": "confirm",
+                            "planning_snapshot": gate.planning_snapshot(),
+                        },
+                        "actor": {"type": "user", "id": "owner"},
+                        "expected_revision": store.revision(),
+                        "idempotency_key": "rewrite-source-outline-confirmation",
+                    },
+                    workspace_id=context.workspace_id,
+                )
+            )
+            self.assertEqual(source_confirmation.status, "accepted", source_confirmation.as_dict())
+            self.assertEqual(
+                store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
+                "rewrite_merge",
+                source_confirmation.as_dict(),
+            )
+            self.assertEqual(
+                source_confirmation.result.get("operation_status"),
+                "blocked_human",
+                source_confirmation.as_dict(),
+            )
+            merged_stages = {
+                item["stage_id"]: item
+                for item in V3WorkspaceSnapshotBuilder(context).build()["analysis"]["pipeline"]["stages"]
+            }
+            self.assertEqual(merged_stages["confirm_source_outline"]["status"], "succeeded")
+            self.assertEqual(merged_stages["merge_rewrite_outline"]["status"], "succeeded")
+            self.assertEqual(merged_stages["confirm_planning"]["status"], "blocked_human")
+            self.assertEqual(
+                store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
+                "rewrite_merge",
+            )
+            final_confirmation = confirmation_gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "document.confirm_planning",
+                        "payload": {
+                            "decision": "confirm",
+                            "planning_snapshot": gate.planning_snapshot(),
+                        },
+                        "actor": {"type": "user", "id": "owner"},
+                        "expected_revision": store.revision(),
+                        "idempotency_key": "rewrite-final-outline-confirmation",
+                    },
+                    workspace_id=context.workspace_id,
+                )
+            )
+            self.assertEqual(final_confirmation.status, "accepted")
+            self.assertEqual(
+                final_confirmation.result["operation_status"],
+                "succeeded",
+            )
 
             replacement = base / "replacement-old-bid.md"
             replacement.write_text(
@@ -218,7 +291,7 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
                 skill_id = REWRITE_OUTLINE_SKILL_ID
                 capability_version = REWRITE_OUTLINE_CAPABILITY_VERSION
                 prompt_version = REWRITE_OUTLINE_PROMPT_VERSION
-                prompt_hash = planning_prompt_hash(REWRITE_OUTLINE_PROMPT_FILE)
+                prompt_hash = rewrite_outline_prompt_hash()
                 schema_version = REWRITE_OUTLINE_SCHEMA_VERSION
                 provider_fingerprint = "test-rewrite-provider-v2"
                 model_fingerprint = "test-rewrite-model-v2"
@@ -310,6 +383,7 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             )
             feedback = "不要采用旧标书中的培训章节"
             runner.request_outline_revision(feedback)
+            runner.request_inference_regeneration([REWRITE_OUTLINE_SKILL_ID])
             runner.run("compile_chapter_blueprint", operation_id="feedback-run")
             self.assertEqual(provider.requests[-1].review_feedback, feedback)
             self.assertEqual(
@@ -322,6 +396,82 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             runner.request_inference_regeneration([REWRITE_OUTLINE_SKILL_ID])
             runner.run("compile_chapter_blueprint", operation_id="regenerate-run")
             self.assertEqual(len(provider.requests), 2)
+
+    def test_rewrite_merge_provider_matches_complete_outline_without_body(self) -> None:
+        calls = []
+
+        def chat(messages, *, temperature):
+            del temperature
+            calls.append(messages)
+            content = messages[-1]["content"]
+            request = json.loads(content[content.index("{"):])
+            self.assertIn("legacy_outline", request)
+            self.assertNotIn("legacy_sections", request)
+            return json.dumps({
+                "alignments": [
+                    {
+                        "legacy_section_id": section["section_id"],
+                        "placement": "ignore",
+                        "confidence": 1.0,
+                    }
+                    for section in request["legacy_outline"]
+                ],
+                "supplemental_nodes": [],
+                "review_status": "draft",
+            })
+
+        target = InitialOutlineCard(
+            node_id="chapter-1",
+            path=["实施方案"],
+            depth=1,
+            title="实施方案",
+            purpose="响应实施要求",
+            subtree_requirement_ids=["REQ-1"],
+            requirements=[{"requirement_id": "REQ-1", "text": "实施要求"}],
+        )
+        sections = [
+            LegacySectionCard(
+                section_id=f"legacy-{index}",
+                path=[f"旧章节 {index}"],
+                depth=1,
+                order=index,
+                title=f"旧章节 {index}",
+                direct_content="旧正文" * 3_000,
+                blocks=[LegacyBlockCard(
+                    block_id=f"block-{index}",
+                    content_hash=f"hash-{index}",
+                    content="旧正文块" * 3_000,
+                )],
+                candidate_target_ids=["chapter-1"],
+            )
+            for index in range(15)
+        ]
+        request = RewriteOutlineMergeInput(
+            requirement_ledger={"requirements": [{"requirement_id": "REQ-1"}]},
+            score_model={"points": []},
+            project_model={"scope": ["实施"]},
+            initial_outline=[target],
+            legacy_sections=sections,
+        )
+        provider = LLMRewriteOutlineMergeProvider(
+            chat_callable=chat,
+            model_fingerprint="test-model",
+            provider_fingerprint="test-provider",
+        )
+
+        result = provider.merge(request)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result.candidate.alignments), len(sections))
+        structure_payload = json.loads(
+            calls[0][-1]["content"][calls[0][-1]["content"].index("{"):]
+        )
+        self.assertEqual(len(structure_payload["legacy_outline"]), len(sections))
+        serialized = json.dumps(structure_payload, ensure_ascii=False)
+        self.assertNotIn("direct_content", serialized)
+        self.assertNotIn("blocks", serialized)
+        self.assertNotIn("candidate_target_ids", serialized)
+        self.assertNotIn("旧正文块", serialized)
 
 
 if __name__ == "__main__":

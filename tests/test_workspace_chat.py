@@ -56,6 +56,7 @@ def test_regenerate_outline_only_requests_rewrite_outline_capability() -> None:
         {
             "workspace_revision": 7,
             "profile": {"project_mode": "bid_rewrite"},
+            "analysis": {"chapter_blueprint": {"planning_model": "rewrite_merge"}},
         },
         {"type": "user", "id": "user-1"},
     )
@@ -97,6 +98,7 @@ def test_workspace_chat_uses_llm_as_main_agent_and_dispatches_its_action(
     snapshot = {
         "workspace_revision": 9,
         "profile": {"project_mode": "bid_rewrite"},
+        "analysis": {"chapter_blueprint": {"planning_model": "score_direct"}},
     }
     history_path = tmp_path / "chat_history.jsonl"
     submitted = []
@@ -126,7 +128,7 @@ def test_workspace_chat_uses_llm_as_main_agent_and_dispatches_its_action(
 
     assert result["action"] == "regenerate_outline"
     assert result["command"]["payload"] == {
-        "regenerate_capabilities": ["planning.rewrite_outline_merge"],
+        "regenerate_capabilities": ["planning.chapter_outline_split"],
     }
     assert submitted
     assert "主 Agent" in seen_messages[0]["content"]

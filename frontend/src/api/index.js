@@ -214,7 +214,8 @@ export async function confirmV3Planning(runId, planningSnapshot) {
     workspaceRevisionFromV3Payload(snapshot?.data),
     planningSnapshot,
   )
-  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 120000 })
+  // 改写模式首次确认后还会执行旧投标书目录融合，沿用无浏览器超时的长任务策略。
+  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 0 })
 }
 
 export async function resolveV3Research(runId, needId) {

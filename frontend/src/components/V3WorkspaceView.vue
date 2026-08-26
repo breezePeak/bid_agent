@@ -584,114 +584,98 @@
 
         <div ref="studioChatBody" class="studio-chat-body" @scroll.passive="updateChatFollowState">
           <div class="legacy-chat-stream">
-          <!-- 步骤 1：材料投递引导 -->
+          <!-- 阶段 1：材料投递引导 -->
           <div class="chat-msg bot-msg timeline-step-msg">
             <div class="msg-avatar step-avatar" aria-hidden="true">1</div>
             <div class="msg-bubble step-bubble">
               <header class="workflow-step-header">
                 <div class="workflow-step-heading">
-                  <span class="step-tag">步骤 1 · 材料投递</span>
+                  <span class="step-tag">阶段 1 · 材料投递</span>
                   <div>
                     <h4>投递项目材料</h4>
-                    <p>{{ projectMode === 'bid_rewrite' ? '准备新招标书与旧投标书' : '先准备招标文件，再补充公司资质与参考资料。' }}</p>
                   </div>
                 </div>
                 <span class="workflow-step-status" :class="initialMaterialsReady ? 'done' : 'pending'">
                   {{ initialMaterialsReady ? '已完成' : '待上传' }}
                 </span>
               </header>
-              <p class="workflow-step-intro">{{ materialReadinessDescription }}</p>
-            </div>
-          </div>
 
-          <div v-if="!secondStageConfirmed && !hasOutline && !loading" class="chat-msg bot-msg timeline-step-msg upload-start-msg">
-            <div class="msg-avatar material-avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5M12 10v7M8.5 13.5h7" /></svg>
-            </div>
-            <div class="msg-bubble upload-start-bubble">
-              <div class="upload-start-header">
-                <span class="workflow-result-kicker">开始投递</span>
-                <h4>请先补齐必传材料</h4>
-                <p>{{ projectMode === 'bid_rewrite' ? '新招标书与旧投标书解析完成后才能生成新目录；公司资料为可选。' : '仅上传招标文件不会进入第二阶段；请同时上传公司资质或参考资料。' }}</p>
-              </div>
-              <div class="required-upload-zones">
-                <div
-                  v-for="zone in uploadZones"
-                  :key="zone.role"
-                  class="required-upload-zone"
-                  :class="{ complete: inputsForRole(zone.role).length }"
-                >
-                  <label class="required-upload-zone-label">
-                    <input
-                      class="visually-hidden"
-                      type="file"
-                      accept=".pdf,.docx,.md,.txt"
-                      multiple
-                      :disabled="uploading || running"
-                      @change="handleQuickUpload(zone.role, $event)"
-                    />
-                    <div class="zone-icon-box">
-                      <svg v-if="zone.role === 'tender'" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                        <polyline points="14 2 14 8 20 8"/>
-                        <line x1="16" y1="13" x2="8" y2="13"/>
-                        <line x1="16" y1="17" x2="8" y2="17"/>
-                        <polyline points="10 9 9 9 8 9"/>
-                      </svg>
-                      <svg v-else-if="zone.role === 'legacy_bid'" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-                        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-                      </svg>
-                      <svg v-else viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M3 6h7l2 2h9v11H3z"/>
-                      </svg>
-                    </div>
-                    <div class="zone-info-box">
-                      <div class="zone-title-line">
-                        <strong>{{ zone.title }}</strong>
-                        <span v-if="zone.required" class="zone-req-badge">必传</span>
+              <!-- 快捷投递区域（未进入第二阶段且无提纲时在步骤1中直接提供上传入口） -->
+              <div v-if="!secondStageConfirmed && !hasOutline && !loading" class="step-upload-section">
+                <div class="required-upload-zones">
+                  <div
+                    v-for="zone in uploadZones"
+                    :key="zone.role"
+                    class="required-upload-zone"
+                    :class="{ complete: inputsForRole(zone.role).length }"
+                  >
+                    <label class="required-upload-zone-label">
+                      <input
+                        class="visually-hidden"
+                        type="file"
+                        accept=".pdf,.docx,.md,.txt"
+                        multiple
+                        :disabled="uploading || running"
+                        @change="handleQuickUpload(zone.role, $event)"
+                      />
+                      <div class="zone-icon-box">
+                        <svg v-if="zone.role === 'tender'" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                          <polyline points="14 2 14 8 20 8"/>
+                          <line x1="16" y1="13" x2="8" y2="13"/>
+                          <line x1="16" y1="17" x2="8" y2="17"/>
+                          <polyline points="10 9 9 9 8 9"/>
+                        </svg>
+                        <svg v-else-if="zone.role === 'legacy_bid'" viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                          <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+                        </svg>
+                        <svg v-else viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2">
+                          <path d="M3 6h7l2 2h9v11H3z"/>
+                        </svg>
                       </div>
-                      <small>{{ zone.description }}</small>
-                    </div>
-                    <div class="zone-status-box">
-                      <span v-if="inputsForRole(zone.role).length" class="zone-uploaded-tag">
-                        ✓ 已上传 {{ inputsForRole(zone.role).length }} 份
-                      </span>
-                      <span v-else class="zone-upload-btn-text">
-                        + 点击上传
-                      </span>
-                    </div>
-                  </label>
+                      <div class="zone-info-box">
+                        <div class="zone-title-line">
+                          <strong>{{ zone.title }}</strong>
+                          <span v-if="zone.required" class="zone-req-badge">必传</span>
+                        </div>
+                        <small>{{ zone.description }}</small>
+                      </div>
+                      <div class="zone-status-box">
+                        <span v-if="inputsForRole(zone.role).length" class="zone-uploaded-tag">
+                          ✓ 已上传 {{ inputsForRole(zone.role).length }} 份
+                        </span>
+                        <span v-else class="zone-upload-btn-text">
+                          + 点击上传
+                        </span>
+                      </div>
+                    </label>
+                  </div>
                 </div>
               </div>
-            </div>
-          </div>
 
-          <!-- 步骤 1.1：已登记材料卡片消息 -->
-          <div v-if="displayInputs.length" class="chat-msg bot-msg timeline-step-msg file-list-msg">
-            <div class="msg-avatar file-summary-avatar" aria-hidden="true">
-              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-            </div>
-            <div class="file-changes-card">
-              <div class="file-changes-header">
-                <span class="file-changes-title">已登记与解析材料（{{ displayInputs.length }} 份）</span>
-              </div>
-              <div class="file-changes-list">
-                <div v-for="item in displayInputs" :key="item.input_id" class="file-change-item">
-                  <div class="file-item-left">
-                    <span class="file-role-badge" :class="`role-${item.role}`">{{ roleLabel(item.role) }}</span>
-                    <span class="file-path" :title="item.filename">
-                      <span class="name">{{ formatFilename(item.filename) }}</span>
-                    </span>
-                  </div>
-                  <div class="file-diff-stats">
-                    <span class="diff-tag add">✓ {{ displayInputStatusLabel(item) }}</span>
-                    <button
-                      v-if="item.role === 'legacy_bid' && item.status === 'ready'"
-                      class="legacy-preview-trigger"
-                      type="button"
-                      @click="openLegacyPreview(item)"
-                    >查看拆解</button>
+              <!-- 已登记与解析材料列表（合并在步骤1中） -->
+              <div v-if="displayInputs.length" class="step-materials-card">
+                <div class="file-changes-header">
+                  <span class="file-changes-title">已登记与解析材料（{{ displayInputs.length }} 份）</span>
+                </div>
+                <div class="file-changes-list">
+                  <div v-for="item in displayInputs" :key="item.input_id" class="file-change-item">
+                    <div class="file-item-left">
+                      <span class="file-role-badge" :class="`role-${item.role}`">{{ roleLabel(item.role) }}</span>
+                      <span class="file-path" :title="item.filename">
+                        <span class="name">{{ formatFilename(item.filename) }}</span>
+                      </span>
+                    </div>
+                    <div class="file-diff-stats">
+                      <span class="diff-tag add">✓ {{ displayInputStatusLabel(item) }}</span>
+                      <button
+                        v-if="item.role === 'legacy_bid' && item.status === 'ready'"
+                        class="legacy-preview-trigger"
+                        type="button"
+                        @click="openLegacyPreview(item)"
+                      >查看拆解</button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -760,13 +744,17 @@
           <div v-if="initialMaterialsReady && secondStageConfirmed" class="chat-msg bot-msg timeline-step-msg outline-stage-msg">
             <div class="msg-avatar outline-avatar" aria-hidden="true">2</div>
             <div class="msg-bubble outline-card-bubble">
-              <header class="card-title-row">
-                <div>
-                  <span class="workflow-result-kicker">阶段 2 · 解析评分并生成目录</span>
-                  <h4>{{ outlineWorkflowTitle }}</h4>
+              <header class="workflow-step-header">
+                <div class="workflow-step-heading">
+                  <span class="step-tag" :class="{ ready: outlineProcessStatus === 'completed' }">阶段 2 · 评分与目录</span>
+                  <div>
+                    <h4>解析评分点并生成目录</h4>
+                  </div>
                 </div>
+                <span class="workflow-step-status" :class="outlineStatusBadgeClass">
+                  {{ outlineStatusBadgeText }}
+                </span>
               </header>
-              <p class="outline-card-summary">{{ outlineWorkflowDescription }}</p>
               <AiProcessDisclosure
                 :status="outlineProcessStatus"
                 :seconds="outlineElapsedSeconds"
@@ -839,12 +827,14 @@
             <div class="msg-bubble generation-stage-bubble">
               <header class="workflow-step-header">
                 <div class="workflow-step-heading">
-                  <span class="step-tag ready">阶段 3 · 完整标书生成</span>
+                  <span class="step-tag" :class="{ ready: generationProcessStatus === 'completed' }">阶段 3 · 标书生成</span>
                   <div>
-                    <h4>{{ generationWorkflowTitle }}</h4>
-                    <p>基于已确认目录执行材料检查、逐章写作、全文整合、质量审核和 Word 交付。</p>
+                    <h4>生成完整标书</h4>
                   </div>
                 </div>
+                <span class="workflow-step-status" :class="generationStatusBadgeClass">
+                  {{ generationStatusBadgeText }}
+                </span>
               </header>
               <p class="workflow-step-intro generation-stage-headline">{{ generationHeadline }}</p>
 
@@ -1621,7 +1611,7 @@
               :disabled="running"
               @click="confirmPlanning"
             >
-              确认当前目录
+              {{ awaitingSourceOutlineConfirmation ? '确认当前目录并融合旧投标书' : '确认当前目录' }}
             </button>
             <button
               v-if="deliveryReady"
@@ -3018,46 +3008,20 @@ watch(
 )
 const sourceIndex = computed(() => snapshot.value.analysis?.source_index || {})
 const analysisPipeline = computed(() => snapshot.value.analysis?.pipeline || {})
+const activeBlueprintPlanningModel = computed(() => String(
+  snapshot.value.analysis?.chapter_blueprint?.planning_model || '',
+))
+const awaitingSourceOutlineConfirmation = computed(() => (
+  projectMode.value === 'bid_rewrite'
+  && activeBlueprintPlanningModel.value !== 'rewrite_merge'
+))
 const rawPipelineStages = computed(() => (
   workflow.value.phase === 'planning' || workflow.value.phase === 'planning_review'
     ? (workflow.value.stages || analysisPipeline.value.stages || [])
     : (analysisPipeline.value.stages || [])
 ))
 const pipelineStages = computed(() => {
-  if (projectMode.value !== 'bid_rewrite') return rawPipelineStages.value
-  const byId = new Map(rawPipelineStages.value.map(stage => [stage.stage_id, stage]))
-  const groups = [
-    ['normalize_sources', '新招标文件解析', ['normalize_sources', 'build_requirement_ledger']],
-    ['score_semantic', '评分与项目理解', ['score_structure', 'score_semantic', 'plan_response']],
-    ['compile_chapter_blueprint', '生成新目录', ['compile_chapter_blueprint']],
-    ['confirm_planning', '等待目录确认', ['confirm_planning']],
-  ]
-  const groupStatus = (members) => {
-    const values = members.map(item => String(item.status || 'pending'))
-    for (const candidate of ['failed', 'paused', 'blocked', 'running', 'queued', 'blocked_human']) {
-      if (values.includes(candidate)) return candidate
-    }
-    if (values.length && values.every(value => ['succeeded', 'reused', 'completed'].includes(value))) {
-      return 'succeeded'
-    }
-    return 'pending'
-  }
-  return groups.map(([stageId, label, ids]) => {
-    const members = ids.map(id => byId.get(id)).filter(Boolean)
-    const representative = byId.get(stageId) || members.at(-1) || {}
-    return {
-      ...representative,
-      stage_id: stageId,
-      label,
-      status: groupStatus(members),
-      llm_requests: members.flatMap(item => item.llm_requests || []),
-      llm_request_count: members.reduce(
-        (total, item) => total + Number(item.llm_request_count || 0),
-        0,
-      ),
-      error: members.find(item => item.error)?.error || null,
-    }
-  })
+  return rawPipelineStages.value
 })
 const latestWorkspaceOperation = computed(() => (
   snapshot.value.analysis?.latest_operation || {}
@@ -3347,6 +3311,31 @@ const outlineWorkflowDescription = computed(() => {
   if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
   if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
   return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
+})
+const outlineStatusBadgeClass = computed(() => {
+  if (outlineProcessStatus.value === 'completed') return 'done'
+  if (outlineProcessStatus.value === 'failed') return 'failed'
+  if (outlineProcessStatus.value === 'processing' || outlineBusy.value) return 'action'
+  return 'pending'
+})
+const outlineStatusBadgeText = computed(() => {
+  if (outlineProcessStatus.value === 'completed') return '已完成'
+  if (outlineProcessStatus.value === 'failed') return '失败'
+  if (outlineProcessStatus.value === 'processing' || outlineBusy.value) return '处理中'
+  return '待执行'
+})
+
+const generationStatusBadgeClass = computed(() => {
+  if (generationProcessStatus.value === 'completed') return 'done'
+  if (generationProcessStatus.value === 'failed') return 'failed'
+  if (generationProcessStatus.value === 'processing' || generationBusy.value) return 'action'
+  return 'pending'
+})
+const generationStatusBadgeText = computed(() => {
+  if (generationProcessStatus.value === 'completed') return '已完成'
+  if (generationProcessStatus.value === 'failed') return '失败'
+  if (generationProcessStatus.value === 'processing' || generationBusy.value) return '生成中'
+  return '待生成'
 })
 const generationPrerequisiteCompleted = computed(() => (
   generationPrerequisiteStages.value.filter(
@@ -4266,9 +4255,18 @@ async function confirmPlanning() {
   try {
     const { data } = await confirmV3Planning(props.runId, planning.value.snapshot)
     assertCommandAccepted(data, '目录确认失败。')
-    message.value = '目录已确认；正文生成尚未启动。'
+    const confirmationStatus = String(
+      data?.result?.operation_status
+      || data?.receipt?.result?.operation_status
+      || '',
+    )
+    const waitingForFinalOutline = confirmationStatus === 'blocked_human'
+    message.value = waitingForFinalOutline
+      ? '原始目录已确认；已结合旧投标书生成最终目录，请再次审核确认。'
+      : '最终目录已确认；正文生成尚未启动。'
     await refresh()
     activeTab.value = 'upload'
+    if (waitingForFinalOutline) activeTab.value = 'planning'
   } catch (cause) {
     reportError(cause, '目录确认失败。')
   } finally {
@@ -8361,7 +8359,7 @@ onUnmounted(() => {
 
 .workflow-step-heading {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 10px;
   min-width: 0;
 }
@@ -8598,7 +8596,23 @@ onUnmounted(() => {
   .required-upload-zones { grid-template-columns: 1fr; }
 }
 
-/* 已登记材料清单卡片 */
+/* 步骤1中的材料卡片与上传区 */
+.step-upload-section {
+  margin-top: 14px;
+}
+
+.step-materials-card {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid #f1f5f9;
+}
+
+.step-materials-card .file-changes-header {
+  padding-bottom: 8px;
+  margin-bottom: 6px;
+  border-bottom: none;
+}
+
 .file-list-msg .file-changes-card {
   width: 100%;
   max-width: 100%;
