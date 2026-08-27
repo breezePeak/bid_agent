@@ -167,7 +167,26 @@ class WriterInputBundleAssembler:
                 },
             )
 
-        writable_targets: list[tuple[BlueprintNode, str]] = []
+        generation_modes = {
+            str(node.rewrite_mode or "new_write") for node in nodes
+        }
+        if not generation_modes <= {"copy", "light_edit", "restructure", "new_write"}:
+            raise ControlPlaneError(
+                "CHAPTER_GENERATION_MODE_INVALID",
+                "章节正文生成模式无效。",
+                status_code=409,
+                details={"modes": sorted(generation_modes)},
+            )
+        if len(generation_modes) != 1:
+            raise ControlPlaneError(
+                "CHAPTER_GENERATION_MODE_MIXED",
+                "一个写作单元只能使用一种章节正文生成模式。",
+                status_code=409,
+                details={"modes": sorted(generation_modes)},
+            )
+        effective_generation_mode = next(iter(generation_modes))
+
+        writable_targets: list[BlueprintNode] = []
         if blueprint.mode.value == "template_strict":
             structure = load_promoted_template_structure(self.context)
             slots_by_id = (
@@ -193,9 +212,9 @@ class WriterInputBundleAssembler:
                                     "template_slot_id": slot_id,
                                 },
                             )
-                    writable_targets.append((node, node.template_slot_ids[0]))
+                    writable_targets.append(node)
                 elif node.template_target:
-                    writable_targets.append((node, node.template_target))
+                    writable_targets.append(node)
                 else:
                     raise ControlPlaneError(
                         "WRITER_BUNDLE_BLOCKED",
@@ -204,7 +223,7 @@ class WriterInputBundleAssembler:
                         details={"chapter_id": node.chapter_id},
                     )
         else:
-            writable_targets = [(node, node.chapter_id) for node in nodes]
+            writable_targets = list(nodes)
         ledger = load_promoted_requirement_ledger(self.context)
         scores = load_promoted_score_model(self.context)
         requirement_ids = sorted(
@@ -286,10 +305,14 @@ class WriterInputBundleAssembler:
                 f"章节绑定未知 score_point_id: {sorted(unknown)}",
                 status_code=409,
             )
-        evidence_snapshot = self._evidence_snapshot(
-            node_ids=node_id_set,
-            score_ids=score_ids,
-            requirement_ids=set(requirement_ids),
+        evidence_snapshot = (
+            self._evidence_snapshot(
+                node_ids=node_id_set,
+                score_ids=score_ids,
+                requirement_ids=set(requirement_ids),
+            )
+            if effective_generation_mode == "new_write"
+            else []
         )
         global_context_service = GlobalProjectContextService(self.context)
         global_project_context = (
@@ -414,25 +437,6 @@ class WriterInputBundleAssembler:
             node_payload["legacy_sources"] = resolved_sources
             blueprint_slice.append(node_payload)
 
-        generation_modes = {
-            str(node.get("rewrite_mode") or "new_write")
-            for node in blueprint_slice
-        }
-        if not generation_modes <= {"copy", "light_edit", "restructure", "new_write"}:
-            raise ControlPlaneError(
-                "CHAPTER_GENERATION_MODE_INVALID",
-                "章节正文生成模式无效。",
-                status_code=409,
-                details={"modes": sorted(generation_modes)},
-            )
-        if len(generation_modes) != 1:
-            raise ControlPlaneError(
-                "CHAPTER_GENERATION_MODE_MIXED",
-                "一个写作单元只能使用一种章节正文生成模式。",
-                status_code=409,
-                details={"modes": sorted(generation_modes)},
-            )
-
         body = {
             "unit_id": unit_id,
             "source_blueprint_artifact_id": str(blueprint_artifact["artifact_id"]),
@@ -441,7 +445,7 @@ class WriterInputBundleAssembler:
             "h1_receipt_id": h1.receipt_id,
             "dependency_refs": dependencies,
             "blueprint_slice": blueprint_slice,
-            "effective_generation_mode": next(iter(generation_modes)),
+            "effective_generation_mode": effective_generation_mode,
             "topic_and_duty_slice": [],
             "requirement_excerpts": [requirements[item].model_dump(mode="json") for item in requirement_ids],
             "score_obligations": score_obligations,
@@ -458,8 +462,11 @@ class WriterInputBundleAssembler:
             "document_target_constraints": [
                 {
                     "node_id": item.chapter_id,
-                    "target": output_target,
-                    "output_target": output_target,
+                    "target": item.chapter_id,
+                    "output_target": item.chapter_id,
+                    "template_node_id": item.template_node_id,
+                    "template_slot_ids": list(item.template_slot_ids),
+                    "template_target": item.template_target,
                     "title": item.title,
                     "purpose": item.purpose,
                     "writing_objectives": item.writing_objectives,
@@ -474,7 +481,7 @@ class WriterInputBundleAssembler:
                     "deferred_reason": item.deferred_reason,
                     "is_leaf": item.chapter_id in leaf_chapter_ids,
                 }
-                for item, output_target in writable_targets
+                for item in writable_targets
             ],
             "prompt_version": PROMPT_VERSION,
             "model_config_hash": canonical_hash(

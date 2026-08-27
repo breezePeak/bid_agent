@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from unittest import mock
 from pathlib import Path
 
 from docx import Document
@@ -40,6 +41,8 @@ from document_pipeline.chapter_writing_service import (  # noqa: E402
     ChapterWritingRequest,
     ChapterWritingService,
 )
+from document_pipeline.chapter_workspace import ChapterWorkspaceService  # noqa: E402
+from document_pipeline.chapter_editing import ChapterEditingService  # noqa: E402
 from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 
 
@@ -322,21 +325,53 @@ def _assert_strict_template_g2_h1_document_contract_writer_path(
     document_contract_path.unlink()
     assert not document_contract_path.exists()
 
+    ChapterWorkspaceService(context).ensure_all(
+        actor={"type": "user", "id": "owner"}
+    )
     writing = ChapterWritingService(context, deterministic_test=True)
-    blocks = [
-        block
-        for unit in units
-        for block in writing.write(
-            ChapterWritingRequest(
-                unit_id=unit.unit_id,
-                node_ids=tuple(unit.node_ids),
-                run_research=False,
-                commit_drafts=False,
+    results = []
+    with mock.patch.object(
+        ChapterEditingService,
+        "_evaluate_grounding",
+        return_value={"verdict": "pass", "paragraph_fact_bindings": {}},
+    ) as grounding:
+        for unit in units:
+            chapter_id = unit.node_ids[0]
+            workspace = store.chapter_workspace(chapter_id)
+            if workspace is None:
+                continue
+            results.append(
+                writing.write(
+                    ChapterWritingRequest(
+                        unit_id=unit.unit_id,
+                        node_ids=tuple(unit.node_ids),
+                        chapter_id=chapter_id,
+                        expected_chapter_revision=int(workspace["chapter_revision"]),
+                        actor={"type": "user", "id": "owner"},
+                        run_research=False,
+                        commit_drafts=True,
+                    )
+                )
             )
-        ).blocks
-    ]
+    assert grounding.call_count == len(results)
+    blocks = [block for result in results for block in result.blocks]
     assert blocks
-    assert {block.target_node_id for block in blocks}.issubset(slot_ids)
+    chapter_ids = {
+        node["chapter_id"] for node in blueprint_artifact["payload"]["nodes"]
+    }
+    assert {block.target_node_id for block in blocks}.issubset(chapter_ids)
+    assert not {block.target_node_id for block in blocks} & slot_ids
+    assert all(result.draft_revisions for result in results)
+    for result in results:
+        target = result.bundle.document_target_constraints[0]
+        chapter_id = target["node_id"]
+        assert target["output_target"] == chapter_id
+        assert target["template_slot_ids"]
+        workspace = store.chapter_workspace(chapter_id)
+        assert int(workspace["head_content_revision"]) > 0
+        revision = store.chapter_content_head(chapter_id)
+        assert revision is not None
+        assert revision["blocks"]
 
 
 def test_strict_template_g2_h1_document_contract_writer_path() -> None:

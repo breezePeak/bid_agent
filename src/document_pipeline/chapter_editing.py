@@ -15,7 +15,7 @@ from typing import Any
 from control_plane import CommandEnvelope, ControlPlaneError, ControlStore, WorkspaceContext
 
 from .contracts import ContentBlock
-from .canonicalization import chapter_context_hash
+from .canonicalization import canonical_hash, chapter_context_hash
 
 
 def _now_iso() -> str:
@@ -330,6 +330,7 @@ class ChapterEditingService:
         expected_global_ref: tuple[str, int, str] | None = None,
         expected_chapter_ref: tuple[str, int, str] | None = None,
         evidence_batch_ids: list[str] | None = None,
+        effective_generation_mode: str = "new_write",
     ) -> dict[str, Any]:
         from .chapter_workspace import ChapterWorkspaceService
         from .content_grounding import ContentGroundingGate
@@ -460,7 +461,51 @@ class ChapterEditingService:
             chapter_grounding_context=chapter_context,
             evidence_sources=evidence_sources,
             require_evidence_use=bool(evidence_sources),
+            effective_generation_mode=effective_generation_mode,
         )
+
+    def _grounding_report_is_current(
+        self,
+        *,
+        chapter_id: str,
+        text: str,
+        report: dict[str, Any],
+        effective_generation_mode: str,
+    ) -> bool:
+        from .global_project_context import GlobalProjectContextService
+
+        if report.get("verdict") != "pass":
+            return False
+        if str(report.get("effective_generation_mode") or "new_write") != str(
+            effective_generation_mode or "new_write"
+        ):
+            return False
+        if str(report.get("evaluated_content_hash") or "") != canonical_hash(text):
+            return False
+        global_context = GlobalProjectContextService(self.context).load()
+        global_ref = (
+            str(global_context.get("global_context_id") or ""),
+            int(global_context.get("global_context_revision") or 0),
+            str(global_context.get("global_context_hash") or ""),
+        )
+        report_global_ref = (
+            str(report.get("global_context_id") or ""),
+            int(report.get("global_context_revision") or 0),
+            str(report.get("global_context_hash") or ""),
+        )
+        context = self.store.chapter_context_head(chapter_id) or {"items": []}
+        revision = int(context.get("context_revision") or 0)
+        current_chapter_ref = (
+            f"chapter-context:{chapter_id}",
+            revision,
+            chapter_context_hash(chapter_id, revision, context.get("items") or []),
+        )
+        report_chapter_ref = (
+            str(report.get("chapter_context_id") or ""),
+            int(report.get("chapter_context_revision") or 0),
+            str(report.get("chapter_context_hash") or ""),
+        )
+        return global_ref == report_global_ref and current_chapter_ref == report_chapter_ref
 
     def apply_operations(
         self,
@@ -558,6 +603,7 @@ class ChapterEditingService:
         expected_global_ref: tuple[str, int, str] | None = None,
         expected_chapter_ref: tuple[str, int, str] | None = None,
         evidence_batch_ids: list[str] | None = None,
+        effective_generation_mode: str = "new_write",
     ) -> dict[str, Any]:
         """Create an AI Draft Revision; never advance the formal pointer."""
         self._require_leaf_chapter(chapter_id)
@@ -614,15 +660,25 @@ class ChapterEditingService:
             incoming=incoming,
             overwrite_locked=bool(overwrite_locked),
         )
-        report = self._evaluate_grounding(
-            chapter_id=chapter_id,
-            text="\n\n".join(
-                str(block.get("content") or "") for block in merged
-            ),
-            expected_global_ref=expected_global_ref,
-            expected_chapter_ref=expected_chapter_ref,
-            evidence_batch_ids=evidence_batch_ids,
+        final_text = "\n\n".join(
+            str(block.get("content") or "") for block in merged
         )
+        if source_report and self._grounding_report_is_current(
+            chapter_id=chapter_id,
+            text=final_text,
+            report=source_report,
+            effective_generation_mode=effective_generation_mode,
+        ):
+            report = source_report
+        else:
+            report = self._evaluate_grounding(
+                chapter_id=chapter_id,
+                text=final_text,
+                expected_global_ref=expected_global_ref,
+                expected_chapter_ref=expected_chapter_ref,
+                evidence_batch_ids=evidence_batch_ids,
+                effective_generation_mode=effective_generation_mode,
+            )
         fact_bindings = report.get("paragraph_fact_bindings")
         fact_bindings = fact_bindings if isinstance(fact_bindings, dict) else {}
         for index, block in enumerate(merged):
@@ -1013,6 +1069,14 @@ class ChapterEditingService:
                 for item in payload.get("evidence_batch_ids") or []
                 if str(item)
             ],
+            grounding_report=(
+                dict(payload.get("grounding_report"))
+                if isinstance(payload.get("grounding_report"), dict)
+                else None
+            ),
+            effective_generation_mode=str(
+                payload.get("effective_generation_mode") or "new_write"
+            ),
         )
         return {
             "accepted": True,

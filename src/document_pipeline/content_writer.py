@@ -5,6 +5,7 @@ import re
 
 from control_plane import ControlPlaneError, WorkspaceContext
 
+from .canonicalization import canonical_hash
 from .contracts import ContentBlock, WriterInputBundle
 from .writer_policy import (
     require_content_quality,
@@ -29,6 +30,7 @@ class ContentWriter:
         self.deterministic_test = (
             _deterministic_test_authority is _DETERMINISTIC_TEST_AUTHORITY
         )
+        self.grounding_reports: dict[str, dict[str, object]] = {}
 
     @classmethod
     def for_deterministic_tests(
@@ -71,6 +73,7 @@ class ContentWriter:
                     status_code=409,
                     details={"bundle": bundle_ref, "current": current_ref},
                 )
+        self.grounding_reports = {}
         requirements = {
             str(item["requirement_id"]): item
             for item in bundle.requirement_excerpts
@@ -128,7 +131,9 @@ class ContentWriter:
                 continue
             if not _is_leaf_target(target):
                 continue
-            target_id = str(target["output_target"])
+            target_id = str(target.get("node_id") or "").strip()
+            if not target_id:
+                raise ValueError("CONTENT_BLOCKED: 正文目标缺少逻辑 chapter_id")
             title = str(target["title"])
             research_evidence = self._research_evidence_for_target(
                 bundle,
@@ -283,6 +288,7 @@ class ContentWriter:
                         in set(used_evidence_ids)
                     ],
                     "require_evidence_use": bool(used_evidence_ids),
+                    "effective_generation_mode": bundle.effective_generation_mode,
                 }
                 repair_attempted = False
                 try:
@@ -363,6 +369,9 @@ class ContentWriter:
                         requirements=target_requirements,
                         conditions=target_conditions,
                     )
+                grounding_report = dict(grounding_report)
+                grounding_report["evaluated_content_hash"] = canonical_hash(content)
+                self.grounding_reports[target_id] = grounding_report
             if not set(used_evidence_ids).issubset(
                 set(available_evidence_ids)
             ):

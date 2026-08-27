@@ -150,6 +150,8 @@ class ChapterWritingService:
             {"chapter.generate_draft": ChapterEditingService(context).handle_generate_draft},
         )
         self.draft_committer = draft_committer or self._commit_draft_command
+        self._active_grounding_reports: dict[str, dict[str, Any]] = {}
+        self._active_generation_mode = "new_write"
 
     def write(self, request: ChapterWritingRequest) -> WriterResult:
         """Execute one complete chapter write transaction up to Draft Revision."""
@@ -567,13 +569,18 @@ class ChapterWritingService:
         evidence: list[dict[str, Any]],
     ) -> dict[str, dict[str, Any]]:
         revisions: dict[str, dict[str, Any]] = {}
+        reports = getattr(self.writer, "grounding_reports", {})
+        self._active_grounding_reports = (
+            dict(reports) if isinstance(reports, dict) else {}
+        )
+        self._active_generation_mode = bundle.effective_generation_mode
         targets = [
             item
             for item in bundle.document_target_constraints
-            if isinstance(item, dict) and str(item.get("output_target") or "").strip()
+            if isinstance(item, dict) and str(item.get("node_id") or "").strip()
         ]
         for target in targets:
-            chapter_id = str(target.get("output_target") or target.get("node_id") or "").strip()
+            chapter_id = str(target.get("node_id") or "").strip()
             if not chapter_id or self.store.chapter_workspace(chapter_id) is None:
                 continue
             expected = request.expected_chapter_revisions.get(chapter_id)
@@ -634,7 +641,11 @@ class ChapterWritingService:
             "text": text,
             "overwrite_locked": bool(overwrite_locked),
             "evidence_batch_ids": evidence_batch_ids,
+            "effective_generation_mode": self._active_generation_mode,
         }
+        grounding_report = self._active_grounding_reports.get(chapter_id)
+        if isinstance(grounding_report, dict) and grounding_report:
+            payload["grounding_report"] = grounding_report
         if global_ref is not None:
             payload.update(
                 {

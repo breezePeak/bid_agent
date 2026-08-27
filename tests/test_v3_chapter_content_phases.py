@@ -21,7 +21,7 @@ from control_plane import (  # noqa: E402
     ControlStore,
     WorkspaceContext,
 )
-from document_pipeline.canonicalization import canonical_payload_hash  # noqa: E402
+from document_pipeline.canonicalization import canonical_hash, canonical_payload_hash  # noqa: E402
 from document_pipeline.chapter_editing import (  # noqa: E402
     ChapterEditingService,
     merge_ai_blocks_with_locks,
@@ -176,7 +176,7 @@ class ChapterContentPhasesTests(unittest.TestCase):
                 "paragraph_fact_bindings": {},
             },
         )
-        self._grounding_patch.start()
+        self._grounding = self._grounding_patch.start()
 
     def tearDown(self) -> None:
         self._grounding_patch.stop()
@@ -354,6 +354,48 @@ class ChapterContentPhasesTests(unittest.TestCase):
             overwrite_locked=True,
         )
         self.assertEqual([item["block_id"] for item in overwritten], ["ai-new-1", "ai-new-2"])
+
+    def test_locked_merge_regrounds_changed_final_text(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            context = _workspace(Path(tmp))
+            _seed_blueprint(context)
+            chapters = ChapterWorkspaceService(context)
+            editing = ChapterEditingService(context)
+            created = chapters.create(chapter_id="ch-a", expected_chapter_revision=0)
+            first = editing.generate_draft(
+                chapter_id="ch-a",
+                expected_chapter_revision=created["chapter_revision"],
+                text="原 AI 正文",
+            )
+            locked = editing.apply_operations(
+                chapter_id="ch-a",
+                expected_chapter_revision=first["chapter"]["chapter_revision"],
+                operations=[
+                    {
+                        "op": "update",
+                        "block_id": first["content"]["blocks"][0]["block_id"],
+                        "content": "用户锁定正文",
+                    }
+                ],
+                actor={"type": "user", "id": "owner"},
+            )
+            self._grounding.reset_mock()
+            result = editing.generate_draft(
+                chapter_id="ch-a",
+                expected_chapter_revision=locked["chapter"]["chapter_revision"],
+                text="新 AI 正文",
+                grounding_report={
+                    "verdict": "pass",
+                    "evaluated_content_hash": canonical_hash("新 AI 正文"),
+                },
+            )
+            self.assertEqual(self._grounding.call_count, 1)
+            self.assertTrue(
+                any(
+                    block["content"] == "用户锁定正文"
+                    for block in result["content"]["blocks"]
+                )
+            )
 
     def test_restore_creates_new_head(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:

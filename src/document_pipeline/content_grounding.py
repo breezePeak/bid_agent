@@ -14,6 +14,8 @@ from typing import Any, Iterable
 
 from control_plane import ControlPlaneError
 
+from .canonicalization import canonical_hash
+
 
 GROUNDING_POLICY_VERSION = "v3.global-project-context.v2"
 _GROUNDING_FACT_FIELDS = (
@@ -375,6 +377,7 @@ class ContentGroundingGate:
         chapter_grounding_context: dict[str, Any] | None = None,
         evidence_sources: Iterable[dict[str, Any]] = (),
         require_evidence_use: bool = False,
+        effective_generation_mode: str = "new_write",
     ) -> dict[str, Any]:
         body = str(content or "").strip()
         if not global_context or not body:
@@ -511,9 +514,16 @@ class ContentGroundingGate:
 
         semantic_review: dict[str, Any] = {}
         specificity_missing_before_semantic = not matched_fields and not matched_requirements
+        legacy_mode = effective_generation_mode in {
+            "copy", "light_edit", "restructure"
+        }
+        require_project_specificity = not legacy_mode
+        require_requirement_coverage = effective_generation_mode in {
+            "new_write", "restructure"
+        }
         semantic_needed = bool(
-            (not matched_fields and not matched_requirements)
-            or (requirements and not matched_requirements)
+            (require_project_specificity and not matched_fields and not matched_requirements)
+            or (require_requirement_coverage and requirements and not matched_requirements)
             or (require_evidence_use and evidence_rows and not used_evidence_ids)
         )
         # Procurement-policy boilerplate with no lexical project binding is a
@@ -567,7 +577,7 @@ class ContentGroundingGate:
                     {"semantic_review": semantic_review},
                 )
             )
-        if not matched_fields and not matched_requirements:
+        if require_project_specificity and not matched_fields and not matched_requirements:
             findings.append(
                 GroundingFinding(
                     "PROJECT_SPECIFICITY_MISSING",
@@ -586,7 +596,7 @@ class ContentGroundingGate:
                     {"semantic_review": semantic_review},
                 )
             )
-        if requirements and not matched_requirements:
+        if require_requirement_coverage and requirements and not matched_requirements:
             findings.append(
                 GroundingFinding(
                     "CHAPTER_REQUIREMENT_MISSING",
@@ -743,6 +753,8 @@ class ContentGroundingGate:
             "chapter_context_revision": chapter_context_revision,
             "chapter_context_hash": chapter_context_hash,
             "chapter_id": str(chapter.get("chapter_id") or ""),
+            "effective_generation_mode": effective_generation_mode,
+            "evaluated_content_hash": canonical_hash(body),
             "chapter_profile": profile,
             "relevance_method": "semantic" if semantic_review else "lexical",
             "semantic_review": semantic_review,
