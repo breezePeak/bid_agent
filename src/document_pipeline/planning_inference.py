@@ -20,6 +20,7 @@ from typing import Any, Callable, Generic, Literal, Mapping, Protocol, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from .canonicalization import canonical_hash
+from .pipeline_policy import validation_failure_blocks
 from .scoring_outline_policy import (
     is_applicability_scope_heading,
     is_sectionable_quality_condition,
@@ -3543,6 +3544,11 @@ class LLMOutlineDecompositionProvider(
     ) -> None:
         if not isinstance(request, OutlineDecompositionInput):
             raise ValueError("OutlineDecompositionProvider 输入类型错误")
+        # MVP path: the strict Pydantic boundary above already guarantees a
+        # usable, acyclic chapter tree.  Coverage and policy checks run once on
+        # the compiled Blueprint and are recorded as warnings in this mode.
+        if not validation_failure_blocks():
+            return
         catalog = self._direct_catalog(request)
         for label, duplicates in (
             ("ScorePoint", catalog["duplicate_point_ids"]),

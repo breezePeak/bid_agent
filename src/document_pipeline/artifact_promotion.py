@@ -995,7 +995,8 @@ class GateService:
             if issuer not in requirement.allowed_issuers:
                 raise ControlPlaneError("V3_GATE_ISSUER_DENIED", f"issuer {issuer} 不被允许。", status_code=403)
 
-        # Fail closed on failed validation for automated promotion gates.
+        # Fail closed on structurally invalid proposals. Domain-policy findings
+        # have already been downgraded to warnings before this point in MVP mode.
         if not report.passed and not requirement.human_required:
             verdict: str = "block"
         elif not report.passed and requirement.human_required:

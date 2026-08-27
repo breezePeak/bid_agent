@@ -20,13 +20,13 @@ from document_pipeline.stage_runner import V3StageRunner  # noqa: E402
 
 
 class ValidationPolicyTests(unittest.TestCase):
-    def test_configuration_defaults_to_blocking(self):
+    def test_configuration_defaults_to_mvp_warning_mode(self):
         with mock.patch.dict(os.environ, {}, clear=False):
             os.environ.pop(
                 "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
                 None,
             )
-            self.assertTrue(configured_validation_failure_blocks())
+            self.assertFalse(configured_validation_failure_blocks())
 
     def test_stage_runner_freezes_policy_for_the_current_command(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
@@ -60,11 +60,11 @@ class ValidationPolicyTests(unittest.TestCase):
                 os.environ[
                     "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE"
                 ] = "0"
-                self.assertTrue(
+                self.assertFalse(
                     runner.validation_failure_blocks_pipeline
                 )
                 with runner.validation_policy_scope():
-                    self.assertTrue(validation_failure_blocks())
+                    self.assertFalse(validation_failure_blocks())
 
 
 if __name__ == "__main__":

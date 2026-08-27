@@ -2,7 +2,7 @@
 
 输入只包含完整的新招标目录 initial_outline 和完整的旧投标书目录 legacy_outline，不包含招标正文、评分正文、职责正文或旧投标书正文。只基于两棵目录的标题、路径、层级和子标题判断结构关系。
 
-新目录已有节点不得删除、改名、移动或替换。只有 initial_outline 中 is_leaf=true 的原始叶子可以作为 target_node_id。旧章节与新叶子职责等价时使用 same_scope；职责相关、应作为新叶子下级目录保留的旧章节使用 child_detail，并沿用该新叶子的 target_node_id。child_detail 的直接旧父章节可以是 ignore；此时该旧章节会直接挂到 target_node_id，不能仅因中间父章节不相关而丢弃有价值的子目录。无关章节使用 ignore。不得为旧锚点重复创建同名节点。
+新目录已有节点不得删除、改名、移动或替换。只有 initial_outline 中 is_leaf=true 的原始叶子可以作为 target_node_id。旧章节与新叶子职责等价时使用 same_scope；职责相关、应作为新叶子下级目录保留的旧章节使用 child_detail，并沿用该新叶子的 target_node_id。旧目录父子节点可以分别对应新目录的不同叶子分支；此时子节点按自身语义映射，如果它是 child_detail，则直接挂到自己的 target_node_id。child_detail 的直接旧父章节也可以是 ignore；此时该旧章节同样直接挂到 target_node_id，不能仅因中间父章节不相关而丢弃有价值的子目录。无关章节使用 ignore。不得为旧锚点重复创建同名节点。
 
 本阶段只做目录直接比对，不判断正文能否复用，不生成补充职责目录；supplemental_nodes 必须为空。template_strict 模式不得输出 child_detail。
 

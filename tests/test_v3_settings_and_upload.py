@@ -46,7 +46,7 @@ def _response_cookie(response, name: str) -> str:
 
 
 class V3SettingsAndUploadTests(unittest.TestCase):
-    def test_validation_failure_gate_defaults_on_and_persists(self) -> None:
+    def test_validation_failure_gate_is_fixed_to_mvp_warning_mode(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             root = Path(temporary)
             settings = SettingsService(root)
@@ -59,7 +59,7 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                     "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
                     None,
                 )
-                self.assertTrue(
+                self.assertFalse(
                     settings.flow_settings()[
                         "validation_failure_blocks_pipeline"
                     ]
@@ -67,7 +67,7 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                 saved = settings.write_flow_settings(
                     {"validation_failure_blocks_pipeline": True}
                 )
-                self.assertTrue(
+                self.assertFalse(
                     saved["validation_failure_blocks_pipeline"]
                 )
                 self.assertEqual(settings.flow_settings()["research_provider"], "tavily")
@@ -81,10 +81,10 @@ class V3SettingsAndUploadTests(unittest.TestCase):
                     os.environ[
                         "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE"
                     ],
-                    "1",
+                    "0",
                 )
             self.assertIn(
-                "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE=1",
+                "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE=0",
                 (root / ".env").read_text(encoding="utf-8"),
             )
 

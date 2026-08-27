@@ -62,7 +62,7 @@ FLOW_REVIEW_SPECS: dict[str, tuple[str, bool]] = {
     "write_failure_fallback": ("BID_AGENT_WRITE_FAILURE_FALLBACK", False),
     "validation_failure_blocks_pipeline": (
         "BID_AGENT_VALIDATION_FAILURE_BLOCKS_PIPELINE",
-        True,
+        False,
     ),
     # Generated chapter content becomes the current effective revision automatically.
     "confirmation_required": ("BID_AGENT_CHAPTER_CONFIRMATION_REQUIRED", False),
@@ -632,10 +632,9 @@ class SettingsService:
                 current["global_review_gate"] = False
                 current["anti_fabrication_gate"] = False
 
-            # These are workflow invariants, not user choices: a failed required
-            # validation stops the run, generated content is immediately effective,
-            # and the legacy write fallback is always disabled.
-            current["validation_failure_blocks_pipeline"] = True
+            # MVP invariant: validation findings are recorded but never stop the
+            # workflow.  Hard execution errors still fail normally.
+            current["validation_failure_blocks_pipeline"] = False
             current["write_failure_fallback"] = False
             current["confirmation_required"] = False
 

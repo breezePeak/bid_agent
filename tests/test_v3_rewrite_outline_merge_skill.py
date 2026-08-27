@@ -165,14 +165,35 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
             ["root", "migration", inventory.local_id, "service"],
         )
 
-    def test_candidate_target_and_old_parent_branch_are_enforced(self) -> None:
+    def test_child_can_be_reanchored_outside_old_parent_target_branch(self) -> None:
         candidate = self.candidate()
-        broken = candidate.model_copy(deep=True)
-        broken.alignments[1].target_node_id = "service"
-        broken.alignments[1].matched_response_unit_ids = ["U2"]
-        broken.alignments[1].matched_condition_ids = ["C2"]
-        with self.assertRaisesRegex(ValueError, "旧父章节目标之外"):
-            validate_rewrite_outline_merge(self.request(), broken)
+        candidate.alignments[1].target_node_id = "service"
+        candidate.alignments[1].matched_response_unit_ids = ["U2"]
+        candidate.alignments[1].matched_condition_ids = ["C2"]
+
+        validate_rewrite_outline_merge(self.request(), candidate)
+        initial = ChapterOutlineCandidate(nodes=[
+            ChapterOutlineNodeCandidate(
+                local_id="root", order=0, title="项目实施方案", purpose="实施",
+                confidence=1.0,
+            ),
+            ChapterOutlineNodeCandidate(
+                local_id="migration", parent_local_id="root", order=1,
+                title="数据迁移", purpose="迁移", primary_response_unit_ids=["U1"], confidence=1.0,
+            ),
+            ChapterOutlineNodeCandidate(
+                local_id="service", parent_local_id="root", order=2,
+                title="售后服务", purpose="服务", primary_response_unit_ids=["U2"], confidence=1.0,
+            ),
+        ])
+        legacy = SimpleNamespace(sections=[
+            SimpleNamespace(section_id="old-migration", parent_section_id=None, order=0, title="数据迁移"),
+            SimpleNamespace(section_id="inventory", parent_section_id="old-migration", order=1, title="1. 数据盘点"),
+        ])
+
+        merged = apply_rewrite_outline_merge(initial, candidate, legacy)
+        inventory = next(item for item in merged.nodes if item.structure_origin == "legacy_enriched")
+        self.assertEqual(inventory.parent_local_id, "service")
 
     def test_cross_branch_responsibility_id_is_rejected(self) -> None:
         candidate = self.candidate()

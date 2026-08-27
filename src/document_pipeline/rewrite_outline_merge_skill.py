@@ -595,11 +595,6 @@ def validate_rewrite_outline_merge(
         for source in alignment.legacy_sources:
             if allowed_sources.get((source.section_id, source.block_id)) != source.content_hash:
                 raise ValueError(f"{section.section_id} 引用了未知或过期的旧正文来源")
-        if section.parent_section_id:
-            parent = alignment_by_section.get(section.parent_section_id)
-            if parent and parent.placement != "ignore" and alignment.target_node_id:
-                if alignment.target_node_id != parent.target_node_id:
-                    raise ValueError(f"旧章节 {section.section_id} 映射到旧父章节目标之外的分支")
     structure_candidate = RewriteOutlineStructureMatchCandidate(
         alignments=[RewriteOutlineStructureAlignment(
             legacy_section_id=item.legacy_section_id,
@@ -640,6 +635,9 @@ def apply_rewrite_outline_merge(
         merge_candidate.alignments,
         key=lambda item: sections[item.legacy_section_id].order,
     )
+    alignment_by_section = {
+        item.legacy_section_id: item for item in alignments
+    }
 
     def merge_metadata(node: ChapterOutlineNodeCandidate, alignment: RewriteOutlineAlignment) -> ChapterOutlineNodeCandidate:
         sources = {
@@ -706,7 +704,14 @@ def apply_rewrite_outline_merge(
             created_by_section[alignment.legacy_section_id] = target_id
             continue
         section = sections[alignment.legacy_section_id]
-        parent_id = created_by_section.get(str(section.parent_section_id)) or str(alignment.target_node_id)
+        parent_alignment = alignment_by_section.get(str(section.parent_section_id))
+        parent_id = (
+            created_by_section.get(str(section.parent_section_id))
+            if parent_alignment is not None
+            and parent_alignment.placement != "ignore"
+            and parent_alignment.target_node_id == alignment.target_node_id
+            else None
+        ) or str(alignment.target_node_id)
         local_id = "legacy-" + hashlib.sha256(
             f"{alignment.target_node_id}|{alignment.legacy_section_id}".encode("utf-8")
         ).hexdigest()[:20]

@@ -24,16 +24,16 @@ def _parse_bool(value: object, default: bool = False) -> bool:
 
 
 def configured_validation_failure_blocks() -> bool:
-    """Read the process setting used when a new command is constructed."""
+    """MVP policy: validation findings are warnings and never block execution."""
 
-    return _parse_bool(os.environ.get(VALIDATION_FAILURE_BLOCKS_ENV), True)
+    return False
 
 
 def validation_failure_blocks() -> bool:
-    """Return the command-scoped policy, failing closed outside a command."""
+    """Return the command-scoped policy; MVP always continues on warnings."""
 
     active = _ACTIVE_VALIDATION_FAILURE_BLOCKS.get()
-    return True if active is None else active
+    return False if active is None else active
 
 
 def validation_warnings_allowed() -> bool:

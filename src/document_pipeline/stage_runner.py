@@ -729,11 +729,21 @@ class V3StageRunner:
             template_structure=template_structure,
         )
         if not bool(blueprint_audit.get("passed")):
-            raise ControlPlaneError(
-                "REWRITE_OUTLINE_BLUEPRINT_AUDIT_FAILED",
-                "融合后的章节目录未通过完整性校验："
-                f"{self._outline_warning_detail(blueprint_audit.get('findings'))}",
-                status_code=409,
+            message = (
+                "融合后的章节目录完整性校验有警告："
+                f"{self._outline_warning_detail(blueprint_audit.get('findings'))}"
+            )
+            if self.validation_failure_blocks_pipeline:
+                raise ControlPlaneError(
+                    "REWRITE_OUTLINE_BLUEPRINT_AUDIT_FAILED",
+                    message,
+                    status_code=409,
+                    details={"blueprint_audit": blueprint_audit},
+                )
+            self._add_stage_warning(
+                "compile_chapter_blueprint",
+                code="REWRITE_OUTLINE_BLUEPRINT_AUDIT_WARNING",
+                message=message,
                 details={"blueprint_audit": blueprint_audit},
             )
         proposal = self._proposal_from_inference(
@@ -1594,12 +1604,18 @@ class V3StageRunner:
             else input_snapshot
         )
         if result.input_snapshot != expected_input_snapshot:
-            from control_plane import ControlPlaneError
-
-            raise ControlPlaneError(
-                "V3_INFERENCE_INPUT_SNAPSHOT_MISMATCH",
-                f"{artifact_kind} Provider 返回的 input_snapshot 与实际受控输入不一致",
-                status_code=409,
+            self._add_stage_warning(
+                {
+                    "ScoreModel": "analyze_scores",
+                    "ProjectModel": "plan_response",
+                    "ResponseTopicGraph": "plan_response",
+                    "ChapterBlueprint": "compile_chapter_blueprint",
+                }.get(artifact_kind, artifact_kind),
+                code="V3_INFERENCE_INPUT_SNAPSHOT_MISMATCH",
+                message=(
+                    f"{artifact_kind} Provider 返回的 input_snapshot 与"
+                    "实际受控输入不一致，已以调用方的实际输入建立凭证"
+                ),
             )
         INFERENCE_RUNTIME_REGISTRY.publish(
             self.context,
@@ -1672,7 +1688,7 @@ class V3StageRunner:
         if not report.passed:
             raise ControlPlaneError(
                 "V3_PROPOSAL_INVALID",
-                f"{proposal.artifact_kind} Proposal 验证未通过: {report.findings}",
+                f"{proposal.artifact_kind} Proposal 结构无法使用: {report.findings}",
             )
         gate_receipt = GateService(self.context).evaluate(proposal_id, gate_id=gate_id)
         if gate_receipt.verdict != "pass":
@@ -2632,7 +2648,10 @@ class V3StageRunner:
 
             report = validate_and_record(self.context, proposal_id)
             if not report.passed:
-                raise ControlPlaneError("V3_PROPOSAL_INVALID", f"RequirementLedger Proposal 验证未通过: {report.findings}")
+                raise ControlPlaneError(
+                    "V3_PROPOSAL_INVALID",
+                    f"RequirementLedger Proposal 结构无法使用: {report.findings}",
+                )
 
             gate_service = GateService(self.context)
             receipt = gate_service.evaluate(proposal_id, gate_id="G1_REQUIREMENT_INTEGRITY")
@@ -3770,10 +3789,17 @@ class V3StageRunner:
                             ValueError(message),
                         )
                         error_code = "V3_CACHED_INFERENCE_POSTPROCESS_FAILED"
-                    raise ControlPlaneError(
-                        error_code,
-                        message,
-                        status_code=409,
+                    if self.validation_failure_blocks_pipeline:
+                        raise ControlPlaneError(
+                            error_code,
+                            message,
+                            status_code=409,
+                            details={"blueprint_audit": blueprint_audit},
+                        )
+                    self._add_stage_warning(
+                        "compile_chapter_blueprint",
+                        code="V3_BLUEPRINT_AUDIT_WARNING",
+                        message=message,
                         details={"blueprint_audit": blueprint_audit},
                     )
             blueprint_op_id = operation_id or (
