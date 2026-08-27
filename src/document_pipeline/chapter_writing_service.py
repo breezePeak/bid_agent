@@ -162,7 +162,7 @@ class ChapterWritingService:
         bundle = self._apply_request_metadata(bundle, request)
         decision: dict[str, Any] = {}
         evidence: list[dict[str, Any]] = []
-        if request.run_research:
+        if request.run_research and bundle.effective_generation_mode == "new_write":
             try:
                 decision, evidence = self.research.resolve_for_bundle(bundle)
             except ControlPlaneError as exc:
@@ -213,7 +213,7 @@ class ChapterWritingService:
         decision: dict[str, Any] = {}
         evidence: list[dict[str, Any]] = []
         research_queries: list[str] = []
-        if request.run_research:
+        if request.run_research and bundle.effective_generation_mode == "new_write":
             yield {
                 "type": "thinking_step",
                 "step": "research_decision",
@@ -271,7 +271,11 @@ class ChapterWritingService:
                 "type": "thinking_step",
                 "step": "research_decision",
                 "chapter_id": request.chapter_id,
-                "message": "资料查询判断：已按用户确认跳过公开资料查询，使用现有资料继续。",
+                "message": (
+                    "资料查询判断：当前正文生成模式不使用公开资料查询，使用已分配资料继续。"
+                    if bundle.effective_generation_mode != "new_write"
+                    else "资料查询判断：已按用户确认跳过公开资料查询，使用现有资料继续。"
+                ),
             }
 
         if decision:

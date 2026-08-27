@@ -571,6 +571,7 @@ class ContentWriter:
             ChapterWritingRequest(
                 chapter_id=str(target.get("node_id") or ""),
                 operation=bundle.operation,
+                effective_generation_mode=bundle.effective_generation_mode,
                 user_instruction=bundle.user_instruction,
                 existing_content=bundle.existing_content,
                 chapter={
@@ -595,6 +596,8 @@ class ContentWriter:
                         blueprint_node.get("legacy_section_ids") or []
                     ),
                     "legacy_sources": list(blueprint_node.get("legacy_sources") or []),
+                    "required_changes": list(blueprint_node.get("required_changes") or []),
+                    "effective_generation_mode": bundle.effective_generation_mode,
                 },
             )
         )

@@ -1508,6 +1508,9 @@ class WriterInputBundle(ContractModel):
     h1_receipt_id: str = Field(min_length=1)
     dependency_refs: dict[str, dict[str, Any]] = Field(default_factory=dict)
     blueprint_slice: list[dict[str, Any]] = Field(min_length=1)
+    effective_generation_mode: Literal[
+        "copy", "light_edit", "restructure", "new_write"
+    ] = "new_write"
     topic_and_duty_slice: list[dict[str, Any]] = Field(default_factory=list)
     requirement_excerpts: list[dict[str, Any]] = Field(default_factory=list)
     score_obligations: list[dict[str, Any]] = Field(default_factory=list)

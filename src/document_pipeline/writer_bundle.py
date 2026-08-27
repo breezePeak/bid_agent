@@ -373,6 +373,25 @@ class WriterInputBundleAssembler:
             node_payload["legacy_sources"] = resolved_sources
             blueprint_slice.append(node_payload)
 
+        generation_modes = {
+            str(node.get("rewrite_mode") or "new_write")
+            for node in blueprint_slice
+        }
+        if not generation_modes <= {"copy", "light_edit", "restructure", "new_write"}:
+            raise ControlPlaneError(
+                "CHAPTER_GENERATION_MODE_INVALID",
+                "章节正文生成模式无效。",
+                status_code=409,
+                details={"modes": sorted(generation_modes)},
+            )
+        if len(generation_modes) != 1:
+            raise ControlPlaneError(
+                "CHAPTER_GENERATION_MODE_MIXED",
+                "一个写作单元只能使用一种章节正文生成模式。",
+                status_code=409,
+                details={"modes": sorted(generation_modes)},
+            )
+
         body = {
             "unit_id": unit_id,
             "source_blueprint_artifact_id": str(blueprint_artifact["artifact_id"]),
@@ -381,6 +400,7 @@ class WriterInputBundleAssembler:
             "h1_receipt_id": h1.receipt_id,
             "dependency_refs": dependencies,
             "blueprint_slice": blueprint_slice,
+            "effective_generation_mode": next(iter(generation_modes)),
             "topic_and_duty_slice": [],
             "requirement_excerpts": [requirements[item].model_dump(mode="json") for item in requirement_ids],
             "score_obligations": score_obligations,

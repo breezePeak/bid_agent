@@ -13,7 +13,6 @@ sys.path.insert(0, str(ROOT / "src"))
 from control_plane import CommandEnvelope, CommandGateway, ControlPlaneError, ControlStore, WorkspaceContext  # noqa: E402
 from document_pipeline.artifact_promotion import HumanGateService  # noqa: E402
 from document_pipeline.bid_rewrite_execution import BidRewriteExecutionService  # noqa: E402
-from document_pipeline.bid_rewrite_execution import _CopyWriter  # noqa: E402
 from document_pipeline.chapter_batch import ChapterBatchService  # noqa: E402
 from document_pipeline.chapter_rewrite_plan import ChapterRewritePlanService  # noqa: E402
 from document_pipeline.chapter_workspace import ChapterWorkspaceService  # noqa: E402
@@ -364,114 +363,23 @@ class V3ChapterRewritePlanTests(unittest.TestCase):
                 ChapterRewritePlanService(context).generate("chapter-x")
             self.assertEqual(blocked.exception.code, "REWRITE_MODE_REQUIRED")
 
-    def test_copy_writer_applies_confirmed_replacements_without_model_writer(self) -> None:
-        class Bundle:
-            bundle_id = "bundle-copy"
-            bundle_hash = "hash-copy"
-            chapter_id = "CH-1"
-            document_target_constraints = [{"output_target": "CH-1"}]
-
-        blocks = _CopyWriter(
-            {
-                "selected_legacy_sources": [{"content": "采购人：旧城采购中心，工期30天"}],
-                "replacement_map": [
-                    {"source_text": "旧城采购中心", "replacement_text": "新城采购中心"},
-                    {"source_text": "工期30天", "replacement_text": "按新招标要求执行"},
-                ],
-            }
-        ).stream_bundle(Bundle())
-
-        self.assertEqual(len(blocks), 1)
-        self.assertIn("新城采购中心", blocks[0].content)
-        self.assertNotIn("旧城采购中心", blocks[0].content)
-        self.assertNotIn("工期30天", blocks[0].content)
-
-    def test_execution_requires_confirmation_and_freezes_approved_rewrite_context(self) -> None:
+    def test_execution_uses_blueprint_mode_without_rewrite_plan(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
             context, leaf = self.prepare(Path(temporary))
-            plan_service = self.service(context)
-            plan = plan_service.generate(leaf, actor={"type": "user", "id": "owner"})
-            execution = BidRewriteExecutionService(context, plan_service=plan_service)
-            with self.assertRaises(ControlPlaneError) as incomplete:
-                execution.build_request(
-                    leaf,
-                    operation_id="rewrite-execution-test",
-                    expected_workspace_revision=ControlStore(context).revision(),
-                    expected_chapter_revision=plan["dependencies"]["chapter_revision"],
-                    actor={"type": "user", "id": "owner"},
-                )
-            self.assertEqual(incomplete.exception.code, "REWRITE_PLAN_INCOMPLETE")
-
-            operations = [{"op": "set_strategy", "strategy": "copy"}]
-            operations.extend(
-                {
-                    "op": "resolve_pollution",
-                    "finding_id": finding["finding_id"],
-                    "replacement_fact_id": "F-new-project-source",
-                }
-                for finding in plan["pollution_findings"]
-                if finding["status"] != "resolved"
-            )
-            plan = self.update(plan_service, plan, operations)
-            plan_service.confirm(
-                leaf,
-                expected_chapter_revision=plan["dependencies"]["chapter_revision"],
-                plan_revision=plan["plan_revision"],
-                plan_hash=plan["plan_hash"],
-                principal_id="owner",
-            )
-            request = execution.build_request(
+            chapter = ChapterWorkspaceService(context).get_chapter(leaf)
+            request = BidRewriteExecutionService(context).build_request(
                 leaf,
                 operation_id="rewrite-execution-test",
                 expected_workspace_revision=ControlStore(context).revision(),
-                expected_chapter_revision=plan["dependencies"]["chapter_revision"],
+                expected_chapter_revision=chapter["chapter_revision"],
                 actor={"type": "user", "id": "owner"},
             )
-            rewrite_context = request.chapter_writing_plan["rewrite_context"]
             self.assertEqual(request.operation, "rewrite")
-            self.assertFalse(request.run_research)
-            self.assertEqual(rewrite_context["rewrite_strategy"], "copy")
-            self.assertTrue(rewrite_context["selected_legacy_sources"])
-            self.assertEqual(
-                bool(rewrite_context["replacement_map"]),
-                bool(plan["pollution_findings"]),
-            )
+            self.assertTrue(request.run_research)
+            self.assertEqual(request.chapter_writing_plan, {})
 
-    def test_batch_snapshots_the_confirmed_rewrite_plan(self) -> None:
-        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
-            context, leaf = self.prepare(Path(temporary))
-            plan_service = self.service(context)
-            plan = plan_service.generate(leaf, actor={"type": "user", "id": "owner"})
-            plan = self.update(
-                plan_service,
-                plan,
-                [
-                    {"op": "set_strategy", "strategy": "copy"},
-                    *[
-                        {
-                            "op": "resolve_pollution",
-                            "finding_id": finding["finding_id"],
-                            "replacement_fact_id": "F-new-project-source",
-                        }
-                        for finding in plan["pollution_findings"]
-                        if finding["status"] != "resolved"
-                    ],
-                ],
-            )
-            plan_service.confirm(
-                leaf,
-                expected_chapter_revision=plan["dependencies"]["chapter_revision"],
-                plan_revision=plan["plan_revision"],
-                plan_hash=plan["plan_hash"],
-                principal_id="owner",
-            )
-            batch_service = ChapterBatchService(context)
-            with mock.patch("document_pipeline.chapter_rewrite_plan.ChapterRewritePlanService") as plans:
-                plans.return_value.get.return_value = plan_service.get(leaf)
-                frozen = batch_service._rewrite_plan_ref(leaf)
-            self.assertEqual(frozen["plan_revision"], plan["plan_revision"])
-            self.assertEqual(frozen["plan_hash"], plan["plan_hash"])
-            self.assertEqual(frozen["strategy"], "copy")
+    def test_batch_does_not_resolve_rewrite_plan(self) -> None:
+        self.assertFalse(hasattr(ChapterBatchService, "_rewrite_plan_ref"))
 
 
 if __name__ == "__main__":

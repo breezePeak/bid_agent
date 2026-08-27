@@ -20,6 +20,7 @@ from .chapter_writing_outline import compile_chapter_writing_plan
 
 
 Operation = Literal["create", "rewrite", "repair"]
+GenerationMode = Literal["copy", "light_edit", "restructure", "new_write"]
 
 
 def _dump(value: Any) -> Any:
@@ -337,6 +338,7 @@ class ChapterWritingRequest:
 
     chapter_id: str
     operation: Operation = "create"
+    effective_generation_mode: GenerationMode = "new_write"
     user_instruction: str = ""
     existing_content: str = ""
     validation_errors: tuple[str, ...] = ()
@@ -363,6 +365,7 @@ class ChapterWritingSpec:
     chapter_id: str
     chapter_title: str
     operation: Operation
+    effective_generation_mode: GenerationMode
     purpose: str
     writing_objectives: tuple[str, ...]
     writing_outline: dict[str, Any]
@@ -383,6 +386,7 @@ class ChapterWritingSpec:
             # Title is display metadata; it is deliberately not used in rules.
             "display": {"chapter_title": self.chapter_title},
             "operation": self.operation,
+            "effective_generation_mode": self.effective_generation_mode,
             "purpose": self.purpose,
             "writing_objectives": list(self.writing_objectives),
             "writing_outline": deepcopy(self.writing_outline),
@@ -486,6 +490,10 @@ def compile_chapter_writing_spec(
     req = _request_from_values(request, values)
     if req.operation not in {"create", "rewrite", "repair"}:
         raise ValueError("operation must be create, rewrite, or repair")
+    if req.effective_generation_mode not in {
+        "copy", "light_edit", "restructure", "new_write"
+    }:
+        raise ValueError("invalid effective_generation_mode")
     chapter_id = str(req.chapter_id or "")
     node = _node_for(req.chapter, req.blueprint, chapter_id)
     chapter = _chapter_payload(req.chapter, node, chapter_id)
@@ -532,6 +540,7 @@ def compile_chapter_writing_spec(
         chapter_id=chapter_id,
         chapter_title=str(node.get("title") or _dump(req.chapter or {}).get("title") or ""),
         operation=req.operation,
+        effective_generation_mode=req.effective_generation_mode,
         purpose=purpose,
         writing_objectives=objectives,
         writing_outline=outline,
@@ -586,6 +595,16 @@ the current value when supplied; otherwise delete or generalize the old-specific
 fact and never invent a replacement.
 Priority summary: 当前项目事实优先；旧项目专属事实不得直接继承；有新值使用新值；
 无新值时删除或泛化旧项目专属事实，不得编造。
+
+Follow effective_generation_mode exactly:
+- copy: preserve the assigned legacy body as directly as current tender and
+  current-project facts allow; make no independent source-selection decision.
+- light_edit: use the assigned legacy body as the base and change only the
+  supplied required_changes and conflicting current-project details.
+- restructure: retain applicable professional content from the assigned legacy
+  body, but reorganize it around purpose, writing_objectives and current rules.
+- new_write: write from current context and do not use legacy text as a body draft.
+These are the only chapter body generation modes.
 
 Return only the chapter body, without a duplicate chapter heading, internal
 instructions, scores, hashes, citations to field names, or prompt discussion."""
