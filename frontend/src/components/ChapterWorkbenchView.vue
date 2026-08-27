@@ -1,5 +1,9 @@
 <template>
-  <div class="workbench" :style="workbenchStyle" :class="{ 'is-dragging': isDragging }">
+  <div
+    class="workbench"
+    :style="workbenchStyle"
+    :class="{ 'is-dragging': isDragging, 'is-right-collapsed': isRightCollapsed }"
+  >
     <!-- 左：目录结构 -->
     <aside class="pane pane-tree">
       <header class="pane-header">
@@ -226,7 +230,7 @@
       />
 
       <div ref="docBodyEl" v-show="!isBidRewrite || middleTab === 'body'" class="chapter-doc-body">
-        <div class="document-stage">
+        <div class="document-stage" :style="{ zoom: docZoom }">
           <article
             class="document-paper"
             :aria-busy="detailLoading"
@@ -277,11 +281,61 @@
           </article>
         </div>
       </div>
+
+      <!-- 悬浮缩放控制胶囊 (Word 风格) -->
+      <div v-show="!isBidRewrite || middleTab === 'body'" class="doc-zoom-control" title="按住 Ctrl + 滚轮也可缩放正文">
+        <button
+          type="button"
+          class="zoom-btn"
+          :disabled="docZoom <= 0.4"
+          title="缩小 (Ctrl + 滚轮向下)"
+          @click="changeDocZoom(-0.1)"
+        >−</button>
+        <span
+          class="zoom-label"
+          title="点击重置为 100%"
+          @click="resetDocZoom"
+        >{{ Math.round(docZoom * 100) }}%</span>
+        <button
+          type="button"
+          class="zoom-btn"
+          :disabled="docZoom >= 2.5"
+          title="放大 (Ctrl + 滚轮向上)"
+          @click="changeDocZoom(0.1)"
+        >+</button>
+        <button
+          v-if="docZoom !== 1.0"
+          type="button"
+          class="zoom-reset-btn"
+          title="恢复 100%"
+          @click="resetDocZoom"
+        >重置</button>
+      </div>
     </main>
 
     <!-- 右拖拽分割线 -->
-    <div class="resizer resizer-right" title="拖动调整对话栏宽度" @mousedown="startDragRight">
+    <div
+      class="resizer resizer-right"
+      :class="{ 'is-collapsed': isRightCollapsed }"
+      :title="isRightCollapsed ? '点击按钮展开对话栏，或拖动调整宽度' : '拖动调整对话栏宽度'"
+      @mousedown="startDragRight"
+    >
       <div class="resizer-handle"></div>
+
+      <!-- 炫酷推拉折叠/展开按钮 -->
+      <button
+        type="button"
+        class="collapse-toggle-btn"
+        :class="{ 'is-collapsed': isRightCollapsed }"
+        :title="isRightCollapsed ? '展开聊天与上下文' : '收起聊天与上下文'"
+        :aria-label="isRightCollapsed ? '展开聊天与上下文' : '收起聊天与上下文'"
+        @mousedown.stop
+        @click.stop="toggleRightCollapse"
+      >
+        <svg class="toggle-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+      </button>
     </div>
 
     <!-- 右：聊天 + 上下文 -->
@@ -720,10 +774,22 @@ const router = useRouter()
 const leftWidth = ref(480)
 const rightWidth = ref(520)
 const isDragging = ref(false)
+const isRightCollapsed = ref(false)
 
 const workbenchStyle = computed(() => ({
-  gridTemplateColumns: `${leftWidth.value}px 6px minmax(0, 1fr) 6px ${rightWidth.value}px`,
+  '--chat-width': `${rightWidth.value}px`,
+  gridTemplateColumns: isRightCollapsed.value
+    ? `${leftWidth.value}px 6px minmax(0, 1fr) 6px 0px`
+    : `${leftWidth.value}px 6px minmax(0, 1fr) 6px ${rightWidth.value}px`,
 }))
+
+function toggleRightCollapse(e) {
+  if (e) {
+    e.stopPropagation()
+    e.preventDefault()
+  }
+  isRightCollapsed.value = !isRightCollapsed.value
+}
 
 function startDragLeft(e) {
   e.preventDefault()
@@ -750,6 +816,9 @@ function startDragLeft(e) {
 function startDragRight(e) {
   e.preventDefault()
   isDragging.value = true
+  if (isRightCollapsed.value) {
+    isRightCollapsed.value = false
+  }
   const startX = e.clientX
   const startWidth = rightWidth.value
 
@@ -819,6 +888,43 @@ const researchStatus = ref('')
 const researchSources = ref([])
 const docBodyEl = ref(null)
 let draftAbortController = null
+
+// Word 风格视图整体缩放（Ctrl + 滚轮）
+const docZoom = ref(1.0)
+
+function handleDocWheel(e) {
+  if (!e.ctrlKey && !e.metaKey) return
+  e.preventDefault()
+  const step = e.deltaY < 0 ? 0.05 : -0.05
+  let newZoom = Math.round((docZoom.value + step) * 100) / 100
+  if (newZoom < 0.4) newZoom = 0.4
+  if (newZoom > 2.5) newZoom = 2.5
+  docZoom.value = newZoom
+}
+
+function resetDocZoom() {
+  docZoom.value = 1.0
+}
+
+function changeDocZoom(delta) {
+  let newZoom = Math.round((docZoom.value + delta) * 100) / 100
+  if (newZoom < 0.4) newZoom = 0.4
+  if (newZoom > 2.5) newZoom = 2.5
+  docZoom.value = newZoom
+}
+
+watch(
+  docBodyEl,
+  (newEl, oldEl) => {
+    if (oldEl) {
+      oldEl.removeEventListener('wheel', handleDocWheel)
+    }
+    if (newEl) {
+      newEl.addEventListener('wheel', handleDocWheel, { passive: false })
+    }
+  },
+  { immediate: true }
+)
 
 const showCreateModal = ref(false)
 const newChapterId = ref('')
@@ -2782,6 +2888,9 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  if (docBodyEl.value) {
+    docBodyEl.value.removeEventListener('wheel', handleDocWheel)
+  }
   stopBatchPolling()
   closeWorkspaceStream?.()
   closeWorkspaceStream = null
@@ -2798,11 +2907,13 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   background: #f1f5f9;
+  transition: grid-template-columns 0.28s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .workbench.is-dragging {
   user-select: none !important;
   cursor: col-resize !important;
+  transition: none !important;
 }
 
 .resizer {
@@ -2838,6 +2949,69 @@ onUnmounted(() => {
   background: #ffffff;
 }
 
+.resizer-right {
+  position: relative;
+  z-index: 15;
+}
+
+/* 炫酷推拉折叠/展开按钮 */
+.collapse-toggle-btn {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 18px;
+  height: 48px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 9px;
+  color: #475569;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.12), 0 0 0 1px rgba(255, 255, 255, 0.8) inset;
+  z-index: 20;
+  transition: all 0.22s cubic-bezier(0.34, 1.56, 0.64, 1);
+  outline: none;
+}
+
+.collapse-toggle-btn .toggle-icon {
+  width: 13px;
+  height: 13px;
+  transition: transform 0.28s cubic-bezier(0.34, 1.56, 0.64, 1), stroke 0.15s ease;
+}
+
+/* 悬浮动效：微放大、外发光、品牌色高亮 */
+.collapse-toggle-btn:hover {
+  width: 20px;
+  height: 52px;
+  background: #2563eb;
+  border-color: #1d4ed8;
+  color: #ffffff;
+  box-shadow: 0 0 14px rgba(37, 99, 235, 0.45), 0 4px 10px rgba(15, 23, 42, 0.18);
+  transform: translate(-50%, -50%) scale(1.08);
+}
+
+.collapse-toggle-btn:active {
+  transform: translate(-50%, -50%) scale(0.96);
+}
+
+/* 折叠状态下箭头 180 度翻转（指向左，表示展开） */
+.collapse-toggle-btn.is-collapsed .toggle-icon {
+  transform: rotate(180deg);
+}
+
+/* 悬停时的小箭头微位移动效 */
+.collapse-toggle-btn:hover:not(.is-collapsed) .toggle-icon {
+  transform: translateX(1.5px);
+}
+
+.collapse-toggle-btn.is-collapsed:hover .toggle-icon {
+  transform: rotate(180deg) translateX(1.5px);
+}
+
 .pane {
   display: flex;
   flex-direction: column;
@@ -2847,6 +3021,16 @@ onUnmounted(() => {
 }
 .pane-chat {
   border-left: none;
+  width: var(--chat-width, 520px);
+  min-width: var(--chat-width, 520px);
+  max-width: var(--chat-width, 520px);
+  overflow: hidden;
+  transition: transform 0.28s cubic-bezier(0.2, 0, 0, 1);
+  will-change: transform;
+}
+.workbench.is-right-collapsed .pane-chat {
+  transform: translateX(100%);
+  pointer-events: none;
 }
 .pane-header {
   display: flex;
@@ -3231,6 +3415,11 @@ onUnmounted(() => {
 .middle-tabs button { min-width: 96px; padding: 7px 14px; border: 1px solid transparent; border-radius: 6px; background: #f8fafc; color: #64748b; cursor: pointer; font-size: 13px; }
 .middle-tabs button.active { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
 
+.pane-doc {
+  position: relative;
+  overflow: hidden;
+}
+
 /* Word 页面仿真容器（中间正文工作台） */
 .chapter-doc-body {
   --word-page-width: 820px;
@@ -3249,6 +3438,83 @@ onUnmounted(() => {
   width: var(--word-page-width);
   min-height: var(--word-page-min-height);
   margin: 0 auto;
+  transform-origin: top center;
+}
+
+/* 仿 Word 悬浮缩放状态与控制栏 */
+.doc-zoom-control {
+  position: absolute;
+  right: 24px;
+  bottom: 18px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.94);
+  backdrop-filter: blur(8px);
+  border: 1px solid #cbd5e1;
+  border-radius: 20px;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08), 0 1px 3px rgba(15, 23, 42, 0.05);
+  font-size: 12px;
+  color: #475569;
+  user-select: none;
+}
+.doc-zoom-control .zoom-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid #e2e8f0;
+  border-radius: 50%;
+  background: #f8fafc;
+  color: #334155;
+  font-size: 14px;
+  font-weight: bold;
+  cursor: pointer;
+  line-height: 1;
+  transition: all 0.15s ease;
+}
+.doc-zoom-control .zoom-btn:hover:not(:disabled) {
+  background: #e2e8f0;
+  color: #0f172a;
+  border-color: #cbd5e1;
+}
+.doc-zoom-control .zoom-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.doc-zoom-control .zoom-label {
+  min-width: 42px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  color: #1e293b;
+  transition: background 0.15s, color 0.15s;
+}
+.doc-zoom-control .zoom-label:hover {
+  background: #f1f5f9;
+  color: #2563eb;
+}
+.doc-zoom-control .zoom-reset-btn {
+  padding: 2px 8px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+  color: #2563eb;
+  font-size: 11px;
+  cursor: pointer;
+  font-weight: 500;
+  transition: all 0.15s ease;
+}
+.doc-zoom-control .zoom-reset-btn:hover {
+  background: #dbeafe;
+  border-color: #93c5fd;
 }
 .document-paper {
   box-sizing: border-box;

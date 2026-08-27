@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 
 from control_plane import ControlPlaneError, WorkspaceContext
 
@@ -297,7 +296,7 @@ class ContentWriter:
                         content=content,
                     )
                 except ControlPlaneError as exc:
-                    if not self._is_soft_grounding_error(content, exc):
+                    if not self._is_soft_grounding_error(exc):
                         raise
                     repaired = self._repair_soft_grounding_failure(
                         content=content,
@@ -659,29 +658,9 @@ class ContentWriter:
 
     @staticmethod
     def _is_soft_grounding_error(
-        content: str,
         error: ControlPlaneError,
     ) -> bool:
-        if error.code == "PROJECT_SPECIFICITY_MISSING":
-            return True
-        if error.code == "WRITING_PLAN_COVERAGE_INCOMPLETE":
-            return True
-        if error.code != "CHAPTER_GOAL_MISALIGNED":
-            return False
-        details = error.details if isinstance(error.details, dict) else {}
-        alignment = details.get("goal_alignment")
-        alignment = alignment if isinstance(alignment, dict) else {}
-        off_goal = {
-            int(item)
-            for item in alignment.get("off_goal_paragraphs") or []
-            if isinstance(item, int) and item >= 0
-        }
-        paragraph_count = len(
-            [item for item in re.split(r"\n\s*\n", content) if item.strip()]
-        )
-        # One isolated drifting paragraph is repairable. Predominant or
-        # multi-paragraph cross-chapter content remains a hard block.
-        return bool(off_goal) and len(off_goal) == 1 and paragraph_count >= 2
+        return error.code == "PROJECT_SPECIFICITY_MISSING"
 
     @staticmethod
     def _repair_soft_grounding_failure(
@@ -691,26 +670,14 @@ class ContentWriter:
         target: dict,
         error: ControlPlaneError,
     ) -> str:
-        """Repair one soft coverage/specificity failure inside ContentWriter."""
+        """Repair one project-specificity or content-length failure."""
         from llm_client import chat
-
-        blueprint_node = next(
-            (
-                item
-                for item in bundle.blueprint_slice
-                if isinstance(item, dict)
-                and str(item.get("chapter_id") or "")
-                == str(target.get("node_id") or "")
-            ),
-            {},
-        )
         messages = [
             {
                 "role": "system",
                 "content": (
-                    "你是同一 ContentWriter 内部的一次性正文修复步骤。只修复内容太空、"
-                    "目标不具体、WritingPlan 覆盖不完整或轻微偏题。删除超出章节目的的展开，"
-                    "补齐 WritingPlan 未回答内容；保持已授权项目事实，不得新增事实、企业能力、"
+                    "你是同一 ContentWriter 内部的一次性正文修复步骤。只修复正文过短或"
+                    "与当前项目事实关联不足的问题；保持已授权项目事实，不得新增事实、企业能力、"
                     "指标、任务或承诺。只输出修复后的正文。"
                 ),
             },
@@ -718,11 +685,11 @@ class ContentWriter:
                 "role": "user",
                 "content": json.dumps(
                     {
-                        "chapter_goal": {
-                            "purpose": blueprint_node.get("purpose"),
-                            "writing_objectives": blueprint_node.get("writing_objectives") or [],
+                        "chapter": {
+                            "chapter_id": str(target.get("node_id") or ""),
+                            "title": str(target.get("title") or ""),
                         },
-                        "chapter_writing_plan": bundle.chapter_writing_plan,
+                        "project_context": bundle.global_project_context,
                         "gate_error": {
                             "code": error.code,
                             "message": error.message,
@@ -737,29 +704,6 @@ class ContentWriter:
         repaired = str(chat(messages, temperature=0.15) or "").strip()
         if not repaired:
             raise error
-        alignment = (
-            error.details.get("goal_alignment")
-            if isinstance(error.details, dict)
-            else {}
-        )
-        off_goal = {
-            int(index)
-            for index in (alignment or {}).get("off_goal_paragraphs") or []
-            if str(index).isdigit()
-        }
-        if off_goal:
-            paragraphs = [
-                item.strip()
-                for item in re.split(r"\n\s*\n", repaired)
-                if item.strip()
-            ]
-            retained = [
-                paragraph
-                for index, paragraph in enumerate(paragraphs)
-                if index not in off_goal
-            ]
-            if retained:
-                repaired = "\n\n".join(retained)
         return repaired
 
     @staticmethod

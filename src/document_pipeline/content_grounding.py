@@ -238,112 +238,6 @@ def _semantic_relevance_review(
     }
 
 
-def _goal_alignment_review(
-    *, chapter: dict[str, Any], content: str, bound_requirements: list[str]
-) -> dict[str, Any]:
-    """Judge the finished body against the exact Blueprint GOAL before save."""
-    from llm_client import chat
-
-    node = chapter.get("blueprint_node")
-    node = node if isinstance(node, dict) else {}
-    purpose = str(node.get("purpose") or "").strip()
-    objectives = [
-        str(item).strip()
-        for item in node.get("writing_objectives") or []
-        if str(item).strip()
-    ]
-    if not purpose and not objectives:
-        return {}
-    writing_plan = chapter.get("chapter_writing_plan")
-    writing_plan = writing_plan if isinstance(writing_plan, dict) else {}
-    plan_blocks = [
-        {
-            "block_id": str(item.get("block_id") or f"block-{index}"),
-            "heading": str(item.get("heading") or ""),
-            "must_answer": str(item.get("must_answer") or ""),
-        }
-        for index, item in enumerate(writing_plan.get("blocks") or [], start=1)
-        if isinstance(item, dict)
-    ]
-    payload = {
-        "chapter_title": str(chapter.get("title") or node.get("title") or ""),
-        "blueprint_goal": {
-            "purpose": purpose,
-            "writing_objectives": objectives,
-        },
-        "chapter_writing_plan": plan_blocks,
-        "bound_requirements": list(bound_requirements),
-        "content": str(content),
-        "output_schema": {
-            "verdict": "aligned|drifted",
-            "confidence": "number between 0 and 1",
-            "off_goal_paragraphs": "array of zero-based paragraph indexes",
-            "missing_writing_plan_blocks": "array of block_id values not substantively answered",
-            "reason": "short Chinese explanation",
-        },
-    }
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "你是章节 GOAL 一致性保存门禁。Blueprint 中 purpose 与 writing_objectives 的原文"
-                "是唯一判断标准，不得对其分类、改写、扩展或推导新的章节目的。判断正文是否直接"
-                "完成该目标，以及是否用较大篇幅写了目标没有要求的内容。事实真实不等于切题；"
-                "bound_requirements 只能补充必须回答内容，不能改变章节目的。采购人安排、人员、"
-                "流程、任务分发、输入输出、交付或验收等内容，只有原始 GOAL 或明确评分条件要求时"
-                "才可展开。逐项检查 chapter_writing_plan 的 must_answer 是否得到实质回答。"
-                "必须只返回 JSON，不得输出 Markdown。"
-            ),
-        },
-        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-    ]
-    try:
-        parsed = _parse_json_object(chat(messages, temperature=0.0))
-    except Exception as exc:
-        raise ControlPlaneError(
-            "CHAPTER_GOAL_REVIEW_UNAVAILABLE",
-            "章节 GOAL 一致性审核暂不可用，已阻止保存。",
-            status_code=503,
-            details={"error": f"{type(exc).__name__}: {exc}"[:500]},
-        ) from exc
-    if not parsed or str(parsed.get("verdict") or "").lower() not in {"aligned", "drifted"}:
-        raise ControlPlaneError(
-            "CHAPTER_GOAL_REVIEW_UNAVAILABLE",
-            "章节 GOAL 一致性审核返回格式无效，已阻止保存。",
-            status_code=503,
-        )
-    try:
-        confidence = max(0.0, min(1.0, float(parsed.get("confidence", 0))))
-    except (TypeError, ValueError):
-        confidence = 0.0
-    paragraph_count = len([p for p in re.split(r"\n\s*\n", content) if p.strip()])
-    raw_indexes = parsed.get("off_goal_paragraphs")
-    raw_indexes = raw_indexes if isinstance(raw_indexes, list) else []
-    indexes = sorted(
-        {
-            int(item)
-            for item in raw_indexes
-            if isinstance(item, int) and 0 <= item < paragraph_count
-        }
-    )
-    valid_plan_ids = {item["block_id"] for item in plan_blocks}
-    missing_plan_ids = sorted(
-        {
-            str(item)
-            for item in (parsed.get("missing_writing_plan_blocks") or [])
-            if str(item) in valid_plan_ids
-        }
-    )
-    return {
-        "verdict": str(parsed.get("verdict")).lower(),
-        "confidence": confidence,
-        "off_goal_paragraphs": indexes,
-        "missing_writing_plan_blocks": missing_plan_ids,
-        "reason": str(parsed.get("reason") or "").strip()[:500],
-        "blueprint_goal": {"purpose": purpose, "writing_objectives": objectives},
-    }
-
-
 def _chapter_profile(chapter: dict[str, Any]) -> tuple[str, tuple[str, ...]]:
     """Return one title-independent profile for every chapter."""
     return "goal_driven", _GROUNDING_FACT_FIELDS
@@ -615,28 +509,6 @@ class ContentGroundingGate:
                     {"evidence_count": len(evidence_rows)},
                 )
             )
-        goal_alignment = _goal_alignment_review(
-            chapter=chapter,
-            content=body,
-            bound_requirements=requirements,
-        )
-        if goal_alignment.get("verdict") == "drifted":
-            findings.append(
-                GroundingFinding(
-                    "CHAPTER_GOAL_MISALIGNED",
-                    "正文未直接完成 Blueprint 原始章节目的，或大篇幅写入了目标未要求内容，已拒绝保存。",
-                    {"goal_alignment": goal_alignment},
-                )
-            )
-        if goal_alignment.get("missing_writing_plan_blocks"):
-            findings.append(
-                GroundingFinding(
-                    "WRITING_PLAN_COVERAGE_INCOMPLETE",
-                    "正文未完整回答内部 WritingPlan 的写作块。",
-                    {"goal_alignment": goal_alignment},
-                )
-            )
-
         for label, expected in (
             ("项目名称", project_name),
             (
@@ -758,7 +630,6 @@ class ContentGroundingGate:
             "chapter_profile": profile,
             "relevance_method": "semantic" if semantic_review else "lexical",
             "semantic_review": semantic_review,
-            "goal_alignment": goal_alignment,
             "repair_attempted": False,
             "repair_succeeded": False,
             "matched_fact_groups": sorted(matched_fields),

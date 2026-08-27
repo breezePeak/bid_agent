@@ -65,7 +65,7 @@ def _chapter_context() -> dict:
 
 
 class ContentGroundingGateTests(unittest.TestCase):
-    def test_goal_gate_rejects_real_but_off_goal_procurement_process(self) -> None:
+    def test_evaluate_does_not_call_llm_for_post_write_goal_review(self) -> None:
         chapter = {
             "chapter_id": "background",
             "title": "项目任务背景",
@@ -73,30 +73,50 @@ class ContentGroundingGateTests(unittest.TestCase):
                 "purpose": "交代项目任务所处背景、现实情境及任务由来，帮助评审理解项目实施基础。",
                 "writing_objectives": ["清楚说明项目任务背景及任务由来。"],
             },
+            "chapter_writing_plan": {
+                "blocks": [
+                    {
+                        "block_id": "WO-3",
+                        "heading": "背景说明",
+                        "must_answer": "说明任务由来。",
+                    }
+                ]
+            },
         }
-        with (
-            mock.patch(
-                "document_pipeline.content_grounding._goal_alignment_review",
-                return_value={
-                    "verdict": "drifted",
-                    "confidence": 0.96,
-                    "off_goal_paragraphs": [0, 1],
-                    "reason": "正文主要写采购人安排、资料接收和任务分发。",
-                },
-            ),
-            self.assertRaises(ControlPlaneError) as caught,
-        ):
-            ContentGroundingGate.evaluate(
+        with mock.patch("llm_client.chat") as chat:
+            report = ContentGroundingGate.evaluate(
                 global_context=_global_context(),
                 chapter=chapter,
                 chapter_grounding_context=_chapter_context(),
                 content=(
                     f"{PROJECT_NAME}面向年度全国国土变更调查监测数据开展国家级核实处理，"
-                    "并由采购人形成本次任务。\n\n"
-                    "项目组依据采购人安排接收资料并完成任务分发。"
+                    "实施方法包括数据接收、任务分发和国家级内外业核查。\n\n"
+                    "必要流程形成质量控制记录并开展成果检查，同时给出相关技术说明。"
                 ),
             )
-        self.assertEqual(caught.exception.code, "CHAPTER_GOAL_MISALIGNED")
+        chat.assert_not_called()
+        self.assertEqual(report["verdict"], "pass")
+        self.assertNotIn("goal_" + "alignment", report)
+
+    def test_copy_mode_mature_content_does_not_need_to_repeat_purpose(self) -> None:
+        with mock.patch("llm_client.chat") as chat:
+            report = ContentGroundingGate.evaluate(
+                global_context=_global_context(),
+                chapter={
+                    "chapter_id": "background",
+                    "title": "项目任务背景",
+                    "blueprint_node": {
+                        "purpose": "简要交代任务由来。",
+                        "writing_objectives": ["说明背景。"],
+                    },
+                },
+                chapter_grounding_context=_chapter_context(),
+                effective_generation_mode="copy",
+                content="建立资料接收、任务分发、内外业核查、质量控制和成果复核流程。",
+            )
+
+        chat.assert_not_called()
+        self.assertEqual(report["verdict"], "pass")
 
     def test_fact_binding_does_not_bind_many_facts_on_weak_bigram_overlap(self) -> None:
         context = _global_context()
