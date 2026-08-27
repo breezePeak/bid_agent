@@ -591,6 +591,10 @@ class ContentWriter:
                     "chapter_context_items": list(bundle.chapter_context_items or []),
                     "response_units": list(response_units),
                     "research_evidence": list(research_evidence or []),
+                    "legacy_section_ids": list(
+                        blueprint_node.get("legacy_section_ids") or []
+                    ),
+                    "legacy_sources": list(blueprint_node.get("legacy_sources") or []),
                 },
             )
         )

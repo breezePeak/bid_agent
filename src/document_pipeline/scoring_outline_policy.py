@@ -261,6 +261,44 @@ def score_group_category(title: str) -> str:
     return "other"
 
 
+def active_planning_requirement_ids(
+    requirement_ledger: RequirementLedger,
+    score_model: ScoreModel,
+) -> set[str]:
+    """Return requirements that may drive the technical response plan.
+
+    The ledger remains a complete procurement record.  Score requirements are
+    different: once ScoreModel has been projected to the supported technical
+    scoring scope, an unreferenced score requirement belongs to an excluded
+    commercial/price scoring group and must not reappear as a standalone
+    chapter duty.
+    """
+
+    referenced_score_requirement_ids = {
+        requirement_id
+        for point in score_model.points
+        for requirement_id in (
+            *point.linked_requirement_ids,
+            *point.context_requirement_ids,
+            *(
+                requirement_id
+                for unit in point.response_units
+                for requirement_id in unit.linked_requirement_ids
+            ),
+        )
+    }
+    return {
+        requirement.requirement_id
+        for requirement in requirement_ledger.requirements
+        if requirement.status not in {"blocked", "waived"}
+        and (
+            getattr(requirement.kind, "value", requirement.kind) != "score"
+            or requirement.requirement_id
+            in referenced_score_requirement_ids
+        )
+    }
+
+
 def score_group_chapter_title(title: str, declared_points: object, category: str) -> str:
     base = {
         "price": "报价响应",
@@ -486,11 +524,7 @@ def audit_response_topic_graph(
         else {}
     )
     active_requirement_ids = (
-        {
-            item.requirement_id
-            for item in requirement_ledger.requirements
-            if item.status not in {"blocked", "waived"}
-        }
+        active_planning_requirement_ids(requirement_ledger, score_model)
         if requirement_ledger is not None
         else set()
     )
@@ -1053,11 +1087,10 @@ def _audit_chapter_blueprint_direct(
         requirement.requirement_id: requirement
         for requirement in ledger.requirements
     }
-    active_requirement_ids = {
-        requirement_id
-        for requirement_id, requirement in requirements.items()
-        if requirement.status not in {"blocked", "waived"}
-    }
+    active_requirement_ids = active_planning_requirement_ids(
+        ledger,
+        score_model,
+    )
     linked_requirement_ids = {
         str(requirement_id)
         for point in score_model.points

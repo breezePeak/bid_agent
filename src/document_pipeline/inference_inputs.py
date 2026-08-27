@@ -32,6 +32,7 @@ from .score_semantic import (
     ScoreSemanticInput,
     build_score_semantic_batches,
 )
+from .scoring_outline_policy import active_planning_requirement_ids
 
 
 PROJECT_CONTEXT_TOKENS = (
@@ -561,10 +562,19 @@ def build_topic_duty_planning_input(
     scores: ScoreModel,
     source_index: SourceIndex,
 ) -> TopicDutyPlanningInput:
+    planning_requirement_ids = active_planning_requirement_ids(
+        ledger,
+        scores,
+    )
+    planning_requirements = [
+        item
+        for item in ledger.requirements
+        if item.requirement_id in planning_requirement_ids
+    ]
     source_context = select_planning_source_context(
         list(source_index.blocks),
         requirement_chunk_ids={
-            item.source_anchor.chunk_id for item in ledger.requirements
+            item.source_anchor.chunk_id for item in planning_requirements
         },
         score_chunk_ids={
             anchor.chunk_id
@@ -574,7 +584,9 @@ def build_topic_duty_planning_input(
     )
     return TopicDutyPlanningInput(
         project_model=project.model_dump(mode="json"),
-        requirement_ledger=ledger.model_dump(mode="json"),
+        requirement_ledger=ledger.model_copy(
+            update={"requirements": planning_requirements}
+        ).model_dump(mode="json"),
         score_model=scores.model_dump(mode="json"),
         source_context=source_context,
     )

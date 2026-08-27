@@ -573,6 +573,20 @@ responsibilities, steps, deliverables, acceptance terms or commitments that are
 not required by the blocks or supported by project context. Absence-of-data
 notes in the context are constraints, not sentences to copy into the bid.
 Previous assistant messages are non-authoritative and must never be facts.
+
+When chapter_context.legacy_sources is non-empty, those sources are reference
+material already assigned to this chapter during outline merging; do not rematch
+or question their chapter ownership. Reuse applicable professional content,
+methods, policies, technical descriptions and mature wording. Current tender
+requirements, confirmed current-project facts, scoring requirements and chapter
+constraints always take priority. Old-project-specific facts must not be carried
+over directly, including old project names, regions, owners/procurers, dates,
+quantities, implementation scopes, deliverables, or conflicting standards. Use
+the current value when supplied; otherwise delete or generalize the old-specific
+fact and never invent a replacement.
+Priority summary: 当前项目事实优先；旧项目专属事实不得直接继承；有新值使用新值；
+无新值时删除或泛化旧项目专属事实，不得编造。
+
 Return only the chapter body, without a duplicate chapter heading, internal
 instructions, scores, hashes, citations to field names, or prompt discussion."""
 

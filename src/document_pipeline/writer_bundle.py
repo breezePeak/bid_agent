@@ -350,6 +350,29 @@ class WriterInputBundleAssembler:
                 if requirement_id in provided_requirement_ids
             ]
             score_obligations.append(payload)
+        legacy_blocks: dict[str, dict[str, Any]] = {}
+        if any(node.legacy_sources for node in nodes):
+            legacy_artifact = self.store.v3_active_artifact("LegacyBidIndex") or {}
+            legacy_blocks = {
+                str(item.get("block_id") or ""): item
+                for item in (legacy_artifact.get("payload") or {}).get("blocks") or []
+                if isinstance(item, dict) and item.get("block_id")
+            }
+        blueprint_slice: list[dict[str, Any]] = []
+        for node in nodes:
+            node_payload = node.model_dump(mode="json")
+            resolved_sources: list[dict[str, Any]] = []
+            for source in node_payload.get("legacy_sources") or []:
+                source_payload = dict(source)
+                block = legacy_blocks.get(str(source_payload.get("block_id") or ""))
+                if block and str(block.get("content_hash") or "") == str(
+                    source_payload.get("content_hash") or ""
+                ):
+                    source_payload["content"] = str(block.get("content") or "")
+                resolved_sources.append(source_payload)
+            node_payload["legacy_sources"] = resolved_sources
+            blueprint_slice.append(node_payload)
+
         body = {
             "unit_id": unit_id,
             "source_blueprint_artifact_id": str(blueprint_artifact["artifact_id"]),
@@ -357,7 +380,7 @@ class WriterInputBundleAssembler:
             "source_blueprint_hash": str(blueprint_artifact["artifact_hash"]),
             "h1_receipt_id": h1.receipt_id,
             "dependency_refs": dependencies,
-            "blueprint_slice": [item.model_dump(mode="json") for item in nodes],
+            "blueprint_slice": blueprint_slice,
             "topic_and_duty_slice": [],
             "requirement_excerpts": [requirements[item].model_dump(mode="json") for item in requirement_ids],
             "score_obligations": score_obligations,

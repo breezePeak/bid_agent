@@ -11,6 +11,7 @@ from .document_contract import DOCUMENT_CONTRACT_PATH
 from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
+from .scoring_outline_policy import active_planning_requirement_ids
 
 
 DOCUMENT_PLAN_PATH = V3_ROOT / "document_plan.json"
@@ -158,11 +159,10 @@ class DocumentPlanner:
                 and unit.unit_id not in deferred_response_unit_ids
                 for requirement_id in unit.linked_requirement_ids
             }
-            active_requirement_ids = {
-                item.requirement_id
-                for item in ledger.requirements
-                if item.status not in {"blocked", "waived"}
-            }
+            active_requirement_ids = active_planning_requirement_ids(
+                ledger,
+                scores,
+            )
             if isinstance(contract, TemplateContract):
                 required_requirement_ids = (
                     active_requirement_ids & score_linked_requirement_ids

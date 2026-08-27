@@ -81,7 +81,7 @@
 
       <nav class="tree-list" aria-label="章节目录">
         <div
-          v-for="(item, idx) in treeItems"
+          v-for="(item, idx) in visibleTreeItems"
           :key="item.chapter_id"
           class="tree-item"
           :class="{
@@ -89,11 +89,30 @@
             archived: item.status === 'archived',
             editing: editingChapterId === item.chapter_id,
             'writing-selecting': isSelectingChapters && item.status !== 'archived',
+            'is-parent': item.has_children,
+            'is-collapsed': isChapterCollapsed(item.chapter_id),
           }"
           :style="{ '--tree-depth': item.depth || 0 }"
           @click="selectChapter(item.chapter_id)"
         >
           <span class="tree-indent" aria-hidden="true" />
+
+          <!-- Word 风格展开/折叠三角图标 -->
+          <button
+            v-if="item.has_children"
+            type="button"
+            class="tree-collapse-btn"
+            :class="{ 'is-collapsed': isChapterCollapsed(item.chapter_id) }"
+            :title="isChapterCollapsed(item.chapter_id) ? '展开小节' : '折叠小节'"
+            aria-label="展开或折叠"
+            @click.stop="toggleChapterCollapse(item.chapter_id, $event)"
+          >
+            <svg class="chevron-svg" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clip-rule="evenodd" />
+            </svg>
+          </button>
+          <span v-else class="tree-collapse-placeholder" />
+
           <input
             v-if="isSelectingChapters && item.status !== 'archived'"
             class="tree-write-checkbox"
@@ -118,12 +137,17 @@
           </template>
           <template v-else>
             <span class="tree-title-row">
-              <span class="tree-title" :title="item.title || item.chapter_id" @dblclick="startRenameChapter(item, $event)">
-                {{ item.title || item.chapter_id }}
+              <span
+                class="tree-title"
+                :class="[`tree-level-${item.depth || 0}`, { 'is-root-heading': !item.depth || item.depth === 0 }]"
+                :title="chapterDisplayTitle(item)"
+                @dblclick="startRenameChapter(item, $event)"
+              >
+                {{ chapterDisplayTitle(item) }}
               </span>
               <small v-if="isMultiChapterQueued(item)" class="tree-queue-label">队列中</small>
             </span>
-            <span v-if="isLeafChapter(item)" class="tree-meta">{{ shortStatus(item) }}</span>
+            <span v-if="isLeafChapter(item)" class="tree-meta" :class="statusClass(item)">{{ shortStatus(item) }}</span>
             <div class="tree-item-actions" @click.stop>
               <button
                 type="button"
@@ -146,7 +170,7 @@
                 type="button"
                 class="icon-action-btn"
                 title="向下移动"
-                :disabled="idx === treeItems.length - 1"
+                :disabled="idx === visibleTreeItems.length - 1"
                 @click="handleMoveChapter(item, 'down', $event)"
               >
                 <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m7 13 5 5 5-5M12 18V6" /></svg>
@@ -186,7 +210,7 @@
       <header class="pane-header doc-header">
         <div>
           <p class="kicker">文档生成</p>
-          <h3>{{ selectedChapter?.title || selectedId || '选择左侧章节' }}</h3>
+          <h3>{{ selectedDisplayTitle }}</h3>
           <div v-if="selectedChapter" class="doc-sub">
             <span v-if="selectedIsLeaf" class="pill" :class="statusClass(selectedChapter)">{{ shortStatus(selectedChapter) }}</span>
             <span>rev {{ chapterDetail?.chapter_revision || selectedChapter.chapter_revision || 0 }}</span>
@@ -211,7 +235,7 @@
       </header>
 
       <div v-if="isBidRewrite" class="middle-tabs">
-        <button type="button" :class="{ active: middleTab === 'rewrite' }" @click="middleTab = 'rewrite'">改写逻辑</button>
+        <button type="button" :class="{ active: middleTab === 'rewrite' }" @click="openRewriteLogic">改写逻辑</button>
         <button type="button" :class="{ active: middleTab === 'body' }" @click="middleTab = 'body'">正文</button>
       </div>
 
@@ -253,7 +277,7 @@
             aria-label="A4 正文编辑页"
           >
             <header v-if="selectedId" class="paper-heading">
-              <h1>{{ selectedChapter?.title || selectedId || '未命名章节' }}</h1>
+              <h1>{{ selectedDisplayTitle }}</h1>
             </header>
 
             <div v-if="!selectedId" class="document-state">
@@ -311,7 +335,7 @@
           <p class="kicker">Agent · 本章专属</p>
           <h3>聊天与上下文</h3>
           <p v-if="selectedChapter" class="chat-chapter-label">
-            {{ selectedChapter.title || selectedId }}
+            {{ selectedDisplayTitle }}
           </p>
           <p v-else class="chat-chapter-label muted">请先选择左侧章节</p>
         </div>
@@ -1139,18 +1163,74 @@ const treeItems = computed(() => {
 
   const ordered = []
   const visited = new Set()
-  const appendBranch = (item, depth) => {
+  const appendBranch = (item, depth, prefix) => {
     if (!item || visited.has(item.chapter_id)) return
     visited.add(item.chapter_id)
     const children = [...(childrenByParent.get(item.chapter_id) || [])].sort(compareChapter)
-    ordered.push({ ...item, depth: Math.min(depth, 8), has_children: children.length > 0 })
-    children.forEach(child => appendBranch(child, depth + 1))
+    ordered.push({
+      ...item,
+      depth: Math.min(depth, 8),
+      section_number: prefix,
+      has_children: children.length > 0,
+    })
+    children.forEach((child, index) => {
+      const childPrefix = prefix ? `${prefix}.${index + 1}` : `${index + 1}`
+      appendBranch(child, depth + 1, childPrefix)
+    })
   }
 
-  roots.sort(compareChapter).forEach(root => appendBranch(root, 0))
+  roots.sort(compareChapter).forEach((root, index) => appendBranch(root, 0, `${index + 1}`))
   items.value.filter(item => !visited.has(item.chapter_id)).sort(compareChapter)
-    .forEach(item => appendBranch(item, 0))
+    .forEach((item, index) => appendBranch(item, 0, `${roots.length + index + 1}`))
   return ordered
+})
+
+function chapterDisplayTitle(item) {
+  if (!item) return ''
+  const title = String(item.title || item.chapter_id || '').trim()
+  if (!item.section_number) return title
+  const hasExistingNumber = /^([第0-9一二三四五六七八九十百千]+[章节部分篇点、\. \-]|[0-9]+(\.[0-9]+)*[\s\.、])/i.test(title)
+  if (hasExistingNumber) return title
+  return `${item.section_number} ${title}`
+}
+
+const selectedDisplayTitle = computed(() => {
+  const current = treeItems.value.find(item => item.chapter_id === selectedId.value)
+  if (current) return chapterDisplayTitle(current)
+  return selectedChapter.value?.title || selectedId.value || '选择左侧章节'
+})
+
+const collapsedChapterIds = ref(new Set())
+
+function toggleChapterCollapse(chapterId, event) {
+  if (event) event.stopPropagation()
+  const next = new Set(collapsedChapterIds.value)
+  if (next.has(chapterId)) {
+    next.delete(chapterId)
+  } else {
+    next.add(chapterId)
+  }
+  collapsedChapterIds.value = next
+}
+
+function isChapterCollapsed(chapterId) {
+  return collapsedChapterIds.value.has(chapterId)
+}
+
+const visibleTreeItems = computed(() => {
+  const collapsed = collapsedChapterIds.value
+  if (!collapsed.size) return treeItems.value
+  const hiddenParentIds = new Set()
+  return treeItems.value.filter(item => {
+    if (item.parent_chapter_id && hiddenParentIds.has(item.parent_chapter_id)) {
+      hiddenParentIds.add(item.chapter_id)
+      return false
+    }
+    if (collapsed.has(item.chapter_id)) {
+      hiddenParentIds.add(item.chapter_id)
+    }
+    return true
+  })
 })
 
 function isLeafChapter(item) {
@@ -1465,7 +1545,7 @@ async function refreshSnapshotRevision() {
     workspaceRevision.value = Number(snap.data.snapshot?.workspace_revision || 0)
     projectMode.value = String(snap.data.snapshot?.profile?.project_mode || 'full_write')
     if (!rewriteModeInitialized) {
-      middleTab.value = projectMode.value === 'bid_rewrite' ? 'rewrite' : 'body'
+  middleTab.value = 'body'
       rewriteModeInitialized = true
     }
     globalProjectContext.value = snap.data.snapshot?.global_project_context || {}
@@ -1572,7 +1652,6 @@ async function reloadAll() {
     await Promise.all([
       loadChapterDetail({ force: true }),
       selectedId.value ? loadChapterChat(selectedId.value, { force: true }) : Promise.resolve(),
-      selectedId.value ? loadRewriteMatch(selectedId.value) : Promise.resolve(),
     ])
   } finally {
     busy.value = false
@@ -1681,6 +1760,13 @@ async function loadRewriteMatch(chapterId) {
       rewriteMatchAbortController = null
       rewriteMatchLoading.value = false
     }
+  }
+}
+
+function openRewriteLogic() {
+  middleTab.value = 'rewrite'
+  if (selectedId.value && !rewriteMatch.value && !rewriteMatchLoading.value) {
+    void loadRewriteMatch(selectedId.value)
   }
 }
 
@@ -2721,7 +2807,6 @@ watch(
     await Promise.all([
       loadChapterDetail({ force: true }),
       loadChapterChat(id),
-      loadRewriteMatch(id),
     ])
   },
 )
@@ -2852,138 +2937,313 @@ onUnmounted(() => {
   background: #fef2f2;
   border-color: #fca5a5;
 }
+
+/* ===== Word 经典导航窗格与工具栏 ===== */
 .tree-toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 12px;
-  border-bottom: 1px solid #f1f5f9;
-  flex-shrink: 0;
+  display: flex !important;
+  flex-wrap: wrap !important;
+  gap: 4px !important;
+  padding: 6px 8px !important;
+  background: #f3f3f3 !important;
+  border-bottom: 1px solid #e1dfdd !important;
+  flex-shrink: 0 !important;
 }
 .tree-toolbar > .btn {
-  flex: 1 1 calc(50% - 3px);
-  min-width: 0;
-  white-space: nowrap;
+  flex: 1 1 calc(50% - 2px) !important;
+  min-width: 0 !important;
+  white-space: nowrap !important;
+  font-size: 11.5px !important;
+  padding: 4px 6px !important;
+  border-radius: 2px !important;
+  border: 1px solid #d2d0ce !important;
+  background: #ffffff !important;
+  color: #323130 !important;
+  box-shadow: none !important;
+  font-weight: 500 !important;
+}
+.tree-toolbar > .btn:hover:not(:disabled) {
+  background: #edebe9 !important;
+  border-color: #c8c6c4 !important;
+  color: #201f1e !important;
+  transform: none !important;
+  box-shadow: none !important;
+}
+.tree-toolbar > .btn-primary {
+  background: #106ebe !important;
+  border-color: #106ebe !important;
+  color: #ffffff !important;
+}
+.tree-toolbar > .btn-primary:hover:not(:disabled) {
+  background: #005a9e !important;
+  border-color: #005a9e !important;
 }
 .tree-stats {
-  display: flex;
-  gap: 10px;
-  padding: 6px 12px;
-  font-size: 11px;
-  color: #64748b;
-  border-bottom: 1px solid #f1f5f9;
-  flex-shrink: 0;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  padding: 4px 10px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  color: #605e5c !important;
+  background: #f8f8f8 !important;
+  border-bottom: 1px solid #edebe9 !important;
+  flex-shrink: 0 !important;
 }
 .tree-list {
-  flex: 1;
-  overflow: auto;
-  padding: 8px;
+  flex: 1 !important;
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  padding: 4px 0 !important;
+  background: #ffffff !important;
 }
 .pane-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  display: flex !important;
+  align-items: center !important;
+  gap: 6px !important;
 }
 .back-assistant-btn {
-  min-height: 36px;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  white-space: nowrap;
+  min-height: 28px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  white-space: nowrap !important;
+  font-size: 12px !important;
+  border-radius: 2px !important;
+  border: 1px solid #d2d0ce !important;
+  background: #ffffff !important;
+  color: #323130 !important;
+  box-shadow: none !important;
+}
+.back-assistant-btn:hover {
+  background: #edebe9 !important;
+  transform: none !important;
+  box-shadow: none !important;
 }
 .back-assistant-btn svg {
-  width: 16px;
-  height: 16px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+  width: 14px !important;
+  height: 14px !important;
+  fill: none !important;
+  stroke: currentColor !important;
+  stroke-width: 2 !important;
 }
+
+/* Word 导航窗格风格章节项（单行紧凑、无圆点、经典三角折叠） */
 .tree-item {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 8px;
-  padding: 8px 10px;
-  text-align: left;
-  cursor: pointer;
-  margin-bottom: 2px;
+  width: 100% !important;
+  box-sizing: border-box !important;
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
+  align-items: center !important;
+  height: 28px !important;
+  min-height: 28px !important;
+  line-height: 28px !important;
+  padding: 0 8px 0 2px !important;
+  margin: 1px 0 !important;
+  border: none !important;
+  border-left: 3px solid transparent !important;
+  background: transparent !important;
+  cursor: pointer !important;
+  user-select: none !important;
+  position: relative !important;
+  transition: background-color 0.1s ease !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif !important;
 }
+
+/* 层级缩进 */
 .tree-indent {
-  width: calc(var(--tree-depth) * 20px);
-  height: 1px;
-  flex: 0 0 auto;
+  display: inline-block !important;
+  width: calc(var(--tree-depth) * 14px) !important;
+  height: 100% !important;
+  flex: 0 0 calc(var(--tree-depth) * 14px) !important;
 }
-.tree-item:hover { background: #f8fafc; }
-.tree-item.active {
-  background: rgba(37, 99, 235, 0.08);
-  border-color: rgba(37, 99, 235, 0.2);
+
+/* Word 经典折叠三角按钮 */
+.tree-collapse-btn {
+  width: 16px !important;
+  height: 16px !important;
+  min-width: 16px !important;
+  max-width: 16px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  margin: 0 2px 0 0 !important;
+  padding: 0 !important;
+  border: none !important;
+  background: transparent !important;
+  color: #605e5c !important;
+  cursor: pointer !important;
+  border-radius: 2px !important;
+  box-shadow: none !important;
+  flex: 0 0 16px !important;
 }
-.tree-item.archived { opacity: 0.55; }
+.tree-collapse-btn:hover {
+  background: #edebe9 !important;
+  color: #201f1e !important;
+  transform: none !important;
+  box-shadow: none !important;
+}
+.tree-collapse-btn .chevron-svg {
+  width: 12px !important;
+  height: 12px !important;
+  transition: transform 0.12s ease !important;
+}
+.tree-collapse-btn.is-collapsed .chevron-svg {
+  transform: rotate(-90deg) !important;
+}
+.tree-collapse-placeholder {
+  width: 16px !important;
+  min-width: 16px !important;
+  height: 16px !important;
+  flex: 0 0 16px !important;
+  display: inline-block !important;
+}
+
+/* 隐藏无序列表圆点（Word 导航大纲不使用 bullet 圆点） */
 .tree-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #cbd5e1;
-  flex-shrink: 0;
+  display: none !important;
 }
-.tree-dot.ok { background: #22c55e; }
-.tree-dot.draft { background: #f59e0b; }
-.tree-dot.ready { background: #3b82f6; }
-.tree-dot.projected { background: #cbd5e1; }
-.tree-dot.archived { background: #94a3b8; }
-.tree-dot.batch-queued { background: #2563eb; }
-.tree-dot.batch-preflight,
-.tree-dot.batch-analyzing,
-.tree-dot.batch-researching,
-.tree-dot.batch-drafting,
-.tree-dot.batch-validating,
-.tree-dot.batch-committing,
-.tree-dot.batch-running { background: #2563eb; }
-.tree-dot.batch-succeeded { background: #22c55e; }
-.tree-dot.batch-failed,
-.tree-dot.batch-paused { background: #ef4444; }
-.tree-dot.batch-skipped,
-.tree-dot.batch-cancelled { background: #94a3b8; }
+
+/* Word 悬浮态与选中态 */
+.tree-item:hover {
+  background: #f3f2f1 !important;
+}
+.tree-item.active {
+  background: #e5f1fb !important;
+  border-left: 3px solid #106ebe !important;
+}
+.tree-item.active .tree-title {
+  color: #004e8c !important;
+  font-weight: 600 !important;
+}
+.tree-item.archived {
+  opacity: 0.45 !important;
+}
+
 .tree-title-row {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 4px !important;
+  overflow: hidden !important;
+  white-space: nowrap !important;
 }
 .tree-title {
-  min-width: 0;
-  font-size: 13px;
-  color: #0f172a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0 !important;
+  overflow: hidden !important;
+  text-overflow: ellipsis !important;
+  white-space: nowrap !important;
+  font-size: 12px !important;
+  color: #323130 !important;
+  line-height: 28px !important;
 }
+.tree-title.is-root-heading {
+  font-weight: 600 !important;
+  color: #111827 !important;
+  font-size: 12.5px !important;
+}
+.tree-title.tree-level-1 {
+  font-weight: 500 !important;
+  color: #242424 !important;
+}
+.tree-title.tree-level-2 {
+  font-weight: 400 !important;
+  color: #484644 !important;
+}
+
 .tree-queue-label {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border: 1px solid #f59e0b;
-  border-radius: 999px;
-  background: #fffbeb;
-  color: #92400e;
-  font-size: 11px;
-  font-weight: 700;
-  line-height: 16px;
+  flex: 0 0 auto !important;
+  padding: 0 4px !important;
+  border: 1px solid #f59e0b !important;
+  border-radius: 2px !important;
+  background: #fffbeb !important;
+  color: #92400e !important;
+  font-size: 10px !important;
+  font-weight: 600 !important;
+  line-height: 14px !important;
 }
 .tree-meta {
-  font-size: 11px;
-  color: #94a3b8;
-  flex-shrink: 0;
+  margin-left: auto !important;
+  flex: 0 0 auto !important;
+  font-size: 10px !important;
+  font-weight: 500 !important;
+  padding: 1px 4px !important;
+  border-radius: 2px !important;
+  background: #f3f2f1 !important;
+  color: #605e5c !important;
+  line-height: 14px !important;
+  border: 1px solid #e1dfdd !important;
 }
+.tree-meta.ok {
+  background: #dff6dd !important;
+  color: #0e700e !important;
+  border-color: #c3eec0 !important;
+}
+.tree-meta.draft {
+  background: #fff4ce !important;
+  color: #8f4d00 !important;
+  border-color: #ffe699 !important;
+}
+.tree-meta.ready {
+  background: #e5f1fb !important;
+  color: #004e8c !important;
+  border-color: #c7e0f4 !important;
+}
+
+/* 悬浮操作胶囊栏 */
+.tree-item-actions {
+  display: none !important;
+  align-items: center !important;
+  gap: 2px !important;
+  position: absolute !important;
+  right: 4px !important;
+  background: #ffffff !important;
+  padding: 1px 3px !important;
+  border-radius: 2px !important;
+  border: 1px solid #d2d0ce !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12) !important;
+  z-index: 10 !important;
+}
+.tree-item:hover .tree-item-actions {
+  display: flex !important;
+}
+.icon-action-btn {
+  background: transparent !important;
+  border: none !important;
+  color: #605e5c !important;
+  padding: 2px !important;
+  border-radius: 2px !important;
+  cursor: pointer !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  box-shadow: none !important;
+}
+.icon-action-btn svg {
+  width: 13px !important;
+  height: 13px !important;
+  stroke: currentColor !important;
+  fill: none !important;
+}
+.icon-action-btn:hover:not(:disabled) {
+  background: #edebe9 !important;
+  color: #201f1e !important;
+  transform: none !important;
+}
+.icon-action-btn.danger:hover:not(:disabled) {
+  background: #fde7e9 !important;
+  color: #a80000 !important;
+}
+.icon-action-btn:disabled {
+  opacity: 0.3 !important;
+  cursor: not-allowed !important;
+}
+
 .compose-box {
   margin: 8px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: 6px;
   background: #fff7ed;
   border: 1px solid #fed7aa;
   font-size: 12px;
@@ -3012,19 +3272,22 @@ onUnmounted(() => {
   flex-wrap: wrap;
 }
 .middle-tabs { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid #e2e8f0; background: #fff; }
-.middle-tabs button { min-width: 96px; padding: 7px 14px; border: 1px solid transparent; border-radius: 8px; background: #f8fafc; color: #64748b; cursor: pointer; }
-.middle-tabs button.active { border-color: #bfdbfe; background: #dbeafe; color: #1d4ed8; font-weight: 700; }
+.middle-tabs button { min-width: 96px; padding: 7px 14px; border: 1px solid transparent; border-radius: 6px; background: #f8fafc; color: #64748b; cursor: pointer; font-size: 13px; }
+.middle-tabs button.active { border-color: #bfdbfe; background: #eff6ff; color: #1d4ed8; font-weight: 600; }
+
+/* Word 页面仿真容器（中间正文工作台） */
 .chapter-doc-body {
-  --word-page-width: 850px;
+  --word-page-width: 820px;
   --word-page-min-height: 1120px;
   flex: 1;
   display: block;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: auto;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
-  padding: 28px 32px 56px;
-  background: #e7ebf0;
+  padding: 32px 24px 64px;
+  background: #eef2f5;
 }
 .document-stage {
   width: var(--word-page-width);
@@ -3035,22 +3298,29 @@ onUnmounted(() => {
   box-sizing: border-box;
   width: 100%;
   min-height: var(--word-page-min-height);
-  padding: 72px 78px;
-  border: 1px solid #d5dbe5;
-  background: #fff;
-  box-shadow: 0 16px 42px rgb(15 23 42 / 10%);
+  padding: 64px 72px 80px;
+  border: 1px solid #d8dee8;
+  background: #ffffff;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 10px 25px -5px rgba(0, 0, 0, 0.08), 0 0 0 1px rgba(0, 0, 0, 0.02);
+  border-radius: 2px;
   color: #111827;
-  font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", serif;
+  font-family: "SimSun", "Songti SC", "Noto Serif CJK SC", "STSong", serif;
+  position: relative;
 }
-.paper-heading { margin-bottom: 30px; }
+.paper-heading {
+  margin-bottom: 32px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #0f172a;
+}
 .paper-heading h1 {
   margin: 0;
-  color: #111827;
-  font-family: "SimHei", "Microsoft YaHei", sans-serif;
-  font-size: 28px;
+  color: #0f172a;
+  font-family: "SimHei", "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-size: 24px;
   line-height: 1.45;
   font-weight: 700;
   text-align: center;
+  letter-spacing: 0.02em;
 }
 .research-status {
   margin: 0 0 24px;

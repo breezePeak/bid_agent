@@ -58,6 +58,22 @@ test('rewrite workbench remains mode-gated, CAS editable, and preserves the body
   assert.match(source, /executeRewritePlan/)
 })
 
+test('single chapter writing is not gated by rewrite match or plan state', () => {
+  const source = fs.readFileSync(
+    resolve(here, '../src/components/ChapterWorkbenchView.vue'),
+    'utf8',
+  )
+  const start = source.indexOf('async function writeCurrentChapter()')
+  const end = source.indexOf('\nfunction shortStatus', start)
+  const writeCurrentChapter = source.slice(start, end)
+
+  assert.match(source, /:disabled="busy \|\| !selectedIsLeaf" @click="writeCurrentChapter"/)
+  assert.match(source, /@click="openRewriteLogic"/)
+  assert.match(source, /middleTab\.value = 'body'/)
+  assert.doesNotMatch(writeCurrentChapter, /rewriteMatch|rewritePlan|plan_revision/)
+  assert.doesNotMatch(source, /loadChapterChat\(id\),\s*loadRewriteMatch\(id\)/)
+})
+
 test('rewrite panel emits only structured operations and exposes recovery controls', () => {
   const source = fs.readFileSync(
     resolve(here, '../src/components/ChapterRewriteLogicPanel.vue'),

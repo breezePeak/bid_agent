@@ -44,6 +44,7 @@ from .scoring_outline_policy import (
     is_document_quality_score,
     is_evaluative_sentence_heading,
     outline_structure_key,
+    score_group_category,
 )
 
 
@@ -175,8 +176,6 @@ class ScoreAgent:
         group_by_input: dict[str, ScoreGroup] = {}
         group_by_table: dict[tuple[str, int | None, int], ScoreGroup] = {}
         current_group: ScoreGroup | None = None
-        total_declared: float | None = None
-
         for block in source_blocks:
             if block.block_id in scoring_table_block_ids:
                 row_blocks = row_blocks_by_leader.get(block.block_id)
@@ -221,8 +220,6 @@ class ScoreAgent:
                 group_by_input[block.input_id] = current_group
                 groups.append(current_group)
                 continue
-            if match := _TOTAL_POINTS.search(content):
-                total_declared = float(match.group(1))
             if self._is_group_label(content):
                 current_group = self._group_for_heading(block)
                 group_by_input[block.input_id] = current_group
@@ -246,9 +243,19 @@ class ScoreAgent:
 
         points = self._deduplicate_points(points)
         points = self._disambiguate_titles(points)
+        groups, points = self._technical_score_projection(
+            groups,
+            points,
+            source_blocks,
+        )
         groups = self._reconcile_groups(groups, points)
         known_total = sum(point.max_points or 0 for point in points)
-        total_points = total_declared if total_declared is not None else known_total
+        if all(point.max_points is not None for point in points):
+            total_points = known_total
+        elif groups and all(group.declared_points is not None for group in groups):
+            total_points = sum(group.declared_points or 0 for group in groups)
+        else:
+            total_points = known_total
         candidates = self._evidence_need_candidates(points)
         source_input_ids = sorted({anchor.source_input_id for point in points for anchor in point.source_anchors})
         model_id = f"SM-{hashlib.sha256('|'.join(source_input_ids).encode('utf-8')).hexdigest()[:12]}"
@@ -1489,6 +1496,63 @@ class ScoreAgent:
             seen.add(group.group_id)
             reconciled.append(group)
         return reconciled
+
+    @staticmethod
+    def _technical_score_projection(
+        groups: list[ScoreGroup],
+        points: list[ScorePoint],
+        source_blocks: list[SourceBlock],
+    ) -> tuple[list[ScoreGroup], list[ScorePoint]]:
+        """Keep only technical/solution/service scoring without guessing from rule prose."""
+
+        groups_by_id = {group.group_id: group for group in groups}
+        blocks_by_anchor = {
+            (
+                block.source_anchor.source_input_id,
+                block.source_anchor.chunk_id,
+            ): block
+            for block in source_blocks
+        }
+
+        def source_category(point: ScorePoint) -> str:
+            categories: list[str] = []
+            for anchor in point.source_anchors:
+                block = blocks_by_anchor.get(
+                    (anchor.source_input_id, anchor.chunk_id)
+                )
+                if block is None:
+                    continue
+                # The closest explicit scoring section owns the row.  Root
+                # headings such as “评标办法” remain neutral.
+                for heading in reversed(block.heading_path):
+                    category = score_group_category(heading)
+                    if category != "other":
+                        categories.append(category)
+                        break
+            if any(category in {"price", "business"} for category in categories):
+                return "excluded"
+            if "technical" in categories:
+                return "technical"
+            return "other"
+
+        retained_points: list[ScorePoint] = []
+        for point in points:
+            group = groups_by_id.get(point.group_id)
+            group_category = (
+                score_group_category(group.title)
+                if group is not None
+                else "other"
+            )
+            if group_category == "technical":
+                retained_points.append(point)
+            elif group_category == "other" and source_category(point) == "technical":
+                retained_points.append(point)
+
+        retained_group_ids = {point.group_id for point in retained_points}
+        return (
+            [group for group in groups if group.group_id in retained_group_ids],
+            retained_points,
+        )
 
     @staticmethod
     def _canonical_row_blocks(row_blocks: list[SourceBlock]) -> list[SourceBlock]:

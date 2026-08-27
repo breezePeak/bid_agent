@@ -659,5 +659,96 @@ class V3PlanningAgentTests(unittest.TestCase):
             self.assertEqual(quality_duty.requirement_ids, [])
 
 
+    def test_topic_graph_ignores_score_requirements_outside_technical_model(self) -> None:
+        anchor = SourceAnchor(
+            source_input_id="score-1",
+            chunk_id="score-row",
+            location="table:1:row:1",
+        )
+        ledger = RequirementLedger(
+            revision=1,
+            source_hashes={"score-1": "hash-score"},
+            requirements=[
+                RequirementItem(
+                    requirement_id="R-technical-score",
+                    kind=RequirementKind.SCORE,
+                    source_anchor=anchor,
+                    original_text="技术方案完整得10分",
+                    normalized_requirement="技术方案完整得10分",
+                    response_type="score_response",
+                    evidence_policy="tender",
+                ),
+                RequirementItem(
+                    requirement_id="R-price-score",
+                    kind=RequirementKind.SCORE,
+                    source_anchor=anchor,
+                    original_text="报价最低得20分",
+                    normalized_requirement="报价最低得20分",
+                    response_type="score_response",
+                    evidence_policy="tender",
+                ),
+                RequirementItem(
+                    requirement_id="R-mandatory",
+                    kind=RequirementKind.MANDATORY,
+                    source_anchor=anchor,
+                    original_text="须提交实施方案",
+                    normalized_requirement="提交实施方案",
+                    response_type="narrative",
+                    evidence_policy="tender",
+                ),
+            ],
+        )
+        scores = ScoreModel(
+            revision=1,
+            source_hashes={"score-1": "hash-score"},
+            model_id="SM-technical-only",
+            source_input_ids=["score-1"],
+            total_points=10,
+            groups=[
+                ScoreGroup(
+                    group_id="G-technical",
+                    title="技术评分（10分）",
+                    declared_points=10,
+                )
+            ],
+            points=[
+                ScorePoint(
+                    score_point_id="SP-technical",
+                    group_id="G-technical",
+                    title="技术方案",
+                    criterion="技术方案完整得10分",
+                    max_points=10,
+                    response_expectation="完整响应",
+                    linked_requirement_ids=["R-technical-score"],
+                    source_anchors=[anchor],
+                    confidence=1,
+                )
+            ],
+        )
+        project = ProjectModel(
+            revision=1,
+            source_hashes={"score-1": "hash-score"},
+            project_id="P-technical-only",
+            requirement_ids=[
+                "R-technical-score",
+                "R-price-score",
+                "R-mandatory",
+            ],
+            score_point_ids=["SP-technical"],
+        )
+
+        graph = PlanningAgent(object()).topic_graph(
+            ledger,
+            scores,
+            project,
+            revision=1,
+        )
+
+        topic_ids = {topic.topic_id for topic in graph.topics}
+        self.assertIn("T-R-technical-score", topic_ids)
+        self.assertIn("T-R-mandatory", topic_ids)
+        self.assertNotIn("T-R-price-score", topic_ids)
+
+
 if __name__ == "__main__":
     unittest.main()

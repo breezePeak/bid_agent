@@ -24,8 +24,8 @@ from utils import read_json, write_json
 from .canonicalization import canonical_hash, canonical_json
 
 SCORE_SEMANTIC_CAPABILITY_ID = "score.semantic_reconcile"
-SCORE_SEMANTIC_CAPABILITY_VERSION = "3.1.0"
-SCORE_SEMANTIC_PROMPT_VERSION = "v3_score_semantic_v3.1"
+SCORE_SEMANTIC_CAPABILITY_VERSION = "3.2.0"
+SCORE_SEMANTIC_PROMPT_VERSION = "v3_score_semantic_v3.2"
 SCORE_SEMANTIC_SCHEMA_VERSION = "v3-score-semantic-candidate-6"
 SCORE_SEMANTIC_TEMPERATURE = 0.1
 # Character budgets intentionally mirror the model-context allocation contract:

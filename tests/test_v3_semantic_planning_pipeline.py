@@ -359,7 +359,7 @@ def _prepare_outline_stage(
         encoding="utf-8",
     )
     score.write_text(
-        "技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
+        "技术评分（4分）\n技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
         encoding="utf-8",
     )
     inputs = InputManifestService(context)
@@ -391,7 +391,7 @@ def test_stage_runner_uses_direct_score_and_outline_providers_only(
         encoding="utf-8",
     )
     score.write_text(
-        "技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
+        "技术评分（4分）\n技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
         encoding="utf-8",
     )
     inputs = InputManifestService(context)
@@ -422,7 +422,7 @@ def test_stage_runner_uses_direct_score_and_outline_providers_only(
     assert blueprint.planning_model == "score_direct"
     assert blueprint.assignments == []
     assert blueprint.nodes[0].parent_chapter_id is None
-    assert blueprint.nodes[0].title == "未分组评分项"
+    assert blueprint.nodes[0].title == "技术评分（4分）"
     store = ControlStore(context)
     for kind, expected_provider in (
         ("ScoreModel", _FakeScoreProvider.provider_fingerprint),
@@ -615,7 +615,7 @@ def test_score_program_audit_warning_does_not_block_outline(
         encoding="utf-8",
     )
     score.write_text(
-        "技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
+        "技术评分（4分）\n技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
         encoding="utf-8",
     )
     inputs = InputManifestService(context)
@@ -706,7 +706,7 @@ def test_invalid_score_candidate_fails_operation_without_rule_fallback(
     score = tmp_path / "score-fallback.md"
     tender.write_text("投标人须制定项目实施方案。", encoding="utf-8")
     score.write_text(
-        "技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
+        "技术评分（4分）\n技术方案完整、可行，得4分；较完整得2分；不完整得0分。",
         encoding="utf-8",
     )
     inputs = InputManifestService(context)

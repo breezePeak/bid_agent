@@ -43,6 +43,7 @@ from .proposals import InferenceReceiptRef
 from .project_model import is_enterprise_claim
 from .scoring_outline_policy import (
     SCORING_OUTLINE_POLICY_VERSION,
+    active_planning_requirement_ids,
     is_sectionable_quality_condition,
     document_quality_check_items,
     document_quality_criteria,
@@ -970,16 +971,15 @@ class PlanningAgent:
         need_ids_by_score = defaultdict(list)
         score_groups = {group.group_id: group for group in scores.groups}
         score_group_order = {group.group_id: order for order, group in enumerate(scores.groups)}
-        active_requirement_ids = {
-            item.requirement_id
-            for item in ledger.requirements
-            if item.status not in {"blocked", "waived"}
-        }
+        active_requirement_ids = active_planning_requirement_ids(
+            ledger,
+            scores,
+        )
         for need in project.evidence_needs:
             if need.topic_id.startswith("score:"):
                 need_ids_by_score[need.topic_id.removeprefix("score:")].append(need.need_id)
         for index, requirement in enumerate(ledger.requirements):
-            if requirement.status in {"blocked", "waived"}:
+            if requirement.requirement_id not in active_requirement_ids:
                 continue
             topic_id = f"T-R-{requirement.requirement_id.removeprefix('R-')}"
             topic_type, duty_type = self._requirement_topic_type(requirement.kind, requirement.normalized_requirement)
@@ -1301,11 +1301,10 @@ class PlanningAgent:
             requirement.requirement_id: requirement
             for requirement in ledger.requirements
         }
-        active_requirement_ids = {
-            requirement_id
-            for requirement_id, requirement in requirements.items()
-            if requirement.status not in {"blocked", "waived"}
-        }
+        active_requirement_ids = active_planning_requirement_ids(
+            ledger,
+            scores,
+        )
         linked_requirement_ids: set[str] = set()
         linked_requirements_by_unit: dict[str, set[str]] = {}
         for unit_id in unit_order:

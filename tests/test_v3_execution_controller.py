@@ -55,7 +55,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
  def test_command_gateway_is_the_only_execution_entry_point(self):
   with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
    base=Path(t);runs=base/'runs';(runs/'alpha').mkdir(parents=True);context=WorkspaceContext.resolve(runs,'alpha')
-   tender=base/'tender.docx';score=base/'score.md';doc=Document();doc.add_heading('项目技术需求',level=1);doc.add_paragraph('服务范围包括系统实施、培训、交付成果和验收条件，工期30日。');doc.add_heading('实施与验收',level=1);doc.add_paragraph('投标人应提交实施方案、服务响应和验收材料。');doc.add_heading('评标办法',level=1);doc.add_paragraph('项目实施方案完整性，满分10分。');doc.add_table(rows=1,cols=2).cell(0,0).text='交付成果';doc.save(tender);score.write_text('项目实施方案完整性，满分10分。',encoding='utf-8')
+   tender=base/'tender.docx';score=base/'score.md';doc=Document();doc.add_heading('项目技术需求',level=1);doc.add_paragraph('服务范围包括系统实施、培训、交付成果和验收条件，工期30日。');doc.add_heading('实施与验收',level=1);doc.add_paragraph('投标人应提交实施方案、服务响应和验收材料。');doc.add_heading('评标办法',level=1);doc.add_paragraph('项目实施方案完整性，满分10分。');doc.add_table(rows=1,cols=2).cell(0,0).text='交付成果';doc.save(tender);score.write_text('技术评分（10分）\n项目实施方案完整性，满分10分。',encoding='utf-8')
    inputs=InputManifestService(context);inputs.register_local_file(tender,InputRole.TENDER);inputs.register_local_file(score,InputRole.SCORE)
    controller=V3ExecutionController.for_deterministic_tests(context);gateway=CommandGateway(context,controller.handlers())
    envelope=CommandEnvelope.from_mapping({'kind':'document.prepare_outline','expected_revision':ControlStore(context).revision(),'idempotency_key':'v3-outline-run'},workspace_id='alpha')
@@ -307,7 +307,7 @@ class V3ExecutionControllerTests(unittest.TestCase):
 
  def test_v3_api_uses_the_v3_command_controller_and_snapshot(self):
   with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as t:
-   base=Path(t);runs=base/'runs';(runs/'alpha').mkdir(parents=True);context=WorkspaceContext.resolve(runs,'alpha');tender=base/'tender.md';score=base/'score.md';tender.write_text('项目目标。\n\n服务范围；交付成果；验收条件；工期30日。\n\n# 评标办法\n项目实施方案完整性，满分10分。',encoding='utf-8');score.write_text('项目实施方案完整性，满分10分。',encoding='utf-8');inputs=InputManifestService(context);inputs.register_local_file(tender,InputRole.TENDER);inputs.register_local_file(score,InputRole.SCORE)
+   base=Path(t);runs=base/'runs';(runs/'alpha').mkdir(parents=True);context=WorkspaceContext.resolve(runs,'alpha');tender=base/'tender.md';score=base/'score.md';tender.write_text('项目目标。\n\n服务范围；交付成果；验收条件；工期30日。\n\n# 评标办法\n项目实施方案完整性，满分10分。',encoding='utf-8');score.write_text('技术评分（10分）\n项目实施方案完整性，满分10分。',encoding='utf-8');inputs=InputManifestService(context);inputs.register_local_file(tender,InputRole.TENDER);inputs.register_local_file(score,InputRole.SCORE)
    with (
     mock.patch.object(v3_app,'RUNS_DIR',runs),
     mock.patch.object(

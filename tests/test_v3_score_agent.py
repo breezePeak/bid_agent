@@ -378,9 +378,9 @@ class TestV3ScoreAgent(unittest.TestCase):
             source_hashes={"in-score": "scorehash"},
         )
 
-        self.assertEqual([group.title for group in model.groups], ["价格部分（10分）"])
-        self.assertEqual(model.points[0].outline_path, ["投标报价（10分）"])
-        self.assertNotIn("第1至第3标段适用：", model.points[0].outline_path)
+        self.assertEqual(model.groups, [])
+        self.assertEqual(model.points, [])
+        self.assertEqual(model.total_points, 0)
 
     def test_package_wording_is_preserved_when_it_is_a_table_factor(self) -> None:
         row_blocks = [
@@ -420,6 +420,97 @@ class TestV3ScoreAgent(unittest.TestCase):
                 group_title="技术部分（10分）",
             ),
             ["各标包实施方案（10分）"],
+        )
+
+    def test_technical_projection_uses_group_before_source_context(self) -> None:
+        business_anchor = self._anchor("business-rule")
+        service_anchor = self._anchor("service-rule")
+        unknown_anchor = self._anchor("unknown-rule")
+        groups = [
+            ScoreGroup(group_id="SG-business", title="商务评分（20分）"),
+            ScoreGroup(group_id="SG-default", title="未分组评分项"),
+        ]
+        points = [
+            ScorePoint(
+                score_point_id="SP-business",
+                group_id="SG-business",
+                title="技术服务能力",
+                criterion="技术服务能力完整，得20分。",
+                max_points=20,
+                response_expectation="响应",
+                source_anchors=[business_anchor],
+                confidence=1,
+            ),
+            ScorePoint(
+                score_point_id="SP-service",
+                group_id="SG-default",
+                title="响应方案",
+                criterion="响应方案完整，得10分。",
+                max_points=10,
+                response_expectation="响应",
+                source_anchors=[service_anchor],
+                confidence=1,
+            ),
+            ScorePoint(
+                score_point_id="SP-unknown",
+                group_id="SG-default",
+                title="综合能力",
+                criterion="综合能力良好，得5分。",
+                max_points=5,
+                response_expectation="响应",
+                source_anchors=[unknown_anchor],
+                confidence=1,
+            ),
+        ]
+        blocks = [
+            SourceBlock(
+                block_id="business-rule",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="paragraph",
+                ordinal=0,
+                content=points[0].criterion,
+                heading_path=["评标方法", "技术评分"],
+                source_anchor=business_anchor,
+                content_hash="business",
+            ),
+            SourceBlock(
+                block_id="service-rule",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="paragraph",
+                ordinal=1,
+                content=points[1].criterion,
+                heading_path=["评标方法", "服务评分"],
+                source_anchor=service_anchor,
+                content_hash="service",
+            ),
+            SourceBlock(
+                block_id="unknown-rule",
+                input_id="in-score",
+                input_role=InputRole.SCORE,
+                block_kind="paragraph",
+                ordinal=2,
+                content=points[2].criterion,
+                heading_path=["评标方法"],
+                source_anchor=unknown_anchor,
+                content_hash="unknown",
+            ),
+        ]
+
+        retained_groups, retained_points = ScoreAgent._technical_score_projection(
+            groups,
+            points,
+            blocks,
+        )
+
+        self.assertEqual(
+            [point.score_point_id for point in retained_points],
+            ["SP-service"],
+        )
+        self.assertEqual(
+            [group.group_id for group in retained_groups],
+            ["SG-default"],
         )
 
     def test_semantic_outline_cannot_change_table_hierarchy(self) -> None:
@@ -775,15 +866,15 @@ class TestV3ScoreAgent(unittest.TestCase):
             source_hashes=ledger.source_hashes,
         )
 
-        self.assertEqual(len(model.points), 20)
-        self.assertEqual(model.total_points, 100)
+        self.assertEqual(len(model.points), 16)
+        self.assertEqual(model.total_points, 65)
         self.assertEqual(
             [group.title for group in model.groups],
-            [title for title, _table_index, _row_points in group_specs],
+            [group_specs[-1][0]],
         )
         self.assertEqual(
             [(group.declared_points, sum(point.max_points or 0 for point in model.points if point.group_id == group.group_id)) for group in model.groups],
-            [(10, 10), (25, 25), (65, 65)],
+            [(65, 65)],
         )
         self.assertTrue(all(len(point.linked_requirement_ids) == 1 for point in model.points))
         self.assertTrue(all(len(point.scoring_levels) == 2 for point in model.points))
@@ -808,7 +899,12 @@ class TestV3ScoreAgent(unittest.TestCase):
 
         model = runner.run("analyze_scores")
 
-        self.assertEqual(len(model.points), 3)
+        self.assertEqual(len(model.points), 2)
+        self.assertEqual(model.total_points, 70)
+        self.assertEqual(
+            [group.title for group in model.groups],
+            ["技术方案（45分）", "服务承诺（25分）"],
+        )
         self.assertTrue(all(len(point.linked_requirement_ids) == 1 for point in model.points))
         active = ControlStore(self.context).v3_active_artifact("ScoreModel")
         self.assertIsNotNone(active)
@@ -834,12 +930,9 @@ class TestV3ScoreAgent(unittest.TestCase):
 
         model = runner.run("analyze_scores")
 
-        self.assertEqual(model.total_points, 100)
-        self.assertEqual(
-            [point.title for point in model.points],
-            ["平台方案", "接入能力", "数据安全", "质保服务"],
-        )
-        self.assertTrue(all(len(point.linked_requirement_ids) == 1 for point in model.points))
+        self.assertEqual(model.total_points, 0)
+        self.assertEqual(model.groups, [])
+        self.assertEqual(model.points, [])
 
     def test_score_audit_blocks_missing_requirement_and_bulk_binding(self) -> None:
         anchor = self._anchor("score-1")
