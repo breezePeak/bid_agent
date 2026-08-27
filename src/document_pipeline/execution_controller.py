@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -69,16 +70,129 @@ _STAGE_ARTIFACT_KIND = {
 class V3ExecutionController:
     """CommandGateway-owned V3 execution entry point.
 
-    The controller is deliberately synchronous for now: a command does not report
-    success until its registered V3 stage has produced a verified result.  Web and
-    CLI callers must submit a command to this controller rather than invoking a
-    stage runner directly.
+    Most commands finish only after their V3 stage has produced a verified result.
+    The source-outline confirmation is the exception: it persists the confirmation,
+    returns immediately, and schedules the legacy-outline merge after commit.
     """
 
     def __init__(self, context: WorkspaceContext, *, runner: V3StageRunner | None = None) -> None:
         self.context = context
         self.store = ControlStore(context)
         self.runner = runner or V3StageRunner(context)
+
+    def _schedule_rewrite_outline_merge(
+        self,
+        *,
+        operation_id: str,
+        actor: dict[str, Any],
+    ) -> None:
+        thread = threading.Thread(
+            target=self._run_rewrite_outline_merge,
+            kwargs={"operation_id": operation_id, "actor": dict(actor)},
+            name=f"rewrite-outline-merge-{operation_id[:8]}",
+            daemon=True,
+        )
+        thread.start()
+
+    def _source_outline_confirmation_matches(
+        self,
+        active_blueprint: dict[str, Any],
+    ) -> bool:
+        dependencies_are_current = getattr(
+            self.runner,
+            "artifact_dependencies_are_current",
+            None,
+        )
+        if callable(dependencies_are_current) and not bool(
+            dependencies_are_current("ChapterBlueprint")
+        ):
+            return False
+        proposal_id = str(active_blueprint.get("proposal_id") or "")
+        proposal_hash = str(active_blueprint.get("proposal_hash") or "")
+        if not proposal_id or not proposal_hash:
+            return False
+        receipt = self.store.latest_v3_gate_receipt(
+            proposal_id,
+            "H1_PLANNING_CONFIRM",
+        ) or {}
+        return (
+            str(receipt.get("workspace_id") or "") == self.context.workspace_id
+            and str(receipt.get("proposal_id") or "") == proposal_id
+            and str(receipt.get("proposal_hash") or "") == proposal_hash
+            and str(receipt.get("artifact_kind") or "") == "ChapterBlueprint"
+            and str(receipt.get("receipt_subtype") or "") == "planning"
+            and str(receipt.get("planning_decision") or "") == "confirm"
+            and str(receipt.get("verdict") or "") == "pass"
+            and bool(str(receipt.get("principal_id") or "").strip())
+        )
+
+    def _run_rewrite_outline_merge(
+        self,
+        *,
+        operation_id: str,
+        actor: dict[str, Any],
+    ) -> None:
+        from .planning_inference import REWRITE_OUTLINE_SKILL_ID
+
+        disposition = "rewrite_merge_after_source_outline_confirmation"
+        self.store.sync_operation(
+            operation_id,
+            "running",
+            message="原始章节目录已确认，正在合并旧投标书目录。",
+        )
+        self.store.record_stage_run(
+            operation_id,
+            "merge_rewrite_outline",
+            "running",
+            disposition=disposition,
+        )
+        try:
+            self.runner.request_inference_regeneration([REWRITE_OUTLINE_SKILL_ID])
+            merged = self.runner.run(
+                "compile_chapter_blueprint",
+                operation_id=operation_id,
+            )
+            self.store.record_stage_run(
+                operation_id,
+                "merge_rewrite_outline",
+                "succeeded",
+                disposition=disposition,
+                output=self._stage_output("compile_chapter_blueprint", merged),
+            )
+            ChapterWorkspaceService(self.context).ensure_all(actor=actor)
+            self.store.record_stage_run(
+                operation_id,
+                "confirm_planning",
+                "blocked_human",
+                disposition="final_rewrite_outline_confirmation_required",
+            )
+            self.store.sync_operation(
+                operation_id,
+                "blocked_human",
+                message="旧投标书目录合并完成，等待用户确认最终目录。",
+            )
+        except Exception as exc:
+            clear_regeneration = getattr(
+                self.runner,
+                "clear_inference_regeneration",
+                None,
+            )
+            if callable(clear_regeneration):
+                clear_regeneration([REWRITE_OUTLINE_SKILL_ID])
+            error = self._stage_error(exc)
+            self.store.record_stage_run(
+                operation_id,
+                "merge_rewrite_outline",
+                "failed",
+                disposition=disposition,
+                error=error,
+            )
+            self.store.sync_operation(
+                operation_id,
+                "failed",
+                message=str(error.get("message") or "旧投标书目录合并失败。"),
+                error=error,
+            )
 
     @classmethod
     def for_deterministic_tests(
@@ -541,6 +655,7 @@ class V3ExecutionController:
         """Build the promoted score-aware ChapterBlueprint and stop before H1/writing."""
 
         from .artifact_promotion import HumanGateService
+        from .planning_inference import REWRITE_OUTLINE_SKILL_ID
 
         MaterialReadinessService(self.context).require_outline_ready()
 
@@ -559,8 +674,6 @@ class V3ExecutionController:
             "request_inference_regeneration",
             None,
         )
-        if callable(request_regeneration):
-            request_regeneration(regenerate_capabilities)
         review_feedback = str(payload.get("review_feedback") or "").strip()
         base_blueprint_hash = str(payload.get("base_blueprint_hash") or "").strip()
         project_feedback = str(payload.get("project_feedback") or "").strip()
@@ -568,6 +681,41 @@ class V3ExecutionController:
         active_planning_model = str(
             (active_blueprint.get("payload") or {}).get("planning_model") or ""
         ).strip()
+        project_mode = str(
+            self.store.workspace_profile().get("project_mode") or "full_write"
+        )
+        source_outline_confirmed = False
+        if project_mode == "bid_rewrite" and active_planning_model == "score_direct":
+            try:
+                HumanGateService(self.context).require_current_confirmation()
+                source_outline_confirmed = True
+            except ControlPlaneError:
+                source_outline_confirmed = self._source_outline_confirmation_matches(
+                    active_blueprint,
+                )
+        # A current source-outline H1 is durable backend workflow state.  An
+        # ordinary retry/continue command must resume the pending legacy merge
+        # instead of re-projecting the already confirmed source outline as a
+        # fresh human-review result.
+        if (
+            source_outline_confirmed
+            and not regenerate_capabilities
+            and not review_feedback
+            and not project_feedback
+        ):
+            regenerate_capabilities = [REWRITE_OUTLINE_SKILL_ID]
+        if REWRITE_OUTLINE_SKILL_ID in regenerate_capabilities:
+            revising_final_outline = bool(review_feedback) and active_planning_model == "rewrite_merge"
+            if not source_outline_confirmed and not revising_final_outline:
+                raise ControlPlaneError(
+                    "REWRITE_OUTLINE_SOURCE_CONFIRM_REQUIRED",
+                    "旧目录融合必须在用户确认原始目录后启动；请先审核并确认原始目录。",
+                    status_code=409,
+                    details={
+                        "required_action": "document.confirm_planning",
+                        "active_planning_model": active_planning_model or None,
+                    },
+                )
         if (
             review_feedback
             and self.store.workspace_profile().get("project_mode") == "bid_rewrite"
@@ -578,8 +726,6 @@ class V3ExecutionController:
                 *regenerate_capabilities,
                 "planning.rewrite_outline_merge",
             ]
-            if callable(request_regeneration):
-                request_regeneration(["planning.rewrite_outline_merge"])
         if project_feedback:
             request_project_revision = getattr(
                 self.runner,
@@ -601,6 +747,9 @@ class V3ExecutionController:
             if callable(request_revision):
                 request_revision(review_feedback)
 
+        if callable(request_regeneration):
+            request_regeneration(regenerate_capabilities)
+
         completed: list[str] = []
         reused: list[str] = []
         requested_regeneration = {
@@ -610,6 +759,14 @@ class V3ExecutionController:
             _OUTLINE_ONLY_REGENERATE_CAPABILITIES
         )
         for stage in V3_OUTLINE_STAGES:
+            recorded_stage = (
+                "merge_rewrite_outline"
+                if (
+                    stage == "compile_chapter_blueprint"
+                    and REWRITE_OUTLINE_SKILL_ID in requested_regeneration
+                )
+                else stage
+            )
             if outline_only_regeneration and stage != "compile_chapter_blueprint":
                 required_artifact = _OUTLINE_REGENERATION_REQUIRED_ARTIFACTS.get(stage)
                 if required_artifact and self.store.v3_active_artifact(required_artifact) is None:
@@ -648,7 +805,7 @@ class V3ExecutionController:
             before_identity = self._active_artifact_identity(stage)
             self.store.record_stage_run(
                 operation_id,
-                stage,
+                recorded_stage,
                 "running",
                 disposition="v3_outline_command",
             )
@@ -662,6 +819,13 @@ class V3ExecutionController:
                         status_code=409,
                     )
             except Exception as exc:
+                clear_regeneration = getattr(
+                    self.runner,
+                    "clear_inference_regeneration",
+                    None,
+                )
+                if callable(clear_regeneration):
+                    clear_regeneration(list(requested_regeneration))
                 error = self._stage_error(exc)
                 failure_output: dict[str, Any] = {}
                 consume_metrics = getattr(
@@ -713,7 +877,7 @@ class V3ExecutionController:
                     }
                 self.store.record_stage_run(
                     operation_id,
-                    stage,
+                    recorded_stage,
                     "failed",
                     disposition="v3_outline_command",
                     error=error,
@@ -727,7 +891,7 @@ class V3ExecutionController:
             )
             self.store.record_stage_run(
                 operation_id,
-                stage,
+                recorded_stage,
                 "reused" if was_reused else "succeeded",
                 disposition=(
                     "v3_outline_reused"
@@ -750,14 +914,28 @@ class V3ExecutionController:
             "blocked_human",
             disposition="planning_confirmation_required",
         )
+        active_blueprint = self.store.v3_active_artifact("ChapterBlueprint") or {}
+        final_planning_model = str(
+            (active_blueprint.get("payload") or {}).get("planning_model") or ""
+        )
+        if project_mode == "bid_rewrite" and final_planning_model == "rewrite_merge":
+            completion_message = (
+                "已根据修改意见重新生成最终章节目录，等待审阅确认。"
+                if review_feedback
+                else "旧投标书目录融合完成，等待审阅确认最终目录。"
+            )
+            confirmation_phase = "final_outline_review"
+        elif project_mode == "bid_rewrite":
+            completion_message = "已根据招标文件生成原始章节目录，等待审阅确认。"
+            confirmation_phase = "source_outline_review"
+        else:
+            completion_message = "评分点解析与章节目录草案已生成，等待审阅确认。"
+            confirmation_phase = "planning_review"
         return {
             "accepted": True,
             "operation_status": "blocked_human",
-            "message": (
-                "已根据招标文件生成原始章节目录，等待审阅确认。"
-                if self.store.workspace_profile().get("project_mode") == "bid_rewrite"
-                else "评分点解析与章节目录草案已生成，等待审阅确认。"
-            ),
+            "confirmation_phase": confirmation_phase,
+            "message": completion_message,
             "completed_stages": completed,
             "reused_stages": reused,
             "review_feedback_applied": bool(review_feedback),
@@ -768,7 +946,6 @@ class V3ExecutionController:
 
     def confirm_planning(self, context: WorkspaceContext, envelope: CommandEnvelope, operation_id: str) -> dict[str, Any]:
         from .artifact_promotion import HumanGateService
-        from .planning_inference import REWRITE_OUTLINE_SKILL_ID
 
         actor = envelope.actor if isinstance(envelope.actor, dict) else {}
         principal_id = str(actor.get("id") or "").strip()
@@ -799,50 +976,23 @@ class V3ExecutionController:
                 disposition="explicit_human_confirmation",
                 output={"planning_receipt": receipt.model_dump(mode="json")},
             )
-            self.runner.request_inference_regeneration([REWRITE_OUTLINE_SKILL_ID])
             self.store.record_stage_run(
                 operation_id,
                 "merge_rewrite_outline",
-                "running",
+                "queued",
                 disposition="rewrite_merge_after_source_outline_confirmation",
-            )
-            try:
-                merged = self.runner.run(
-                    "compile_chapter_blueprint",
-                    operation_id=operation_id,
-                )
-            except Exception as exc:
-                self.store.record_stage_run(
-                    operation_id,
-                    "merge_rewrite_outline",
-                    "failed",
-                    disposition="rewrite_merge_after_source_outline_confirmation",
-                    error=self._stage_error(exc),
-                )
-                raise
-            self.store.record_stage_run(
-                operation_id,
-                "merge_rewrite_outline",
-                "succeeded",
-                disposition="rewrite_merge_after_source_outline_confirmation",
-                output=self._stage_output("compile_chapter_blueprint", merged),
-            )
-            final_snapshot = HumanGateService(self.context).planning_snapshot()
-            workspaces = ChapterWorkspaceService(self.context).ensure_all(actor=actor)
-            self.store.record_stage_run(
-                operation_id,
-                "confirm_planning",
-                "blocked_human",
-                disposition="final_rewrite_outline_confirmation_required",
             )
             return {
                 "accepted": True,
-                "operation_status": "blocked_human",
-                "confirmation_phase": "final_rewrite_outline_required",
-                "message": "原始章节目录已确认；已结合旧投标书生成最终章节目录，等待再次确认。",
+                "operation_status": "running",
+                "confirmation_phase": "source_outline_confirmed",
+                "message": "原始章节目录已确认，旧投标书目录合并已排队。",
                 "source_outline_receipt": receipt.model_dump(mode="json"),
-                "planning_snapshot": final_snapshot,
-                "chapter_workspaces": workspaces,
+                "planning_snapshot": HumanGateService(self.context).planning_snapshot(),
+                "_after_commit": lambda: self._schedule_rewrite_outline_merge(
+                    operation_id=operation_id,
+                    actor=actor,
+                ),
             }
         self.store.finalize_planning_confirmation(operation_id)
         self.store.record_stage_run(operation_id, "confirm_planning", "succeeded", disposition="explicit_human_confirmation")

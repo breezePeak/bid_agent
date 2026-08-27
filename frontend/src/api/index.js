@@ -207,15 +207,15 @@ export async function prepareV3Outline(runId, options = {}) {
 }
 
 export async function confirmV3Planning(runId, planningSnapshot) {
+  const confirmation = await fetchV3PlanningConfirmation(runId)
   const snapshot = await fetchV3WorkspaceSnapshot(runId)
   const commandId = newCommandId()
   const command = buildConfirmPlanningCommand(
     commandId,
     workspaceRevisionFromV3Payload(snapshot?.data),
-    planningSnapshot,
+    confirmation?.data?.planning_snapshot || planningSnapshot,
   )
-  // 改写模式首次确认后还会执行旧投标书目录融合，沿用无浏览器超时的长任务策略。
-  return api.post(v3WorkspacePath(runId, 'commands'), command, { timeout: 0 })
+  return api.post(v3WorkspacePath(runId, 'commands'), command)
 }
 
 export async function resolveV3Research(runId, needId) {

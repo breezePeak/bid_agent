@@ -217,15 +217,10 @@ class WorkspaceChatService:
         payload: dict[str, Any] = {}
         kind = "document.prepare_outline"
         if action == "regenerate_outline":
-            project_mode = str((snapshot.get("profile") or {}).get("project_mode") or "full_write")
-            active_blueprint = (snapshot.get("analysis") or {}).get("chapter_blueprint") or {}
-            planning_model = str(active_blueprint.get("planning_model") or "").strip()
-            outline_capability = (
-                "planning.rewrite_outline_merge"
-                if project_mode == "bid_rewrite" and planning_model == "rewrite_merge"
-                else "planning.chapter_outline_split"
-            )
-            payload["regenerate_capabilities"] = [outline_capability]
+            # A chat regeneration request always rebuilds the tender-derived
+            # source outline.  Rewrite merging is a separate phase and may only
+            # start from the explicit source-outline confirmation command.
+            payload["regenerate_capabilities"] = ["planning.chapter_outline_split"]
         elif action == "run_document":
             kind = "document.run_pipeline"
         return CommandEnvelope(

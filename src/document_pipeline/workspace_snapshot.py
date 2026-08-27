@@ -25,7 +25,12 @@ class V3WorkspaceSnapshotBuilder:
     # phases.  Keep the analysis projection pinned to the latest outline run;
     # generation has its own snapshot below.  Mixing both command kinds here
     # made generation stage runs appear inside the phase-2 activity stream.
-    _ANALYSIS_COMMAND_KINDS = frozenset({"document.prepare_outline"})
+    _ANALYSIS_COMMAND_KINDS = frozenset(
+        {"document.prepare_outline", "document.confirm_planning"}
+    )
+    _EMBEDDED_CONFIRMATION_STAGE_IDS = frozenset(
+        {"confirm_source_outline", "confirm_planning"}
+    )
     _ANALYSIS_CHAIN = (
         "InputManifest",
         "SourceIndex",
@@ -103,6 +108,34 @@ class V3WorkspaceSnapshotBuilder:
         delivery = payload("DeliveryReceipt")
         artifact_states = self._artifact_states(control, artifacts)
         latest_analysis_operation = self._latest_analysis_operation(control, artifacts)
+        latest_analysis_stages = [
+            item
+            for item in latest_analysis_operation.get("stages", [])
+            if isinstance(item, dict)
+        ]
+        latest_merge_stage = max(
+            (
+                item
+                for item in latest_analysis_stages
+                if str(item.get("stage_command") or "")
+                == "merge_rewrite_outline"
+            ),
+            key=lambda item: int(item.get("attempt") or 0),
+            default={},
+        )
+        latest_analysis_kind = str(latest_analysis_operation.get("kind") or "")
+        latest_analysis_status = str(latest_analysis_operation.get("status") or "")
+        rewrite_outline_merge_status = str(latest_merge_stage.get("status") or "")
+        rewrite_outline_merge_in_progress = (
+            latest_analysis_kind in self._ANALYSIS_COMMAND_KINDS
+            and latest_analysis_status in {"queued", "running", "processing"}
+            and rewrite_outline_merge_status in {"queued", "running", "processing"}
+        )
+        rewrite_outline_merge_failed = (
+            latest_analysis_kind in self._ANALYSIS_COMMAND_KINDS
+            and latest_analysis_status == "failed"
+            and rewrite_outline_merge_status == "failed"
+        )
         stale_artifact_kinds = [
             kind
             for kind in self._ANALYSIS_CHAIN
@@ -125,6 +158,10 @@ class V3WorkspaceSnapshotBuilder:
         else:
             analysis_status = "not_ready"
 
+        project_mode = str(
+            control.workspace_profile().get("project_mode") or "full_write"
+        )
+        planning_model = str((plan or {}).get("planning_model") or "").strip()
         planning: dict[str, Any] = {"status": "not_ready"}
         if artifacts.get("ChapterBlueprint"):
             if result_outdated:
@@ -154,11 +191,23 @@ class V3WorkspaceSnapshotBuilder:
                 service = HumanGateService(self.context)
                 try:
                     receipt = service.require_current_confirmation()
-                    planning = {
-                        "status": "confirmed",
-                        "receipt_id": receipt.receipt_id,
-                        "warnings": service.runtime_change_warnings(),
-                    }
+                    if (
+                        project_mode == "bid_rewrite"
+                        and planning_model != "rewrite_merge"
+                    ):
+                        planning = {
+                            "status": "needs_human",
+                            "confirmation_phase": "source_outline_confirmed",
+                            "source_outline_confirmed": True,
+                            "source_outline_receipt_id": receipt.receipt_id,
+                            "warnings": service.runtime_change_warnings(),
+                        }
+                    else:
+                        planning = {
+                            "status": "confirmed",
+                            "receipt_id": receipt.receipt_id,
+                            "warnings": service.runtime_change_warnings(),
+                        }
                 except Exception:
                     try:
                         planning = {"status": "needs_human", "snapshot": service.planning_snapshot()}
@@ -177,6 +226,51 @@ class V3WorkspaceSnapshotBuilder:
                         }
                     except Exception:
                         planning = {"status": "blocked"}
+        if project_mode == "bid_rewrite" and planning.get("status") == "needs_human":
+            if planning_model == "rewrite_merge":
+                planning.update({
+                    "confirmation_phase": "final_outline_review",
+                    "review_kind": "final_outline",
+                    "review_title": "最终目录已生成，等待审核",
+                    "review_message": "请审核最终目录；审核通过后返回聊天页面。",
+                    "source_outline_confirmed": True,
+                    "action_required": {
+                        "kind": "review_final_outline",
+                        "label": "审阅并确认最终目录",
+                    },
+                })
+            elif planning.get("source_outline_confirmed") is True:
+                # The source H1 is already durable and current, so exposing
+                # the same source blueprint as another review prompt is an
+                # impossible workflow state.  Until the merge is resumed,
+                # project a backend-owned blocked state with no pending review.
+                planning = {
+                    "status": "blocked",
+                    "confirmation_phase": "rewrite_outline_merge_required",
+                    "source_outline_confirmed": True,
+                    "reason": "REWRITE_OUTLINE_MERGE_REQUIRED",
+                    "message": "原始目录已确认，下一步需要继续检查并融合旧投标书目录。",
+                    "action_required": {
+                        "kind": "resume_rewrite_outline_merge",
+                        "label": "继续融合旧目录",
+                        "command": "document.prepare_outline",
+                        "regenerate_capabilities": [
+                            "planning.rewrite_outline_merge"
+                        ],
+                    },
+                }
+            else:
+                planning.update({
+                    "confirmation_phase": "source_outline_review",
+                    "review_kind": "source_outline",
+                    "review_title": "原始目录已生成，等待审核",
+                    "review_message": "请审核原始目录；审核通过后后端将合并旧投标书目录。",
+                    "source_outline_confirmed": False,
+                    "action_required": {
+                        "kind": "review_source_outline",
+                        "label": "审阅并确认原始目录",
+                    },
+                })
         # A confirmed directory without its shared ProjectModel is a legacy
         # partial run, not a writable workspace.  Keep the old directory for
         # audit, but send the user back through planning so the missing stage
@@ -189,6 +283,40 @@ class V3WorkspaceSnapshotBuilder:
                 "status": "outdated",
                 "reason": "PROJECT_MODEL_REQUIRED",
                 "message": "当前目录缺少全局项目事实，请重新进入目录流程补齐后再编写章节。",
+            }
+        if rewrite_outline_merge_in_progress:
+            planning = {
+                "status": "processing",
+                "confirmation_phase": "rewrite_outline_merge_in_progress",
+                "source_outline_confirmed": True,
+                "message": str(
+                    latest_analysis_operation.get("message")
+                    or "原始章节目录已确认，正在合并旧投标书目录。"
+                ),
+            }
+        elif rewrite_outline_merge_failed:
+            merge_error = latest_analysis_operation.get("error")
+            error_detail = merge_error if isinstance(merge_error, dict) else {}
+            planning = {
+                "status": "blocked",
+                "confirmation_phase": "rewrite_outline_merge_failed",
+                "source_outline_confirmed": True,
+                "reason": str(
+                    error_detail.get("code") or "REWRITE_OUTLINE_MERGE_FAILED"
+                ),
+                "message": str(
+                    error_detail.get("message")
+                    or latest_analysis_operation.get("message")
+                    or "旧投标书目录合并失败，请修复后重试。"
+                ),
+                "action_required": {
+                    "kind": "retry_rewrite_outline_merge",
+                    "label": "重试融合旧目录",
+                    "command": "document.prepare_outline",
+                    "regenerate_capabilities": [
+                        "planning.rewrite_outline_merge"
+                    ],
+                },
             }
         scheduled_needs = {
             str(item.get("need_id") or ""): item
@@ -248,7 +376,11 @@ class V3WorkspaceSnapshotBuilder:
             artifact_states,
             latest_analysis_operation,
             planning_confirmed=planning.get("status") == "confirmed",
+            source_outline_confirmed=bool(
+                planning.get("source_outline_confirmed")
+            ),
             planning_status=str(planning.get("status") or "not_ready"),
+            planning_phase=str(planning.get("confirmation_phase") or ""),
         )
         chapters = self._chapters_snapshot(control, plan or {})
         phase_states = control.workflow_phase_states()
@@ -434,8 +566,14 @@ class V3WorkspaceSnapshotBuilder:
                     + str(blueprint_artifact.get("artifact_hash") or payload.get("artifact_hash") or "current"),
                     "kind": "planning",
                     "status": "pending",
-                    "title": "目录已生成，等待审核",
-                    "summary": "请核验评分点覆盖、章节结构和响应任务。",
+                    "title": str(
+                        planning.get("review_title")
+                        or "目录已生成，等待审核"
+                    ),
+                    "summary": str(
+                        planning.get("review_message")
+                        or "请核验评分点覆盖、章节结构和响应任务。"
+                    ),
                     "target_revision": int(blueprint_artifact.get("revision") or payload.get("revision") or 0),
                     "target_hash": str(blueprint_artifact.get("artifact_hash") or ""),
                     "items": [
@@ -476,12 +614,50 @@ class V3WorkspaceSnapshotBuilder:
                 }
             )
 
-        # Phase identity and status are persisted operation fields.  Artifact
-        # and chapter projections above only enrich review/detail sections.
+        # Persisted phase fields describe the command that produced the current
+        # artifacts, but the planning projection owns the current user action.
+        # Reconcile the planning phase so a confirmed source outline awaiting
+        # legacy merging is never exposed as a nonexistent "等待确认" gate.
         explicit_phase = "materials"
         explicit_state = phase_states.get("materials") or {}
-        planning_state = phase_states.get("planning") or {}
+        planning_state = dict(phase_states.get("planning") or {})
         writing_state = phase_states.get("writing") or {}
+        planning_confirmation_phase = str(
+            planning.get("confirmation_phase") or ""
+        )
+        if planning_status == "processing":
+            planning_state.update({
+                "phase_status": "running",
+                "message": str(planning.get("message") or ""),
+                "current_stage_id": "merge_rewrite_outline",
+            })
+        elif planning_status == "needs_human":
+            planning_state.update({
+                "phase_status": "waiting_confirmation",
+                "message": str(
+                    planning.get("review_message")
+                    or planning.get("message")
+                    or ""
+                ),
+                "current_stage_id": (
+                    "merge_rewrite_outline"
+                    if planning_confirmation_phase == "final_outline_review"
+                    else "compile_source_outline"
+                ),
+            })
+        elif planning_status == "blocked":
+            planning_state.update({
+                "phase_status": "blocked",
+                "message": str(planning.get("message") or ""),
+                "current_stage_id": (
+                    "merge_rewrite_outline"
+                    if planning_confirmation_phase.startswith(
+                        "rewrite_outline_merge"
+                    )
+                    else str(planning_state.get("current_stage_id") or "")
+                ),
+            })
+        phase_states = {**phase_states, "planning": planning_state}
         planning_phase_status = str(planning_state.get("phase_status") or "not_started")
         writing_phase_status = str(writing_state.get("phase_status") or "not_started")
         if planning_phase_status in {
@@ -508,7 +684,7 @@ class V3WorkspaceSnapshotBuilder:
             "current_stage_id": current_stage_id,
             "stages": stages,
             "pending_reviews": pending_reviews,
-            "can_resume": status in {"failed", "needs_handling"},
+            "can_resume": status in {"failed", "blocked", "needs_handling"},
             "current_artifact": {
                 "kind": "ChapterBlueprint",
                 "revision": int(blueprint_artifact.get("revision") or 0),
@@ -1841,12 +2017,29 @@ class V3WorkspaceSnapshotBuilder:
         control: ControlStore,
         artifacts: dict[str, dict[str, Any]],
     ) -> dict[str, Any]:
-        latest_command = control.latest_command_by_kind("document.prepare_outline")
+        candidates = [
+            command
+            for kind in self._ANALYSIS_COMMAND_KINDS
+            if (command := control.latest_command_by_kind(kind)) is not None
+        ]
+        latest_command = max(
+            candidates,
+            key=lambda item: self._timestamp_key(
+                str(item.get("updated_at") or item.get("created_at") or "")
+            ),
+            default=None,
+        )
         if latest_command is None:
             return {}
         operation_id = str(latest_command.get("operation_id") or "")
         operation = control.operation(operation_id) or {}
         stage_runs = control.stage_runs(operation_id)
+        projected_stage_runs = [
+            item
+            for item in stage_runs
+            if str(item.get("stage_command") or "")
+            not in self._EMBEDDED_CONFIRMATION_STAGE_IDS
+        ]
         completed_outline = any(
             str(item.get("stage_command") or "") == "compile_chapter_blueprint"
             and str(item.get("status") or "") in {"succeeded", "reused"}
@@ -1876,7 +2069,7 @@ class V3WorkspaceSnapshotBuilder:
             "updated_at": operation_time,
             "completed_outline": completed_outline,
             "result_outdated": failed_after_current_result,
-            "stages": stage_runs,
+            "stages": projected_stage_runs,
         }
 
     def _analysis_pipeline(
@@ -1887,11 +2080,18 @@ class V3WorkspaceSnapshotBuilder:
         latest_operation: dict[str, Any],
         *,
         planning_confirmed: bool = False,
+        source_outline_confirmed: bool = False,
         planning_status: str = "not_ready",
+        planning_phase: str = "",
     ) -> dict[str, Any]:
         operation_id = str(latest_operation.get("operation_id") or "")
         raw_runs = (
-            control.stage_runs(operation_id)
+            [
+                item
+                for item in control.stage_runs(operation_id)
+                if str(item.get("stage_command") or "")
+                not in self._EMBEDDED_CONFIRMATION_STAGE_IDS
+            ]
             if operation_id
             else []
         )
@@ -1917,32 +2117,6 @@ class V3WorkspaceSnapshotBuilder:
                 previous.get("attempt") or 0
             ):
                 runs_by_stage[stage] = item
-
-        # The outline operation deliberately stops at the human gate, so its
-        # final stage remains ``blocked_human`` in that operation's history.
-        # A later explicit confirmation is recorded by a separate command.
-        # Project the current confirmed planning state back onto this timeline
-        # so the UI accurately marks the final "人工确认" node as complete.
-        if planning_confirmed:
-            previous = runs_by_stage.get("confirm_planning") or {}
-            runs_by_stage["confirm_planning"] = {
-                **previous,
-                "stage_command": "confirm_planning",
-                "status": "succeeded",
-                "attempt": max(1, int(previous.get("attempt") or 0)),
-                "disposition": "explicit_human_confirmation",
-            }
-        elif planning_status != "needs_human":
-            previous = runs_by_stage.get("confirm_planning") or {}
-            if str(previous.get("status") or "") == "blocked_human":
-                # The historical outline operation stops at H1 by design.
-                # If no reviewable outline is currently available, that old
-                # pause must not be presented as an actionable confirmation.
-                runs_by_stage["confirm_planning"] = {
-                    **previous,
-                    "stage_command": "confirm_planning",
-                    "status": "pending",
-                }
 
         operation_status = str(latest_operation.get("status") or "")
         operation_error = latest_operation.get("error")
@@ -2089,68 +2263,85 @@ class V3WorkspaceSnapshotBuilder:
             planning_model = str(blueprint_payload.get("planning_model") or "")
             has_blueprint = bool(blueprint_payload)
             source_status = status_for("compile_chapter_blueprint")
+            source_confirmation_status = "not_started"
             if has_blueprint and source_status == "pending":
                 source_status = "succeeded"
-            source_confirm_status = status_for("confirm_source_outline")
             merge_status = status_for("merge_rewrite_outline")
-            final_confirm_status = status_for("confirm_planning")
+            final_confirmation_status = "not_started"
             if planning_model == "rewrite_merge":
-                if source_confirm_status == "pending":
-                    source_confirm_status = "succeeded"
-                if merge_status == "pending":
+                source_status = "succeeded"
+                source_confirmation_status = "confirmed"
+                if planning_confirmed:
                     merge_status = "succeeded"
-                if not planning_confirmed and final_confirm_status == "pending":
-                    final_confirm_status = "blocked_human"
-            elif has_blueprint and planning_status == "needs_human":
-                source_confirm_status = "blocked_human"
-                merge_status = "pending"
-                final_confirm_status = "pending"
+                    final_confirmation_status = "confirmed"
+                elif planning_status == "needs_human":
+                    merge_status = "blocked_human"
+                    final_confirmation_status = "pending"
+                elif merge_status == "pending":
+                    merge_status = "succeeded"
+            elif has_blueprint:
+                if source_outline_confirmed:
+                    source_status = "succeeded"
+                    source_confirmation_status = "confirmed"
+                    if planning_phase == "rewrite_outline_merge_required":
+                        merge_status = "blocked"
+                elif planning_status == "needs_human":
+                    source_status = "blocked_human"
+                    source_confirmation_status = "pending"
             llm_requests_by_stage.setdefault(
                 "compile_source_outline",
                 llm_requests_by_stage.get("compile_chapter_blueprint", []),
             )
+            source_row = self._pipeline_stage(
+                "compile_source_outline",
+                source_status,
+                runs_by_stage.get("compile_chapter_blueprint"),
+                llm_requests_by_stage,
+            )
+            source_row["confirmation"] = {
+                "phase": "source_outline_review",
+                "status": source_confirmation_status,
+                "title": "审核原始目录",
+            }
+            merge_row = self._pipeline_stage(
+                "merge_rewrite_outline",
+                merge_status,
+                runs_by_stage.get("merge_rewrite_outline"),
+                llm_requests_by_stage,
+            )
+            merge_row["confirmation"] = {
+                "phase": "final_outline_review",
+                "status": final_confirmation_status,
+                "title": "审核最终目录",
+            }
             stage_rows = [
                 *common_stage_rows,
-                self._pipeline_stage(
-                    "compile_source_outline",
-                    source_status,
-                    runs_by_stage.get("compile_chapter_blueprint"),
-                    llm_requests_by_stage,
-                ),
-                self._pipeline_stage(
-                    "confirm_source_outline",
-                    source_confirm_status,
-                    runs_by_stage.get("confirm_source_outline"),
-                    llm_requests_by_stage,
-                ),
-                self._pipeline_stage(
-                    "merge_rewrite_outline",
-                    merge_status,
-                    runs_by_stage.get("merge_rewrite_outline"),
-                    llm_requests_by_stage,
-                ),
-                self._pipeline_stage(
-                    "confirm_planning",
-                    final_confirm_status,
-                    runs_by_stage.get("confirm_planning"),
-                    llm_requests_by_stage,
-                ),
+                source_row,
+                merge_row,
             ]
         else:
+            outline_status = status_for("compile_chapter_blueprint")
+            confirmation_status = "not_started"
+            if planning_confirmed:
+                outline_status = "succeeded"
+                confirmation_status = "confirmed"
+            elif planning_status == "needs_human":
+                outline_status = "blocked_human"
+                confirmation_status = "pending"
+            outline_row = self._pipeline_stage(
+                "compile_chapter_blueprint",
+                outline_status,
+                runs_by_stage.get("compile_chapter_blueprint"),
+                llm_requests_by_stage,
+            )
+            outline_row["confirmation"] = {
+                "phase": "planning_review",
+                "status": confirmation_status,
+                "title": "审核目录",
+            }
             stage_rows = [
                 *common_stage_rows,
-                self._pipeline_stage(
-                    "compile_chapter_blueprint",
-                    status_for("compile_chapter_blueprint"),
-                    runs_by_stage.get("compile_chapter_blueprint"),
-                    llm_requests_by_stage,
-                ),
-                self._pipeline_stage(
-                    "confirm_planning",
-                    status_for("confirm_planning"),
-                    runs_by_stage.get("confirm_planning"),
-                    llm_requests_by_stage,
-                ),
+                outline_row,
             ]
         products = self._pipeline_products(
             artifacts,
@@ -2373,6 +2564,10 @@ class V3WorkspaceSnapshotBuilder:
         has_current_operation = bool(
             latest_operation.get("operation_id")
         )
+        confirmation_operation = (
+            str(latest_operation.get("kind") or "")
+            == "document.confirm_planning"
+        )
         for kind, label in labels.items():
             artifact = artifacts.get(kind)
             if artifact is None or kind in seen:
@@ -2398,6 +2593,7 @@ class V3WorkspaceSnapshotBuilder:
                         and (
                             not has_current_operation
                             or current_for_operation
+                            or confirmation_operation
                         )
                         else "outdated"
                     ),

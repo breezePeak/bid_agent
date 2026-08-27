@@ -47,7 +47,7 @@ def test_workspace_agent_state_excludes_large_artifact_payloads() -> None:
     assert len(encoded) < 10_000
 
 
-def test_regenerate_outline_only_requests_rewrite_outline_capability() -> None:
+def test_regenerate_outline_does_not_bypass_source_confirmation() -> None:
     service = WorkspaceChatService.__new__(WorkspaceChatService)
     service.context = SimpleNamespace(workspace_id="workspace-1")
 
@@ -64,7 +64,7 @@ def test_regenerate_outline_only_requests_rewrite_outline_capability() -> None:
     assert envelope is not None
     assert envelope.kind == "document.prepare_outline"
     assert envelope.payload == {
-        "regenerate_capabilities": ["planning.rewrite_outline_merge"],
+        "regenerate_capabilities": ["planning.chapter_outline_split"],
     }
     assert "score.semantic_reconcile" not in envelope.payload["regenerate_capabilities"]
     assert "planning.project_understanding" not in envelope.payload["regenerate_capabilities"]

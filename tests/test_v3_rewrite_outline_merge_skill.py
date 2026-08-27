@@ -181,15 +181,72 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "目标分支外"):
             validate_rewrite_outline_merge(self.request(), broken)
 
-    def test_multiple_same_scope_alignments_for_one_target_are_rejected(self) -> None:
+    def test_multiple_same_scope_alignments_for_one_target_are_aggregated(self) -> None:
         candidate = self.candidate()
-        broken = candidate.model_copy(deep=True)
-        broken.alignments[1].placement = "same_scope"
-        with self.assertRaisesRegex(ValueError, "最多只能有一个 same_scope"):
-            validate_rewrite_outline_merge(self.request(), broken)
+        candidate.alignments[1].placement = "same_scope"
+
+        validate_rewrite_outline_merge(self.request(), candidate)
+        initial = ChapterOutlineCandidate(nodes=[
+            ChapterOutlineNodeCandidate(
+                local_id="root", order=0, title="项目实施方案", purpose="实施",
+                primary_response_unit_ids=["U2"], confidence=1.0,
+            ),
+            ChapterOutlineNodeCandidate(
+                local_id="migration", parent_local_id="root", order=1,
+                title="数据迁移", purpose="迁移", primary_response_unit_ids=["U1"], confidence=1.0,
+            ),
+        ])
+        legacy = SimpleNamespace(sections=[
+            SimpleNamespace(section_id="old-migration", parent_section_id=None, order=0, title="数据迁移"),
+            SimpleNamespace(section_id="inventory", parent_section_id="old-migration", order=1, title="1. 数据盘点"),
+        ])
+
+        merged = apply_rewrite_outline_merge(initial, candidate, legacy)
+        migration = next(item for item in merged.nodes if item.local_id == "migration")
+        self.assertEqual(
+            migration.legacy_section_ids,
+            ["old-migration", "inventory"],
+        )
+        self.assertEqual(
+            {(item["section_id"], item["block_id"]) for item in migration.legacy_sources},
+            {("old-migration", "B1"), ("inventory", "B2")},
+        )
+        self.assertEqual(migration.rewrite_mode, "restructure")
+        self.assertEqual([item.local_id for item in merged.nodes], ["root", "migration"])
 
     def test_same_scope_with_child_detail_is_valid(self) -> None:
         validate_rewrite_outline_merge(self.request(), self.candidate())
+
+    def test_child_detail_is_kept_when_legacy_parent_is_ignored(self) -> None:
+        request = self.request()
+        candidate = self.candidate()
+        candidate.alignments[0] = RewriteOutlineAlignment(
+            legacy_section_id="old-migration",
+            placement="ignore",
+            reason="旧父章节本身不相关",
+            confidence=0.9,
+        )
+
+        validate_rewrite_outline_merge(request, candidate)
+        initial = ChapterOutlineCandidate(nodes=[
+            ChapterOutlineNodeCandidate(
+                local_id="root", order=0, title="项目实施方案", purpose="实施",
+                primary_response_unit_ids=["U2"], confidence=1.0,
+            ),
+            ChapterOutlineNodeCandidate(
+                local_id="migration", parent_local_id="root", order=1,
+                title="数据迁移", purpose="迁移", primary_response_unit_ids=["U1"], confidence=1.0,
+            ),
+        ])
+        legacy = SimpleNamespace(sections=[
+            SimpleNamespace(section_id="old-migration", parent_section_id=None, order=0, title="数据迁移"),
+            SimpleNamespace(section_id="inventory", parent_section_id="old-migration", order=1, title="1. 数据盘点"),
+        ])
+
+        merged = apply_rewrite_outline_merge(initial, candidate, legacy)
+        inventory = next(item for item in merged.nodes if item.structure_origin == "legacy_enriched")
+        self.assertEqual(inventory.parent_local_id, "migration")
+        self.assertEqual(inventory.legacy_section_ids, ["inventory"])
 
     def test_input_has_feedback_without_full_legacy_index(self) -> None:
         payload = self.request().model_dump(mode="json")
@@ -233,20 +290,7 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
                     "supplemental_nodes": [],
                     "review_status": "draft",
                 }, ensure_ascii=False)
-            source = payload["blocks"][0]
-            return json.dumps({
-                "target_node_id": payload["target_node_id"],
-                "rewrite_mode": "light_edit",
-                "legacy_sources": [{
-                    "section_id": source["section_id"],
-                    "block_id": source["block_id"],
-                    "content_hash": source["content_hash"],
-                }],
-                "covered_condition_ids": ["C1"],
-                "required_changes": ["按新项目更新盘点范围"],
-                "reason": "旧正文主体可复用",
-                "confidence": 0.9,
-            }, ensure_ascii=False)
+            raise AssertionError("目录融合阶段不应发送旧正文")
 
         provider = LLMRewriteOutlineMergeProvider(
             chat_callable=chat,
@@ -255,17 +299,80 @@ class RewriteOutlineMergeSkillTests(unittest.TestCase):
         )
         result = provider.merge(self.request())
 
-        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls), 1)
         structure_json = json.dumps(calls[0], ensure_ascii=False)
         self.assertIn("legacy_outline", calls[0])
         self.assertNotIn("direct_content", structure_json)
         self.assertNotIn("blocks", structure_json)
-        self.assertEqual(calls[1]["allowed_legacy_section_ids"], ["inventory", "old-migration"])
+        self.assertNotIn("requirements", structure_json)
+        self.assertNotIn("score_conditions", structure_json)
+        self.assertNotIn("writing_objectives", structure_json)
         inventory = next(
             item for item in result.candidate.alignments
             if item.legacy_section_id == "inventory"
         )
-        self.assertEqual(inventory.rewrite_mode, "light_edit")
+        self.assertEqual(inventory.rewrite_mode, "restructure")
+
+    def test_structure_only_request_allows_realistic_outline_size(self) -> None:
+        calls = []
+
+        def chat(messages, *, temperature):
+            del temperature
+            payload_text = messages[-1]["content"]
+            payload = json.loads(payload_text[payload_text.index("{"):])
+            calls.append(payload)
+            return json.dumps({
+                "alignments": [
+                    {
+                        "legacy_section_id": item["section_id"],
+                        "placement": "ignore",
+                        "confidence": 1.0,
+                    }
+                    for item in payload["legacy_outline"]
+                ],
+                "supplemental_nodes": [],
+                "review_status": "draft",
+            }, ensure_ascii=False)
+
+        targets = [
+            InitialOutlineCard(
+                node_id=f"new-node-{index:04d}-" + "n" * 24,
+                path=["技术方案", f"新目录章节{index}"],
+                depth=2,
+                order=index,
+                title=f"新目录章节{index}",
+                purpose="目录结构匹配",
+                is_leaf=True,
+            )
+            for index in range(101)
+        ]
+        sections = [
+            LegacySectionCard(
+                section_id=f"legacy-section-{index:04d}-" + "s" * 24,
+                path=["旧投标书", f"旧目录章节{index}"],
+                depth=2,
+                order=index,
+                title=f"旧目录章节{index}",
+                candidate_target_ids=[targets[0].node_id],
+            )
+            for index in range(299)
+        ]
+        request = RewriteOutlineMergeInput(
+            requirement_ledger={"requirements": []},
+            score_model={"points": []},
+            project_model={},
+            initial_outline=targets,
+            legacy_sections=sections,
+        )
+        result = LLMRewriteOutlineMergeProvider(
+            chat_callable=chat,
+            model_fingerprint="test-model",
+            provider_fingerprint="test-provider",
+        ).merge(request)
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(result.candidate.alignments), 299)
+        self.assertGreater(len(json.dumps(calls[0], ensure_ascii=False)), 60_000)
 
 
 if __name__ == "__main__":

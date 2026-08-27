@@ -513,9 +513,11 @@
           </button>
           <span class="planning-review-icon" aria-hidden="true">✓</span>
           <p class="section-kicker">需要您的审核</p>
-          <h2 id="planning-review-title">目录已生成，等待审核</h2>
+          <h2 id="planning-review-title">
+            {{ planning.review_title || '目录已生成，等待审核' }}
+          </h2>
           <p>
-            请核验评分点覆盖、章节结构和响应任务，再确认目录并进入完整标书生成。
+            {{ planning.review_message || '请审核当前目录；审核通过后返回聊天页面。' }}
           </p>
           <dl class="planning-review-metrics">
             <div><dt>章节节点</dt><dd>{{ planningView.summary.chapter_count }}</dd></div>
@@ -758,6 +760,7 @@
               <AiProcessDisclosure
                 :status="outlineProcessStatus"
                 :seconds="outlineElapsedSeconds"
+                :status-text="outlineProcessStatusText"
               >
                 <div class="ai-process-overview">
                   <span>{{ outlineCompletedStageCount }}/{{ pipelineStages.length }} 步完成</span>
@@ -783,7 +786,7 @@
                 <p v-else>正在建立阶段 2 执行队列，收到节点状态后会自动更新。</p>
               </AiProcessDisclosure>
 
-              <template v-if="planningReadyForReview && planningStatus !== 'confirmed'">
+              <template v-if="hasOutline && planningStatus !== 'confirmed'">
                 <details class="chat-outline-details outline-card-details">
                   <summary>点击查看详细目录（{{ flatOutline.length }} 个章节节点）</summary>
                   <div class="preview-tree-box full-outline-preview">
@@ -814,8 +817,25 @@
                     </div>
                   </div>
                 </details>
-                <button class="workflow-result-link" type="button" @click="activeTab = 'planning'">
-                  审阅并确认完整目录 →
+                <p v-if="planningStatus === 'blocked' && planning.message" class="workflow-action-notice">
+                  {{ planning.message }}
+                </p>
+                <button
+                  v-if="planningStatus === 'needs_human'"
+                  class="workflow-result-link"
+                  type="button"
+                  @click="activeTab = 'planning'"
+                >
+                  {{ planningActionLabel }} →
+                </button>
+                <button
+                  v-else-if="rewriteOutlineMergeActionRequired"
+                  class="workflow-result-link"
+                  type="button"
+                  :disabled="outlineActionDisabled"
+                  @click="retryRewriteOutlineMerge"
+                >
+                  {{ planningActionLabel }} →
                 </button>
               </template>
             </div>
@@ -1605,13 +1625,22 @@
           </button>
           <template v-if="hasOutline">
             <button
-              v-if="planningStatus === 'needs_human'"
+              v-if="planningStatus === 'needs_human' && (!sourceOutlineConfirmed || activeBlueprintPlanningModel === 'rewrite_merge')"
               class="btn btn-primary"
               type="button"
               :disabled="running"
               @click="confirmPlanning"
             >
-              {{ awaitingSourceOutlineConfirmation ? '确认当前目录并融合旧投标书' : '确认当前目录' }}
+              审核通过
+            </button>
+            <button
+              v-if="sourceOutlineConfirmed && rewriteOutlineMergeStatus === 'failed'"
+              class="btn btn-primary"
+              type="button"
+              :disabled="outlineActionDisabled"
+              @click="retryRewriteOutlineMerge"
+            >
+              重试目录处理
             </button>
             <button
               v-if="deliveryReady"
@@ -2970,6 +2999,19 @@ const workflowIsWriting = computed(() => !['not_started', 'ready', 'blocked'].in
 ))
 const pendingReviews = computed(() => workflow.value.pending_reviews || [])
 const planningStatus = computed(() => planning.value.status || 'not_ready')
+const planningConfirmationPhase = computed(() => String(planning.value.confirmation_phase || ''))
+const planningActionRequired = computed(() => planning.value.action_required || {})
+const planningActionKind = computed(() => String(planningActionRequired.value.kind || ''))
+const planningActionLabel = computed(() => String(
+  planningActionRequired.value.label
+  || (planningConfirmationPhase.value === 'source_outline_review'
+    ? '审阅并确认原始目录'
+    : '审阅并确认最终目录'),
+))
+const rewriteOutlineMergeActionRequired = computed(() => [
+  'resume_rewrite_outline_merge',
+  'retry_rewrite_outline_merge',
+].includes(planningActionKind.value))
 const deliveryStatus = computed(() => document.value.delivery?.status || 'new')
 const deliveryReady = computed(() => (
   deliveryStatus.value === 'ready'
@@ -2982,7 +3024,7 @@ const hasOutline = computed(() => (
   // operation and may therefore be `failed` while the confirmed blueprint and
   // its chapter workspaces are still valid.
   (
-    ['needs_human', 'confirmed'].includes(planningStatus.value)
+    ['needs_human', 'confirmed', 'processing', 'blocked'].includes(planningStatus.value)
     || workflowIsWriting.value
   )
   && planningView.value.summary.chapter_count > 0
@@ -3011,9 +3053,11 @@ const analysisPipeline = computed(() => snapshot.value.analysis?.pipeline || {})
 const activeBlueprintPlanningModel = computed(() => String(
   snapshot.value.analysis?.chapter_blueprint?.planning_model || '',
 ))
+const sourceOutlineConfirmed = computed(() => (
+  planning.value.source_outline_confirmed === true
+))
 const awaitingSourceOutlineConfirmation = computed(() => (
-  projectMode.value === 'bid_rewrite'
-  && activeBlueprintPlanningModel.value !== 'rewrite_merge'
+  planning.value.confirmation_phase === 'source_outline_review'
 ))
 const rawPipelineStages = computed(() => (
   workflow.value.phase === 'planning' || workflow.value.phase === 'planning_review'
@@ -3021,7 +3065,9 @@ const rawPipelineStages = computed(() => (
     : (analysisPipeline.value.stages || [])
 ))
 const pipelineStages = computed(() => {
-  return rawPipelineStages.value
+  return rawPipelineStages.value.filter(stage => (
+    !['confirm_source_outline', 'confirm_planning'].includes(stage.stage_id)
+  ))
 })
 const latestWorkspaceOperation = computed(() => (
   snapshot.value.analysis?.latest_operation || {}
@@ -3210,6 +3256,13 @@ function phaseProcessStatus(status) {
 }
 
 const outlineProcessStatus = computed(() => {
+  if (planningStatus.value === 'processing') return 'processing'
+  if (planningStatus.value === 'needs_human') return 'waiting'
+  if (
+    planningStatus.value === 'blocked'
+    && planningConfirmationPhase.value === 'rewrite_outline_merge_required'
+  ) return 'waiting'
+  if (planningStatus.value === 'blocked') return 'failed'
   return phaseProcessStatus(String(planningPhaseState.value.phase_status || 'not_started'))
 })
 
@@ -3300,14 +3353,29 @@ const showOutlineProcessMessage = computed(() => (
 const outlineWorkflowTitle = computed(() => {
   const status = String(planningPhaseState.value.phase_status || 'not_started')
   if (['not_started', 'ready'].includes(status)) return '等待进入第二阶段'
+  if (planningConfirmationPhase.value === 'rewrite_outline_merge_required') {
+    return '原始目录已确认，等待继续融合旧目录'
+  }
+  if (planningConfirmationPhase.value === 'rewrite_outline_merge_in_progress') {
+    return '正在检查并融合旧目录'
+  }
+  if (planningConfirmationPhase.value === 'source_outline_review') {
+    return planning.value.review_title || '原始目录已生成，等待审核'
+  }
+  if (planningConfirmationPhase.value === 'final_outline_review') {
+    return planning.value.review_title || '最终目录已生成，等待审核'
+  }
   if (outlineProcessStatus.value === 'processing') return '正在解析评分点并生成目录'
   if (outlineProcessStatus.value === 'failed') return '评分点解析与目录生成失败'
-  if (status === 'waiting_confirmation') return '编写计划已生成，等待您审核'
+  if (status === 'waiting_confirmation') return '目录已生成，等待您审核'
   return `编写计划已生成（${planningView.value.summary.chapter_count} 个章节节点）`
 })
 const outlineWorkflowDescription = computed(() => {
   const status = String(planningPhaseState.value.phase_status || 'not_started')
   if (['not_started', 'ready'].includes(status)) return '材料准备完成后即可开始解析评分点并生成目录。'
+  if (planning.value.message || planning.value.review_message) {
+    return planning.value.message || planning.value.review_message
+  }
   if (outlineProcessStatus.value === 'processing') return '正在解析招标要求、评分点并生成章节目录。'
   if (outlineProcessStatus.value === 'failed') return '请展开处理详情查看失败节点；修正后在对话中回复“继续”即可恢复。'
   return `已识别 ${planningView.value.summary.score_point_count} 个评分点和 ${planningView.value.summary.response_unit_count} 个响应任务。`
@@ -3322,7 +3390,17 @@ const outlineStatusBadgeText = computed(() => {
   if (outlineProcessStatus.value === 'completed') return '已完成'
   if (outlineProcessStatus.value === 'failed') return '失败'
   if (outlineProcessStatus.value === 'processing' || outlineBusy.value) return '处理中'
+  if (planningStatus.value === 'needs_human') return '等待审核'
+  if (rewriteOutlineMergeActionRequired.value) return '待继续处理'
   return '待执行'
+})
+const outlineProcessStatusText = computed(() => {
+  if (planningConfirmationPhase.value === 'source_outline_review') return '等待审核原始目录'
+  if (planningConfirmationPhase.value === 'final_outline_review') return '等待审核最终目录'
+  if (planningConfirmationPhase.value === 'rewrite_outline_merge_required') return '等待继续融合旧目录'
+  if (planningConfirmationPhase.value === 'rewrite_outline_merge_in_progress') return '正在融合旧目录'
+  if (planningConfirmationPhase.value === 'rewrite_outline_merge_failed') return '旧目录融合失败'
+  return ''
 })
 
 const generationStatusBadgeClass = computed(() => {
@@ -3499,11 +3577,35 @@ const planningReviewOperationId = computed(() => String(
   || snapshot.value.analysis?.operation_id
   || '',
 ))
+const rewriteOutlineMergeStatus = computed(() => String(
+  pipelineStages.value.find(stage => stage.stage_id === 'merge_rewrite_outline')?.status
+  || '',
+))
+const rewriteOutlineMergeConfirmationStatus = computed(() => String(
+  pipelineStages.value.find(stage => stage.stage_id === 'merge_rewrite_outline')?.confirmation?.status
+  || '',
+))
+const rewriteOutlineMergeBusy = computed(() => (
+  ['queued', 'running', 'processing'].includes(rewriteOutlineMergeStatus.value)
+))
 const showPlanningReviewPrompt = computed(() => (
   planningStatus.value === 'needs_human'
   && hasOutline.value
+  && !rewriteOutlineMergeBusy.value
   && planningReviewOperationId.value !== dismissedPlanningReviewOperationId.value
 ))
+watch(
+  () => [rewriteOutlineMergeStatus.value, rewriteOutlineMergeConfirmationStatus.value],
+  ([, confirmationStatus], [, previousConfirmationStatus]) => {
+    if (
+      confirmationStatus === 'pending'
+      && previousConfirmationStatus !== 'pending'
+    ) {
+      dismissedPlanningReviewOperationId.value = ''
+      message.value = '最终目录已生成，请审核。'
+    }
+  },
+)
 const processingSummaryLabel = computed(() => {
   const duration = runningDurationSeconds.value > 0
     ? `已处理 ${formatPipelineDuration(runningDurationSeconds.value)}`
@@ -3966,6 +4068,7 @@ watch(
 const planningStatusLabel = computed(() => ({
   not_ready: '尚未生成目录',
   needs_human: '目录待确认',
+  processing: '正在合并旧目录',
   confirmed: '目录已确认',
   blocked: '目录已阻断',
   outdated: '目录结果已失效',
@@ -4221,6 +4324,14 @@ async function retryProjectFacts(withFeedback, regenerate = false) {
   }
 }
 
+async function retryRewriteOutlineMerge() {
+  activeTab.value = 'upload'
+  message.value = '正在重试目录处理。'
+  await prepareOutline({
+    regenerateCapabilities: ['planning.rewrite_outline_merge'],
+  })
+}
+
 async function submitPlanningFeedback() {
   const feedback = planningReviewFeedback.value.trim()
   if (!feedback) return
@@ -4233,14 +4344,20 @@ async function submitPlanningFeedback() {
   running.value = true
   runningAction.value = 'planning-feedback'
   clearError()
+  dismissPlanningReviewPrompt()
+  activeTab.value = 'upload'
+  message.value = '正在根据修改意见重新生成最终目录。'
+  await nextTick()
+  await scrollChatToLatest(true)
   try {
     const { data } = await prepareV3Outline(props.runId, { reviewFeedback: feedback, baseBlueprintHash })
     assertCommandAccepted(data, '目录修改失败')
     planningReviewFeedback.value = ''
-    dismissedPlanningReviewOperationId.value = ''
-    message.value = '已提交修改意见，正在生成新的目录版本。'
     await refresh()
+    dismissedPlanningReviewOperationId.value = ''
+    message.value = data.message || data.receipt?.message || '已根据修改意见重新生成最终目录，请审核。'
   } catch (cause) {
+    await refresh().catch(() => {})
     reportError(cause, '提交目录修改意见失败')
   } finally {
     running.value = false
@@ -4249,9 +4366,15 @@ async function submitPlanningFeedback() {
 }
 
 async function confirmPlanning() {
+  const confirmingSourceOutline = awaitingSourceOutlineConfirmation.value
   running.value = true
-  runningAction.value = 'confirm'
+  runningAction.value = confirmingSourceOutline ? 'confirm-source' : 'confirm-final'
   clearError()
+  dismissPlanningReviewPrompt()
+  activeTab.value = 'upload'
+  message.value = '审核已通过。'
+  await nextTick()
+  await scrollChatToLatest(true)
   try {
     const { data } = await confirmV3Planning(props.runId, planning.value.snapshot)
     assertCommandAccepted(data, '目录确认失败。')
@@ -4261,13 +4384,21 @@ async function confirmPlanning() {
       || '',
     )
     const waitingForFinalOutline = confirmationStatus === 'blocked_human'
-    message.value = waitingForFinalOutline
-      ? '原始目录已确认；已结合旧投标书生成最终目录，请再次审核确认。'
-      : '最终目录已确认；正文生成尚未启动。'
     await refresh()
     activeTab.value = 'upload'
-    if (waitingForFinalOutline) activeTab.value = 'planning'
+    if (confirmingSourceOutline) {
+      message.value = waitingForFinalOutline
+        ? '最终目录已生成，请审核。'
+        : '审核已通过。'
+      if (waitingForFinalOutline) dismissedPlanningReviewOperationId.value = ''
+    } else if (waitingForFinalOutline) {
+      message.value = '最终目录已生成，请审核。'
+      dismissedPlanningReviewOperationId.value = ''
+    } else {
+      message.value = '最终目录审核已通过；正文生成尚未启动。'
+    }
   } catch (cause) {
+    await refresh().catch(() => {})
     reportError(cause, '目录确认失败。')
   } finally {
     running.value = false
@@ -4596,7 +4727,9 @@ function isRequestTimeout(cause) {
 
 function latestOutlineOperation() {
   const latest = snapshot.value.analysis?.latest_operation
-  return latest?.kind === 'document.prepare_outline' ? latest : null
+  return ['document.prepare_outline', 'document.confirm_planning'].includes(latest?.kind)
+    ? latest
+    : null
 }
 
 function reportOutlineOperationFailure(operation) {
@@ -4609,6 +4742,11 @@ function reportOutlineOperationFailure(operation) {
 }
 
 function pipelineStageStatus(stage) {
+  if (stage?.confirmation?.status === 'pending') return '等待人工审核'
+  if (
+    stage?.confirmation?.status === 'confirmed'
+    && ['succeeded', 'reused', 'completed'].includes(stage?.status)
+  ) return '执行完成 · 审核通过'
   if (
     stage?.stage_id === 'plan_response'
     && Number(stage?.repair_round || 0) > 0
@@ -4640,8 +4778,9 @@ function pipelineStageOperation(stage) {
     build_requirement_ledger: '操作：提取采购要求和约束',
     analyze_scores: '操作：解析评分点与满分条件',
     plan_response: '操作：生成全局项目事实，供全部章节统一引用',
-    compile_chapter_blueprint: '操作：生成评分驱动章节目录',
-    confirm_planning: '用户操作：审阅并确认目录',
+    compile_chapter_blueprint: '操作：生成评分驱动章节目录，并在本阶段完成目录审核',
+    compile_source_outline: '操作：根据招标文件生成原始目录，并在本阶段完成原始目录审核',
+    merge_rewrite_outline: '操作：检查并合并旧目录，并在本阶段完成最终目录审核',
     sync_material_requirements: '操作：匹配公司资料并列出证据缺口',
     compile_document_contract: '操作：固化已确认目录、模板和写入位置',
     plan_document: '操作：拆分章节、依赖和写作任务',
@@ -4705,7 +4844,11 @@ function stageResultSummary(stage) {
   }
   if (['succeeded', 'reused'].includes(stage?.status)) return '步骤已完成，产物已持久化。'
   if (['failed', 'paused', 'blocked'].includes(stage?.status)) return pipelineStageError(stage)
-  if (stage?.status === 'blocked_human') return '需要人工处理后才能继续。'
+  if (stage?.status === 'blocked_human') {
+    return stage?.confirmation?.title
+      ? `${stage.confirmation.title}后继续下一阶段。`
+      : '需要人工处理后才能继续。'
+  }
   return ''
 }
 
@@ -9229,6 +9372,17 @@ onUnmounted(() => {
   background: #ecfdf5;
   color: #047857;
   font-weight: 600;
+}
+
+.workflow-action-notice {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid #fed7aa;
+  border-radius: 8px;
+  background: #fff7ed;
+  color: #9a3412;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .workflow-result-link {

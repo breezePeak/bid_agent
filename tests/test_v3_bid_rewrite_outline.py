@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -18,6 +20,7 @@ from document_pipeline.input_manifest import InputManifestService  # noqa: E402
 from document_pipeline.legacy_bid_source import LegacyBidSourceService  # noqa: E402
 from document_pipeline.canonicalization import canonical_json  # noqa: E402
 from document_pipeline.planning_inference import (  # noqa: E402
+    PlanningInferenceError,
     REWRITE_OUTLINE_CAPABILITY_VERSION,
     REWRITE_OUTLINE_PROMPT_FILE,
     REWRITE_OUTLINE_PROMPT_VERSION,
@@ -51,6 +54,25 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
         context = WorkspaceContext.resolve(runs, "alpha")
         ControlStore(context).initialize_workspace_profile(mode)
         return context
+
+    def wait_for_operation_status(
+        self,
+        store: ControlStore,
+        operation_id: str,
+        expected_status: str,
+        *,
+        timeout: float = 5.0,
+    ) -> dict:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            operation = store.operation(operation_id) or {}
+            if operation.get("status") == expected_status:
+                return operation
+            time.sleep(0.01)
+        self.fail(
+            f"operation {operation_id} did not reach {expected_status}: "
+            f"{store.operation(operation_id)}"
+        )
 
     @staticmethod
     def command(context: WorkspaceContext, key: str):
@@ -117,12 +139,47 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
                 initial_stages["compile_source_outline"]["label"],
                 "根据招标文件生成原始目录",
             )
-            self.assertEqual(initial_stages["confirm_source_outline"]["status"], "blocked_human")
+            self.assertEqual(initial_stages["compile_source_outline"]["status"], "blocked_human")
+            self.assertEqual(
+                initial_stages["compile_source_outline"]["confirmation"]["status"],
+                "pending",
+            )
+            initial_snapshot = V3WorkspaceSnapshotBuilder(context).build()
+            self.assertEqual(
+                initial_snapshot["planning"]["action_required"]["label"],
+                "审阅并确认原始目录",
+            )
             self.assertEqual(initial_stages["merge_rewrite_outline"]["status"], "pending")
-            self.assertEqual(initial_stages["confirm_planning"]["status"], "pending")
+            self.assertNotIn("confirm_source_outline", initial_stages)
+            self.assertNotIn("confirm_planning", initial_stages)
             self.assertEqual(audit_rewrite_zero_pollution(context)["status"], "pass")
 
             store = ControlStore(context)
+            bypass = CommandGateway(
+                context,
+                V3ExecutionController.for_deterministic_tests(context).handlers(),
+            ).submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "document.prepare_outline",
+                        "payload": {
+                            "regenerate_capabilities": [REWRITE_OUTLINE_SKILL_ID],
+                        },
+                        "expected_revision": store.revision(),
+                        "idempotency_key": "rewrite-merge-before-source-confirmation",
+                    },
+                    workspace_id=context.workspace_id,
+                )
+            )
+            self.assertEqual(bypass.status, "rejected")
+            self.assertEqual(
+                bypass.error["code"],
+                "REWRITE_OUTLINE_SOURCE_CONFIRM_REQUIRED",
+            )
+            self.assertEqual(
+                store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
+                "score_direct",
+            )
             legacy_index = legacy_service.index(first_legacy.legacy_bid_id)
             forbidden = {
                 first_legacy.legacy_bid_id,
@@ -170,22 +227,40 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             )
             self.assertEqual(source_confirmation.status, "accepted", source_confirmation.as_dict())
             self.assertEqual(
-                store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
-                "rewrite_merge",
+                source_confirmation.result.get("operation_status"),
+                "running",
                 source_confirmation.as_dict(),
             )
             self.assertEqual(
-                source_confirmation.result.get("operation_status"),
+                source_confirmation.result.get("confirmation_phase"),
+                "source_outline_confirmed",
+            )
+            self.wait_for_operation_status(
+                store,
+                str(source_confirmation.operation_id),
                 "blocked_human",
+            )
+            self.assertEqual(
+                store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
+                "rewrite_merge",
                 source_confirmation.as_dict(),
             )
             merged_stages = {
                 item["stage_id"]: item
                 for item in V3WorkspaceSnapshotBuilder(context).build()["analysis"]["pipeline"]["stages"]
             }
-            self.assertEqual(merged_stages["confirm_source_outline"]["status"], "succeeded")
-            self.assertEqual(merged_stages["merge_rewrite_outline"]["status"], "succeeded")
-            self.assertEqual(merged_stages["confirm_planning"]["status"], "blocked_human")
+            self.assertEqual(merged_stages["compile_source_outline"]["status"], "succeeded")
+            self.assertEqual(
+                merged_stages["compile_source_outline"]["confirmation"]["status"],
+                "confirmed",
+            )
+            self.assertEqual(merged_stages["merge_rewrite_outline"]["status"], "blocked_human")
+            self.assertEqual(
+                merged_stages["merge_rewrite_outline"]["confirmation"]["status"],
+                "pending",
+            )
+            self.assertNotIn("confirm_source_outline", merged_stages)
+            self.assertNotIn("confirm_planning", merged_stages)
             self.assertEqual(
                 store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
                 "rewrite_merge",
@@ -210,6 +285,18 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
                 final_confirmation.result["operation_status"],
                 "succeeded",
             )
+            confirmed_stages = {
+                item["stage_id"]: item
+                for item in V3WorkspaceSnapshotBuilder(context).build()["analysis"]["pipeline"]["stages"]
+            }
+            self.assertEqual(confirmed_stages["compile_source_outline"]["status"], "succeeded")
+            self.assertEqual(confirmed_stages["merge_rewrite_outline"]["status"], "succeeded")
+            self.assertEqual(
+                confirmed_stages["merge_rewrite_outline"]["confirmation"]["status"],
+                "confirmed",
+            )
+            self.assertNotIn("confirm_source_outline", confirmed_stages)
+            self.assertNotIn("confirm_planning", confirmed_stages)
 
             replacement = base / "replacement-old-bid.md"
             replacement.write_text(
@@ -246,6 +333,266 @@ class V3BidRewriteOutlineTests(unittest.TestCase):
             stale = V3WorkspaceSnapshotBuilder(context).build()
             self.assertTrue(stale["analysis"]["stale"])
             self.assertEqual(stale["planning"]["status"], "outdated")
+
+    def test_failed_merge_keeps_source_confirmation_checked(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:
+            base = Path(temporary)
+            context = self.context(base)
+            tender = base / "new-tender.md"
+            tender.write_text(
+                "# 项目需求\n投标人须提供实施方案。\n\n"
+                "# 评分办法\n实施方案完整性，满分10分。",
+                encoding="utf-8",
+            )
+            old_bid = base / "old-bid.md"
+            old_bid.write_text("# 旧实施方案\n旧正文。", encoding="utf-8")
+            InputManifestService(context).register_local_file(tender, InputRole.TENDER)
+            LegacyBidSourceService(context).register_local_file(old_bid, old_bid.name)
+            initial = self.command(context, "failed-merge-seed")
+            self.assertEqual(initial.status, "accepted", initial.message)
+
+            merge_entered = threading.Event()
+            release_merge = threading.Event()
+
+            class FailingProvider:
+                skill_id = REWRITE_OUTLINE_SKILL_ID
+                capability_version = REWRITE_OUTLINE_CAPABILITY_VERSION
+                prompt_version = REWRITE_OUTLINE_PROMPT_VERSION
+                prompt_hash = rewrite_outline_prompt_hash()
+                schema_version = REWRITE_OUTLINE_SCHEMA_VERSION
+                provider_fingerprint = "failing-provider"
+                model_fingerprint = "failing-model"
+                temperature = 0.1
+
+                def merge(self, request):
+                    del request
+                    merge_entered.set()
+                    release_merge.wait(timeout=5)
+                    raise PlanningInferenceError("目录结构超过测试预算")
+
+            store = ControlStore(context)
+            store.grant_workspace_access("owner")
+            runner = V3StageRunner.for_deterministic_tests(
+                context,
+                rewrite_outline_merge_provider=FailingProvider(),
+            )
+            gateway = CommandGateway(
+                context,
+                V3ExecutionController(context, runner=runner).handlers(),
+            )
+            receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "document.confirm_planning",
+                        "payload": {
+                            "decision": "confirm",
+                            "planning_snapshot": HumanGateService(context).planning_snapshot(),
+                        },
+                        "actor": {"type": "user", "id": "owner"},
+                        "expected_revision": store.revision(),
+                        "idempotency_key": "failed-merge-confirmation",
+                    },
+                    workspace_id=context.workspace_id,
+                )
+            )
+            self.assertEqual(receipt.status, "accepted")
+            self.assertEqual(receipt.result.get("operation_status"), "running")
+            self.assertTrue(merge_entered.wait(timeout=5))
+            try:
+                running_snapshot = V3WorkspaceSnapshotBuilder(context).build()
+                self.assertEqual(running_snapshot["planning"]["status"], "processing")
+                self.assertEqual(
+                    running_snapshot["planning"]["confirmation_phase"],
+                    "rewrite_outline_merge_in_progress",
+                )
+                self.assertEqual(
+                    running_snapshot["workflow"]["phase_states"]["planning"]["phase_status"],
+                    "running",
+                )
+                self.assertFalse(
+                    any(
+                        item.get("kind") == "planning"
+                        for item in running_snapshot["workflow"]["pending_reviews"]
+                    )
+                )
+            finally:
+                release_merge.set()
+            self.wait_for_operation_status(
+                store,
+                str(receipt.operation_id),
+                "failed",
+            )
+            stages = {
+                item["stage_id"]: item
+                for item in V3WorkspaceSnapshotBuilder(context).build()["analysis"]["pipeline"]["stages"]
+            }
+            failed_snapshot = V3WorkspaceSnapshotBuilder(context).build()
+            self.assertEqual(stages["compile_source_outline"]["status"], "succeeded")
+            self.assertEqual(
+                stages["compile_source_outline"]["confirmation"]["status"],
+                "confirmed",
+            )
+            self.assertEqual(stages["merge_rewrite_outline"]["status"], "failed")
+            self.assertNotIn("confirm_source_outline", stages)
+            self.assertNotIn("confirm_planning", stages)
+            self.assertEqual(failed_snapshot["planning"]["status"], "blocked")
+            self.assertEqual(
+                failed_snapshot["planning"]["confirmation_phase"],
+                "rewrite_outline_merge_failed",
+            )
+            self.assertEqual(
+                failed_snapshot["planning"]["action_required"]["label"],
+                "重试融合旧目录",
+            )
+            self.assertEqual(
+                failed_snapshot["workflow"]["phase_states"]["planning"]["phase_status"],
+                "blocked",
+            )
+            self.assertTrue(failed_snapshot["planning"]["source_outline_confirmed"])
+            self.assertFalse(
+                any(
+                    item.get("kind") == "planning"
+                    for item in failed_snapshot["workflow"]["pending_reviews"]
+                )
+            )
+            self.assertNotEqual(failed_snapshot["workflow"]["phase"], "writing")
+
+            retry_receipt = gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "document.prepare_outline",
+                        "payload": {
+                            "regenerate_capabilities": [REWRITE_OUTLINE_SKILL_ID],
+                        },
+                        "actor": {"type": "user", "id": "owner"},
+                        "expected_revision": store.revision(),
+                        "idempotency_key": "failed-merge-retry",
+                    },
+                    workspace_id=context.workspace_id,
+                )
+            )
+            self.assertEqual(retry_receipt.status, "rejected")
+            retry_snapshot = V3WorkspaceSnapshotBuilder(context).build()
+            self.assertEqual(
+                retry_snapshot["analysis"]["latest_operation"]["operation_id"],
+                str(retry_receipt.operation_id),
+                retry_receipt.as_dict(),
+            )
+            self.assertTrue(
+                any(
+                    item.get("stage_command") == "merge_rewrite_outline"
+                    for item in store.stage_runs(str(retry_receipt.operation_id))
+                ),
+                {
+                    "receipt": retry_receipt.as_dict(),
+                    "stages": store.stage_runs(str(retry_receipt.operation_id)),
+                },
+            )
+            retry_stages = {
+                item["stage_id"]: item
+                for item in retry_snapshot["analysis"]["pipeline"]["stages"]
+            }
+            self.assertEqual(retry_stages["merge_rewrite_outline"]["status"], "failed")
+            self.assertEqual(retry_snapshot["planning"]["status"], "blocked")
+            self.assertFalse(
+                any(
+                    item.get("kind") == "planning"
+                    for item in retry_snapshot["workflow"]["pending_reviews"]
+                )
+            )
+
+            resume_gateway = CommandGateway(
+                context,
+                V3ExecutionController.for_deterministic_tests(context).handlers(),
+            )
+            resumed = resume_gateway.submit(
+                CommandEnvelope.from_mapping(
+                    {
+                        "kind": "document.prepare_outline",
+                        "payload": {},
+                        "actor": {"type": "user", "id": "owner"},
+                        "expected_revision": store.revision(),
+                        "idempotency_key": "resume-confirmed-source-merge",
+                    },
+                    workspace_id=context.workspace_id,
+                )
+            )
+            self.assertEqual(resumed.status, "accepted", resumed.as_dict())
+            self.assertEqual(resumed.result["operation_status"], "blocked_human")
+            self.assertEqual(
+                resumed.result["confirmation_phase"],
+                "final_outline_review",
+            )
+            self.assertEqual(
+                store.v3_active_artifact("ChapterBlueprint")["payload"]["planning_model"],
+                "rewrite_merge",
+            )
+            resumed_snapshot = V3WorkspaceSnapshotBuilder(context).build()
+            self.assertEqual(resumed_snapshot["planning"]["status"], "needs_human")
+            self.assertEqual(
+                resumed_snapshot["planning"]["confirmation_phase"],
+                "final_outline_review",
+            )
+            self.assertEqual(
+                resumed_snapshot["workflow"]["pending_reviews"][0]["title"],
+                "最终目录已生成，等待审核",
+            )
+            self.assertEqual(
+                resumed_snapshot["planning"]["action_required"]["label"],
+                "审阅并确认最终目录",
+            )
+            resumed_stages = {
+                item["stage_id"]: item
+                for item in resumed_snapshot["analysis"]["pipeline"]["stages"]
+            }
+            self.assertEqual(resumed_stages["compile_source_outline"]["status"], "succeeded")
+            self.assertEqual(resumed_stages["merge_rewrite_outline"]["status"], "blocked_human")
+            self.assertEqual(
+                resumed_stages["merge_rewrite_outline"]["confirmation"]["status"],
+                "pending",
+            )
+            self.assertNotIn("confirm_source_outline", resumed_stages)
+            self.assertNotIn("confirm_planning", resumed_stages)
+
+    def test_merge_required_overrides_stale_waiting_confirmation_phase(self) -> None:
+        workflow = V3WorkspaceSnapshotBuilder._workflow_projection(
+            planning={
+                "status": "blocked",
+                "confirmation_phase": "rewrite_outline_merge_required",
+                "message": "原始目录已确认，下一步需要继续检查并融合旧投标书目录。",
+            },
+            analysis_pipeline={
+                "operation_id": "confirm-source",
+                "status": "blocked_human",
+                "stages": [
+                    {"stage_id": "compile_source_outline", "status": "succeeded"},
+                    {"stage_id": "merge_rewrite_outline", "status": "blocked"},
+                ],
+            },
+            generation={"status": "not_started"},
+            chapters={"items": []},
+            blueprint_artifact={"payload": {"nodes": [{"chapter_id": "chapter-1"}]}},
+            project_model_current=True,
+            phase_states={
+                "planning": {
+                    "phase_status": "waiting_confirmation",
+                    "operation_id": "confirm-source",
+                    "message": "目录已生成，等待确认。",
+                }
+            },
+        )
+
+        self.assertEqual(workflow["phase"], "planning")
+        self.assertEqual(workflow["status"], "blocked")
+        self.assertTrue(workflow["can_resume"])
+        self.assertEqual(workflow["current_stage_id"], "merge_rewrite_outline")
+        self.assertEqual(
+            workflow["phase_states"]["planning"]["phase_status"],
+            "blocked",
+        )
+        self.assertFalse(
+            any(item.get("kind") == "planning" for item in workflow["pending_reviews"])
+        )
 
     def test_full_write_readiness_projection_is_unchanged(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temporary:

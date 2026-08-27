@@ -257,6 +257,15 @@ class V3StageRunner:
             )
         self._regenerate_capabilities.update(requested)
 
+    def clear_inference_regeneration(self, capabilities: list[str] | None) -> None:
+        requested = {
+            str(item).strip() for item in (capabilities or []) if str(item).strip()
+        }
+        self._regenerate_capabilities.difference_update(requested)
+
+    def artifact_dependencies_are_current(self, artifact_kind: str) -> bool:
+        return self._active_artifact_dependencies_are_current(artifact_kind)
+
     @staticmethod
     def _checkpoint_result(hit: Any, *, structured: bool) -> Any:
         record = hit.record

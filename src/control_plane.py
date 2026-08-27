@@ -7452,6 +7452,7 @@ class CommandGateway:
                 key: result[key]
                 for key in (
                     "operation_status",
+                    "confirmation_phase",
                     "completed_stages",
                     "planning_snapshot",
                     "planning_receipt",

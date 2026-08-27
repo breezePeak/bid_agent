@@ -34,13 +34,13 @@ from .planning_inference import (
 RewriteMode = Literal["copy", "light_edit", "restructure", "new_write"]
 
 REWRITE_STRUCTURE_MAX_INPUT_CHARS = max(
-    12_000, int(os.getenv("REWRITE_STRUCTURE_MAX_INPUT_CHARS", "60000"))
+    12_000, int(os.getenv("REWRITE_STRUCTURE_MAX_INPUT_CHARS", "120000"))
 )
 REWRITE_CONTENT_MAX_BLOCKS = max(
     1, int(os.getenv("REWRITE_CONTENT_MAX_BLOCKS", "8"))
 )
 REWRITE_CONTENT_MAX_INPUT_CHARS = max(
-    8_000, int(os.getenv("REWRITE_CONTENT_MAX_INPUT_CHARS", "12000"))
+    4_000, int(os.getenv("REWRITE_CONTENT_MAX_INPUT_CHARS", "6000"))
 )
 REWRITE_BLOCK_MAX_CHARS = max(
     500, int(os.getenv("REWRITE_BLOCK_MAX_CHARS", "2000"))
@@ -118,9 +118,20 @@ class LegacyOutlineCard(StrictPlanningModel):
     child_titles: list[str] = Field(default_factory=list)
 
 
+class RewriteNewOutlineCard(StrictPlanningModel):
+    node_id: str = Field(min_length=1)
+    parent_node_id: str | None = None
+    path: list[str] = Field(min_length=1)
+    depth: int = Field(ge=1)
+    order: int = Field(default=0, ge=0)
+    title: str = Field(min_length=1)
+    child_titles: list[str] = Field(default_factory=list)
+    is_leaf: bool = False
+
+
 class RewriteOutlineStructureMatchInput(StrictPlanningModel):
     document_mode: Literal["auto_outline", "template_strict"] = "auto_outline"
-    initial_outline: list[InitialOutlineCard] = Field(min_length=1)
+    initial_outline: list[RewriteNewOutlineCard] = Field(min_length=1)
     legacy_outline: list[LegacyOutlineCard] = Field(min_length=1)
     review_feedback: str = ""
 
@@ -146,12 +157,6 @@ class RewriteOutlineStructureAlignment(StrictPlanningModel):
             return self
         if not self.target_node_id:
             raise ValueError("非 ignore 目录匹配必须声明 target_node_id")
-        if not (
-            self.matched_response_unit_ids
-            or self.matched_condition_ids
-            or self.matched_requirement_ids
-        ):
-            raise ValueError("非 ignore 目录匹配必须引用至少一个真实责任 ID")
         return self
 
 
@@ -462,7 +467,19 @@ def _build_structure_match_input(
 ) -> RewriteOutlineStructureMatchInput:
     return RewriteOutlineStructureMatchInput(
         document_mode=request.document_mode,
-        initial_outline=request.initial_outline,
+        initial_outline=[
+            RewriteNewOutlineCard(
+                node_id=item.node_id,
+                parent_node_id=item.parent_node_id,
+                path=item.path,
+                depth=item.depth,
+                order=item.order,
+                title=item.title,
+                child_titles=item.child_titles,
+                is_leaf=item.is_leaf,
+            )
+            for item in request.initial_outline
+        ],
         legacy_outline=[
             LegacyOutlineCard(
                 section_id=item.section_id,
@@ -496,9 +513,6 @@ def validate_rewrite_outline_structure_match(
         for item in request.initial_outline
         if item.parent_node_id
     }
-    sections = {item.section_id: item for item in request.legacy_outline}
-    by_section = {item.legacy_section_id: item for item in candidate.alignments}
-    same_scope_targets: set[str] = set()
     for alignment in candidate.alignments:
         if alignment.placement == "ignore":
             continue
@@ -507,89 +521,13 @@ def validate_rewrite_outline_structure_match(
             raise ValueError(f"{alignment.legacy_section_id} 引用了未知新目录节点")
         if target.node_id not in original_leaf_ids:
             raise ValueError("旧目录只能匹配或扩展新目录原始叶子节点")
-        checks = (
-            (alignment.matched_response_unit_ids, target.subtree_response_unit_ids, "response unit"),
-            (alignment.matched_condition_ids, target.subtree_condition_ids, "condition"),
-            (alignment.matched_requirement_ids, target.subtree_requirement_ids, "requirement"),
-        )
-        for values, allowed, label in checks:
-            if unknown := set(values) - set(allowed):
-                raise ValueError(
-                    f"{alignment.legacy_section_id} 引用了目标职责外的 {label}: {sorted(unknown)}"
-                )
         if alignment.placement == "same_scope":
-            target_id = str(alignment.target_node_id)
-            if target_id in same_scope_targets:
-                raise ValueError("同一个新叶子最多只能有一个 same_scope 锚点")
-            same_scope_targets.add(target_id)
             continue
         if request.document_mode == "template_strict":
             raise ValueError("template_strict 不允许迁入旧子目录")
-        parent_id = sections[alignment.legacy_section_id].parent_section_id
-        parent = by_section.get(str(parent_id or ""))
-        if (
-            parent is None
-            or parent.placement == "ignore"
-            or parent.target_node_id != alignment.target_node_id
-        ):
-            raise ValueError("child_detail 必须位于同一新叶子锚点的已匹配旧父章节下")
 
-    covered_by_target: dict[str, dict[str, set[str]]] = defaultdict(
-        lambda: {"response": set(), "condition": set(), "requirement": set()}
-    )
-    expanded_targets: set[str] = set()
-    for alignment in candidate.alignments:
-        if alignment.placement != "child_detail" or not alignment.target_node_id:
-            continue
-        target_id = str(alignment.target_node_id)
-        expanded_targets.add(target_id)
-        covered_by_target[target_id]["response"].update(alignment.matched_response_unit_ids)
-        covered_by_target[target_id]["condition"].update(alignment.matched_condition_ids)
-        covered_by_target[target_id]["requirement"].update(alignment.matched_requirement_ids)
-    supplemental_titles: set[tuple[str, str]] = set()
-    for item in candidate.supplemental_nodes:
-        target = targets.get(item.target_node_id)
-        if target is None or target.node_id not in original_leaf_ids:
-            raise ValueError("补充目录只能挂到新目录原始叶子节点")
-        if request.document_mode == "template_strict":
-            raise ValueError("template_strict 不允许新增补充目录")
-        if item.target_node_id not in same_scope_targets:
-            raise ValueError("补充目录必须挂到已有 same_scope 锚点下")
-        title_key = (item.target_node_id, _NUMBERING_RE.sub("", item.title).strip().lower())
-        if title_key in supplemental_titles:
-            raise ValueError("同一新叶子下不允许生成同名补充目录")
-        supplemental_titles.add(title_key)
-        checks = (
-            (item.matched_response_unit_ids, target.subtree_response_unit_ids, "response unit"),
-            (item.matched_condition_ids, target.subtree_condition_ids, "condition"),
-            (item.matched_requirement_ids, target.subtree_requirement_ids, "requirement"),
-        )
-        for values, allowed, label in checks:
-            if unknown := set(values) - set(allowed):
-                raise ValueError(f"补充目录引用了目标职责外的 {label}: {sorted(unknown)}")
-        coverage = covered_by_target[item.target_node_id]
-        new_ids = (
-            set(item.matched_response_unit_ids) - coverage["response"]
-            or set(item.matched_condition_ids) - coverage["condition"]
-            or set(item.matched_requirement_ids) - coverage["requirement"]
-        )
-        if not new_ids:
-            raise ValueError("补充目录必须承接尚未由迁入子目录覆盖的责任")
-        coverage["response"].update(item.matched_response_unit_ids)
-        coverage["condition"].update(item.matched_condition_ids)
-        coverage["requirement"].update(item.matched_requirement_ids)
-        expanded_targets.add(item.target_node_id)
-    for target_id in sorted(expanded_targets):
-        target = targets[target_id]
-        coverage = covered_by_target[target_id]
-        missing = {
-            "response_unit_ids": set(target.subtree_response_unit_ids) - coverage["response"],
-            "condition_ids": set(target.subtree_condition_ids) - coverage["condition"],
-            "requirement_ids": set(target.subtree_requirement_ids) - coverage["requirement"],
-        }
-        missing = {key: sorted(value) for key, value in missing.items() if value}
-        if missing:
-            raise ValueError(f"扩展后的新叶子仍有未承接责任: {target_id}: {missing}")
+    if candidate.supplemental_nodes:
+        raise ValueError("目录直接比对阶段不得生成补充职责目录")
     if candidate.review_status == "blocked":
         raise ValueError("structure match candidate 标记为 blocked")
 
@@ -610,14 +548,6 @@ def validate_rewrite_outline_merge(
     }
     sections = {item.section_id: item for item in request.legacy_sections}
     alignment_by_section = {item.legacy_section_id: item for item in candidate.alignments}
-    same_scope_targets = [
-        str(item.target_node_id)
-        for item in candidate.alignments
-        if item.placement == "same_scope"
-    ]
-    if len(same_scope_targets) != len(set(same_scope_targets)):
-        raise ValueError("同一个 target_node_id 最多只能有一个 same_scope 对齐")
-
     for alignment in candidate.alignments:
         section = sections[alignment.legacy_section_id]
         if alignment.placement == "ignore":
@@ -712,18 +642,57 @@ def apply_rewrite_outline_merge(
     )
 
     def merge_metadata(node: ChapterOutlineNodeCandidate, alignment: RewriteOutlineAlignment) -> ChapterOutlineNodeCandidate:
-        sources = [item.model_dump(mode="json") for item in alignment.legacy_sources]
+        sources = {
+            (
+                str(item.get("section_id") or ""),
+                str(item.get("block_id") or ""),
+                str(item.get("content_hash") or ""),
+            ): item
+            for item in node.legacy_sources
+        }
+        for item in alignment.legacy_sources:
+            value = item.model_dump(mode="json")
+            sources[(item.section_id, item.block_id, item.content_hash)] = value
+        basis = node.rewrite_basis if isinstance(node.rewrite_basis, dict) else {}
+        rewrite_modes = {
+            str(value)
+            for value in (node.rewrite_mode, alignment.rewrite_mode)
+            if value
+        }
+        rewrite_mode = (
+            next(iter(rewrite_modes))
+            if len(rewrite_modes) == 1
+            else "restructure"
+        )
         return node.model_copy(update={
-            "rewrite_mode": alignment.rewrite_mode,
-            "legacy_section_ids": [alignment.legacy_section_id],
-            "legacy_sources": sources,
+            "rewrite_mode": rewrite_mode,
+            "legacy_section_ids": list(dict.fromkeys([
+                *node.legacy_section_ids,
+                alignment.legacy_section_id,
+            ])),
+            "legacy_sources": list(sources.values()),
             "rewrite_basis": {
-                "response_unit_ids": alignment.matched_response_unit_ids,
-                "condition_ids": alignment.matched_condition_ids,
-                "requirement_ids": alignment.matched_requirement_ids,
+                "response_unit_ids": list(dict.fromkeys([
+                    *(basis.get("response_unit_ids") or []),
+                    *alignment.matched_response_unit_ids,
+                ])),
+                "condition_ids": list(dict.fromkeys([
+                    *(basis.get("condition_ids") or []),
+                    *alignment.matched_condition_ids,
+                ])),
+                "requirement_ids": list(dict.fromkeys([
+                    *(basis.get("requirement_ids") or []),
+                    *alignment.matched_requirement_ids,
+                ])),
             },
-            "rewrite_reason": alignment.reason,
-            "required_changes": alignment.required_changes,
+            "rewrite_reason": "；".join(dict.fromkeys(filter(None, [
+                node.rewrite_reason,
+                alignment.reason,
+            ]))),
+            "required_changes": list(dict.fromkeys([
+                *node.required_changes,
+                *alignment.required_changes,
+            ])),
         })
 
     for alignment in alignments:
@@ -845,7 +814,7 @@ class _LLMRewriteOutlineStructureProvider(
 ):
     capability_id = f"{REWRITE_OUTLINE_SKILL_ID}.structure_match"
     prompt_file = REWRITE_OUTLINE_STRUCTURE_PROMPT_FILE
-    prompt_version = "v3_rewrite_outline_structure_match_v1"
+    prompt_version = "v3_rewrite_outline_structure_match_v3"
     schema_version = "v3.rewrite_outline_structure_match.v1"
     candidate_model = RewriteOutlineStructureMatchCandidate
 
@@ -860,7 +829,7 @@ class _LLMRewriteChapterContentProvider(
 ):
     capability_id = f"{REWRITE_OUTLINE_SKILL_ID}.content_assessment"
     prompt_file = REWRITE_CHAPTER_CONTENT_PROMPT_FILE
-    prompt_version = "v3_rewrite_chapter_content_assessment_v1"
+    prompt_version = "v3_rewrite_chapter_content_assessment_v2"
     schema_version = "v3.rewrite_chapter_content_assessment.v1"
     candidate_model = RewriteChapterContentAssessmentCandidate
 
@@ -968,17 +937,12 @@ class LLMRewriteOutlineMergeProvider(
             structure_request,
             logical_batch_id="rewrite-outline-structure-match",
         )
-        content_results: list[StructuredInferenceResult[RewriteChapterContentAssessmentCandidate]] = []
         final_alignments: list[RewriteOutlineAlignment] = []
+        targets = {item.node_id: item for item in request.initial_outline}
         structure_by_id = {
             item.legacy_section_id: item
             for item in structure_result.candidate.alignments
         }
-        children: dict[str, list[str]] = defaultdict(list)
-        for section in request.legacy_sections:
-            if section.parent_section_id:
-                children[section.parent_section_id].append(section.section_id)
-
         for section in request.legacy_sections:
             structural = structure_by_id[section.section_id]
             if structural.placement == "ignore":
@@ -990,46 +954,39 @@ class LLMRewriteOutlineMergeProvider(
                     needs_human=structural.needs_human,
                 ))
                 continue
-            has_migrated_child = any(
-                structure_by_id[child_id].placement != "ignore"
-                for child_id in children.get(section.section_id, [])
-            )
-            assessments: list[RewriteChapterContentAssessmentCandidate] = []
-            if not has_migrated_child:
-                for batch_index, content_request in enumerate(
-                    self._content_requests(request, structural, structure_by_id), start=1
-                ):
-                    result = self._invoke_internal(
-                        self._content_provider,
-                        content_request,
-                        logical_batch_id=(
-                            f"rewrite-content-{section.order:04d}-{batch_index:03d}"
-                        ),
-                    )
-                    content_results.append(result)
-                    assessments.append(result.candidate)
-            assessment = self._merge_content_assessments(
-                structural, assessments
+            target = targets[str(structural.target_node_id)]
+            legacy_sources = [
+                RewriteLegacySource(
+                    section_id=section.section_id,
+                    block_id=block.block_id,
+                    content_hash=block.content_hash,
+                )
+                for block in section.blocks
+            ]
+            rewrite_mode: RewriteMode = "restructure" if legacy_sources else "new_write"
+            required_changes = (
+                ["目录仅完成结构对齐；正文复用范围在逐章改写阶段单独评估"]
+                if legacy_sources else []
             )
             final_alignments.append(RewriteOutlineAlignment(
                 legacy_section_id=section.section_id,
                 target_node_id=structural.target_node_id,
                 placement=structural.placement,
-                matched_response_unit_ids=structural.matched_response_unit_ids,
-                matched_condition_ids=structural.matched_condition_ids,
-                matched_requirement_ids=structural.matched_requirement_ids,
-                purpose=structural.purpose,
-                writing_objectives=structural.writing_objectives,
-                rewrite_mode=assessment.rewrite_mode,
-                legacy_sources=assessment.legacy_sources,
-                reason=assessment.reason or structural.reason,
-                required_changes=assessment.required_changes,
-                confidence=min(structural.confidence, assessment.confidence),
-                needs_human=structural.needs_human or assessment.needs_human,
+                matched_response_unit_ids=target.subtree_response_unit_ids,
+                matched_condition_ids=target.subtree_condition_ids,
+                matched_requirement_ids=target.subtree_requirement_ids,
+                purpose=target.purpose,
+                writing_objectives=target.writing_objectives,
+                rewrite_mode=rewrite_mode,
+                legacy_sources=legacy_sources,
+                reason=structural.reason,
+                required_changes=required_changes,
+                confidence=structural.confidence,
+                needs_human=structural.needs_human,
             ))
         candidate = RewriteOutlineMergeCandidate(
             alignments=final_alignments,
-            supplemental_nodes=structure_result.candidate.supplemental_nodes,
+            supplemental_nodes=[],
             review_status=(
                 "needs_review"
                 if structure_result.candidate.review_status == "needs_review"
@@ -1041,30 +998,22 @@ class LLMRewriteOutlineMergeProvider(
         self.last_batch_summary = {
             "rewrite_structure_call_count": 1,
             "rewrite_structure_input_chars": structure_chars,
-            "rewrite_content_batch_count": len(content_results),
+            "rewrite_content_batch_count": 0,
             "rewrite_internal_cache_hits": self._internal_cache_hits,
             "rewrite_merge_section_count": len(request.legacy_sections),
-            "rewrite_content_batch_input_chars": [
-                len(result.input_snapshot) for result in content_results
-            ],
+            "rewrite_content_batch_input_chars": [],
         }
         return StructuredInferenceResult(
             candidate=candidate,
             raw_output=_canonical_json({
-                "mode": "structure_then_content",
+                "mode": "structure_only",
                 "structure": structure_result.raw_output,
-                "content_batches": [item.raw_output for item in content_results],
+                "content_batches": [],
             }),
             normalized_output=_canonical_json(candidate),
-            reasoning="\n".join(
-                item.reasoning
-                for item in [structure_result, *content_results]
-                if item.reasoning.strip()
-            ),
+            reasoning=structure_result.reasoning,
             input_snapshot=_canonical_json(structure_request),
-            attempt_count=structure_result.attempt_count + sum(
-                item.attempt_count for item in content_results
-            ),
+            attempt_count=structure_result.attempt_count,
             capability_id=self.capability_id,
             prompt_version=self.prompt_version,
             prompt_hash=self.prompt_hash,
@@ -1072,15 +1021,8 @@ class LLMRewriteOutlineMergeProvider(
             provider_fingerprint=self.provider_fingerprint,
             model_fingerprint=self.model_fingerprint,
             temperature=self.temperature,
-            normalized_reference_count=sum(
-                item.normalized_reference_count
-                for item in [structure_result, *content_results]
-            ),
-            validation_errors=tuple(
-                error
-                for item in [structure_result, *content_results]
-                for error in item.validation_errors
-            ),
+            normalized_reference_count=structure_result.normalized_reference_count,
+            validation_errors=tuple(structure_result.validation_errors),
         )
 
     @staticmethod

@@ -38,6 +38,7 @@ const props = defineProps({
   status: { type: String, default: 'completed' },
   seconds: { type: Number, default: null },
   detailText: { type: String, default: '' },
+  statusText: { type: String, default: '' },
 })
 
 const normalizedStatus = computed(() => (
@@ -57,6 +58,18 @@ const durationLabel = computed(() => {
 
 const summaryLabel = computed(() => {
   const duration = durationLabel.value
+  const statusText = String(props.statusText || '').trim()
+  if (statusText) {
+    if (normalizedStatus.value === 'processing') {
+      return `${statusText} · 已用 ${duration || '1 秒'}`
+    }
+    if (normalizedStatus.value === 'waiting') {
+      return duration && duration !== '0 秒'
+        ? `${statusText} · 前序耗时 ${duration}`
+        : statusText
+    }
+    return duration ? `${statusText} · 耗时 ${duration}` : statusText
+  }
   if (normalizedStatus.value === 'processing') {
     return `正在处理 · 已用 ${duration || '1 秒'}`
   }

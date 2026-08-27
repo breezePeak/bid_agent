@@ -6,4 +6,6 @@
 
 copy 仅用于完整覆盖当前要求、无过期信息、无冲突且 required_changes 为空；light_edit 用于主体可复用但项目字段、参数、周期、人员、交付或验收信息需要更新；restructure 用于内容可复用但必须重新组织；正文不足、冲突或核心要求缺失时使用 new_write，且不得返回 legacy_sources。
 
+如果 review_feedback 非空，它是用户对本次重新生成提出的强制修改意见。凡意见涉及当前章节的旧正文取舍、重写方式或必须补充的内容，必须优先落实；当用户明确要求不采用旧内容或重新撰写时，使用 new_write 且 legacy_sources 必须为空。
+
 只评估当前输入章节，不得改变目录结构。仅返回满足 Schema 的完整 JSON。
