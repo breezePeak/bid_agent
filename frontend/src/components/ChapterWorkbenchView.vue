@@ -22,50 +22,6 @@
         <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="openCreateModal">
           + 新建章节
         </button>
-        <button
-          v-if="!isSelectingChapters"
-          type="button"
-          class="btn btn-sm"
-          :disabled="busy || !writableLeafChapters.length"
-          @click="beginChapterSelection"
-        >
-          {{ isBidRewrite ? '选择章节改写' : '选择章节编写' }}
-        </button>
-        <button
-          v-else
-          type="button"
-          class="btn btn-sm btn-primary"
-          :disabled="busy || !selectedWritingChapterIds.length"
-          @click="writeSelectedChapters"
-        >
-          {{ isBidRewrite ? '开始改写' : '编写' }} {{ selectedWritingChapterIds.length }} 章
-        </button>
-        <button
-          v-if="isSelectingChapters"
-          type="button"
-          class="btn btn-sm"
-          :disabled="busy || !writableLeafChapters.length"
-          @click="selectAllWritingChapters"
-        >
-          全选叶子章节
-        </button>
-        <button
-          v-if="isSelectingChapters && selectedWritingChapterIds.length"
-          type="button"
-          class="btn btn-sm"
-          :disabled="busy"
-          @click="clearWritingChapterSelection"
-        >
-          清空已选
-        </button>
-        <button v-if="isSelectingChapters" type="button" class="btn btn-sm" :disabled="busy" @click="cancelChapterSelection">取消选择</button>
-        <button v-if="!isSelectingChapters" type="button" class="btn btn-sm btn-primary" :disabled="busy || !selectedIsLeaf" @click="writeCurrentChapter">
-          {{ isBidRewrite ? '开始改写' : '一键编写' }}
-        </button>
-        <button type="button" class="btn btn-sm" :disabled="busy" @click="composeCheck">检查组装</button>
-        <button type="button" class="btn btn-sm" :disabled="busy || !treeItems.length" @click="exportMarkdownOutline">
-          导出 MD
-        </button>
         <button type="button" class="btn btn-sm btn-primary" :disabled="busy" @click="exportCurrentWord">
           导出 Word
         </button>

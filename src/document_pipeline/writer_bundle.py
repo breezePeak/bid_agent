@@ -10,19 +10,14 @@ from utils import read_json, write_json
 
 from .canonicalization import canonical_hash, chapter_context_hash
 from .chapter_blueprint import load_promoted_chapter_blueprint
-from .contracts import (
-    DOCUMENT_CONTRACT_ADAPTER,
-    ContractNode,
-    TemplateContract,
-    WriterInputBundle,
-)
-from .document_contract import DOCUMENT_CONTRACT_PATH
+from .contracts import BlueprintNode, WriterInputBundle
 from .input_manifest import V3_ROOT
 from .requirement_ledger import load_promoted_requirement_ledger
 from .score_model import load_promoted_score_model
 from .artifact_promotion import HumanGateService
 from .global_project_context import GlobalProjectContextService
 from .research_service import load_published_batch
+from .source_artifacts import load_promoted_template_structure
 from .writer_policy import (
     WRITER_PROMPT_VERSION,
     writer_model_identity,
@@ -129,25 +124,20 @@ class WriterInputBundleAssembler:
         h1 = HumanGateService(self.context).require_current_confirmation()
         blueprint_artifact = self.store.v3_active_artifact("ChapterBlueprint")
         assert blueprint_artifact is not None
-        contract = DOCUMENT_CONTRACT_ADAPTER.validate_python(read_json(self.root / DOCUMENT_CONTRACT_PATH))
-        if contract.source_blueprint_hash != str(blueprint_artifact["artifact_hash"]):
-            raise ControlPlaneError(
-                "WRITER_BUNDLE_BLOCKED",
-                "DocumentContract 未绑定当前 H1 Blueprint。",
-                status_code=409,
-            )
         blueprint = load_promoted_chapter_blueprint(self.context)
-        if blueprint.planning_model != "score_direct":
+        if blueprint.planning_model not in {"score_direct", "rewrite_merge"}:
             raise ControlPlaneError(
                 "WRITER_BUNDLE_LEGACY_READ_ONLY",
-                "legacy TopicGraph Blueprint 仅支持历史查看；请重新生成评分直连目录后再写作。",
+                "topic_graph Blueprint 仅支持历史查看；请使用 score_direct 或 rewrite_merge 目录后再写作。",
                 status_code=409,
             )
-        ledger = load_promoted_requirement_ledger(self.context)
-        scores = load_promoted_score_model(self.context)
         node_id_set = set(node_ids)
-        if not node_id_set or not node_id_set.issubset({node.node_id for node in contract.nodes}):
-            raise ControlPlaneError("WRITER_BUNDLE_BLOCKED", "ContentUnit 包含未授权章节目标。", status_code=409)
+        if not node_id_set:
+            raise ControlPlaneError(
+                "WRITER_BUNDLE_BLOCKED",
+                "ContentUnit 未声明章节目标。",
+                status_code=409,
+            )
         blueprint_by_node = {node.chapter_id: node for node in blueprint.nodes}
         parent_chapter_ids = {
             str(node.parent_chapter_id)
@@ -162,6 +152,61 @@ class WriterInputBundleAssembler:
                 status_code=409,
             )
         nodes = [blueprint_by_node[item] for item in node_ids]
+        non_leaf_nodes = node_id_set - leaf_chapter_ids
+        non_full_nodes = {
+            node.chapter_id for node in nodes if node.content_policy != "full"
+        }
+        if non_leaf_nodes or non_full_nodes:
+            raise ControlPlaneError(
+                "CHAPTER_NOT_WRITABLE",
+                "ContentUnit 只允许写入 content_policy=full 的叶子章节。",
+                status_code=409,
+                details={
+                    "parent_chapter_ids": sorted(non_leaf_nodes),
+                    "non_full_chapter_ids": sorted(non_full_nodes),
+                },
+            )
+
+        writable_targets: list[tuple[BlueprintNode, str]] = []
+        if blueprint.mode.value == "template_strict":
+            structure = load_promoted_template_structure(self.context)
+            slots_by_id = (
+                {slot.slot_id: slot for slot in structure.slots}
+                if structure is not None
+                else {}
+            )
+            for node in nodes:
+                if node.template_slot_ids:
+                    for slot_id in node.template_slot_ids:
+                        slot = slots_by_id.get(slot_id)
+                        if (
+                            slot is None
+                            or node.template_node_id is None
+                            or slot.node_id != node.template_node_id
+                        ):
+                            raise ControlPlaneError(
+                                "WRITER_BUNDLE_BLOCKED",
+                                "Blueprint 中的严格模板 Slot 映射与当前模板不一致。",
+                                status_code=409,
+                                details={
+                                    "chapter_id": node.chapter_id,
+                                    "template_slot_id": slot_id,
+                                },
+                            )
+                    writable_targets.append((node, node.template_slot_ids[0]))
+                elif node.template_target:
+                    writable_targets.append((node, node.template_target))
+                else:
+                    raise ControlPlaneError(
+                        "WRITER_BUNDLE_BLOCKED",
+                        "严格模板章节缺少已确认的可写映射。",
+                        status_code=409,
+                        details={"chapter_id": node.chapter_id},
+                    )
+        else:
+            writable_targets = [(node, node.chapter_id) for node in nodes]
+        ledger = load_promoted_requirement_ledger(self.context)
+        scores = load_promoted_score_model(self.context)
         requirement_ids = sorted(
             {
                 requirement_id
@@ -258,29 +303,6 @@ class WriterInputBundleAssembler:
             *list(global_project_context.get("risks") or []),
         ]
         terminology = dict(global_project_context.get("terminology") or {})
-        targets = [item for item in contract.nodes if item.node_id in node_id_set]
-        writable_targets: list[tuple[ContractNode, str]] = []
-        if isinstance(contract, TemplateContract):
-            slots_by_id = {slot.slot_id: slot for slot in contract.slots}
-            for target in targets:
-                slot = slots_by_id.get(target.writable_target)
-                if slot is None:
-                    continue
-                if slot.node_id != target.node_id:
-                    raise ControlPlaneError(
-                        "WRITER_BUNDLE_BLOCKED",
-                        "TemplateContract writable_target 与章节 Slot 映射不一致。",
-                        status_code=409,
-                    )
-                writable_targets.append((target, slot.slot_id))
-        else:
-            writable_targets = [(target, target.node_id) for target in targets]
-        if not writable_targets:
-            raise ControlPlaneError(
-                "WRITER_BUNDLE_BLOCKED",
-                "ContentUnit 不包含已确认 Blueprint 的可写目标。",
-                status_code=409,
-            )
         dependencies = {
             kind: {"artifact_id": str(item["artifact_id"]), "revision": int(item["revision"]), "hash": str(item["artifact_hash"])}
             for kind in (
@@ -364,11 +386,30 @@ class WriterInputBundleAssembler:
             resolved_sources: list[dict[str, Any]] = []
             for source in node_payload.get("legacy_sources") or []:
                 source_payload = dict(source)
-                block = legacy_blocks.get(str(source_payload.get("block_id") or ""))
-                if block and str(block.get("content_hash") or "") == str(
-                    source_payload.get("content_hash") or ""
+                block_id = str(source_payload.get("block_id") or "")
+                expected_hash = str(source_payload.get("content_hash") or "")
+                block = legacy_blocks.get(block_id)
+                content = str((block or {}).get("content") or "")
+                if node.rewrite_mode in {"copy", "light_edit", "restructure"} and (
+                    block is None
+                    or str(block.get("content_hash") or "") != expected_hash
+                    or not content.strip()
                 ):
-                    source_payload["content"] = str(block.get("content") or "")
+                    raise ControlPlaneError(
+                        "LEGACY_SOURCE_STALE",
+                        "Blueprint 引用的旧稿正文已失效，禁止自动替换来源。",
+                        status_code=409,
+                        details={
+                            "chapter_id": node.chapter_id,
+                            "block_id": block_id,
+                            "expected_content_hash": expected_hash,
+                        },
+                    )
+                if (
+                    block is not None
+                    and str(block.get("content_hash") or "") == expected_hash
+                ):
+                    source_payload["content"] = content
                 resolved_sources.append(source_payload)
             node_payload["legacy_sources"] = resolved_sources
             blueprint_slice.append(node_payload)
@@ -416,46 +457,24 @@ class WriterInputBundleAssembler:
             "terminology": terminology,
             "document_target_constraints": [
                 {
-                    "node_id": item.node_id,
-                    "target": item.writable_target,
+                    "node_id": item.chapter_id,
+                    "target": output_target,
                     "output_target": output_target,
                     "title": item.title,
-                    "purpose": blueprint_by_node[item.node_id].purpose,
-                    "writing_objectives": blueprint_by_node[
-                        item.node_id
-                    ].writing_objectives,
-                    "primary_requirement_ids": blueprint_by_node[
-                        item.node_id
-                    ].requirement_ids,
-                    "primary_response_unit_ids": blueprint_by_node[
-                        item.node_id
-                    ].primary_response_unit_ids,
-                    "supporting_response_unit_ids": blueprint_by_node[
-                        item.node_id
-                    ].supporting_response_unit_ids,
-                    "score_point_ids": blueprint_by_node[
-                        item.node_id
-                    ].score_point_ids,
-                    "score_condition_ids": blueprint_by_node[
-                        item.node_id
-                    ].score_condition_ids,
-                    "target_size": blueprint_by_node[
-                        item.node_id
-                    ].target_size,
-                    "section_domain": blueprint_by_node[
-                        item.node_id
-                    ].section_domain,
-                    "content_policy": blueprint_by_node[
-                        item.node_id
-                    ].content_policy,
-                    "deferred_reason": blueprint_by_node[
-                        item.node_id
-                    ].deferred_reason,
-                    "is_leaf": item.node_id in leaf_chapter_ids,
+                    "purpose": item.purpose,
+                    "writing_objectives": item.writing_objectives,
+                    "primary_requirement_ids": item.requirement_ids,
+                    "primary_response_unit_ids": item.primary_response_unit_ids,
+                    "supporting_response_unit_ids": item.supporting_response_unit_ids,
+                    "score_point_ids": item.score_point_ids,
+                    "score_condition_ids": item.score_condition_ids,
+                    "target_size": item.target_size,
+                    "section_domain": item.section_domain,
+                    "content_policy": item.content_policy,
+                    "deferred_reason": item.deferred_reason,
+                    "is_leaf": item.chapter_id in leaf_chapter_ids,
                 }
                 for item, output_target in writable_targets
-                if blueprint_by_node[item.node_id].content_policy == "full"
-                and item.node_id in leaf_chapter_ids
             ],
             "prompt_version": PROMPT_VERSION,
             "model_config_hash": canonical_hash(

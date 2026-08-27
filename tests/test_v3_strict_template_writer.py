@@ -27,7 +27,7 @@ from document_pipeline.contracts import (  # noqa: E402
     TemplateSlot,
     TemplateStructureContract,
 )
-from document_pipeline.input_manifest import InputManifestService  # noqa: E402
+from document_pipeline.input_manifest import InputManifestService, V3_ROOT  # noqa: E402
 from document_pipeline.planning_agent import PlanningAgent  # noqa: E402
 from document_pipeline.planning_inference import (  # noqa: E402
     ChapterOutlineCandidate,
@@ -315,6 +315,12 @@ def _assert_strict_template_g2_h1_document_contract_writer_path(
         node.node_id for node in contract.nodes
     }
     assert units
+
+    document_contract_path = (
+        context.root / V3_ROOT / "contracts" / "document_contract.json"
+    )
+    document_contract_path.unlink()
+    assert not document_contract_path.exists()
 
     writing = ChapterWritingService(context, deterministic_test=True)
     blocks = [
